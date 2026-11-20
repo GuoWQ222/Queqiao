@@ -15,6 +15,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod autostart;
 mod power;
 mod ui;
 
@@ -179,6 +180,10 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    // Started without options (at sign-in, or by hand): one agent per user session.
+    if options.server.is_none() && options.connect.is_none() && options.listen.is_none() {
+        autostart::claim_single_instance()?;
+    }
     let end = options
         .seconds
         .map(|s| Instant::now() + Duration::from_secs(s));
@@ -297,6 +302,14 @@ fn run_account(
                         "the person at this PC set: this account's devices may control it: {on}"
                     ));
                 }
+                PresenceEvent::SetAutostart(on) => match autostart::set(on) {
+                    Ok(()) => lines.push(format!(
+                        "the person at this PC set: start with Windows: {on}"
+                    )),
+                    Err(error) => {
+                        lines.push(format!("start with Windows could not be set: {error}"))
+                    }
+                },
                 PresenceEvent::SetTerminal(on) => {
                     settings.allow_terminal = on;
                     let _ = settings.save();

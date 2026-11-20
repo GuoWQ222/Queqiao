@@ -36,6 +36,8 @@ pub enum PresenceEvent {
     SetFiles(bool),
     /// Allow remote command lines (true) or not.
     SetTerminal(bool),
+    /// Start with Windows (true) or not.
+    SetAutostart(bool),
     /// The answer to the prompt: allowed, or denied (also when the time ran out or it was closed).
     Consent(bool),
 }
@@ -50,6 +52,7 @@ const MENU_QUIT: u16 = 203;
 const MENU_CLIPBOARD: u16 = 204;
 const MENU_FILES: u16 = 205;
 const MENU_TERMINAL: u16 = 206;
+const MENU_AUTOSTART: u16 = 207;
 const ID_END: u16 = 210;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
@@ -79,6 +82,7 @@ pub struct Presence {
     clipboard: bool,
     files: bool,
     terminal: bool,
+    autostart: bool,
     viewer: Option<String>,
 }
 
@@ -90,6 +94,7 @@ impl Presence {
         clipboard: bool,
         files: bool,
         terminal: bool,
+        autostart: bool,
     ) -> Result<Presence> {
         let instance = unsafe { GetModuleHandleW(None) }?;
         REGISTER.call_once(|| unsafe {
@@ -133,6 +138,7 @@ impl Presence {
             clipboard,
             files,
             terminal,
+            autostart,
             viewer: None,
         };
         presence.update_tray();
@@ -340,6 +346,7 @@ impl Presence {
         let clipboard = wide("Share the clipboard");
         let files = wide("Receive files");
         let terminal = wide("Allow remote command lines");
+        let autostart = wide("Start with Windows");
         let quit = wide("Quit Queqiao on this PC");
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
@@ -376,6 +383,12 @@ impl Presence {
                 checked(self.terminal),
                 usize::from(MENU_TERMINAL),
                 PCWSTR(terminal.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                checked(self.autostart),
+                usize::from(MENU_AUTOSTART),
+                PCWSTR(autostart.as_ptr()),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
@@ -421,6 +434,10 @@ impl Presence {
                 MENU_TERMINAL => {
                     self.terminal = !self.terminal;
                     Some(PresenceEvent::SetTerminal(self.terminal))
+                }
+                MENU_AUTOSTART => {
+                    self.autostart = !self.autostart;
+                    Some(PresenceEvent::SetAutostart(self.autostart))
                 }
                 MENU_QUIT => Some(PresenceEvent::Quit),
                 _ => None,

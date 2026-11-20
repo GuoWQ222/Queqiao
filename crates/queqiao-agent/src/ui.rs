@@ -161,6 +161,8 @@ fn run(
         settings.share_clipboard,
         settings.receive_files,
         settings.allow_terminal,
+        // The Run key is the truth: it may be changed outside Queqiao too.
+        crate::autostart::enabled(),
     ) {
         Ok(presence) => presence,
         Err(error) => {

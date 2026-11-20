@@ -72,7 +72,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Runs as a service: login screen, UAC prompts, lock screen; unlock with the PC's account password | planned (M5) |
 | Restart (after confirming, with Windows' 10-second notice) or lock the controlled PC from the session window menu | done (2026-11-21) |
 | Restart Queqiao, lock the PC when the session ends | planned (M5) |
-| Start with Windows, stay in the tray | planned (M5) |
+| Start with Windows (at sign-in, with the saved login), stay in the tray, one agent per user session | done (2026-11-21, "Start with Windows" in the tray); before sign-in: M5 (service) |
 | Wake-on-LAN through another Queqiao device on the same LAN, with a set-up check (network card, BIOS) | planned |
 | Remote command line: several at once (ConPTY: PowerShell, or cmd), each in a console window; the person at the PC can forbid them in the tray | done (2026-11-21) |
 | Command lines: detach and resume, rename | planned |
