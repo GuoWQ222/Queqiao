@@ -45,6 +45,9 @@ impl SoftwareEncoder {
             .bitrate(BitRate::from_bps(config.bitrate))
             .max_frame_rate(FrameRate::from_hz(config.fps as f32))
             .skip_frames(false)
+            // Not available for screen content: OpenH264 turns them off and warns otherwise.
+            .adaptive_quantization(false)
+            .background_detection(false)
             .intra_frame_period(IntraFramePeriod::from_num_frames(config.fps * 10))
             .num_threads(threads as u16)
             .vui(VuiConfig::bt709());

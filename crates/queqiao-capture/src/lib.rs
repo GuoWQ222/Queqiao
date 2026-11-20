@@ -9,6 +9,10 @@ use windows::Win32::Foundation::{E_UNEXPECTED, HMODULE};
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, ROP_CODE, ReleaseDC, SRCCOPY, SelectObject,
+};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::core::{Error, Interface, Result};
 
@@ -26,6 +30,9 @@ pub struct OutputInfo {
     pub rotation: u32,
     /// `DuplicateOutput1` (we choose the pixel format) or the older `DuplicateOutput`.
     pub method: &'static str,
+    /// Top-left corner of the screen on the Windows desktop (physical pixels).
+    pub left: i32,
+    pub top: i32,
 }
 
 /// One screen update. The texture belongs to the duplication and stays valid until the next
@@ -103,6 +110,8 @@ impl Duplicator {
             refresh_hz: f64::from(rate.Numerator) / f64::from(rate.Denominator.max(1)),
             rotation: rotation_degrees(desc.Rotation),
             method,
+            left: output_desc.DesktopCoordinates.left,
+            top: output_desc.DesktopCoordinates.top,
         };
         Ok(Self {
             device,
@@ -116,6 +125,56 @@ impl Duplicator {
 
     pub fn info(&self) -> &OutputInfo {
         &self.info
+    }
+
+    /// The screen's current picture through GDI, in memory. Desktop duplication only delivers changes
+    /// (and its first frame can be empty), so on a still screen this is the way to a first picture.
+    pub fn snapshot_image(&self) -> Result<BgraImage> {
+        let (width, height) = (self.info.width as i32, self.info.height as i32);
+        let header = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let bitmap_info = BITMAPINFO {
+            bmiHeader: header,
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        unsafe {
+            let screen = GetDC(None);
+            let memory = CreateCompatibleDC(Some(screen));
+            let image = CreateDIBSection(
+                Some(screen),
+                &bitmap_info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                None,
+                0,
+            )
+            .and_then(|bitmap| {
+                let previous = SelectObject(memory, bitmap.into());
+                let rop = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
+                let (left, top) = (self.info.left, self.info.top);
+                let copied = BitBlt(memory, 0, 0, width, height, Some(screen), left, top, rop);
+                SelectObject(memory, previous);
+                let length = width as usize * height as usize * 4;
+                let image = copied.map(|()| BgraImage {
+                    width: width as u32,
+                    height: height as u32,
+                    pixels: std::slice::from_raw_parts(bits.cast::<u8>(), length).to_vec(),
+                });
+                let _ = DeleteObject(bitmap.into());
+                image
+            });
+            let _ = DeleteDC(memory);
+            ReleaseDC(None, screen);
+            image
+        }
     }
 
     /// The D3D11 device that owns the frame textures (the encoder must use the same device).

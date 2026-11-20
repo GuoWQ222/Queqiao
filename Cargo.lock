@@ -133,6 +133,16 @@ name = "queqiao-core"
 version = "0.1.0"
 
 [[package]]
+name = "queqiao-display"
+version = "0.1.0"
+dependencies = [
+ "queqiao-capture",
+ "queqiao-codec",
+ "queqiao-core",
+ "windows",
+]
+
+[[package]]
 name = "queqiao-server"
 version = "0.1.0"
 dependencies = [

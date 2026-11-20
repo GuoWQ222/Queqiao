@@ -92,10 +92,18 @@ The controlled and controlling roles live in one installed app: every device can
 
 Encoder probing runs in a separate child process (a driver crash must not kill the agent); results are cached per GPU.
 
+The first picture of a session comes from a GDI screenshot (desktop duplication only delivers changes). Frames
+are encoded at most once per frame time; on the M1 loop that wait is up to one frame (median 1 ms, p95 14 ms at
+60 fps), so encoding right when a change arrives, when the rate allows, is the next latency gain. CPU paths
+(OpenH264, CPU conversion, no GPU) must adapt size and rate to the measured encode time: on a 12th-gen Intel
+laptop they do not hold 1080p30 on busy content.
+
 ## Viewer side
 
-Receive -> reassemble/FEC -> decode with D3D11VA (Media Foundation decoder) -> present with a D3D11 flip-model
-swapchain (no copies to the CPU), cursor drawn locally from the sent shape for lower perceived latency.
+Receive -> reassemble/FEC -> decode (Windows' H.264 decoder with D3D11 video on any GPU, OpenH264 otherwise) ->
+present through a D3D11 swap chain (flip model, blit model before Windows 10): the GPU video processor converts
+and scales NV12 straight into the window's buffer, the CPU does it on devices without one. Cursor drawn locally
+from the sent shape for lower perceived latency.
 Input: Raw Input for mouse and keyboard (scancodes), optional cursor lock for games; sent on a reliable stream.
 
 ## Transport (revised after the UU decompile)
@@ -136,7 +144,7 @@ congestion control and FEC, but a large prebuilt C++ dependency and hard to feed
 | # | Result | Check |
 |---|---|---|
 | M0 | Toolchain, Cargo workspace, empty crates build | `cargo build` passes |
-| M1 | Local loop on one PC: capture -> encode -> decode -> window, with the software fallbacks | latency and fps measured; every fallback forced and tested |
+| M1 | Local loop on one PC: capture -> encode -> decode -> window, with the software fallbacks | latency and fps measured; every fallback forced and tested. **Done 2026-11-20**: RTX 5080 PC 4/4 paths pass (hardware: 12 ms median screen change -> shown); Intel Iris Xe laptop 3/4 (hardware 20 ms; no-GPU path 55 ms, needs adaptive size) |
 | M2 | LAN: agent + viewer by IP, video + mouse/keyboard | control the PC from a second process / PC |
 | M3 | `queqiao-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click |
 | M4 | NAT traversal + relay | connect across networks, forced-relay test |

@@ -11,6 +11,7 @@ machine has and falls back to a path that needs no GPU (`docs\DESIGN.md`, "Runs 
 | `crates\queqiao-core` | Shared library: protocol, identity, transport, codec, input |
 | `crates\queqiao-capture` | Screen capture (DXGI desktop duplication); `examples\capture_probe.rs` checks it |
 | `crates\queqiao-codec` | BGRA -> NV12 (GPU video processor, CPU fallback) and the H.264 encoder: hardware of any vendor via Media Foundation, OpenH264 on the CPU as the fallback; `examples\encode_probe.rs` checks it |
+| `crates\queqiao-display` | Viewer window and presenter (D3D11 swap chain; GPU video processor, CPU fallback); `examples\loopback.rs` runs the whole local loop |
 | `crates\queqiao-server` | Accounts, devices, presence, signaling, STUN/TURN relay |
 | `crates\queqiao-service` | Windows service on each controlled PC |
 | `crates\queqiao-agent` | Controlled side (user session) |
@@ -27,6 +28,8 @@ Build: `cargo build --workspace`. Full check (fmt, clippy, build, test, run each
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1`
 
 Programs that capture the screen or show windows must run in the logged-on user's session, not over SSH:
-`scripts\run_in_session.ps1 -Exe <full path> -Arguments '<arguments>'`. All probes on a machine:
-`scripts\run_probes.ps1 -Bin target\release\examples`. Fallback paths can be forced with `QUEQIAO_FORCE`, for
+`scripts\run_in_session.ps1 -Exe <full path> -Arguments '<arguments>'`. Checks on a machine (release builds
+in `target\release\examples`, or copy the .exe files and scripts into one folder):
+`scripts\run_probes.ps1` (capture and encoders), `scripts\run_codec_probes.ps1` (encode/decode round trips,
+also over SSH), `scripts\run_loopbacks.ps1` (the whole loop in a window, with the delay of each stage). Fallback paths can be forced with `QUEQIAO_FORCE`, for
 example `encode:software`, `convert:cpu`, `adapter:warp` (probes take `force=...`).
