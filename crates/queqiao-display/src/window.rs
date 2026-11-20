@@ -7,12 +7,18 @@ use std::path::PathBuf;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
+use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::{
+    GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE,
+    RAWINPUTDEVICE_FLAGS, RAWINPUTHEADER, RID_INPUT, RIDEV_REMOVE, RIM_TYPEMOUSE,
+    RegisterRawInputDevices,
+};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
@@ -51,6 +57,11 @@ pub enum WindowEvent {
     FilesDropped(Vec<PathBuf>),
     /// An item added with [`Window::add_menu_items`] was chosen.
     Menu(u16),
+    /// Game mouse: the mouse moved by this much (raw counts), while the pointer is held in the window.
+    MouseDelta {
+        dx: i32,
+        dy: i32,
+    },
 }
 
 thread_local! {
@@ -155,6 +166,32 @@ impl Window {
         let menu = unsafe { GetSystemMenu(self.hwnd, false) };
         let flags = MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED };
         let _ = unsafe { CheckMenuItem(menu, u32::from(id), flags.0) };
+    }
+
+    /// Game mouse: the pointer is hidden and held inside the window, and the mouse's movement comes as
+    /// [`WindowEvent::MouseDelta`] (raw input) instead of positions. Off gives the pointer back.
+    pub fn set_game_mouse(&mut self, on: bool) {
+        GAME_MOUSE.set(on);
+        let device = RAWINPUTDEVICE {
+            usUsagePage: 1,
+            usUsage: 2,
+            dwFlags: if on {
+                RAWINPUTDEVICE_FLAGS(0)
+            } else {
+                RIDEV_REMOVE
+            },
+            hwndTarget: if on { self.hwnd } else { HWND::default() },
+        };
+        let _ = unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) };
+        if on {
+            clip_to_client(self.hwnd);
+        } else {
+            let _ = unsafe { ClipCursor(None) };
+        }
+    }
+
+    pub fn is_game_mouse(&self) -> bool {
+        GAME_MOUSE.get()
     }
 
     pub fn is_full_screen(&self) -> bool {
@@ -321,6 +358,39 @@ impl Drop for Window {
     }
 }
 
+thread_local! {
+    /// Game mouse is on (the window procedure hides the pointer and reports raw movement).
+    static GAME_MOUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds the pointer inside the window's drawing area.
+fn clip_to_client(hwnd: HWND) {
+    let mut area = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut area) }.is_err() {
+        return;
+    }
+    let mut corners = [
+        POINT {
+            x: area.left,
+            y: area.top,
+        },
+        POINT {
+            x: area.right,
+            y: area.bottom,
+        },
+    ];
+    for corner in &mut corners {
+        let _ = unsafe { ClientToScreen(hwnd, corner) };
+    }
+    let screen = RECT {
+        left: corners[0].x,
+        top: corners[0].y,
+        right: corners[1].x,
+        bottom: corners[1].y,
+    };
+    let _ = unsafe { ClipCursor(Some(&screen)) };
+}
+
 fn push(event: WindowEvent) {
     EVENTS.with_borrow_mut(|events| events.push(event));
 }
@@ -347,8 +417,52 @@ extern "system" fn window_proc(
     };
     match message {
         WM_MOUSEMOVE => {
-            push(WindowEvent::MouseMove { x: low, y: high });
+            // With game mouse on, movement comes from raw input instead.
+            if !GAME_MOUSE.get() {
+                push(WindowEvent::MouseMove { x: low, y: high });
+            }
             LRESULT(0)
+        }
+        WM_INPUT => {
+            let mut size = 0u32;
+            let header = size_of::<RAWINPUTHEADER>() as u32;
+            let handle = HRAWINPUT(lparam.0 as *mut _);
+            unsafe { GetRawInputData(handle, RID_INPUT, None, &mut size, header) };
+            let mut buffer = vec![0u8; size as usize];
+            let read = unsafe {
+                GetRawInputData(
+                    handle,
+                    RID_INPUT,
+                    Some(buffer.as_mut_ptr().cast()),
+                    &mut size,
+                    header,
+                )
+            };
+            if GAME_MOUSE.get()
+                && read as usize >= size_of::<RAWINPUTHEADER>()
+                && buffer.len() >= size_of::<RAWINPUT>()
+            {
+                let raw = unsafe { &*buffer.as_ptr().cast::<RAWINPUT>() };
+                if raw.header.dwType == RIM_TYPEMOUSE.0 {
+                    let mouse = unsafe { raw.data.mouse };
+                    let relative = mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 == 0;
+                    if relative && (mouse.lLastX != 0 || mouse.lLastY != 0) {
+                        push(WindowEvent::MouseDelta {
+                            dx: mouse.lLastX,
+                            dy: mouse.lLastY,
+                        });
+                    }
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        WM_SETCURSOR if GAME_MOUSE.get() && (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
+            unsafe { SetCursor(None) };
+            LRESULT(1)
+        }
+        WM_SIZE | WM_MOVE if GAME_MOUSE.get() => {
+            clip_to_client(hwnd);
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_LBUTTONDOWN => button(0, true),
         WM_LBUTTONUP => button(0, false),

@@ -37,6 +37,11 @@ pub enum InputEvent {
         extended: bool,
         down: bool,
     },
+    /// Relative pointer movement in mouse counts (game mouse: games read movement, not positions).
+    MouseDelta {
+        dx: i16,
+        dy: i16,
+    },
 }
 
 /// Everything sent on the data channel.
@@ -115,6 +120,7 @@ const INPUT_MOVE: u8 = 1;
 const INPUT_BUTTON: u8 = 2;
 const INPUT_WHEEL: u8 = 3;
 const INPUT_KEY: u8 = 4;
+const INPUT_DELTA: u8 = 5;
 const PING: u8 = 20;
 const PONG: u8 = 21;
 const FRAME_INFO: u8 = 30;
@@ -134,6 +140,11 @@ impl Message {
             }
             Message::Input(InputEvent::MouseButton { button, down }) => {
                 out.extend([INPUT_BUTTON, button as u8, u8::from(down)]);
+            }
+            Message::Input(InputEvent::MouseDelta { dx, dy }) => {
+                out.push(INPUT_DELTA);
+                out.extend_from_slice(&dx.to_le_bytes());
+                out.extend_from_slice(&dy.to_le_bytes());
             }
             Message::Input(InputEvent::Wheel { delta, horizontal }) => {
                 out.push(INPUT_WHEEL);
@@ -211,6 +222,10 @@ impl Message {
             INPUT_MOVE => Message::Input(InputEvent::MouseMove {
                 x: u16_at(0)?,
                 y: u16_at(2)?,
+            }),
+            INPUT_DELTA => Message::Input(InputEvent::MouseDelta {
+                dx: u16_at(0)? as i16,
+                dy: u16_at(2)? as i16,
             }),
             INPUT_BUTTON => {
                 let button = match rest.first()? {
@@ -290,6 +305,7 @@ mod tests {
     fn every_message_round_trips() {
         let messages = [
             Message::Input(InputEvent::MouseMove { x: 0, y: 65535 }),
+            Message::Input(InputEvent::MouseDelta { dx: -40, dy: 32767 }),
             Message::Input(InputEvent::MouseButton {
                 button: MouseButton::X2,
                 down: true,

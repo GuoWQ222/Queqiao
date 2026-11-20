@@ -80,6 +80,10 @@ impl Injector {
                 };
                 mouse(0, 0, data, flags)
             }
+            // Relative: Windows applies the PC's pointer speed (and acceleration) as for a real mouse.
+            InputEvent::MouseDelta { dx, dy } => {
+                mouse(i32::from(dx), i32::from(dy), 0, MOUSEEVENTF_MOVE)
+            }
             InputEvent::Wheel { delta, horizontal } => {
                 let flags = if horizontal {
                     MOUSEEVENTF_HWHEEL

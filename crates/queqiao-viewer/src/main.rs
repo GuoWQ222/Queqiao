@@ -41,6 +41,11 @@ const MENU_SOUND: u16 = 0x1030;
 const MENU_FULL_SCREEN: u16 = 0x1040;
 const MENU_PRIVACY: u16 = 0x1050;
 const MENU_TERMINAL: u16 = 0x1060;
+const MENU_GAME_MOUSE: u16 = 0x1070;
+/// Ctrl+Alt+M: game mouse on or off.
+const KEY_M: u16 = 0x32;
+/// The game-mouse test's relative moves (mouse counts).
+const TEST_DELTAS: [(i16, i16); 4] = [(40, 0), (0, 40), (-40, 0), (0, -40)];
 /// Picture settings: frame rate (at most 30, 60, or what that screen shows) and quality.
 const MENU_FPS: [(u16, u8, &str); 3] = [
     (0x1100, 30, "30 frames per second"),
@@ -131,6 +136,8 @@ struct Options {
     privacy: bool,
     /// Open a command line on that PC and check it (its window closes by itself).
     terminal_test: bool,
+    /// After the input test, relative moves (game mouse) that the agent checks.
+    game_mouse_test: bool,
     /// Picture settings to send at the start: frames per second at most (0: the screen's) and quality.
     picture: Option<(u8, Quality)>,
     /// Help someone of another account: their help ID and code (tests; people use "Help someone...").
@@ -328,6 +335,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--full-screen" => options.full_screen = true,
             "--privacy" => options.privacy = true,
             "--terminal-test" => options.terminal_test = true,
+            "--game-mouse-test" => options.game_mouse_test = true,
             "--help-id" => options.help_id = Some(args.next()?),
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--picture" => {
@@ -879,6 +887,7 @@ fn session(
         (MENU_PRIVACY, tr("Darken that PC's screen")),
         (MENU_TERMINAL, tr("Open a command line on that PC")),
         (MENU_FULL_SCREEN, tr("Full screen (Ctrl+Alt+Enter)")),
+        (MENU_GAME_MOUSE, tr("Game mouse (Ctrl+Alt+M)")),
     ]);
     let mut privacy_on = options.privacy;
     let fps_items: Vec<(u16, &str)> = MENU_FPS
@@ -959,6 +968,12 @@ fn session(
                         window.check_menu_item(MENU_PRIVACY, privacy_on);
                         Some(if privacy_on { Command::PrivacyOn } else { Command::PrivacyOff })
                     }
+                    MENU_GAME_MOUSE => {
+                        let on = !window.is_game_mouse();
+                        window.set_game_mouse(on);
+                        window.check_menu_item(MENU_GAME_MOUSE, on);
+                        None
+                    }
                     MENU_FULL_SCREEN => {
                         let on = !window.is_full_screen();
                         window.set_full_screen(on);
@@ -999,6 +1014,25 @@ fn session(
                 window.set_full_screen(on);
                 continue;
             }
+            // Ctrl+Alt+M: game mouse on or off.
+            if let WindowEvent::Key {
+                scancode: KEY_M,
+                down: true,
+                ..
+            } = event
+                && held_keys.iter().any(|(code, _)| *code == KEY_CTRL)
+                && held_keys.iter().any(|(code, _)| *code == KEY_ALT)
+            {
+                let on = !window.is_game_mouse();
+                window.set_game_mouse(on);
+                window.check_menu_item(MENU_GAME_MOUSE, on);
+                continue;
+            }
+            // Leaving the window gives the pointer back.
+            if event == WindowEvent::FocusLost && window.is_game_mouse() {
+                window.set_game_mouse(false);
+                window.check_menu_item(MENU_GAME_MOUSE, false);
+            }
             if let WindowEvent::FilesDropped(paths) = &event {
                 for path in paths {
                     match transfers.send(path) {
@@ -1023,7 +1057,12 @@ fn session(
                 next_test_step.or_else(|| Some(Instant::now() + Duration::from_secs(1)))
         {
             next_test_step = Some(due);
-            if Instant::now() >= due && test_step < TEST_POINTS.len() + 2 {
+            let deltas = if options.game_mouse_test {
+                TEST_DELTAS.len()
+            } else {
+                0
+            };
+            if Instant::now() >= due && test_step < TEST_POINTS.len() + 2 + deltas {
                 let event = match test_step {
                     i if i < TEST_POINTS.len() => {
                         let (x, y) = TEST_POINTS[i];
@@ -1031,6 +1070,10 @@ fn session(
                             x: (x * 65535.0) as u16,
                             y: (y * 65535.0) as u16,
                         }
+                    }
+                    i if i >= TEST_POINTS.len() + 2 => {
+                        let (dx, dy) = TEST_DELTAS[i - TEST_POINTS.len() - 2];
+                        InputEvent::MouseDelta { dx, dy }
                     }
                     i => InputEvent::Key {
                         scancode: TEST_SCANCODE,
@@ -1331,7 +1374,14 @@ fn session(
         "ended: {}",
         closed.unwrap_or_else(|| "time is up".into())
     ));
-    let test_done = !options.input_test || test_step == TEST_POINTS.len() + 2;
+    let test_steps = TEST_POINTS.len()
+        + 2
+        + if options.game_mouse_test {
+            TEST_DELTAS.len()
+        } else {
+            0
+        };
+    let test_done = !options.input_test || test_step == test_steps;
     Ok(connected_after.is_some()
         && first_picture_after.is_some()
         && stats.shown == stats.decoded
@@ -1372,6 +1422,10 @@ fn translate(
             InputEvent::MouseButton { button, down }
         }
         WindowEvent::Wheel { delta, horizontal } => InputEvent::Wheel { delta, horizontal },
+        WindowEvent::MouseDelta { dx, dy } => InputEvent::MouseDelta {
+            dx: dx.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+            dy: dy.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+        },
         WindowEvent::Key {
             scancode,
             extended,

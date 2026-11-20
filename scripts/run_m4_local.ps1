@@ -118,7 +118,7 @@ try {
         # Full screen: the drawing area must cover the monitor (the input test maps to it too).
         if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen --picture 30,sharp' }
         # A command line on that PC, in a window of its own that closes by itself.
-        if ($label -eq 'relay') { $viewerArgs += ' --terminal-test' }
+        if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += ' --privacy' }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
@@ -172,6 +172,9 @@ try {
             }
             if ($label -eq 'relay' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^terminal test: PASS' })) {
                 $failed += "$label viewer (expected 'terminal test: PASS')"
+            }
+            if ($label -eq 'relay' -and $program -eq 'agent' -and -not ($text | Where-Object { $_ -match 'relative moves right 4/4' })) {
+                $failed += "$label agent (expected 'relative moves right 4/4')"
             }
             # The window title shows the network status (the relay session must say so).
             if ($program -eq 'viewer' -and $mustPass) {

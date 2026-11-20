@@ -118,6 +118,9 @@ struct Stats {
     last_inject_error: String,
     moves_checked: u32,
     moves_ok: u32,
+    /// Game mouse: relative moves checked, and those that moved the pointer the right way.
+    deltas_checked: u32,
+    deltas_ok: u32,
     keys_checked: u32,
     keys_ok: u32,
     agent_ms: Vec<f64>,
@@ -991,7 +994,14 @@ fn session(
                 PeerEvent::Data(bytes) => match Message::decode(&bytes) {
                     Some(Message::Input(event)) => {
                         stats.inputs += 1;
+                        let before = cursor_position();
                         match injector.inject(&event) {
+                            Ok(())
+                                if options.verify_input
+                                    && matches!(event, InputEvent::MouseDelta { .. }) =>
+                            {
+                                verify_delta(&event, before, &mut stats)
+                            }
                             Ok(()) if options.verify_input => verify(&injector, &event, &mut stats),
                             Ok(()) => {}
                             Err(error) => {
@@ -1307,8 +1317,19 @@ fn session(
     ));
     if options.verify_input {
         lines.push(format!(
-            "input check: pointer at the expected place {}/{}, test key state right {}/{}",
-            stats.moves_ok, stats.moves_checked, stats.keys_ok, stats.keys_checked
+            "input check: pointer at the expected place {}/{}, test key state right {}/{}{}",
+            stats.moves_ok,
+            stats.moves_checked,
+            stats.keys_ok,
+            stats.keys_checked,
+            if stats.deltas_checked > 0 {
+                format!(
+                    ", relative moves right {}/{}",
+                    stats.deltas_ok, stats.deltas_checked
+                )
+            } else {
+                String::new()
+            }
         ));
     }
     let ended = closed.unwrap_or_else(|| "time is up".into());
@@ -1317,13 +1338,29 @@ fn session(
         || (stats.moves_checked > 0
             && stats.moves_ok == stats.moves_checked
             && stats.keys_checked == 2
-            && stats.keys_ok == 2);
+            && stats.keys_ok == 2
+            && stats.deltas_ok == stats.deltas_checked);
     let passed =
         connected_after.is_some() && stats.sent > 0 && stats.inject_failures == 0 && input_ok;
     Ok(SessionOutcome { passed, ended })
 }
 
 /// After an injected event: is the pointer where it should be, is the test key in the right state?
+/// A relative move must move the pointer the same way (the distance follows the PC's pointer speed), unless it
+/// was already at that edge of the desktop.
+fn verify_delta(event: &InputEvent, before: (i32, i32), stats: &mut Stats) {
+    let InputEvent::MouseDelta { dx, dy } = *event else {
+        return;
+    };
+    let after = cursor_position();
+    let right_way =
+        |moved: i32, wanted: i16| wanted == 0 || moved.signum() == i32::from(wanted.signum());
+    stats.deltas_checked += 1;
+    if right_way(after.0 - before.0, dx) && right_way(after.1 - before.1, dy) {
+        stats.deltas_ok += 1;
+    }
+}
+
 fn verify(injector: &Injector, event: &InputEvent, stats: &mut Stats) {
     match *event {
         InputEvent::MouseMove { x, y } => {

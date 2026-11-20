@@ -163,6 +163,7 @@ const CHINESE: &[(&str, &str)] = &[
     ("Darken that PC's screen", "让那台电脑黑屏（隐私屏）"),
     ("Open a command line on that PC", "在那台电脑上打开命令行"),
     ("Full screen (Ctrl+Alt+Enter)", "全屏（Ctrl+Alt+Enter）"),
+    ("Game mouse (Ctrl+Alt+M)", "游戏鼠标（Ctrl+Alt+M）"),
     ("Frame rate", "帧率"),
     ("Picture quality", "画质"),
     ("30 frames per second", "每秒 30 帧"),
