@@ -41,6 +41,7 @@ const REGISTER_RESOURCE_VER: u32 = struct_version(3, false);
 const MAP_INPUT_VER: u32 = struct_version(4, false);
 const PIC_PARAMS_VER: u32 = struct_version(4, true);
 const LOCK_BITSTREAM_VER: u32 = struct_version(1, false);
+const RECONFIGURE_VER: u32 = struct_version(1, true);
 const INFINITE_GOP: u32 = 0xFFFF_FFFF;
 /// A keyframe may use this many times a normal frame's bits (see `start`).
 const KEYFRAME_SCALE: u8 = 8;
@@ -140,6 +141,11 @@ pub(crate) struct NvencEncoder {
     ready: Vec<EncodedFrame>,
     frame_index: u32,
     pub(crate) name: String,
+    /// The settings the session was opened with; `init.encodeConfig` points at `encode_config` (both boxed, so
+    /// the pointer stays valid), for changing the bitrate later.
+    encode_config: Box<sys::NV_ENC_CONFIG>,
+    init: Box<sys::NV_ENC_INITIALIZE_PARAMS>,
+    fps: u32,
 }
 
 impl NvencEncoder {
@@ -158,6 +164,9 @@ impl NvencEncoder {
             size: (config.width, config.height),
             ready: Vec::new(),
             frame_index: 0,
+            encode_config: Box::new(unsafe { zeroed() }),
+            init: Box::new(unsafe { zeroed() }),
+            fps: config.fps.max(1),
             name: format!(
                 "NVIDIA NVENC (direct, API {}.{})",
                 sys::NVENCAPI_MAJOR_VERSION,
@@ -245,6 +254,7 @@ impl NvencEncoder {
         vui.transferCharacteristics = 1;
         vui.colourMatrix = 1;
 
+        *self.encode_config = encode_config;
         let mut init: sys::NV_ENC_INITIALIZE_PARAMS = unsafe { zeroed() };
         init.version = INITIALIZE_VER;
         init.encodeGUID = CODEC_H264;
@@ -256,13 +266,14 @@ impl NvencEncoder {
         init.frameRateNum = config.fps.max(1);
         init.frameRateDen = 1;
         init.enablePTD = 1;
-        init.encodeConfig = &mut encode_config;
+        init.encodeConfig = &mut *self.encode_config;
         init.maxEncodeWidth = config.width;
         init.maxEncodeHeight = config.height;
         init.tuningInfo = tuning;
         init.bufferFormat = sys::NV_ENC_BUFFER_FORMAT_NV12;
+        *self.init = init;
         let initialize = function(self.api.nvEncInitializeEncoder)?;
-        let init_status = unsafe { initialize(self.session, &mut init) };
+        let init_status = unsafe { initialize(self.session, &mut *self.init) };
         self.check(init_status, "initialize")?;
 
         let mut buffer: sys::NV_ENC_CREATE_BITSTREAM_BUFFER = unsafe { zeroed() };
@@ -319,6 +330,25 @@ impl NvencEncoder {
         let unmap = function(self.api.nvEncUnmapInputResource)?;
         let _ = unsafe { unmap(self.session, map.mappedResource) };
         result
+    }
+
+    /// Changes the bitrate of the running session (no keyframe, no reset): CBR with a one-frame buffer as at
+    /// the start.
+    pub(crate) fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        let rc = &mut self.encode_config.rcParams;
+        rc.averageBitRate = bitrate;
+        rc.maxBitRate = bitrate;
+        rc.vbvBufferSize = bitrate / self.fps;
+        rc.vbvInitialDelay = rc.vbvBufferSize;
+        let mut params: sys::NV_ENC_RECONFIGURE_PARAMS = unsafe { zeroed() };
+        params.version = RECONFIGURE_VER;
+        params.reInitEncodeParams = *self.init;
+        params.reInitEncodeParams.encodeConfig = &mut *self.encode_config;
+        params.set_resetEncoder(0);
+        params.set_forceIDR(0);
+        let reconfigure = function(self.api.nvEncReconfigureEncoder)?;
+        let reconfigure_status = unsafe { reconfigure(self.session, &mut params) };
+        self.check(reconfigure_status, "reconfigure (bitrate)")
     }
 
     fn take_bitstream(&mut self) -> Result<()> {

@@ -66,6 +66,28 @@ impl SoftwareEncoder {
         })
     }
 
+    /// Changes the target bitrate (all layers) for the next frames.
+    pub(crate) fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        let mut info = openh264_sys2::SBitrateInfo {
+            iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
+            iBitrate: i32::try_from(bitrate).unwrap_or(i32::MAX),
+        };
+        let code = unsafe {
+            self.encoder.raw_api().set_option(
+                openh264_sys2::ENCODER_OPTION_BITRATE,
+                (&raw mut info).cast(),
+            )
+        };
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(Error::new(
+                E_FAIL,
+                format!("OpenH264 refused the bitrate ({code})"),
+            ))
+        }
+    }
+
     pub(crate) fn poll(&mut self, out: &mut Vec<EncodedFrame>) {
         out.append(&mut self.ready);
     }

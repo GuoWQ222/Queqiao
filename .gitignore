@@ -1,6 +1,8 @@
 /target/
 
-# Raw output of the UU Remote analysis (decompiled NetEase code, string and import dumps). It stays on this PC only:
-# the repository holds our own design notes (research\uu\*FINDINGS.md) and our own tools, never third-party code.
-/research/uu/inventory/
-/research/uu/streamer/
+# The UU Remote analysis stays on this PC only (decompiled NetEase code, dumps, extracted interface text). The
+# repository holds our own design notes (research\uu\*FINDINGS.md) and our own tools, never third-party material:
+# everything else in research\uu is ignored.
+/research/uu/*
+!/research/uu/FINDINGS.md
+!/research/uu/STREAMER_FINDINGS.md

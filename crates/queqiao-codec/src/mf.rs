@@ -191,6 +191,14 @@ impl MfEncoder {
     }
 
     /// Sends one NV12 frame (only when `wants_input`). `time` is in 100 ns units.
+    /// Changes the bitrate while streaming; an encoder that does not allow it keeps its bitrate (error).
+    pub(crate) fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        unsafe {
+            self.codec
+                .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))
+        }
+    }
+
     pub(crate) fn encode(
         &mut self,
         nv12: &ID3D11Texture2D,

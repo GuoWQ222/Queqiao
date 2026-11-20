@@ -17,6 +17,7 @@ use std::sync::{Arc, Once};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::channel::ChannelId;
 use str0m::media::{Direction, KeyframeRequestKind, MediaKind, MediaTime, Mid};
@@ -56,6 +57,8 @@ pub enum PeerEvent {
     Path(String),
     /// Something worth a line in a report: ICE state changes, relay events.
     Note(String),
+    /// The estimated bandwidth towards the other side, bits per second (the sender adapts its bitrate).
+    Bitrate(u64),
     Closed(String),
 }
 
@@ -63,11 +66,15 @@ enum Command {
     Video { data: Vec<u8>, time_90khz: u64 },
     Data(Vec<u8>),
     RequestKeyframe,
+    BitrateRange { minimum: u64, desired: u64 },
     Close,
 }
 
 /// Keyframe requests at most this often (UU Remote limits keyframes to one per 600 ms on loss).
 const KEYFRAME_REQUEST_GAP: Duration = Duration::from_millis(600);
+/// The bandwidth estimate starts here (UU Remote starts at 8.1 Mbit/s: desktop text needs bits at once); the
+/// sender should start its encoder at about this rate and follow `PeerEvent::Bitrate`.
+pub const START_BITRATE: u64 = 8_000_000;
 /// Until connected, the network thread gives str0m time at least this often (see `Network::run`).
 const UNCONNECTED_WAIT: Duration = Duration::from_millis(50);
 
@@ -95,10 +102,11 @@ impl Peer {
         let servers = signal.ice_servers()?;
         let relay_only = queqiao_core::forced("network").as_deref() == Some("relay");
         let gathered = gather(&socket, local, &servers, relay_only)?;
-        let mut rtc = RtcConfig::new()
-            .clear_codecs()
-            .enable_h264(true)
-            .build(Instant::now());
+        let mut rtc = tune(
+            RtcConfig::new().clear_codecs().enable_h264(true),
+            Bitrate::bps(START_BITRATE),
+        )
+        .build(Instant::now());
         for candidate in gathered.candidates {
             rtc.add_local_candidate(candidate);
         }
@@ -141,6 +149,7 @@ impl Peer {
             turn: gathered.turn,
             connected: false,
             path: None,
+            clock: Instant::now(),
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -176,6 +185,11 @@ impl Peer {
         self.command(Command::Data(bytes));
     }
 
+    /// The bitrate range the sender wants: the bandwidth estimate probes up to `desired` (str0m's BWE).
+    pub fn set_bitrate_range(&self, minimum: u64, desired: u64) {
+        self.command(Command::BitrateRange { minimum, desired });
+    }
+
     /// Asks the sender for a keyframe (the viewer does this by itself after a loss).
     pub fn request_keyframe(&self) {
         self.command(Command::RequestKeyframe);
@@ -206,6 +220,20 @@ impl Drop for Peer {
     }
 }
 
+/// str0m settings for desktop video (tests/loss_recovery.rs measures them on a lossy link):
+/// - hold up to 2048 video packets for reordering and repair (str0m: "at least as big as the number of packets the
+///   biggest keyframe can be split over"; its default of 30 gives up on a 1440p keyframe at the first loss, which
+///   costs a new keyframe, a bigger burst and more loss);
+/// - keep the last 4096 sent video packets for retransmission (NACK), so a keyframe can still be repaired;
+/// - bandwidth estimation (transport-wide congestion control) from `start`, which also paces the packets out
+///   instead of sending a keyframe as one burst.
+pub fn tune(config: RtcConfig, start: Bitrate) -> RtcConfig {
+    config
+        .set_reordering_size_video(2048)
+        .set_send_buffer_video(4096)
+        .enable_bwe(Some(start))
+}
+
 fn bind_socket() -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(SocketProtocol::UDP))?;
@@ -229,6 +257,8 @@ struct Network {
     turn: Option<TurnClient>,
     connected: bool,
     path: Option<String>,
+    /// The latest time given to str0m: inputs never go back in time (deadlines are served up to 1 ms early).
+    clock: Instant,
 }
 
 impl Network {
@@ -239,13 +269,37 @@ impl Network {
         // viewer's checks wake it; through TURN they are dropped until we have sent something ourselves
         // (permissions), so nothing would move. Hence a timeout input at once, and short waits until
         // connected (tests/relay_ice.rs).
-        self.rtc
-            .handle_input(Input::Timeout(Instant::now()))
-            .map_err(err)?;
+        let start = self.clock(Instant::now());
+        self.rtc.handle_input(Input::Timeout(start)).map_err(err)?;
+        let mut immediate = 0u32;
         loop {
             let Some(mut deadline) = self.drain()? else {
                 return Ok(());
             };
+            // str0m's pacer releases a packet and asks for the next one a fraction of a millisecond later
+            // (one packet's time at the pacing rate); its budget cannot go below zero. Waking up no more
+            // often than every millisecond (the socket wait) would cap paced video at about 1000 packets a
+            // second, roughly 10 Mbit/s, whatever the estimate (tests/loss_recovery.rs). A deadline less than
+            // 1 ms away is served at once, as that time (packets leave up to 1 ms early); the clock never goes
+            // back, and the guard only stops a runaway loop.
+            // Compared with real time, not with the clock: the clock may already be ahead, and comparing with it
+            // would let str0m's time run away from real time (its ICE consent timers then expire at once).
+            let real = Instant::now();
+            if deadline < real + Duration::from_millis(1) && immediate < 10_000 {
+                immediate += 1;
+                let at = self.clock(deadline.max(real));
+                self.rtc.handle_input(Input::Timeout(at)).map_err(err)?;
+                if immediate.is_multiple_of(64) {
+                    // Let commands (new frames, input) in during a long paced burst.
+                    if let Ok(command) = self.commands.try_recv()
+                        && !self.apply(command)?
+                    {
+                        return Ok(());
+                    }
+                }
+                continue;
+            }
+            immediate = 0;
             if !self.connected {
                 deadline = deadline.min(Instant::now() + UNCONNECTED_WAIT);
             }
@@ -276,7 +330,7 @@ impl Network {
                     continue;
                 }
                 Ok((length, source)) => Input::Receive(
-                    Instant::now(),
+                    self.clock(Instant::now()),
                     Receive {
                         proto: Protocol::Udp,
                         source,
@@ -291,7 +345,7 @@ impl Network {
                         turn.poll(Instant::now());
                     }
                     self.flush_turn();
-                    Input::Timeout(Instant::now())
+                    Input::Timeout(self.clock(Instant::now()))
                 }
                 // Windows reports an earlier ICMP "port unreachable" on the next receive: not fatal.
                 Err(error) if error.kind() == ErrorKind::ConnectionReset => continue,
@@ -381,6 +435,9 @@ impl Network {
             }
             Event::ChannelData(data) => Some(PeerEvent::Data(data.data)),
             Event::KeyframeRequest(_) => Some(PeerEvent::KeyframeRequested),
+            Event::EgressBitrateEstimate(
+                BweKind::Twcc { estimate, .. } | BweKind::Remb { estimate, .. },
+            ) => Some(PeerEvent::Bitrate(estimate.as_u64())),
             _ => None,
         };
         if let Some(event) = forward {
@@ -395,6 +452,7 @@ impl Network {
                 let Some(mid) = self.mid else {
                     return Ok(true);
                 };
+                let now = self.clock(Instant::now());
                 let Some(writer) = self.rtc.writer(mid) else {
                     return Ok(true);
                 };
@@ -402,7 +460,7 @@ impl Network {
                     return Ok(true);
                 };
                 let time = MediaTime::from_90khz(time_90khz);
-                writer.write(pt, Instant::now(), time, data).map_err(err)?;
+                writer.write(pt, now, time, data).map_err(err)?;
             }
             Command::Data(bytes) => {
                 if let Some(id) = self.channel
@@ -410,6 +468,11 @@ impl Network {
                 {
                     let _ = channel.write(true, &bytes);
                 }
+            }
+            Command::BitrateRange { minimum, desired } => {
+                self.rtc
+                    .bwe()
+                    .set_bitrate(Bitrate::bps(minimum), Bitrate::bps(desired));
             }
             Command::RequestKeyframe => {
                 if let Some(mid) = self.mid {
@@ -430,10 +493,10 @@ impl Network {
 
     /// A datagram from the TURN server: a peer's data for str0m, or the TURN client's own business.
     fn handle_turn_packet(&mut self, packet: &[u8]) -> Result<(), Error> {
+        let now = self.clock(Instant::now());
         let Some(turn) = self.turn.as_mut() else {
             return Ok(());
         };
-        let now = Instant::now();
         let incoming = turn.handle(packet, now);
         let relayed = turn.relayed;
         self.flush_turn();
@@ -461,6 +524,12 @@ impl Network {
                 let _ = self.events.send(PeerEvent::Note(note));
             }
         }
+    }
+
+    /// `at`, or the latest time already given to str0m if that is later.
+    fn clock(&mut self, at: Instant) -> Instant {
+        self.clock = self.clock.max(at);
+        self.clock
     }
 
     fn ask_keyframe(&mut self, mid: Mid) {

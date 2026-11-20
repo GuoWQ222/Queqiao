@@ -22,13 +22,27 @@ use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_n
 use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::{InputEvent, Message};
 use queqiao_input::{Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position};
-use queqiao_transport::{Peer, PeerEvent, Role, Signal, Signaling, check_hello, hello_body};
+use queqiao_transport::{
+    Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, check_hello, hello_body,
+};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
 /// The test key: F24 exists on no normal keyboard and no program reacts to it.
 const TEST_SCANCODE: u16 = 0x76;
 const VK_F24: u16 = 0x87;
+/// Adaptive bitrate: the encoder never goes below this, changes at most this often, and runs at this share of
+/// the estimated bandwidth (the rest is headroom for retransmissions and the pacer).
+const MIN_BITRATE: u32 = 500_000;
+const BITRATE_CHANGE_GAP: Duration = Duration::from_millis(250);
+const BANDWIDTH_SHARE: f64 = 0.85;
+
+/// The encoder bitrate for a bandwidth estimate.
+fn adapted_bitrate(estimate: u64, max: u32) -> u32 {
+    ((estimate as f64 * BANDWIDTH_SHARE) as u64)
+        .clamp(u64::from(MIN_BITRATE), u64::from(max.max(MIN_BITRATE))) as u32
+}
+
 /// A session that is not connected after this long is given up.
 const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
@@ -288,6 +302,23 @@ fn session(
     let started = Instant::now();
     let peer = Peer::start(Role::Agent, signal).map_err(|e| e.to_string())?;
     lines.extend(peer.candidates().iter().cloned());
+    // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
+    // never above the size-based bitrate the encoder was opened with.
+    let max_bitrate = config.bitrate;
+    peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
+    let start_bitrate = adapted_bitrate(START_BITRATE, max_bitrate);
+    if start_bitrate != encoder.bitrate()
+        && let Err(error) = encoder.set_bitrate(start_bitrate)
+    {
+        lines.push(format!(
+            "the encoder keeps {:.1} Mbit/s: {}",
+            f64::from(encoder.bitrate()) / 1e6,
+            describe(error)
+        ));
+    }
+    let mut bitrate_changes = 0u32;
+    let mut lowest_bitrate = encoder.bitrate();
+    let mut last_bitrate_change: Option<Instant> = None;
 
     let pointer_start = cursor_position();
     let interval = Duration::from_secs_f64(1.0 / f64::from(config.fps));
@@ -349,6 +380,18 @@ fn session(
                 )),
                 PeerEvent::Note(note) => {
                     lines.push(format!("{} ms: {note}", started.elapsed().as_millis()))
+                }
+                PeerEvent::Bitrate(estimate) => {
+                    let target = adapted_bitrate(estimate, max_bitrate);
+                    let current = encoder.bitrate();
+                    let big_enough = target.abs_diff(current) > current / 20;
+                    let spaced =
+                        last_bitrate_change.is_none_or(|at| at.elapsed() >= BITRATE_CHANGE_GAP);
+                    if big_enough && spaced && encoder.set_bitrate(target).is_ok() {
+                        bitrate_changes += 1;
+                        lowest_bitrate = lowest_bitrate.min(target);
+                        last_bitrate_change = Some(Instant::now());
+                    }
                 }
                 PeerEvent::ChannelOpen | PeerEvent::Video { .. } => {}
             }
@@ -438,6 +481,13 @@ fn session(
     lines.push(format!(
         "screen change -> sent, ms: {}",
         summary(&mut stats.agent_ms)
+    ));
+    lines.push(format!(
+        "bitrate: started at {:.1}, lowest {:.1}, last {:.1}, highest allowed {:.1} Mbit/s; {bitrate_changes} changes",
+        f64::from(start_bitrate) / 1e6,
+        f64::from(lowest_bitrate) / 1e6,
+        f64::from(encoder.bitrate()) / 1e6,
+        f64::from(max_bitrate) / 1e6
     ));
     lines.push(format!(
         "input: {} events, {} refused{}",

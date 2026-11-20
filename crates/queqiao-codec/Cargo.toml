@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 queqiao-core.workspace = true
 openh264 = "0.9"
+# The raw option for changing the bitrate while encoding (openh264 does not wrap it).
+openh264-sys2 = "0.9"
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",

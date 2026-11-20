@@ -198,6 +198,15 @@ impl H264Encoder {
         }
     }
 
+    /// Changes the bitrate (bits per second) for the next frames, without a keyframe.
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        match &mut self.backend {
+            Backend::Hardware(encoder) => encoder.set_bitrate(bitrate),
+            Backend::Nvenc(encoder) => encoder.set_bitrate(bitrate),
+            Backend::Software(encoder) => encoder.set_bitrate(bitrate),
+        }
+    }
+
     /// Asks for every frame still inside the encoder; keep calling `poll` until `drained`.
     pub fn drain(&mut self) -> Result<()> {
         match &mut self.backend {

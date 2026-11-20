@@ -782,6 +782,7 @@ name = "queqiao-codec"
 version = "0.1.0"
 dependencies = [
  "openh264",
+ "openh264-sys2",
  "queqiao-capture",
  "queqiao-core",
  "windows",

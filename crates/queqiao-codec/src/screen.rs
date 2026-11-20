@@ -23,6 +23,7 @@ pub struct ScreenEncoder {
     config: EncoderConfig,
     index: u32,
     notes: Vec<String>,
+    bitrate: u32,
 }
 
 impl ScreenEncoder {
@@ -76,6 +77,7 @@ impl ScreenEncoder {
             encoder,
             converter,
             ring,
+            bitrate: config.bitrate,
             config,
             index: 0,
             notes,
@@ -88,6 +90,18 @@ impl ScreenEncoder {
 
     pub fn encoder(&self) -> &H264Encoder {
         &self.encoder
+    }
+
+    /// The bitrate now (it starts at `config().bitrate` and changes with `set_bitrate`).
+    pub fn bitrate(&self) -> u32 {
+        self.bitrate
+    }
+
+    /// Changes the bitrate for the next frames (adaptive bitrate: the network's estimate).
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        self.encoder.set_bitrate(bitrate)?;
+        self.bitrate = bitrate;
+        Ok(())
     }
 
     pub fn converter_description(&self) -> String {

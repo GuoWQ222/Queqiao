@@ -738,6 +738,7 @@ fn session(
                 PeerEvent::Note(note) => {
                     lines.push(format!("{} ms: {note}", started.elapsed().as_millis()))
                 }
+                PeerEvent::Bitrate(_) => {}
                 PeerEvent::Closed(reason) => {
                     closed = Some(reason);
                     break 'session;
