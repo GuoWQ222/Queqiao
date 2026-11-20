@@ -25,11 +25,9 @@ impl Probe {
     }
 }
 
+/// A device that lives in this probe only (its own key, pins in memory).
 fn device(label: &str) -> DeviceIdentity {
-    DeviceIdentity {
-        id: format!("probe-{label}-{}", new_session_id()),
-        name: format!("probe {label}"),
-    }
+    DeviceIdentity::in_memory(&format!("probe-{label}")).expect("a device key")
 }
 
 fn login(server: &str, pin: &str) -> SavedLogin {
@@ -175,6 +173,73 @@ fn main() {
     });
     let ok = matches!(&delivered, Some(AccountEvent::Signal { from, from_role: Role::Viewer, session: s, kind, body, .. })
         if *from == dev_b.id && *s == session && kind == "hello" && body == "probe body");
+    // The device list carries every device's key, and A can check B's signature with it.
+    let b_key = agent_a
+        .devices
+        .iter()
+        .find(|d| d.id == dev_b.id)
+        .map(|d| d.public_key.clone());
+    probe.check(
+        "device list carries B's key",
+        b_key.as_deref() == dev_b.key.as_ref().map(|k| k.public_hex()),
+        b_key.unwrap_or_default(),
+    );
+    if let Some(AccountEvent::Signal {
+        from,
+        from_role,
+        session: s,
+        kind,
+        body,
+        signature,
+        ..
+    }) = &delivered
+    {
+        let checked = agent_a.check_signal(from, *from_role, s, kind, body, signature);
+        probe.check(
+            "B's signature checks out on A",
+            checked.is_ok(),
+            checked.err().map_or("signed by B's key".into(), |e| e.0),
+        );
+    }
+    // A signal through the server signed with any other key is refused by the receiving device.
+    let forger = queqiao_account::DeviceKey::generate().expect("a key");
+    viewer_b.send(queqiao_account::ClientMessage::Signal {
+        to: dev_a.id.clone(),
+        to_role: Role::Agent,
+        session: "forged".into(),
+        kind: "offer".into(),
+        body: "v=0 with someone else's fingerprint".into(),
+        signature: forger.sign(b"anything"),
+    });
+    let forged = wait_for(
+        &mut agent_a,
+        Duration::from_secs(3),
+        |event| matches!(event, AccountEvent::Signal { session, .. } if session == "forged"),
+    );
+    match forged {
+        Some(AccountEvent::Signal {
+            from,
+            from_role,
+            session,
+            kind,
+            body,
+            signature,
+            ..
+        }) => {
+            let checked =
+                agent_a.check_signal(&from, from_role, &session, &kind, &body, &signature);
+            probe.check(
+                "a forged signature is refused by the receiving device",
+                checked.is_err(),
+                checked.err().map_or("accepted".into(), |e| e.0),
+            );
+        }
+        _ => probe.check(
+            "the forged signal reaches A to be refused",
+            false,
+            "not delivered",
+        ),
+    }
     probe.check(
         "signal B -> A delivered",
         ok,

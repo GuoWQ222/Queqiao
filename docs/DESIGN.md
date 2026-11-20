@@ -194,7 +194,13 @@ tested from outside by `account_probe`); failed logins slowed to one per second 
 capped.
 
 Open, in this order, all before any release:
-1. **Peers must prove who they are, not only the server.** Today the DTLS fingerprints in the offer and answer
+1. **Peers must prove who they are, not only the server.** **Done 2026-11-21:** every device has an Ed25519 key
+   (DPAPI-protected, `device_key.json`), registered with the server (a password login may register a new key, a
+   saved-login resume may not) and published in the device list; every signal (hello, offer, answer) is signed over
+   session, kind, sender, receiver and body, and the receiving device checks it against the key it pinned at first
+   contact (`known_devices.json`); a changed key is refused until confirmed (`--trust-new-key <device id>`).
+   Checked from outside by `account_probe` (keys in the list, signature checks out, a forged one is refused).
+   Was: Today the DTLS fingerprints in the offer and answer
    pass through the server, so a compromised server could sit in the middle of a session. Each device gets its
    own long-lived key (DPAPI-protected) at its first login; the account's devices learn each other's public keys
    and pin them (a changed key is refused until the user confirms it on a device they trust); the DTLS

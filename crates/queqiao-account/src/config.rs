@@ -14,17 +14,40 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::core::PCWSTR;
 
+use crate::keys::DeviceKey;
 use crate::tls::err;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeviceIdentity {
     pub id: String,
     pub name: String,
+    /// The device's own key (kept in its own DPAPI-protected file, not in device.json).
+    #[serde(skip)]
+    pub key: Option<DeviceKey>,
+    /// Made for a test or probe: its key and its pins of other devices live in memory only.
+    #[serde(skip)]
+    pub in_memory: bool,
 }
 
 impl DeviceIdentity {
-    /// This PC's identity: made once (random id, the computer's name), then reused.
+    /// A device that exists only in memory (tests, probes): a new id from `label`, a new key.
+    pub fn in_memory(label: &str) -> Result<DeviceIdentity, Error> {
+        Ok(DeviceIdentity {
+            id: format!("{label}-{}", random_hex(8)),
+            name: label.to_string(),
+            key: Some(DeviceKey::generate()?),
+            in_memory: true,
+        })
+    }
+
+    /// This PC's identity: made once (random id, the computer's name), then reused; with its key.
     pub fn load_or_create() -> Result<DeviceIdentity, Error> {
+        let mut identity = DeviceIdentity::load_or_create_file()?;
+        identity.key = Some(DeviceKey::load_or_create()?);
+        Ok(identity)
+    }
+
+    fn load_or_create_file() -> Result<DeviceIdentity, Error> {
         let path = folder()?.join("device.json");
         if let Ok(text) = std::fs::read_to_string(&path)
             && let Ok(identity) = serde_json::from_str::<DeviceIdentity>(&text)
@@ -34,6 +57,8 @@ impl DeviceIdentity {
         let identity = DeviceIdentity {
             id: random_hex(16),
             name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into()),
+            key: None,
+            in_memory: false,
         };
         // The agent and the viewer may start at the same moment: the first file written wins.
         let created = std::fs::OpenOptions::new()
@@ -113,14 +138,14 @@ fn file_name(role: Role) -> &'static str {
     }
 }
 
-fn folder() -> Result<PathBuf, Error> {
+pub(crate) fn folder() -> Result<PathBuf, Error> {
     let base = std::env::var_os("APPDATA").ok_or_else(|| Error("APPDATA is not set".into()))?;
     let folder = PathBuf::from(base).join("Queqiao");
     std::fs::create_dir_all(&folder)?;
     Ok(folder)
 }
 
-fn protect(data: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn protect(data: &[u8]) -> Result<Vec<u8>, Error> {
     let input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr().cast_mut(),
@@ -141,7 +166,7 @@ fn protect(data: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(take_blob(output))
 }
 
-fn unprotect(data: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn unprotect(data: &[u8]) -> Result<Vec<u8>, Error> {
     let input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr().cast_mut(),
@@ -175,11 +200,11 @@ pub(crate) fn random_hex(count: usize) -> String {
     hex(&bytes)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }

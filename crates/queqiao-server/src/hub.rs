@@ -208,12 +208,13 @@ impl Hub {
                 device_id,
                 device_name,
                 role,
+                public_key,
             } => {
                 let row = store
                     .check_password(&user, &password)?
                     .ok_or("wrong user name or password")?;
                 check_device_fields(&device_id, &device_name)?;
-                store.register_device(row.id, &device_id, &device_name)?;
+                store.register_device(row.id, &device_id, &device_name, &public_key, true)?;
                 let token = store.issue_refresh_token(row.id, &device_id, role_name(role))?;
                 let identity = Identity {
                     user_id: row.id,
@@ -229,12 +230,13 @@ impl Hub {
                 device_id,
                 device_name,
                 role,
+                public_key,
             } => {
                 let row = store
                     .check_refresh_token(&refresh_token, &device_id, role_name(role))?
                     .ok_or("the saved login has expired or was revoked: log in again")?;
                 check_device_fields(&device_id, &device_name)?;
-                store.register_device(row.id, &device_id, &device_name)?;
+                store.register_device(row.id, &device_id, &device_name, &public_key, false)?;
                 let identity = Identity {
                     user_id: row.id,
                     user: row.name,
@@ -261,6 +263,7 @@ impl Hub {
                 session,
                 kind,
                 body,
+                signature,
             } => {
                 let delivered = self.online.lock().ok().and_then(|online| {
                     let target = online.get(&(to.clone(), to_role))?;
@@ -275,6 +278,7 @@ impl Hub {
                                 session,
                                 kind,
                                 body,
+                                signature,
                             }))
                             .is_ok()
                     })
@@ -326,7 +330,7 @@ impl Hub {
             Err(_) => return Vec::new(),
         };
         rows.into_iter()
-            .map(|(id, name)| {
+            .map(|(id, name, public_key)| {
                 let agent = online
                     .get(&(id.clone(), Role::Agent))
                     .filter(|c| c.user_id == user_id);
@@ -339,6 +343,7 @@ impl Hub {
                     online: agent.is_some() || viewer.is_some(),
                     id,
                     name,
+                    public_key,
                 }
             })
             .collect()

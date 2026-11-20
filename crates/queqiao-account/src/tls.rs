@@ -174,6 +174,7 @@ pub(crate) fn run(
                         session,
                         kind,
                         body,
+                        signature,
                     }) => AccountEvent::Signal {
                         from,
                         from_name,
@@ -181,6 +182,7 @@ pub(crate) fn run(
                         session,
                         kind,
                         body,
+                        signature,
                     },
                     Ok(ServerMessage::Error { message }) => AccountEvent::Error(message),
                     Ok(ServerMessage::IceServers { stun, turn }) => {

@@ -33,12 +33,21 @@ impl Store {
                  created INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS devices (
                  id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL,
-                 created INTEGER NOT NULL, last_seen INTEGER NOT NULL);
+                 created INTEGER NOT NULL, last_seen INTEGER NOT NULL, public_key TEXT NOT NULL DEFAULT '');
              CREATE TABLE IF NOT EXISTS refresh_tokens (
                  hash TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES devices(id), role TEXT NOT NULL,
                  user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);",
         )
         .map_err(|e| e.to_string())?;
+        // Databases from before device keys (M3) get the column.
+        let has_key: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'public_key'")
+            .and_then(|mut query| query.exists([]))
+            .map_err(|e| e.to_string())?;
+        if !has_key {
+            db.execute_batch("ALTER TABLE devices ADD COLUMN public_key TEXT NOT NULL DEFAULT ''")
+                .map_err(|e| e.to_string())?;
+        }
         Ok(Store { db })
     }
 
@@ -76,8 +85,35 @@ impl Store {
         }))
     }
 
-    /// Records the device for the user. A device id that belongs to another account is refused.
-    pub fn register_device(&self, user_id: i64, device_id: &str, name: &str) -> Result<(), String> {
+    /// Records the device and its public key for the user. A device id that belongs to another account is
+    /// refused; a different key for a known device only when `may_change_key` (a password login).
+    pub fn register_device(
+        &self,
+        user_id: i64,
+        device_id: &str,
+        name: &str,
+        public_key: &str,
+        may_change_key: bool,
+    ) -> Result<(), String> {
+        if public_key.len() != 64 || !public_key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("bad device key".into());
+        }
+        let stored: Option<String> = self
+            .db
+            .query_row(
+                "SELECT public_key FROM devices WHERE id = ?1 AND user_id = ?2",
+                params![device_id, user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some(stored) = stored
+            && !stored.is_empty()
+            && !stored.eq_ignore_ascii_case(public_key)
+            && !may_change_key
+        {
+            return Err("this device has a new key: log in with the password".into());
+        }
         let owner: Option<i64> = self
             .db
             .query_row(
@@ -92,8 +128,8 @@ impl Store {
             Some(_) => {
                 self.db
                     .execute(
-                        "UPDATE devices SET name = ?2, last_seen = ?3 WHERE id = ?1",
-                        params![device_id, name, now()],
+                        "UPDATE devices SET name = ?2, last_seen = ?3, public_key = ?4 WHERE id = ?1",
+                        params![device_id, name, now(), public_key.to_ascii_lowercase()],
                     )
                     .map_err(|e| e.to_string())?;
                 Ok(())
@@ -101,8 +137,8 @@ impl Store {
             None => {
                 self.db
                     .execute(
-                        "INSERT INTO devices (id, user_id, name, created, last_seen) VALUES (?1, ?2, ?3, ?4, ?4)",
-                        params![device_id, user_id, name, now()],
+                        "INSERT INTO devices (id, user_id, name, created, last_seen, public_key) VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                        params![device_id, user_id, name, now(), public_key.to_ascii_lowercase()],
                     )
                     .map_err(|e| e.to_string())?;
                 Ok(())
@@ -168,14 +204,14 @@ impl Store {
         Ok(())
     }
 
-    /// The account's devices: id and name, oldest first.
-    pub fn devices(&self, user_id: i64) -> Result<Vec<(String, String)>, String> {
+    /// The account's devices: id, name and public key, oldest first.
+    pub fn devices(&self, user_id: i64) -> Result<Vec<(String, String, String)>, String> {
         let mut query = self
             .db
-            .prepare("SELECT id, name FROM devices WHERE user_id = ?1 ORDER BY created")
+            .prepare("SELECT id, name, public_key FROM devices WHERE user_id = ?1 ORDER BY created")
             .map_err(|e| e.to_string())?;
         let rows = query
-            .query_map(params![user_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_map(params![user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
@@ -299,7 +335,28 @@ mod tests {
             .check_password("alice", "correct horse")
             .unwrap()
             .unwrap();
-        store.register_device(user.id, "dev1", "Laptop").unwrap();
+        let key_a = "a".repeat(64);
+        let key_b = "b".repeat(64);
+        store
+            .register_device(user.id, "dev1", "Laptop", &key_a, false)
+            .unwrap();
+        assert!(
+            store
+                .register_device(user.id, "dev1", "Laptop", &key_b, false)
+                .is_err(),
+            "resume cannot change the key"
+        );
+        store
+            .register_device(user.id, "dev1", "Laptop", &key_b, true)
+            .unwrap();
+        store
+            .register_device(user.id, "dev1", "Laptop", &key_b, false)
+            .unwrap();
+        assert!(
+            store
+                .register_device(user.id, "dev2", "Laptop", "not hex", true)
+                .is_err()
+        );
         let token = store.issue_refresh_token(user.id, "dev1", "agent").unwrap();
         assert_eq!(
             store
@@ -358,7 +415,7 @@ mod tests {
         );
         assert_eq!(
             store.devices(user.id).unwrap(),
-            vec![("dev1".into(), "Laptop".into())]
+            vec![("dev1".into(), "Laptop".into(), key_b.clone())]
         );
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);

@@ -5,6 +5,7 @@
 //! The connection runs on its own thread ("queqiao-account"); the program talks to it through channels.
 
 mod config;
+mod keys;
 mod tls;
 
 use std::collections::VecDeque;
@@ -13,11 +14,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use queqiao_core::account::{ServerMessage, TurnAccess};
+use queqiao_core::account::{ServerMessage, TurnAccess, signed_bytes};
 use queqiao_transport::{Error, IceServers, Signaling, TurnServer};
 use tungstenite::Message;
 
 pub use config::{DeviceIdentity, SavedLogin};
+pub use keys::{DeviceKey, KnownDevices, Pin, verify};
 pub use queqiao_core::account::{ClientMessage, Device, Role};
 
 /// What the server tells the program after the welcome.
@@ -31,6 +33,8 @@ pub enum AccountEvent {
         session: String,
         kind: String,
         body: String,
+        /// The sender's signature; check it with [`Account::check_signal`] before acting on the signal.
+        signature: String,
     },
     /// The server refused something (for example a signal to a device that is offline).
     Error(String),
@@ -51,17 +55,31 @@ pub struct Account {
     pub device_id: String,
     pub devices: Vec<Device>,
     thread: Option<JoinHandle<()>>,
+    key: DeviceKey,
+    known: KnownDevices,
+    role: Role,
 }
 
 impl Account {
     /// Connects to `login.server`, checking the pinned certificate, and logs in: with the password when
     /// one is given (the new refresh token is put into `login`), otherwise with the saved refresh token.
+    /// The device's key comes with `device`; the keys of other devices are pinned in `known_devices.json`
+    /// (in memory for a device made with [`DeviceIdentity::in_memory`]).
     pub fn connect(
         login: &mut SavedLogin,
         device: &DeviceIdentity,
         role: Role,
         password: Option<(&str, &str)>,
     ) -> Result<Account, Error> {
+        let key = device
+            .key
+            .clone()
+            .ok_or_else(|| Error("the device has no key".into()))?;
+        let known = if device.in_memory {
+            KnownDevices::in_memory()
+        } else {
+            KnownDevices::load()?
+        };
         let address = login
             .server
             .to_socket_addrs()?
@@ -80,6 +98,7 @@ impl Account {
                 device_id: device.id.clone(),
                 device_name: device.name.clone(),
                 role,
+                public_key: key.public_hex().to_string(),
             },
             None => ClientMessage::Resume {
                 refresh_token: login.refresh_token.clone().ok_or_else(|| {
@@ -88,6 +107,7 @@ impl Account {
                 device_id: device.id.clone(),
                 device_name: device.name.clone(),
                 role,
+                public_key: key.public_hex().to_string(),
             },
         };
         socket
@@ -137,7 +157,72 @@ impl Account {
             device_id,
             devices,
             thread: Some(thread),
+            key,
+            known,
+            role,
         })
+    }
+
+    /// Checks a signal from another device: it must come from a device of the account whose key matches the
+    /// key this PC pinned for it (pinned now if it is the first contact), signed over what it says.
+    pub fn check_signal(
+        &mut self,
+        from: &str,
+        from_role: Role,
+        session: &str,
+        kind: &str,
+        body: &str,
+        signature: &str,
+    ) -> Result<(), Error> {
+        let Some(device) = self.devices.iter().find(|d| d.id == from) else {
+            return Err(Error(format!(
+                "a signal from {from}, which is not a device of this account"
+            )));
+        };
+        let (key, name) = (device.public_key.clone(), device.name.clone());
+        if key.is_empty() {
+            return Err(Error(format!(
+                "{name} has no device key (an older Queqiao): refused"
+            )));
+        }
+        if let Pin::Changed(_) = self.known.check(from, &key) {
+            return Err(Error(format!(
+                "the key of {name} differs from the one this PC first saw: refused. If {name} was reinstalled, \
+                 confirm its new key (--trust-new-key {from})"
+            )));
+        }
+        let message = signed_bytes(
+            session,
+            kind,
+            from,
+            from_role,
+            &self.device_id,
+            self.role,
+            body,
+        );
+        if !verify(&key, &message, signature) {
+            return Err(Error(format!(
+                "a signal claiming to be from {name} is not signed by its key: refused"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Accepts a new key for `device` (after the person confirmed it, e.g. a reinstalled PC).
+    pub fn trust_new_key(&mut self, device: &str) -> Result<(), Error> {
+        self.known.forget(device)
+    }
+
+    fn signature(&self, to: &str, to_role: Role, session: &str, kind: &str, body: &str) -> String {
+        self.key.sign(&signed_bytes(
+            session,
+            kind,
+            &self.device_id,
+            self.role,
+            to,
+            to_role,
+            body,
+        ))
     }
 
     /// Our address as seen on the connection to the server (the one other devices can reach).
@@ -204,12 +289,16 @@ pub struct SessionSignal<'a> {
 
 impl Signaling for SessionSignal<'_> {
     fn send(&mut self, kind: &str, body: &str) -> Result<(), Error> {
+        let signature = self
+            .account
+            .signature(&self.device, self.role, &self.session, kind, body);
         self.account.send(ClientMessage::Signal {
             to: self.device.clone(),
             to_role: self.role,
             session: self.session.clone(),
             kind: kind.to_string(),
             body: body.to_string(),
+            signature,
         });
         Ok(())
     }
@@ -225,11 +314,20 @@ impl Signaling for SessionSignal<'_> {
             match self.account.next_event(left) {
                 Some(AccountEvent::Signal {
                     from,
+                    from_role,
                     session,
                     kind: got,
                     body,
+                    signature,
                     ..
                 }) if from == self.device && session == self.session => {
+                    // Nothing from the other side is used before its signature and key are checked.
+                    if let Err(error) = self
+                        .account
+                        .check_signal(&from, from_role, &session, &got, &body, &signature)
+                    {
+                        break Err(error);
+                    }
                     if got == kind {
                         break Ok(body);
                     }

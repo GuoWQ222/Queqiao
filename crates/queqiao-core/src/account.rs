@@ -4,6 +4,11 @@
 //! login); the server answers `Welcome`. After that the server pushes the account's device list as it
 //! changes, and forwards `Signal`s between the account's own devices only (the WebRTC offer and answer
 //! of a session). Every device on an account can be both agent (controlled) and viewer (controlling).
+//!
+//! Each device has its own Ed25519 key; the server publishes the public keys in the device list, and every
+//! signal carries the sender's signature over [`signed_bytes`], which the receiving device checks against the
+//! key it pinned for the sender. So the server can route sessions but cannot change what they agree on (the
+//! DTLS fingerprints in the offer and answer).
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +29,8 @@ pub struct Device {
     pub controllable: bool,
     /// Any of its programs is connected.
     pub online: bool,
+    /// The device's Ed25519 public key, hex (64 characters).
+    pub public_key: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,12 +42,16 @@ pub enum ClientMessage {
         device_id: String,
         device_name: String,
         role: Role,
+        /// The device's Ed25519 public key, hex. A password login may register a new key (a reinstalled
+        /// device); a resume may not change it.
+        public_key: String,
     },
     Resume {
         refresh_token: String,
         device_id: String,
         device_name: String,
         role: Role,
+        public_key: String,
     },
     /// Forward to the program `to_role` on device `to` (same account only).
     Signal {
@@ -49,6 +60,8 @@ pub enum ClientMessage {
         session: String,
         kind: String,
         body: String,
+        /// The sender's Ed25519 signature over [`signed_bytes`], hex.
+        signature: String,
     },
     /// Revoke this device's refresh token: the next start needs the password again.
     Logout,
@@ -87,6 +100,7 @@ pub enum ServerMessage {
         session: String,
         kind: String,
         body: String,
+        signature: String,
     },
     Error {
         message: String,
@@ -96,6 +110,29 @@ pub enum ServerMessage {
         stun: Option<String>,
         turn: Option<TurnAccess>,
     },
+}
+
+/// What a signal's signature covers: a fixed label, the session, the kind, sender and receiver (device ids and
+/// programs) and the body, each on its own line (the label and the ids have no newlines; the body comes last).
+pub fn signed_bytes(
+    session: &str,
+    kind: &str,
+    from: &str,
+    from_role: Role,
+    to: &str,
+    to_role: Role,
+    body: &str,
+) -> Vec<u8> {
+    let role = |role: Role| match role {
+        Role::Agent => "agent",
+        Role::Viewer => "viewer",
+    };
+    format!(
+        "queqiao-signal-v1\n{session}\n{kind}\n{from}\n{}\n{to}\n{}\n{body}",
+        role(from_role),
+        role(to_role)
+    )
+    .into_bytes()
 }
 
 #[cfg(test)]
@@ -110,6 +147,7 @@ mod tests {
             session: "s".into(),
             kind: "offer".into(),
             body: "v=0".into(),
+            signature: "00".into(),
         };
         let text = serde_json::to_string(&message).unwrap();
         assert!(text.contains("\"type\":\"signal\"") && text.contains("\"to_role\":\"agent\""));

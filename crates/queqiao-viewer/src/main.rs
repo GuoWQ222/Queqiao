@@ -55,6 +55,8 @@ const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Options {
+    /// A device whose new key the person confirmed (its old pin is dropped).
+    trust_new_key: Option<String>,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -165,6 +167,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--width" => options.width = args.next().and_then(|v| v.parse().ok()),
             "--report" => options.report = args.next().map(PathBuf::from),
             "--input-test" => options.input_test = true,
+            "--trust-new-key" => options.trust_new_key = args.next(),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -222,6 +225,10 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
         return Ok(true);
     };
     login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+    if let Some(device) = &options.trust_new_key {
+        account.trust_new_key(device).map_err(|e| e.to_string())?;
+        lines.push(format!("the key of device {device} will be pinned anew"));
+    }
     lines.push(format!(
         "logged in as {} at {}; this device: {} ({})",
         account.user, login.server, identity.name, identity.id

@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 queqiao-core.workspace = true
 queqiao-transport.workspace = true
+# Ed25519 device keys (ring is already in the build through rustls).
+ring = "0.17"
 getrandom.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
