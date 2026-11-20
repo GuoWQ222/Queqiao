@@ -1,12 +1,15 @@
 # Runs a program in the interactive session of the user logged on at the console, and waits for it.
 # Screen capture, windows and input injection only work there; a process started over SSH runs in session 0.
 # Uses a one-off scheduled task with an interactive-only principal (no stored password), removed afterwards.
-# Usage: scripts\run_in_session.ps1 -Exe <full path> [-Arguments '<arguments>'] [-TimeoutSec 60]
+# Usage: scripts\run_in_session.ps1 -Exe <full path> [-Arguments '<arguments>'] [-TimeoutSec 60] [-Priority 4]
 # Prints RUN_DONE exit <code> or RUN_FAIL <reason>.
+# Priority: Task Scheduler's scale, 4 = normal (default here, as the agent runs), 7 = below normal (Task
+# Scheduler's own default, which Windows 11 may put on a hybrid CPU's slow efficiency cores).
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [string]$Arguments = '',
-    [int]$TimeoutSec = 60
+    [int]$TimeoutSec = 60,
+    [ValidateRange(0, 10)][int]$Priority = 4
 )
 $ErrorActionPreference = 'Stop'
 $consoleUser = (Get-CimInstance Win32_ComputerSystem).UserName
@@ -22,7 +25,7 @@ if ($Arguments) {
 }
 $principal = New-ScheduledTaskPrincipal -UserId $consoleUser -LogonType Interactive -RunLevel Limited
 $limit = New-TimeSpan -Seconds ($TimeoutSec + 30)
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit $limit
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit $limit -Priority $Priority
 Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
 try {
     Start-ScheduledTask -TaskName $taskName

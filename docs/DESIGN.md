@@ -1,4 +1,4 @@
-# Queqiao: design (draft 3, 2026-11-20)
+# Queqiao: design (draft 4, 2026-11-20)
 
 Our own remote-control software for Windows, written in Rust. Users log in; every device on an account can see the
 others and control them. Original code; UU Remote was studied only for its architecture
@@ -26,9 +26,9 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
    | Stage | First choice | Fallbacks, in order |
    |---|---|---|
    | Capture | DXGI Desktop Duplication on the GPU that drives the screen | Windows.Graphics.Capture, then GDI |
-   | Convert | D3D11 video processor (BGRA -> NV12) | compute shader, then CPU |
-   | Encode | Hardware H.264 through Media Foundation: whichever vendor's encoder Windows offers (NVIDIA, AMD, Intel, Qualcomm) | Windows' own software H.264 encoder, then a royalty-free software codec (VP8/VP9) |
-   | Decode | Media Foundation hardware decoding (D3D11VA) | Media Foundation software decoder, then software VP8/VP9 |
+   | Convert | D3D11 video processor (BGRA -> NV12) | CPU (bilinear scaling, BT.709, one thread per band of rows) |
+   | Encode | Hardware H.264 through Media Foundation: whichever vendor's encoder Windows offers (NVIDIA, AMD, Intel, Qualcomm) | OpenH264 on the CPU, compiled in (as UU Remote does) |
+   | Decode | Media Foundation hardware decoding (D3D11VA) | OpenH264's decoder on the CPU |
    | Present | D3D11 flip-model swap chain | D3D11 on WARP (Microsoft's software adapter), then GDI |
    | Network | direct UDP (ICE) | TURN over UDP, then TURN over TCP/TLS on port 443 |
 
@@ -38,18 +38,29 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
    per pixel per frame, 2-50 Mbit/s), then the network's bandwidth estimate takes over.
 4. **Codecs are negotiated.** Both ends state what they can encode and decode (in the SDP). H.264 is the common
    ground; H.265 and AV1 only when both ends have hardware for them.
-5. **Platforms:** Windows 10 (1809 and later) and Windows 11, on x64 and ARM64. Windows "N" editions ship without
-   Media Foundation unless the Media Feature Pack is installed, so Media Foundation is loaded at runtime rather than
-   at process start: the agent must still start there and use the software path.
+5. **Platforms:** Windows 10 (1809 and later) and Windows 11, on x64 and ARM64. The programs link the C runtime
+   statically (no Visual C++ Redistributable needed). Windows "N" editions ship without Media Foundation unless
+   the Media Feature Pack is installed; OpenH264 does not need it, but the programs still import Media Foundation
+   at start-up today, so it must become a delayed (runtime) load before release.
+   The agent runs at normal priority and opts out of Windows power throttling (EcoQoS): a windowless process is
+   otherwise put on slow efficiency cores. Measured on a 12th-gen Intel laptop: OpenH264 2.7x slower throttled.
+   When nothing changes on screen, or the display is off (lid closed, monitor asleep), desktop duplication delivers
+   no frames at all: the agent must still produce a first picture (force a repaint, wake the display, or capture
+   by another path) and, for machines without a monitor, a virtual display (UU Remote installs an IddCx one).
 6. **Vendor SDKs are optional extras.** Direct NVENC, AMF or oneVPL paths may be added later behind the same
    interface for lower latency, never as a requirement and never as the only path.
 7. **Every path is tested.** Each fallback can be forced with a setting (for example
    `QUEQIAO_FORCE=encode:software`), so all paths run on any test machine; the test PC also runs on WARP to stand
    in for a machine without a GPU. A release is checked on several real machines (NVIDIA, AMD, Intel, a virtual
    machine, an ARM64 laptop).
-8. **Licences (to confirm before release).** H.264 is patent-licensed. Using the encoders that come with Windows or
-   the GPU driver leaves that licensing with them; shipping our own H.264 encoder (for example OpenH264 built from
-   source) would make it ours. That is why the bundled software fallback is VP8/VP9, which are royalty-free.
+8. **Licences (to confirm before release).** OpenH264's code is BSD-licensed (x264 was ruled out: GPL). H.264 itself
+   is patent-licensed: the hardware encoders and decoders that come with Windows or the GPU driver carry their own
+   licence, but an OpenH264 compiled into Queqiao makes the H.264 patent licence the publisher's (the patent pool
+   has a free tier for small volumes). The alternative is Cisco's prebuilt OpenH264, which Cisco's licence covers
+   when each PC downloads it from Cisco; the `openh264` crate can load it at runtime. Decide before release.
+9. **Build requirements:** Rust, Visual Studio Build Tools (C++), and NASM on the PATH: without NASM, OpenH264
+   builds silently without its assembly and runs about 5x slower (measured 35 ms instead of 6.6 ms per 1080p
+   frame); `scripts\check.ps1` warns when NASM is missing.
 
 ## Components
 

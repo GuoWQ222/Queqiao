@@ -11,6 +11,12 @@ Set-Location -LiteralPath $Root
 New-Item -ItemType Directory -Force (Join-Path $Root 'target') | Out-Null
 Set-Content -LiteralPath $Log -Value "check $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Encoding utf8
 
+# OpenH264 (the software encoder) builds without NASM, silently, and then runs about 5x slower (measured:
+# 35 ms instead of 6.6 ms per 1080p frame). Builds for release must have NASM on the PATH.
+if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+    'WARNING  nasm not on PATH: OpenH264 is built without its assembly (about 5x slower)'
+}
+
 $failedStep = $null
 $steps = @(
     @{ Name = 'fmt'; CargoArgs = @('fmt', '--all', '--check') },

@@ -58,10 +58,37 @@ pub struct Duplicator {
 }
 
 impl Duplicator {
+    /// Starts duplicating the main screen: the one whose top-left corner is the desktop's origin. On PCs
+    /// with virtual display drivers (other remote-control tools install them) the first screen DXGI lists
+    /// is not necessarily the real one.
+    pub fn primary() -> Result<Self> {
+        let screens = attached_outputs()?;
+        let main = screens
+            .iter()
+            .position(|(_, _, desc)| {
+                let origin = desc.DesktopCoordinates;
+                origin.left == 0 && origin.top == 0
+            })
+            .unwrap_or(0);
+        let Some((adapter, output, _)) = screens.into_iter().nth(main) else {
+            return Err(Error::new(DXGI_ERROR_NOT_FOUND, "no screen is attached"));
+        };
+        Self::open(adapter, output)
+    }
+
     /// Starts duplicating screen `index`, counting the screens attached to the desktop across all GPUs
-    /// (0 is usually the main screen). The D3D11 device is created on the GPU that drives that screen.
+    /// in DXGI's order. The D3D11 device is created on the GPU that drives that screen.
     pub fn new(index: usize) -> Result<Self> {
-        let (adapter, output) = find_output(index)?;
+        let screens = attached_outputs()?;
+        let count = screens.len();
+        let Some((adapter, output, _)) = screens.into_iter().nth(index) else {
+            let text = format!("screen {index} not found ({count} attached)");
+            return Err(Error::new(DXGI_ERROR_NOT_FOUND, text));
+        };
+        Self::open(adapter, output)
+    }
+
+    fn open(adapter: IDXGIAdapter1, output: IDXGIOutput) -> Result<Self> {
         let (device, context) = create_device(&adapter)?;
         let (duplication, method) = duplicate(&output, &device)?;
         let desc = unsafe { duplication.GetDesc() };
@@ -206,10 +233,10 @@ pub fn qpc_frequency() -> i64 {
     frequency
 }
 
-/// Screen `index` among the screens attached to the desktop, with the GPU it belongs to.
-fn find_output(index: usize) -> Result<(IDXGIAdapter1, IDXGIOutput)> {
+/// The screens attached to the desktop, across all GPUs, with the GPU each belongs to.
+fn attached_outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput, DXGI_OUTPUT_DESC)>> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
-    let mut found = 0;
+    let mut screens = Vec::new();
     for adapter_index in 0.. {
         let Ok(adapter) = (unsafe { factory.EnumAdapters1(adapter_index) }) else {
             break;
@@ -218,19 +245,13 @@ fn find_output(index: usize) -> Result<(IDXGIAdapter1, IDXGIOutput)> {
             let Ok(output) = (unsafe { adapter.EnumOutputs(output_index) }) else {
                 break;
             };
-            let attached = unsafe { output.GetDesc() }?.AttachedToDesktop.as_bool();
-            if attached {
-                if found == index {
-                    return Ok((adapter, output));
-                }
-                found += 1;
+            let desc = unsafe { output.GetDesc() }?;
+            if desc.AttachedToDesktop.as_bool() {
+                screens.push((adapter.clone(), output, desc));
             }
         }
     }
-    Err(Error::new(
-        DXGI_ERROR_NOT_FOUND,
-        format!("screen {index} not found ({found} attached)"),
-    ))
+    Ok(screens)
 }
 
 /// D3D11 device on `adapter`, with BGRA support (desktop images) and video support (hardware encoder).

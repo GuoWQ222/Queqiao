@@ -12,3 +12,8 @@ publish = false
 queqiao-core = { path = "crates/queqiao-core" }
 queqiao-capture = { path = "crates/queqiao-capture" }
 windows = "0.62"
+
+# OpenH264 is C++ built by the cc crate. Unoptimised it is many times slower, which would hide real encode
+# times even in debug builds.
+[profile.dev.package.openh264-sys2]
+opt-level = 3

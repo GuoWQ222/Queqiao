@@ -1,12 +1,20 @@
-//! M1 step 2 check: hardware H.264 encoding of the screen, entirely on the GPU.
+//! M1 check for the encoders: H.264 encoding of the screen in real time, with every path selectable.
 //!
 //! Captures one desktop image, then for each frame scrolls it a little (a stand-in for scrolling a page,
-//! so every frame changes), converts BGRA -> NV12 on the GPU and encodes it in real time at the screen's
-//! frame rate (at most 60 by default). Nothing here is tied to one GPU: the encoder is whichever
-//! hardware H.264 encoder Windows offers for the capturing GPU, and the size, rate and bitrate come
-//! from the screen. Runs in the desktop session via scripts\run_in_session.ps1 (no console window).
+//! so every frame changes), converts BGRA -> NV12 and encodes it at the screen's frame rate (at most 60
+//! by default). The encoder is whatever the machine offers: a hardware encoder of any vendor first,
+//! OpenH264 on the CPU otherwise. Runs in the desktop session via scripts\run_in_session.ps1 (no
+//! console window).
 //!
-//! Usage: encode_probe <out_dir> [frames] [fps] [mbps]
+//! Usage: encode_probe <out_dir> [frames=N] [fps=N] [mbps=N] [force=STAGE:CHOICE,...]
+//!   force=encode:software   OpenH264 even when a hardware encoder exists
+//!   force=encode:hardware   hardware only (fails without one)
+//!   force=adapter:warp      convert and encode on Microsoft's software adapter (WARP): a PC without a
+//!                           GPU, as far as everything after capture is concerned
+//!   force=convert:cpu       BGRA -> NV12 on the CPU instead of the GPU video processor
+//!   throttling=on           keep Windows power throttling (EcoQoS). By default the probe opts out, as the
+//!                           agent will: Windows otherwise runs a windowless process on slow efficiency
+//!                           cores (measured on a 12th-gen Intel laptop: OpenH264 2.7x slower)
 //! Writes <out_dir>\encode_probe.txt (report) and <out_dir>\encode_probe.h264 (the stream).
 
 #![windows_subsystem = "windows"]
@@ -14,22 +22,65 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use queqiao_capture::{Duplicator, qpc_frequency, qpc_now};
+use queqiao_capture::{BgraImage, Duplicator, qpc_frequency, qpc_now};
 use queqiao_codec::{
-    EncodedFrame, EncoderConfig, H264Encoder, Nv12Converter, candidate_sizes, nal_types,
+    EncodedFrame, EncoderChoice, EncoderConfig, H264Encoder, Nv12Converter, candidate_sizes,
+    nal_types,
 };
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
 use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 
+/// Software encoders run on the CPU: they start at no more than 1080p and 30 fps. (The agent will adapt
+/// to the measured encode time; this is the starting point.)
+const SOFTWARE_START: (u32, u32, u32) = (1920, 1080, 30);
+
+struct Request {
+    screen: (u32, u32),
+    fps: u32,
+    mbps: Option<u32>,
+    choice: EncoderChoice,
+    /// Largest size to try (long side, short side).
+    limit: (u32, u32),
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let out_dir = PathBuf::from(args.next().unwrap_or_else(|| ".".into()));
-    let mut number = || args.next().and_then(|s| s.parse::<u32>().ok());
-    let (frames, fps, mbps) = (number().unwrap_or(300), number(), number());
+    let options: HashMap<String, String> = args
+        .filter_map(|a| {
+            a.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect();
+    if let Some(spec) = options.get("force") {
+        // Same as setting QUEQIAO_FORCE before starting (a scheduled task cannot set it). Nothing else
+        // runs yet, so changing the environment here is safe.
+        unsafe { std::env::set_var("QUEQIAO_FORCE", spec) };
+    }
+    let number = |key: &str| options.get(key).and_then(|v| v.parse::<u32>().ok());
     let mut lines = Vec::new();
-    let passed = match run(&out_dir, frames, fps, mbps, &mut lines) {
+    if options.get("throttling").map(String::as_str) == Some("on") {
+        lines.push("power throttling: Windows default (throttling=on)".into());
+    } else {
+        let result = disable_power_throttling();
+        lines.push(format!(
+            "power throttling opt-out: {}",
+            result.map_or_else(|e| e, |()| "ok".into())
+        ));
+    }
+    let passed = match run(
+        &out_dir,
+        number("frames").unwrap_or(300),
+        number("fps"),
+        number("mbps"),
+        &mut lines,
+    ) {
         Ok(passed) => passed,
         Err(error) => {
             lines.push(format!("ERROR {error}"));
@@ -51,57 +102,87 @@ fn run(
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    let mut duplicator = Duplicator::new(0).map_err(describe)?;
-    let info = duplicator.info().clone();
-    let fps = fps.unwrap_or((info.refresh_hz.round() as u32).clamp(1, 60));
+    let force = std::env::var("QUEQIAO_FORCE").unwrap_or_default();
     lines.push(format!(
-        "gpu: {}; screen {}x{} at {:.0} Hz; encoding at {fps} fps",
-        info.adapter, info.width, info.height, info.refresh_hz
+        "forced: {}",
+        if force.is_empty() { "nothing" } else { &force }
     ));
-    let device = duplicator.device().clone();
-    let context = duplicator.context().clone();
+    let mut duplicator = Duplicator::primary().map_err(describe)?;
+    let info = duplicator.info().clone();
+    let screen_fps = (info.refresh_hz.round() as u32).clamp(1, 60);
+    lines.push(format!(
+        "screen: {} {}x{} at {:.0} Hz on {}",
+        info.output, info.width, info.height, info.refresh_hz, info.adapter
+    ));
 
     // One real desktop image (the first frame after starting can be an empty mouse-only update).
     let frequency = qpc_frequency() as f64;
     let deadline = qpc_now() + (10.0 * frequency) as i64;
-    let source = loop {
+    let image = loop {
         if qpc_now() > deadline {
             return Err("no screen update within 10 s".into());
         }
         if let Some(frame) = duplicator.acquire(100).map_err(describe)?
             && frame.present_qpc != 0
         {
-            let copy = bgra_texture(&device, &frame.texture)?;
-            unsafe { context.CopyResource(&copy, &frame.texture) };
-            break copy;
+            break duplicator.copy_to_cpu(&frame).map_err(describe)?;
         }
     };
     duplicator.release().map_err(describe)?;
-    let mut desc = D3D11_TEXTURE2D_DESC::default();
-    unsafe { source.GetDesc(&mut desc) };
-    let (width, height) = (desc.Width, desc.Height);
 
-    // The largest size the encoder accepts, starting with the screen's own size.
-    let mut chosen = None;
-    for (w, h) in candidate_sizes(width, height) {
-        let mut config = EncoderConfig::for_screen(w, h, fps);
-        if let Some(mbps) = mbps {
-            config.bitrate = mbps * 1_000_000;
+    // The device that converts and encodes: the capturing GPU, or WARP when forced.
+    let warp = queqiao_core::forced("adapter").as_deref() == Some("warp");
+    let (device, context) = if warp {
+        warp_device(lines)?
+    } else {
+        (duplicator.device().clone(), duplicator.context().clone())
+    };
+    lines.push(format!(
+        "convert + encode on: {}",
+        if warp {
+            "Microsoft WARP (software adapter)"
+        } else {
+            &info.adapter
         }
-        match H264Encoder::new(&device, &config) {
-            Ok(encoder) => {
-                chosen = Some((encoder, config));
-                break;
-            }
-            Err(error) => lines.push(format!("{w}x{h} refused: {}", error.message())),
+    ));
+    let source = upload(&device, &image)?;
+    let (width, height) = (image.width, image.height);
+
+    let mut request = Request {
+        screen: (width, height),
+        fps: fps.unwrap_or(screen_fps),
+        mbps,
+        choice: EncoderChoice::from_env(),
+        limit: (u32::MAX, u32::MAX),
+    };
+    let (mut encoder, mut config) = open_encoder(&device, &context, &request, lines)?;
+    if !encoder.is_hardware() {
+        let (long, short, max_fps) = SOFTWARE_START;
+        request.limit = (long, short);
+        request.fps = fps.unwrap_or(request.fps.min(max_fps));
+        request.choice = EncoderChoice::Software;
+        let fits = config.width.max(config.height) <= long
+            && config.width.min(config.height) <= short
+            && config.fps <= request.fps;
+        if !fits {
+            drop(encoder);
+            (encoder, config) = open_encoder(&device, &context, &request, lines)?;
         }
     }
-    let (mut encoder, config) = chosen.ok_or("no encoder accepted any size")?;
+    for reason in encoder.skipped() {
+        lines.push(format!("skipped: {reason}"));
+    }
     lines.push(format!(
-        "encoder: {} at {}x{}, {:.1} Mbit/s constant bitrate",
+        "encoder: {} ({}) at {}x{}, {} fps, {:.1} Mbit/s",
         encoder.name(),
+        if encoder.is_hardware() {
+            "hardware"
+        } else {
+            "software"
+        },
         config.width,
         config.height,
+        config.fps,
         f64::from(config.bitrate) / 1e6
     ));
     if !encoder.refused_settings().is_empty() {
@@ -111,14 +192,16 @@ fn run(
         ));
     }
 
+    let fps = config.fps;
     let size = (config.width, config.height);
-    let converter =
-        Nv12Converter::new(&device, &context, (width, height), size, fps).map_err(describe)?;
+    let mut converter = Nv12Converter::new(&device, &context, (width, height), size, fps)
+        .map_err(|e| format!("BGRA -> NV12 converter: {}", describe(e)))?;
+    lines.push(format!("convert: {}", converter.description()));
     let ring = (0..4)
         .map(|_| converter.create_output(&device))
         .collect::<windows::core::Result<Vec<_>>>()
-        .map_err(describe)?;
-    let scene = bgra_texture(&device, &source)?;
+        .map_err(|e| format!("NV12 textures: {}", describe(e)))?;
+    let scene = upload(&device, &image)?;
     let step = (height / 180).max(2);
 
     let interval = frequency / f64::from(fps);
@@ -159,6 +242,7 @@ fn run(
         }
         encoder.encode(nv12, time, i == 0).map_err(describe)?;
         submitted.insert(time, (began, submit));
+        collect(&mut encoder, &mut outputs)?;
     }
     encoder.drain().map_err(describe)?;
     let drain_deadline = qpc_now() + (2.0 * frequency) as i64;
@@ -166,6 +250,8 @@ fn run(
         collect(&mut encoder, &mut outputs)?;
         std::thread::yield_now();
     }
+    collect(&mut encoder, &mut outputs)?;
+    let elapsed = (qpc_now() - start) as f64 / frequency;
 
     // Report.
     let ms = |ticks: i64| ticks as f64 * 1000.0 / frequency;
@@ -186,9 +272,10 @@ fn run(
         .collect();
     let seconds = f64::from(frames) / f64::from(fps);
     lines.push(format!(
-        "{frames} frames in, {} out ({keyframes} keyframes), {late} submitted late, drained: {}",
+        "{frames} frames in, {} out ({keyframes} keyframes), {late} submitted late, {:.1} s for {:.1} s of video",
         outputs.len(),
-        encoder.drained()
+        elapsed,
+        seconds
     ));
     lines.push(format!(
         "encode time (frame in -> H.264 out), ms: {}",
@@ -208,6 +295,14 @@ fn run(
         ));
     }
     lines.push(format!("other frames, KB: {}", summary(&mut delta_kb)));
+    if let Some(timing) = encoder.software_timing() {
+        let n = f64::from(timing.frames.max(1));
+        lines.push(format!(
+            "software time per frame, ms: GPU -> memory + U/V split {:.2}, OpenH264 {:.2}",
+            timing.copy_ms / n,
+            timing.encode_ms / n
+        ));
+    }
     lines.push(format!(
         "stream: {:.2} MB, {:.1} Mbit/s average",
         bytes as f64 / 1e6,
@@ -225,13 +320,36 @@ fn run(
         f.keyframe && types.contains(&7) && types.contains(&8) && types.contains(&5)
     });
     encode_ms.sort_by(f64::total_cmp);
-    let p95 = percentile(&encode_ms, 0.95);
-    let keeps_up = p95 < 1000.0 / f64::from(fps);
+    let keeps_up = percentile(&encode_ms, 0.95) < 1000.0 / f64::from(fps);
+    let all_out = outputs.len() == frames as usize;
     lines.push(format!(
-        "checks: all frames out {}, starts with SPS+PPS+IDR {starts_clean}, p95 encode < frame time {keeps_up}",
-        outputs.len() == frames as usize
+        "checks: all frames out {all_out}, starts with SPS+PPS+IDR {starts_clean}, p95 encode < frame time {keeps_up}"
     ));
-    Ok(outputs.len() == frames as usize && starts_clean && keeps_up)
+    Ok(all_out && starts_clean && keeps_up)
+}
+
+/// The largest candidate size within `request.limit` that an encoder of `request.choice` accepts.
+fn open_encoder(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    request: &Request,
+    lines: &mut Vec<String>,
+) -> Result<(H264Encoder, EncoderConfig), String> {
+    let (screen_w, screen_h) = request.screen;
+    for (w, h) in candidate_sizes(screen_w, screen_h) {
+        if w.max(h) > request.limit.0 || w.min(h) > request.limit.1 {
+            continue;
+        }
+        let mut config = EncoderConfig::for_screen(w, h, request.fps);
+        if let Some(mbps) = request.mbps {
+            config.bitrate = mbps * 1_000_000;
+        }
+        match H264Encoder::new(device, context, &config, request.choice) {
+            Ok(encoder) => return Ok((encoder, config)),
+            Err(error) => lines.push(format!("{w}x{h} refused: {}", error.message())),
+        }
+    }
+    Err("no encoder accepted any size".into())
 }
 
 fn collect(
@@ -245,16 +363,88 @@ fn collect(
     Ok(())
 }
 
-/// A GPU texture like `like` (size, BGRA format) that we own, usable by the video processor.
-fn bgra_texture(device: &ID3D11Device, like: &ID3D11Texture2D) -> Result<ID3D11Texture2D, String> {
-    let mut desc = D3D11_TEXTURE2D_DESC::default();
-    unsafe { like.GetDesc(&mut desc) };
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
-    desc.CPUAccessFlags = 0;
-    desc.MiscFlags = 0;
+/// Asks Windows not to power-throttle this process (no EcoQoS: full clock speed, any core).
+fn disable_power_throttling() -> Result<(), String> {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+        ProcessPowerThrottling, SetProcessInformation,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&raw const state).cast(),
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    }
+    .map_err(describe)
+}
+
+/// Microsoft's software Direct3D 11 adapter (WARP), as on a PC without a usable GPU. Tries with video
+/// support first (the converter needs it), then without, and reports both attempts.
+fn warp_device(lines: &mut Vec<String>) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+    let with_video = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+    for (label, flags) in [
+        ("with video support", with_video),
+        ("without video support", D3D11_CREATE_DEVICE_BGRA_SUPPORT),
+    ] {
+        let mut device = None;
+        let mut context = None;
+        let created = unsafe {
+            D3D11CreateDevice(
+                None::<&IDXGIAdapter>,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                flags,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        };
+        match (created, device, context) {
+            (Ok(()), Some(device), Some(context)) => {
+                lines.push(format!("WARP device {label}: created"));
+                return Ok((device, context));
+            }
+            (Err(error), _, _) => lines.push(format!("WARP device {label}: {}", describe(error))),
+            _ => lines.push(format!("WARP device {label}: nothing returned")),
+        }
+    }
+    Err("no WARP device".into())
+}
+
+/// A BGRA texture on `device` holding `image`, usable by the video processor.
+fn upload(device: &ID3D11Device, image: &BgraImage) -> Result<ID3D11Texture2D, String> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: image.width,
+        Height: image.height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let data = D3D11_SUBRESOURCE_DATA {
+        pSysMem: image.pixels.as_ptr().cast(),
+        SysMemPitch: image.width * 4,
+        SysMemSlicePitch: 0,
+    };
     let mut out = None;
-    unsafe { device.CreateTexture2D(&desc, None, Some(&mut out)) }.map_err(describe)?;
+    unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut out)) }.map_err(describe)?;
     out.ok_or_else(|| "CreateTexture2D returned nothing".to_string())
 }
 

@@ -10,7 +10,7 @@ machine has and falls back to a path that needs no GPU (`docs\DESIGN.md`, "Runs 
 |---|---|
 | `crates\queqiao-core` | Shared library: protocol, identity, transport, codec, input |
 | `crates\queqiao-capture` | Screen capture (DXGI desktop duplication); `examples\capture_probe.rs` checks it |
-| `crates\queqiao-codec` | BGRA -> NV12 on the GPU and the hardware H.264 encoder (any vendor, via Media Foundation); `examples\encode_probe.rs` checks it |
+| `crates\queqiao-codec` | BGRA -> NV12 (GPU video processor, CPU fallback) and the H.264 encoder: hardware of any vendor via Media Foundation, OpenH264 on the CPU as the fallback; `examples\encode_probe.rs` checks it |
 | `crates\queqiao-server` | Accounts, devices, presence, signaling, STUN/TURN relay |
 | `crates\queqiao-service` | Windows service on each controlled PC |
 | `crates\queqiao-agent` | Controlled side (user session) |
@@ -19,8 +19,14 @@ machine has and falls back to a path that needs no GPU (`docs\DESIGN.md`, "Runs 
 | `docs` | Design |
 | `research` | Design-level notes on other products; no third-party code |
 
+Build requirements: Rust 1.85 or later, Visual Studio Build Tools with the C++ workload (OpenH264 is C++),
+and [NASM](https://www.nasm.us) on the PATH (OpenH264's assembly; without it the software encoder is about
+5x slower). The programs link the C runtime statically, so they need no Visual C++ Redistributable.
+
 Build: `cargo build --workspace`. Full check (fmt, clippy, build, test, run each program):
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1`
 
 Programs that capture the screen or show windows must run in the logged-on user's session, not over SSH:
-`scripts\run_in_session.ps1 -Exe <full path> -Arguments '<arguments>'`.
+`scripts\run_in_session.ps1 -Exe <full path> -Arguments '<arguments>'`. All probes on a machine:
+`scripts\run_probes.ps1 -Bin target\release\examples`. Fallback paths can be forced with `QUEQIAO_FORCE`, for
+example `encode:software`, `convert:cpu`, `adapter:warp` (probes take `force=...`).

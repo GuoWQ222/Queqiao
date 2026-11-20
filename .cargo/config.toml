@@ -1,0 +1,4 @@
+# Link the C runtime statically: Queqiao's programs then start on any Windows PC, also without the
+# Visual C++ Redistributable installed. (The cc crate builds OpenH264's C++ with /MT to match.)
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -46,7 +46,7 @@ fn run(out_dir: &Path, seconds: f64, lines: &mut Vec<String>) -> Result<bool, St
     let dpi = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     lines.push(format!("per-monitor DPI aware: {}", dpi.is_ok()));
 
-    let mut duplicator = Duplicator::new(0).map_err(describe)?;
+    let mut duplicator = Duplicator::primary().map_err(describe)?;
     let info = duplicator.info().clone();
     lines.push(format!("gpu: {}", info.adapter));
     lines.push(format!(
@@ -70,7 +70,7 @@ fn run(out_dir: &Path, seconds: f64, lines: &mut Vec<String>) -> Result<bool, St
             }
             Err(error) if needs_restart(&error) => {
                 restarts += 1;
-                duplicator = Duplicator::new(0).map_err(describe)?;
+                duplicator = Duplicator::primary().map_err(describe)?;
                 continue;
             }
             Err(error) => return Err(describe(error)),

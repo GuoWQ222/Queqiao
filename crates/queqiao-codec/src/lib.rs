@@ -2,10 +2,13 @@
 //! H.264 encoder ([`H264Encoder`]). Frames stay on the GPU from capture to the encoder's output.
 
 mod convert;
+mod cpu_convert;
 mod encoder;
+mod mf;
+mod software;
 
 pub use convert::Nv12Converter;
-pub use encoder::{EncodedFrame, EncoderConfig, H264Encoder};
+pub use encoder::{EncodedFrame, EncoderChoice, EncoderConfig, H264Encoder, SoftwareTiming};
 
 /// Encode sizes to try for a screen, largest first: the screen itself (rounded down to even numbers, as
 /// NV12 needs), then the same picture scaled down to fit common encoder limits (4096, 4K, 1440p, 1080p,
