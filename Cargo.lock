@@ -890,6 +890,7 @@ dependencies = [
 name = "queqiao-terminal"
 version = "0.1.0"
 dependencies = [
+ "queqiao-core",
  "windows",
 ]
 

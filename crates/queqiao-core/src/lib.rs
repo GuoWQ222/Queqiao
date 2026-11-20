@@ -8,6 +8,7 @@ pub mod account;
 pub mod platform;
 pub mod protocol;
 pub mod stun;
+pub mod text;
 
 /// Version of the messages exchanged between agent, viewer and server.
 /// Peers with a different version refuse to connect.

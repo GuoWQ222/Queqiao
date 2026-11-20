@@ -8,6 +8,7 @@
 
 use std::time::{Duration, Instant};
 
+use queqiao_core::text::{tr, trf};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -160,12 +161,15 @@ impl Presence {
     pub fn session_started(&mut self, viewer: &str) -> Result<()> {
         self.viewer = Some(viewer.to_string());
         self.banner = None;
-        let form = Form::create("Queqiao", 440, 40, Kind::Banner)?;
+        let form = Form::create(tr("Queqiao"), 440, 40, Kind::Banner)?;
         form.label(
-            &format!("\u{25CF}  {viewer} is controlling this PC"),
+            &format!(
+                "\u{25CF}  {}",
+                trf("{viewer} is controlling this PC", &[("viewer", viewer)])
+            ),
             [14, 11, 320, 20],
         )?;
-        form.button("End", ID_END, false, [346, 6, 84, 28])?;
+        form.button(tr("End"), ID_END, false, [346, 6, 84, 28])?;
         form.show();
         self.banner = Some(form);
         self.update_tray();
@@ -181,15 +185,23 @@ impl Presence {
     /// Asks the person whether `viewer` may control the PC; denied after `seconds`.
     pub fn ask_consent(&mut self, viewer: &str, seconds: u32) -> Result<()> {
         self.prompt = None;
-        let form = Form::create("Queqiao - allow remote control?", 420, 170, Kind::Prompt)?;
+        let form = Form::create(
+            tr("Queqiao - allow remote control?"),
+            420,
+            170,
+            Kind::Prompt,
+        )?;
         form.text(
-            &format!("{viewer}, a device of your account, wants to control this PC."),
+            &trf(
+                "{viewer}, a device of your account, wants to control this PC.",
+                &[("viewer", viewer)],
+            ),
             [20, 18, 380, 40],
         )?;
         let countdown = form.label("", [20, 66, 380, 20])?;
         // Deny is the default button: Enter (or Esc, or closing the window) never lets anyone in.
-        form.button("Deny", ID_DENY, true, [190, 122, 100, 30])?;
-        form.button("Allow", ID_ALLOW, false, [300, 122, 100, 30])?;
+        form.button(tr("Deny"), ID_DENY, true, [190, 122, 100, 30])?;
+        form.button(tr("Allow"), ID_ALLOW, false, [300, 122, 100, 30])?;
         form.show();
         self.prompt = Some(Prompt {
             form,
@@ -337,17 +349,20 @@ impl Presence {
             }
         };
         let status = wide(&match &self.viewer {
-            Some(viewer) => format!("Queqiao: {viewer} is controlling this PC"),
-            None => "Queqiao: ready".into(),
+            Some(viewer) => trf(
+                "Queqiao: {viewer} is controlling this PC",
+                &[("viewer", viewer)],
+            ),
+            None => tr("Queqiao: ready").into(),
         });
-        let end = wide("End the session");
-        let allow = wide("Let my account's devices control this PC");
-        let ask = wide("Ask me before each session");
-        let clipboard = wide("Share the clipboard");
-        let files = wide("Receive files");
-        let terminal = wide("Allow remote command lines");
-        let autostart = wide("Start with Windows");
-        let quit = wide("Quit Queqiao on this PC");
+        let end = wide(tr("End the session"));
+        let allow = wide(tr("Let my account's devices control this PC"));
+        let ask = wide(tr("Ask me before each session"));
+        let clipboard = wide(tr("Share the clipboard"));
+        let files = wide(tr("Receive files"));
+        let terminal = wide(tr("Allow remote command lines"));
+        let autostart = wide(tr("Start with Windows"));
+        let quit = wide(tr("Quit Queqiao on this PC"));
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -454,7 +469,10 @@ impl Presence {
                 + 1;
             set_text(
                 prompt.countdown,
-                &format!("Denied automatically in {left} s unless you allow it."),
+                &trf(
+                    "Denied automatically in {seconds} s unless you allow it.",
+                    &[("seconds", &left.to_string())],
+                ),
             );
         }
     }
@@ -462,8 +480,11 @@ impl Presence {
     /// Adds the icon, or updates its tooltip.
     fn update_tray(&mut self) {
         let tip = match &self.viewer {
-            Some(viewer) => format!("Queqiao: {viewer} is controlling this PC"),
-            None => "Queqiao: ready for your devices".into(),
+            Some(viewer) => trf(
+                "Queqiao: {viewer} is controlling this PC",
+                &[("viewer", viewer)],
+            ),
+            None => tr("Queqiao: ready for your devices").into(),
         };
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,

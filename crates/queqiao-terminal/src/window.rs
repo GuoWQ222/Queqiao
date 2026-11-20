@@ -196,7 +196,7 @@ impl Drop for TerminalWindow {
     /// by the pipes and closes too).
     fn drop(&mut self) {
         if self.frames.is_some() {
-            self.end("The session has ended.");
+            self.end(queqiao_core::text::tr("The session has ended."));
         }
     }
 }

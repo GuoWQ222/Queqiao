@@ -30,6 +30,7 @@ use queqiao_codec::{DecodedFrame, DecoderChoice, H264Decoder};
 use queqiao_core::protocol::{
     Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton, Quality,
 };
+use queqiao_core::text::{tr, trf};
 
 /// The session window's menu items for the controlled PC (system-menu ids: multiples of 16).
 const MENU_CTRL_ALT_DEL: u16 = 0x1000;
@@ -44,6 +45,7 @@ const MENU_FPS: [(u16, u8, &str); 3] = [
     (0x1100, 30, "30 frames per second"),
     (0x1110, 60, "60 frames per second"),
     (0x1120, 0, "As many as that screen shows"),
+    // (translated where the menu is made)
 ];
 const MENU_QUALITY: [(u16, Quality, &str); 3] = [
     (
@@ -221,19 +223,24 @@ impl TitleStatus {
             None => "- ms".into(),
         };
         let path = if self.relayed { "relayed" } else { "direct" };
-        let mut title = format!(
-            "Queqiao - {} | {delay} | {fps:.0} fps | {rate} | {path}",
-            self.agent
-        );
+        // English for the report (tests read it); the window shows it in the user's language.
+        let line = |name: &str, path: &str| {
+            format!(
+                "{name} - {} | {delay} | {fps:.0} fps | {rate} | {path}",
+                self.agent
+            )
+        };
+        let (mut title, mut shown) = (line("Queqiao", path), line(tr("Queqiao"), tr(path)));
         if let Some((text, until)) = &self.notice {
             if now < *until {
                 title = format!("{title} | {text}");
+                shown = format!("{shown} | {text}");
             } else {
                 self.notice = None;
             }
         }
         if title != self.title {
-            window.set_title(&title);
+            window.set_title(&shown);
             self.title = title;
         }
         self.last = (now, stats.shown, stats.bytes);
@@ -286,7 +293,7 @@ fn main() {
     if let Some(error) = failure
         && options.interactive()
     {
-        show_error("Queqiao", &error);
+        show_error(tr("Queqiao"), &error);
     }
     std::process::exit(if passed { 0 } else { 1 });
 }
@@ -480,7 +487,7 @@ fn log_in(
         user: options.user.clone().unwrap_or_default(),
         password: String::new(),
     };
-    let mut form = LoginForm::new("Queqiao - log in", &defaults)
+    let mut form = LoginForm::new(tr("Queqiao - log in"), &defaults)
         .map_err(|e| format!("login form: {}", describe(e)))?;
     if options.ui_test.is_some() {
         form.set_fields(&LoginFields {
@@ -502,7 +509,7 @@ fn log_in(
                     .iter()
                     .any(|value| value.is_empty())
                 {
-                    form.set_status("Please fill in all four fields.");
+                    form.set_status(tr("Please fill in all four fields."));
                     continue;
                 }
                 if login.server != fields.server {
@@ -556,8 +563,11 @@ fn device_list(
     pictures: Option<&Path>,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
-    let heading = format!("Signed in as {}. Your devices:", account.user);
-    let mut list = DeviceList::new("Queqiao", &heading)
+    let heading = trf(
+        "Signed in as {user}. Your devices:",
+        &[("user", &account.user)],
+    );
+    let mut list = DeviceList::new(tr("Queqiao"), &heading)
         .map_err(|e| format!("device list: {}", describe(e)))?;
     list.set_rows(rows(&account.devices, &account.device_id));
     let (mut sessions, mut passed) = (0u32, true);
@@ -578,24 +588,24 @@ fn device_list(
                 match account.devices.iter().find(|d| d.id == id).cloned() {
                     Some(target) if target.controllable => {
                         list.set_enabled(false);
-                        list.set_status(&format!("Connected to {}.", target.name));
+                        list.set_status(&trf("Connected to {name}.", &[("name", &target.name)]));
                         let result = connect_to(account, &target, options, device, context, lines);
                         list.set_enabled(true);
                         sessions += 1;
                         match result {
                             Ok(ok) => {
                                 passed &= ok;
-                                list.set_status(&format!(
-                                    "The session with {} has ended.",
-                                    target.name
+                                list.set_status(&trf(
+                                    "The session with {name} has ended.",
+                                    &[("name", &target.name)],
                                 ));
                             }
                             Err(error) => {
                                 passed = false;
                                 lines.push(format!("session failed: {error}"));
-                                list.set_status(&format!(
-                                    "Could not connect to {}: {error}",
-                                    target.name
+                                list.set_status(&trf(
+                                    "Could not connect to {name}: {error}",
+                                    &[("name", &target.name), ("error", &error)],
                                 ));
                             }
                         }
@@ -604,9 +614,9 @@ fn device_list(
                         }
                     }
                     Some(target) => {
-                        list.set_status(&format!(
-                            "{} is offline: Queqiao is not running there.",
-                            target.name
+                        list.set_status(&trf(
+                            "{name} is offline: Queqiao is not running there.",
+                            &[("name", &target.name)],
                         ));
                     }
                     None => {}
@@ -621,8 +631,9 @@ fn device_list(
                         list.set_rows(rows(&devices, &account.device_id))
                     }
                     AccountEvent::Closed(reason) => {
-                        list.set_status(&format!(
-                            "Lost the connection to the server ({reason}). Trying again..."
+                        list.set_status(&trf(
+                            "Lost the connection to the server ({reason}). Trying again...",
+                            &[("reason", &reason)],
                         ));
                         reconnect_at = Some(Instant::now() + Duration::from_secs(2));
                         break;
@@ -641,12 +652,13 @@ fn device_list(
                 Ok(new) => {
                     *account = new;
                     list.set_rows(rows(&account.devices, &account.device_id));
-                    list.set_status("Connected to the server again.");
+                    list.set_status(tr("Connected to the server again."));
                     reconnect_at = None;
                 }
                 Err(error) => {
-                    list.set_status(&format!(
-                        "The server cannot be reached ({error}). Trying again..."
+                    list.set_status(&trf(
+                        "The server cannot be reached ({error}). Trying again...",
+                        &[("error", &error.to_string())],
                     ));
                     reconnect_at = Some(Instant::now() + Duration::from_secs(5));
                 }
@@ -695,8 +707,12 @@ fn rows(devices: &[Device], own: &str) -> Vec<DeviceRow> {
             name: d.name.clone(),
             status: format!(
                 "{}{}",
-                if d.controllable { "Online" } else { "Offline" },
-                if d.id == own { " - this PC" } else { "" }
+                tr(if d.controllable { "Online" } else { "Offline" }),
+                if d.id == own {
+                    format!(" - {}", tr("this PC"))
+                } else {
+                    String::new()
+                }
             ),
         })
         .collect()
@@ -796,22 +812,25 @@ fn session(
     let mut sound_on = !options.mute;
     player.set_muted(options.mute);
     window.add_menu_items(&[
-        (MENU_CTRL_ALT_DEL, "Send Ctrl+Alt+Del"),
-        (MENU_LOCK, "Lock that PC"),
-        (MENU_RESTART, "Restart that PC..."),
-        (MENU_SOUND, "Play that PC's sound"),
-        (MENU_PRIVACY, "Darken that PC's screen"),
-        (MENU_TERMINAL, "Open a command line on that PC"),
-        (MENU_FULL_SCREEN, "Full screen (Ctrl+Alt+Enter)"),
+        (MENU_CTRL_ALT_DEL, tr("Send Ctrl+Alt+Del")),
+        (MENU_LOCK, tr("Lock that PC")),
+        (MENU_RESTART, tr("Restart that PC...")),
+        (MENU_SOUND, tr("Play that PC's sound")),
+        (MENU_PRIVACY, tr("Darken that PC's screen")),
+        (MENU_TERMINAL, tr("Open a command line on that PC")),
+        (MENU_FULL_SCREEN, tr("Full screen (Ctrl+Alt+Enter)")),
     ]);
     let mut privacy_on = options.privacy;
-    let fps_items: Vec<(u16, &str)> = MENU_FPS.iter().map(|(id, _, text)| (*id, *text)).collect();
+    let fps_items: Vec<(u16, &str)> = MENU_FPS
+        .iter()
+        .map(|(id, _, text)| (*id, tr(text)))
+        .collect();
     let quality_items: Vec<(u16, &str)> = MENU_QUALITY
         .iter()
-        .map(|(id, _, text)| (*id, *text))
+        .map(|(id, _, text)| (*id, tr(text)))
         .collect();
-    window.add_submenu("Frame rate", &fps_items);
-    window.add_submenu("Picture quality", &quality_items);
+    window.add_submenu(tr("Frame rate"), &fps_items);
+    window.add_submenu(tr("Picture quality"), &quality_items);
     let (mut fps_cap, mut quality) = options.picture.unwrap_or((60, Quality::Balanced));
     let show_picture_choice = |window: &Window, fps_cap: u8, quality: Quality| {
         for (id, fps, _) in MENU_FPS {
@@ -1413,7 +1432,10 @@ impl TerminalWindows {
             TerminalMessage::Exited { id, code } => {
                 lines.push(format!("command line {id} ended with exit code {code}"));
                 if let Some(window) = self.windows.get_mut(&id) {
-                    window.end(&format!("The command line ended (exit code {code})."));
+                    window.end(&trf(
+                        "The command line ended (exit code {code}).",
+                        &[("code", &code.to_string())],
+                    ));
                 }
                 if let Some(test) = &mut self.test {
                     test.exit_code = Some(code);

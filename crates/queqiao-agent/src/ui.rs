@@ -195,7 +195,7 @@ fn run(
                             if look.area.is_some() {
                                 ""
                             } else {
-                                PRIVACY_TEXT
+                                queqiao_core::text::tr(PRIVACY_TEXT)
                             },
                             look.area,
                             look.color,

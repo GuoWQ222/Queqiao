@@ -83,5 +83,5 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Feature | Status |
 |---|---|
 | Installer, self-update with rollback, crash reports | planned (M7) |
-| Languages (Chinese, English) | planned (UI) |
+| Languages: Simplified Chinese and English, from Windows' display language (QUEQIAO_LANG=en/zh decides instead) | done (2026-11-21) for everything people click and read; the controlled PC's short notices to the viewer are still English |
 | Mobile and macOS clients, phone as an extra screen | later (the first version is Windows only) |

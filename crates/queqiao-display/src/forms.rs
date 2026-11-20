@@ -9,6 +9,7 @@ use std::ffi::c_void;
 use std::path::Path;
 use std::sync::Once;
 
+use queqiao_core::text::tr;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLOR_WINDOW, CreateCompatibleBitmap, CreateCompatibleDC,
@@ -421,19 +422,24 @@ impl LoginForm {
     pub fn new(title: &str, fields: &LoginFields) -> Result<LoginForm> {
         let form = Form::new(title, 380, 336)?;
         let (left, width) = (20, 340);
-        form.label("Server (host:port)", [left, 16, width, 18])?;
+        form.label(tr("Server (host:port)"), [left, 16, width, 18])?;
         let server = form.edit(&fields.server, false, [left, 36, width, 24])?;
         form.label(
-            "Server certificate fingerprint (SHA-256)",
+            tr("Server certificate fingerprint (SHA-256)"),
             [left, 70, width, 18],
         )?;
         let pin = form.edit(&fields.pin, false, [left, 90, width, 24])?;
-        form.label("User name", [left, 124, width, 18])?;
+        form.label(tr("User name"), [left, 124, width, 18])?;
         let user = form.edit(&fields.user, false, [left, 144, width, 24])?;
-        form.label("Password", [left, 178, width, 18])?;
+        form.label(tr("Password"), [left, 178, width, 18])?;
         let password = form.edit(&fields.password, true, [left, 198, width, 24])?;
         let status = form.label("", [left, 234, width, 40])?;
-        let button = form.button("Log in", ID_OK, true, [left + width - 100, 286, 100, 30])?;
+        let button = form.button(
+            tr("Log in"),
+            ID_OK,
+            true,
+            [left + width - 100, 286, 100, 30],
+        )?;
         form.show();
         // Start where something is missing.
         let first_empty = [
@@ -553,11 +559,11 @@ impl DeviceList {
             );
         }
         let status = form.label(
-            "Double-click a device to connect to it.",
+            tr("Double-click a device to connect to it."),
             [20, 304, 400, 36],
         )?;
-        form.button("Log out", ID_LOGOUT, false, [20, 352, 100, 30])?;
-        form.button("Connect", ID_OK, true, [320, 352, 100, 30])?;
+        form.button(tr("Log out"), ID_LOGOUT, false, [20, 352, 100, 30])?;
+        form.button(tr("Connect"), ID_OK, true, [320, 352, 100, 30])?;
         form.show();
         let _ = unsafe { SetFocus(Some(list)) };
         Ok(DeviceList {

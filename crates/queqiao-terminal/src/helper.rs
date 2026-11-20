@@ -16,6 +16,8 @@ use windows::Win32::System::Console::{
 };
 use windows::core::{PCWSTR, w};
 
+use queqiao_core::text::tr;
+
 use crate::window::{
     FRAME_END, FRAME_INPUT, FRAME_OUTPUT, FRAME_RESIZE, frame, open_pipe, read_frame, write_all,
 };
@@ -26,7 +28,7 @@ const UTF8: u32 = 65001;
 /// process exit code. With `test`, 0 means output and the end both arrived (and the window closes at once).
 pub fn run_helper(pipe: &str, title: &str, test: bool) -> i32 {
     let _ = unsafe { AllocConsole() };
-    let title: Vec<u16> = format!("Queqiao - {title}")
+    let title: Vec<u16> = format!("{} - {title}", tr("Queqiao"))
         .encode_utf16()
         .chain(Some(0))
         .collect();
@@ -50,7 +52,10 @@ pub fn run_helper(pipe: &str, title: &str, test: bool) -> i32 {
         open_pipe(&format!("{pipe}-in"), GENERIC_WRITE.0),
         open_pipe(&format!("{pipe}-out"), GENERIC_READ.0),
     ) else {
-        write_text(output, "Queqiao: the viewer is not there.\r\n");
+        write_text(
+            output,
+            &format!("{}\r\n", tr("Queqiao: the viewer is not there.")),
+        );
         std::thread::sleep(Duration::from_secs(5));
         return 3;
     };
@@ -142,7 +147,10 @@ pub fn run_helper(pipe: &str, title: &str, test: bool) -> i32 {
                 if test {
                     return if saw_output { 0 } else { 4 };
                 }
-                write_text(output, "This window closes in 10 seconds.\r\n");
+                write_text(
+                    output,
+                    &format!("{}\r\n", tr("This window closes in 10 seconds.")),
+                );
                 std::thread::sleep(Duration::from_secs(10));
                 return 0;
             }
@@ -150,7 +158,10 @@ pub fn run_helper(pipe: &str, title: &str, test: bool) -> i32 {
             Err(()) => {
                 write_text(
                     output,
-                    "\r\n\x1b[0m[Queqiao: the connection to the session ended.]\r\n",
+                    &format!(
+                        "\r\n\x1b[0m[{}]\r\n",
+                        tr("Queqiao: the connection to the session ended.")
+                    ),
                 );
                 if !test {
                     std::thread::sleep(Duration::from_secs(10));
