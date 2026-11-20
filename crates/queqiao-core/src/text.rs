@@ -199,6 +199,19 @@ const CHINESE: &[(&str, &str)] = &[
     ("Close", "关闭"),
     ("Help someone...", "帮助别人……"),
     ("Wake up", "唤醒"),
+    ("More...", "更多……"),
+    ("Rename...", "重命名……"),
+    ("Favourite", "收藏"),
+    ("Remove from the account...", "从账号中移除……"),
+    (
+        "A name of your own for {name}:",
+        "为 {name} 起一个你自己的名字：",
+    ),
+    (
+        "Remove {name} from the account? Its saved login ends; it needs the password again to come back.",
+        "要把 {name} 从账号中移除吗？它保存的登录将失效，需要再次输入密码才能回来。",
+    ),
+    ("OK", "确定"),
     ("Select a device first.", "请先选择一台设备。"),
     ("Queqiao - help someone", "鹊桥 - 帮助别人"),
     (

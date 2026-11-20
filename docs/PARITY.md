@@ -12,8 +12,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Feature | Status |
 |---|---|
 | Account, devices on the account, presence, connect by double-click | done (M3) |
-| Saved login, log out, remove (unbind) a device from the account | partly (M3: saved login, log out; removing a device: planned M5) |
-| Device names, remarks, favourites | planned (UI) |
+| Saved login, log out, remove (unbind) a device from the account | done (removing: "More..." in the device list, 2026-11-21) |
+| Device remarks (a name of your own) and favourites (listed first), kept on this PC | done (2026-11-21, "More..." in the device list) |
 | Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); manual "switch to relay" while connected: planned |
 | Help someone else: connect to a device of another account with its help ID (9 digits) and a one-use code (8 characters, 40 bits) that the person there reads out from "Let someone help me..."; "Help someone..." in the device list | done (2026-11-21) |
 | Help: an own fixed code, asking without a code (the other side approves), invitation links, the code read from the clipboard | planned |

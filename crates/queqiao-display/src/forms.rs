@@ -49,6 +49,7 @@ const ID_LIST: u16 = 100;
 const ID_LOGOUT: u16 = 101;
 const ID_HELP: u16 = 102;
 const ID_WAKE: u16 = 103;
+const ID_MORE: u16 = 104;
 /// The window was closed (not a control id).
 pub(crate) const CLOSED: u16 = 0xFFFF;
 
@@ -405,6 +406,69 @@ pub struct LoginFields {
     pub password: String,
 }
 
+/// A menu at the mouse pointer, owned by `owner`; the chosen item's id.
+pub fn popup_menu(owner: HWND, items: &[(u16, &str, bool)]) -> Option<u16> {
+    let menu = unsafe { CreatePopupMenu() }.ok()?;
+    for (id, text, checked) in items {
+        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let flags = if *checked {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        let _ = unsafe { AppendMenuW(menu, flags, usize::from(*id), PCWSTR(text.as_ptr())) };
+    }
+    let mut at = windows::Win32::Foundation::POINT::default();
+    let _ = unsafe { GetCursorPos(&mut at) };
+    let chosen = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            at.x,
+            at.y,
+            None,
+            owner,
+            None,
+        )
+    }
+    .0;
+    let _ = unsafe { DestroyMenu(menu) };
+    u16::try_from(chosen).ok().filter(|id| *id != 0)
+}
+
+/// Asks for one line of text (`initial` filled in); None when cancelled.
+pub fn ask_text(title: &str, prompt: &str, initial: &str) -> Option<String> {
+    let form = Form::new(title, 380, 170).ok()?;
+    form.label(prompt, [20, 16, 340, 20]).ok()?;
+    let field = form.edit(initial, false, [20, 40, 340, 24]).ok()?;
+    form.button(tr("OK"), ID_OK, true, [260, 90, 100, 30])
+        .ok()?;
+    form.show();
+    let _ = unsafe { SetFocus(Some(field)) };
+    loop {
+        match form.next_command(50) {
+            Some(ID_OK) => return Some(text_of(field)),
+            Some(ID_CANCEL | CLOSED) => return None,
+            _ => {}
+        }
+    }
+}
+
+/// A yes/no question (No is the default).
+pub fn confirm(owner: HWND, title: &str, text: &str) -> bool {
+    let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let answer = unsafe {
+        MessageBoxW(
+            Some(owner),
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+        )
+    };
+    answer == IDYES
+}
+
 pub enum HelpAction {
     /// The help ID (digits only) and the code (letters and digits, upper case).
     Submit {
@@ -603,6 +667,8 @@ pub enum ListAction {
     Help,
     /// Wake the device with this id (Wake-on-LAN through another device on its network).
     Wake(String),
+    /// "More..." for the device with this id (rename, favourite, remove).
+    More(String),
     LogOut,
     Closed,
 }
@@ -624,15 +690,15 @@ pub struct DeviceList {
 
 impl DeviceList {
     pub fn new(title: &str, heading: &str) -> Result<DeviceList> {
-        let form = Form::new(title, 440, 400)?;
-        form.label(heading, [20, 16, 400, 20])?;
+        let form = Form::new(title, 540, 400)?;
+        form.label(heading, [20, 16, 500, 20])?;
         let list = form.control(
             w!("LISTBOX"),
             "",
             WS_TABSTOP.0 | WS_VSCROLL.0 | LBS_NOTIFY | LBS_USETABSTOPS | LBS_NOINTEGRALHEIGHT,
             WS_EX_CLIENTEDGE,
             ID_LIST,
-            [20, 44, 400, 250],
+            [20, 44, 500, 250],
         )?;
         // One tab stop (in dialog units) between the name and the status column.
         let stops = [150i32];
@@ -646,12 +712,13 @@ impl DeviceList {
         }
         let status = form.label(
             tr("Double-click a device to connect to it."),
-            [20, 304, 400, 36],
+            [20, 304, 500, 36],
         )?;
         form.button(tr("Log out"), ID_LOGOUT, false, [20, 352, 90, 30])?;
         form.button(tr("Wake up"), ID_WAKE, false, [116, 352, 94, 30])?;
         form.button(tr("Help someone..."), ID_HELP, false, [216, 352, 100, 30])?;
-        form.button(tr("Connect"), ID_OK, true, [322, 352, 98, 30])?;
+        form.button(tr("More..."), ID_MORE, false, [322, 352, 90, 30])?;
+        form.button(tr("Connect"), ID_OK, true, [422, 352, 98, 30])?;
         form.show();
         let _ = unsafe { SetFocus(Some(list)) };
         Ok(DeviceList {
@@ -736,6 +803,13 @@ impl DeviceList {
             },
             ID_LOGOUT => Some(ListAction::LogOut),
             ID_HELP => Some(ListAction::Help),
+            ID_MORE => match self.selected() {
+                Some(row) => Some(ListAction::More(row.id.clone())),
+                None => {
+                    self.set_status(tr("Select a device first."));
+                    None
+                }
+            },
             ID_WAKE => match self.selected() {
                 Some(row) => Some(ListAction::Wake(row.id.clone())),
                 None => {

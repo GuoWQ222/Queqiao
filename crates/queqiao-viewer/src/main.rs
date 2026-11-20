@@ -23,15 +23,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use queqiao_account::{
-    Account, AccountEvent, ClientMessage, Device, DeviceIdentity, Role as AccountRole, SavedLogin,
-    new_session_id,
+    Account, AccountEvent, ClientMessage, Device, DeviceIdentity, DeviceNotes, Role as AccountRole,
+    SavedLogin, new_session_id,
 };
 use queqiao_codec::{DecodedFrame, DecoderChoice, H264Decoder};
 use queqiao_core::protocol::{
     Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton, Quality,
 };
 use queqiao_core::text::{tr, trf};
-use queqiao_display::{HelpAction, HelpForm, normalize_code};
+use queqiao_display::{HelpAction, HelpForm, ask_text, confirm, normalize_code, popup_menu};
 
 /// The session window's menu items for the controlled PC (system-menu ids: multiples of 16).
 const MENU_CTRL_ALT_DEL: u16 = 0x1000;
@@ -595,7 +595,9 @@ fn device_list(
     );
     let mut list = DeviceList::new(tr("Queqiao"), &heading)
         .map_err(|e| format!("device list: {}", describe(e)))?;
-    list.set_rows(rows(&account.devices, &account.device_id));
+    // The person's own names and favourites for the devices (kept on this PC only).
+    let mut notes = DeviceNotes::load();
+    list.set_rows(rows(&account.devices, &account.device_id, &notes));
     let (mut sessions, mut passed) = (0u32, true);
     let mut reconnect_at: Option<Instant> = None;
     let mut test_picked = false;
@@ -603,6 +605,45 @@ fn device_list(
     loop {
         match list.next(15) {
             Some(ListAction::Closed) => break,
+            Some(ListAction::More(id)) => {
+                let name = account
+                    .devices
+                    .iter()
+                    .find(|d| d.id == id)
+                    .map_or(id.clone(), |d| d.name.clone());
+                let favourite = notes.get(&id).favourite;
+                let items = [
+                    (1u16, tr("Rename..."), false),
+                    (2, tr("Favourite"), favourite),
+                    (3, tr("Remove from the account..."), false),
+                ];
+                match popup_menu(list.hwnd(), &items) {
+                    Some(1) => {
+                        let current = notes.get(&id).remark;
+                        if let Some(remark) = ask_text(
+                            tr("Queqiao"),
+                            &trf("A name of your own for {name}:", &[("name", &name)]),
+                            &current,
+                        ) {
+                            let _ = notes.set_remark(&id, &remark);
+                        }
+                    }
+                    Some(2) => {
+                        let _ = notes.set_favourite(&id, !favourite);
+                    }
+                    Some(3) => {
+                        let question = trf(
+                            "Remove {name} from the account? Its saved login ends; it needs the password again to come back.",
+                            &[("name", &name)],
+                        );
+                        if confirm(list.hwnd(), tr("Queqiao"), &question) {
+                            account.remove_device(&id);
+                        }
+                    }
+                    _ => {}
+                }
+                list.set_rows(rows(&account.devices, &account.device_id, &notes));
+            }
             Some(ListAction::Wake(id)) => {
                 // The server's answer (who sends the packet, or why not) comes as a notice or error.
                 account.send(ClientMessage::Wake { device_id: id });
@@ -681,7 +722,7 @@ fn device_list(
             while let Some(event) = account.next_event(Duration::ZERO) {
                 match event {
                     AccountEvent::Devices(devices) => {
-                        list.set_rows(rows(&devices, &account.device_id))
+                        list.set_rows(rows(&devices, &account.device_id, &notes))
                     }
                     AccountEvent::Closed(reason) => {
                         list.set_status(&trf(
@@ -709,7 +750,7 @@ fn device_list(
             match Account::connect(login, identity, AccountRole::Viewer, None) {
                 Ok(new) => {
                     *account = new;
-                    list.set_rows(rows(&account.devices, &account.device_id));
+                    list.set_rows(rows(&account.devices, &account.device_id, &notes));
                     list.set_status(tr("Connected to the server again."));
                     reconnect_at = None;
                 }
@@ -755,14 +796,21 @@ fn settle(mut step: impl FnMut() -> bool) {
 }
 
 /// The device list's rows: devices that can be controlled first, then by name.
-fn rows(devices: &[Device], own: &str) -> Vec<DeviceRow> {
+/// The device list's rows: favourites first, then those that can be controlled, then by name.
+fn rows(devices: &[Device], own: &str, notes: &DeviceNotes) -> Vec<DeviceRow> {
     let mut sorted: Vec<&Device> = devices.iter().collect();
-    sorted.sort_by_key(|d| (!d.controllable, d.name.to_lowercase()));
+    sorted.sort_by_key(|d| {
+        (
+            !notes.get(&d.id).favourite,
+            !d.controllable,
+            notes.label(&d.id, &d.name).to_lowercase(),
+        )
+    });
     sorted
         .into_iter()
         .map(|d| DeviceRow {
             id: d.id.clone(),
-            name: d.name.clone(),
+            name: notes.label(&d.id, &d.name),
             status: format!(
                 "{}{}",
                 tr(if d.controllable { "Online" } else { "Offline" }),

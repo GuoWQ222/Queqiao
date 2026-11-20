@@ -6,6 +6,7 @@
 
 mod config;
 mod keys;
+mod notes;
 mod tls;
 
 use std::collections::VecDeque;
@@ -20,6 +21,7 @@ use tungstenite::Message;
 
 pub use config::{DeviceIdentity, SavedLogin, folder as data_folder};
 pub use keys::{DeviceKey, KnownDevices, Pin, verify};
+pub use notes::{DeviceNote, DeviceNotes};
 pub use queqiao_core::account::{ClientMessage, Device, Role};
 
 /// What the server tells the program after the welcome.
