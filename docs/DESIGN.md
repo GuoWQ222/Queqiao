@@ -168,6 +168,40 @@ congestion control and FEC, but a large prebuilt C++ dependency and hard to feed
   token, and again by the controlled agent against its pinned list).
 - The controlled PC always shows that a session is active (tray icon + banner) and can end it.
 
+## Security first
+
+The user, 2026-11-20: "security is also the most important thing". Remote control hands a PC to another device,
+so a security gap outranks any feature or speed gain, and the milestones below wait for it.
+
+What is to be prevented: someone controlling a PC that is not theirs; someone watching or changing a session;
+a stolen password, token or device; a compromised or impersonated server; malware using the agent.
+
+Built so far (M2-M3): video and input encrypted end to end (WebRTC DTLS-SRTP); the server's certificate pinned
+by the clients; passwords stored with Argon2id; refresh tokens random, stored as hashes, per device and program,
+revocable, DPAPI-encrypted on the device; signals only between devices of one account (checked by the server,
+tested from outside by `account_probe`); failed logins slowed to one per second per connection; message sizes
+capped.
+
+Open, in this order, all before any release:
+1. **Peers must prove who they are, not only the server.** Today the DTLS fingerprints in the offer and answer
+   pass through the server, so a compromised server could sit in the middle of a session. Each device gets its
+   own long-lived key (DPAPI-protected) at its first login; the account's devices learn each other's public keys
+   and pin them (a changed key is refused until the user confirms it on a device they trust); the DTLS
+   fingerprint in every offer and answer is signed with the device key and checked by the other side.
+2. **Nothing happens unseen on the controlled PC.** A tray icon whenever the agent runs, a banner during every
+   session with a one-click end, and a list of past sessions. A session needs consent on the controlled PC
+   (Allow / Deny) unless its owner turned on unattended access for that device, which then needs a separate
+   device password (as UU Remote does).
+3. **Logins:** limits per account and per address with lockout, optional two-factor codes (TOTP), a notice to
+   the account's devices when a new device logs in, removing a device revokes its tokens, a password change
+   revokes all of them. Test-only options (`--password` on the command line) are left out of release builds.
+4. **The agent accepts only what it must:** no listening ports; input only from the session the server
+   introduced and the device key confirmed; with the service (M5), the SYSTEM part stays minimal and talks to
+   the user-session agent only through an authenticated local channel.
+5. **The code and the release:** `cargo audit` / `cargo deny` on every build, fuzzing of everything that parses
+   network input (the data-channel protocol, the server's JSON), signed binaries and signed updates (see also
+   point 11 of "Runs on any PC"), and a review of all of the above before the first public build.
+
 ## Milestones
 
 | # | Result | Check |
@@ -175,7 +209,7 @@ congestion control and FEC, but a large prebuilt C++ dependency and hard to feed
 | M0 | Toolchain, Cargo workspace, empty crates build | `cargo build` passes |
 | M1 | Local loop on one PC: capture -> encode -> decode -> window, with the software fallbacks | latency and fps measured; every fallback forced and tested. **Done 2026-11-20**: RTX 5080 PC 4/4 paths pass (hardware: 12 ms median screen change -> shown); Intel Iris Xe laptop 3/4 (hardware 20 ms; no-GPU path 55 ms, needs adaptive size) |
 | M2 | LAN: agent + viewer by IP, video + mouse/keyboard | control the PC from a second process / PC. **Done 2026-11-20**: one PC (611/611 frames, input 7/7) and PC viewer -> Intel laptop agent over Tailscale (direct, 5 ms ping): 17 ms median / 29 ms p95 screen change -> shown, input checked 7/7, 2 frames lost in 20 s and recovered by keyframe requests |
-| M3 | `queqiao-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click. **Done on one PC 2026-11-20** (`scripts\run_m3_local.ps1`): account probe 17/17 (pinned certificate, wrong password answered after 1 s, tokens per device and program, logout revokes, live presence, other accounts cannot see or reach a device); viewer through the login form and device list controls the PC through the server (connected in 107-137 ms, all frames shown, input 7/7); saved login, logout. Across machines (agent on the Intel laptop) blocked by its antivirus, see "Runs on any PC" point 11 |
+| M3 | `queqiao-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click. **Done on one PC 2026-11-20** (`scripts\run_m3_local.ps1`): account probe 17/17 (pinned certificate, wrong password answered after 1 s, tokens per device and program, logout revokes, live presence, other accounts cannot see or reach a device); viewer through the login form and device list controls the PC through the server (connected in 107-137 ms, all frames shown, input 7/7); saved login, logout. Across machines the same day (server and viewer on the PC, agent on the Intel laptop over Tailscale, after the laptop's Kaspersky was told to allow the test folder): connected in 467 ms, first picture 603 ms, 746/746 frames shown (4 after a loss, repaired by keyframe requests), screen change -> shown median 33 ms / p95 40 ms at a 29 ms round trip, Intel Quick Sync at 2240x1400 60 fps, input 7/7 |
 | M4 | NAT traversal + relay | connect across networks, forced-relay test |
 | M5 | `queqiao-service`: login screen, UAC, Ctrl+Alt+Del, restart | control at the lock screen |
 | M6 | Clipboard, file transfer, multi-monitor, audio | each feature end to end |
