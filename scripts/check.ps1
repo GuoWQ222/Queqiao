@@ -33,14 +33,27 @@ foreach ($step in $steps) {
     if ($exitCode -ne 0) { $failedStep = $step.Name; break }
 }
 
-# Every crate with a src\main.rs is a program: run it once and expect its banner "<name> <version> ...".
+# Every crate with a src\main.rs is a program: run it with --version and expect its banner
+# "<name> <version> ...". Without options the agent goes online and the viewer opens its login form, so
+# never start them bare here; a program still running after 20 s is stopped and fails the check.
 if (-not $failedStep) {
     $programs = Get-ChildItem -LiteralPath (Join-Path $Root 'crates') -Directory |
         Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'src\main.rs') }
     foreach ($program in $programs) {
         $exe = Join-Path $Root "target\debug\$($program.Name).exe"
-        $output = @(& $exe 2>&1 | ForEach-Object { "$_" })
-        $exitCode = $LASTEXITCODE
+        $startInfo = New-Object Diagnostics.ProcessStartInfo $exe, '--version'
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [Diagnostics.Process]::Start($startInfo)
+        if ($process.WaitForExit(20000)) {
+            $output = @(($process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()) -split "`r?`n" | Where-Object { $_ })
+            $exitCode = $process.ExitCode
+        } else {
+            $process.Kill()
+            $output = @('still running after 20 s')
+            $exitCode = 'timeout'
+        }
         '{0,-12} exit {1}  {2}' -f $program.Name, $exitCode, ($output -join ' | ')
         if ($exitCode -ne 0 -or -not ($output[0] -like "$($program.Name) *")) { $failedStep = "run $($program.Name)" }
     }

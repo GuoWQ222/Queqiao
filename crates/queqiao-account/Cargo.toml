@@ -1,0 +1,18 @@
+[package]
+name = "queqiao-account"
+description = "Client side of queqiao-server: pinned TLS WebSocket, login, device list, session signaling"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+queqiao-core.workspace = true
+queqiao-transport.workspace = true
+getrandom.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

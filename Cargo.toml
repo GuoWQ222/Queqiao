@@ -16,6 +16,14 @@ queqiao-display = { path = "crates/queqiao-display" }
 queqiao-input = { path = "crates/queqiao-input" }
 queqiao-transport = { path = "crates/queqiao-transport" }
 windows = "0.62"
+queqiao-account = { path = "crates/queqiao-account" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# TLS everywhere with the ring crypto backend (aws-lc, rustls' default, would need CMake on every build machine).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+sha2 = "0.11"
+getrandom = "0.3"
 
 # OpenH264 is C++ built by the cc crate. Unoptimised it is many times slower, which would hide real encode
 # times even in debug builds.

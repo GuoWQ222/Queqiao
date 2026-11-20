@@ -95,26 +95,6 @@ impl Signal {
         }
     }
 
-    /// Exchanges hellos: both sides must speak the same protocol version and have different roles.
-    /// Returns the other side's role.
-    pub fn hello(&mut self, role: &str) -> Result<String, Error> {
-        let version = queqiao_core::PROTOCOL_VERSION;
-        self.send("hello", &format!("queqiao {version} {role}"))?;
-        let body = self.expect("hello")?;
-        let mut parts = body.split_whitespace();
-        let (name, their_version, their_role) = (parts.next(), parts.next(), parts.next());
-        if name != Some("queqiao") || their_version != Some(&version.to_string()) {
-            return Err(Error(format!(
-                "the other side speaks \"{body}\", we speak protocol {version}"
-            )));
-        }
-        let their_role = their_role.unwrap_or("").to_string();
-        if their_role == role {
-            return Err(Error(format!("both sides are {role}s")));
-        }
-        Ok(their_role)
-    }
-
     /// Our address on the connection: the one the other side can reach us at.
     pub fn local_ip(&self) -> Result<IpAddr, Error> {
         Ok(self.stream.local_addr()?.ip())
@@ -122,5 +102,58 @@ impl Signal {
 
     pub fn peer_address(&self) -> Result<SocketAddr, Error> {
         Ok(self.stream.peer_addr()?)
+    }
+}
+
+/// Carries the offer and answer between the two sides of a session: a direct connection ([`Signal`]) or
+/// queqiao-server (in queqiao-account).
+pub trait Signaling {
+    fn send(&mut self, kind: &str, body: &str) -> Result<(), Error>;
+    /// The next message from the other side, which must be of `kind`.
+    fn expect(&mut self, kind: &str) -> Result<String, Error>;
+    /// Our address as the other side can reach it (for the ICE host candidate).
+    fn local_ip(&self) -> Result<IpAddr, Error>;
+
+    /// Exchanges hellos: both sides must speak the same protocol version and have different roles.
+    /// Returns the other side's role.
+    fn hello(&mut self, role: &str) -> Result<String, Error> {
+        self.send("hello", &hello_body(role))?;
+        check_hello(&self.expect("hello")?, role)
+    }
+}
+
+/// Our hello: "queqiao <protocol version> <role>".
+pub fn hello_body(role: &str) -> String {
+    format!("queqiao {} {role}", queqiao_core::PROTOCOL_VERSION)
+}
+
+/// Checks the other side's hello (same protocol version, the other role) and returns its role.
+pub fn check_hello(body: &str, role: &str) -> Result<String, Error> {
+    let version = queqiao_core::PROTOCOL_VERSION;
+    let mut parts = body.split_whitespace();
+    let (name, their_version, their_role) = (parts.next(), parts.next(), parts.next());
+    if name != Some("queqiao") || their_version != Some(&version.to_string()) {
+        return Err(Error(format!(
+            "the other side speaks \"{body}\", we speak protocol {version}"
+        )));
+    }
+    let their_role = their_role.unwrap_or("").to_string();
+    if their_role == role {
+        return Err(Error(format!("both sides are {role}s")));
+    }
+    Ok(their_role)
+}
+
+impl Signaling for Signal {
+    fn send(&mut self, kind: &str, body: &str) -> Result<(), Error> {
+        Signal::send(self, kind, body)
+    }
+
+    fn expect(&mut self, kind: &str) -> Result<String, Error> {
+        Signal::expect(self, kind)
+    }
+
+    fn local_ip(&self) -> Result<IpAddr, Error> {
+        Signal::local_ip(self)
     }
 }

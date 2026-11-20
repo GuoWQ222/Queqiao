@@ -59,7 +59,7 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
    has a free tier for small volumes). The alternative is Cisco's prebuilt OpenH264, which Cisco's licence covers
    when each PC downloads it from Cisco. **Decided by the user (2026-11-20): OpenH264 is built in, as UU
    Remote does; the publisher takes the H.264 patent licence.**
-10. **Encoders: Media Foundation and direct vendor SDKs, compared** (user decision 2026-11-20): direct NVENC,
+9. **Encoders: Media Foundation and direct vendor SDKs, compared** (user decision 2026-11-20): direct NVENC,
    AMF and oneVPL paths are built beside Media Foundation and measured against it on the same machines; AMD
    cannot be tested on the current machines.
    NVENC (direct, `QUEQIAO_FORCE=encode:nvenc`) is built against API 11.1 so drivers from R470 (2021) work: the
@@ -70,9 +70,18 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
    2x gave a 19 dB first picture). So on NVIDIA the direct path saves about 0.5 ms only with the fastest,
    lowest-quality preset; Media Foundation stays the default. What the direct SDK adds is control Media
    Foundation does not expose (bitrate changes without a keyframe, intra refresh, 4:4:4 for sharp text).
-9. **Build requirements:** Rust, Visual Studio Build Tools (C++), and NASM on the PATH: without NASM, OpenH264
+10. **Build requirements:** Rust, Visual Studio Build Tools (C++), and NASM on the PATH: without NASM, OpenH264
    builds silently without its assembly and runs about 5x slower (measured 35 ms instead of 6.6 ms per 1080p
    frame); `scripts\check.ps1` warns when NASM is missing.
+11. **Antivirus must not block it.** A remote-control agent looks like a remote-access trojan to antivirus
+   heuristics: an unknown program that captures the screen, injects input and talks to a server. Seen on
+   2026-11-20: Kaspersky Endpoint Security on the test laptop locked the M3 agent as `VHO:Trojan.Win32.Agent.gen`
+   (cloud heuristic) minutes after it arrived, so it could not start; the M2 agent had run there. Before release:
+   Authenticode signing of every binary (a code-signing certificate; EV builds reputation fastest), version
+   information in each executable, the visible session indicator on the controlled PC (tray icon and banner),
+   and false-positive submissions to the vendors common on Chinese PCs (Kaspersky, Huorong, Tencent PC Manager,
+   360) as UU Remote and others do. Test machines exclude their test folders instead; never rename or pack a
+   binary to get past a scanner.
 
 ## Components
 
@@ -146,6 +155,14 @@ congestion control and FEC, but a large prebuilt C++ dependency and hard to feed
 ## Accounts and security
 
 - Passwords hashed with Argon2id; short-lived access tokens + refresh tokens; per-device revocation.
+  As built in M3: each program (agent, viewer) keeps one TLS WebSocket to the server and logs in on it once,
+  with the password or its refresh token, so no separate access token is needed. Refresh tokens are random 256-bit
+  values, stored on the server only as SHA-256, valid for one device and one program, 90 days, and revoked by
+  logging out; on the device they are encrypted with DPAPI for the Windows user. A failed login is answered
+  after 1 s.
+- The server's certificate: a self-hosted server makes its own on first start and prints its SHA-256
+  fingerprint; clients pin it (no CA needed, and no other certificate is accepted). A server with a CA-issued
+  certificate can be used the same way; CA checking for the public server comes with the installer (M7).
 - A device joins an account after login; new devices are shown to the account's other devices.
 - Rule: only devices on the same account can control each other (checked by the server when it issues a session
   token, and again by the controlled agent against its pinned list).
@@ -158,7 +175,7 @@ congestion control and FEC, but a large prebuilt C++ dependency and hard to feed
 | M0 | Toolchain, Cargo workspace, empty crates build | `cargo build` passes |
 | M1 | Local loop on one PC: capture -> encode -> decode -> window, with the software fallbacks | latency and fps measured; every fallback forced and tested. **Done 2026-11-20**: RTX 5080 PC 4/4 paths pass (hardware: 12 ms median screen change -> shown); Intel Iris Xe laptop 3/4 (hardware 20 ms; no-GPU path 55 ms, needs adaptive size) |
 | M2 | LAN: agent + viewer by IP, video + mouse/keyboard | control the PC from a second process / PC. **Done 2026-11-20**: one PC (611/611 frames, input 7/7) and PC viewer -> Intel laptop agent over Tailscale (direct, 5 ms ping): 17 ms median / 29 ms p95 screen change -> shown, input checked 7/7, 2 frames lost in 20 s and recovered by keyframe requests |
-| M3 | `queqiao-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click |
+| M3 | `queqiao-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click. **Done on one PC 2026-11-20** (`scripts\run_m3_local.ps1`): account probe 17/17 (pinned certificate, wrong password answered after 1 s, tokens per device and program, logout revokes, live presence, other accounts cannot see or reach a device); viewer through the login form and device list controls the PC through the server (connected in 107-137 ms, all frames shown, input 7/7); saved login, logout. Across machines (agent on the Intel laptop) blocked by its antivirus, see "Runs on any PC" point 11 |
 | M4 | NAT traversal + relay | connect across networks, forced-relay test |
 | M5 | `queqiao-service`: login screen, UAC, Ctrl+Alt+Del, restart | control at the lock screen |
 | M6 | Clipboard, file transfer, multi-monitor, audio | each feature end to end |

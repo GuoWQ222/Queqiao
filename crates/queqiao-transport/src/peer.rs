@@ -19,7 +19,7 @@ use str0m::media::{Direction, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
-use crate::signal::Signal;
+use crate::signal::Signaling;
 use crate::{Error, err};
 
 /// The agent sends video and receives the data channel; the viewer receives video, makes the offer and
@@ -68,7 +68,7 @@ pub struct Peer {
 
 impl Peer {
     /// Negotiates over `signal` (the viewer offers, the agent answers) and starts the network thread.
-    pub fn start(role: Role, signal: &mut Signal) -> Result<Peer, Error> {
+    pub fn start(role: Role, signal: &mut dyn Signaling) -> Result<Peer, Error> {
         static PROCESS_SETUP: Once = Once::new();
         PROCESS_SETUP.call_once(|| {
             str0m::crypto::from_feature_flags().install_process_default();

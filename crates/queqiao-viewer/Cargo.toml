@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+queqiao-account.workspace = true
 queqiao-codec.workspace = true
 queqiao-core.workspace = true
 queqiao-display.workspace = true

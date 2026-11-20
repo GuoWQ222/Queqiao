@@ -1,9 +1,21 @@
 [package]
 name = "queqiao-server"
-description = "Accounts, devices, presence, WebSocket signaling, STUN/TURN relay"
+description = "Accounts, devices, presence and signaling over TLS WebSockets (STUN/TURN relay in M4)"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
 queqiao-core.workspace = true
+argon2 = "0.6"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

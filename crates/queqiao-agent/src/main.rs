@@ -1,22 +1,28 @@
 //! queqiao-agent: the controlled side. Captures the screen, encodes it and streams it to the viewer, and
 //! injects the viewer's mouse and keyboard input. Runs in the logged-on user's desktop session.
 //!
-//! M2, by IP address (queqiao-server takes over finding each other in M3):
+//! With an account (M3): the agent logs in to queqiao-server, stays online and serves each viewer of the
+//! same account that connects, one at a time.
+//!   queqiao-agent --server <host:port> --pin <fingerprint> --user <name> --password <password>
+//!       logs in and saves the login (the refresh token, DPAPI-encrypted); later starts need no options:
+//!   queqiao-agent [--sessions N] [--seconds N]
+//! By IP address (M2, for tests):
 //!   queqiao-agent --connect <viewer-ip:port> | --listen <ip:port>
-//!                 [--seconds N] [--fps N] [--report <file>] [--verify-input]
-//! --verify-input checks every injected pointer move and the test key (F24) and puts the pointer back at
-//! the end. Without arguments the agent prints its version.
+//! Common options: [--seconds N] [--fps N] [--report <file>] [--verify-input]
+//! --seconds limits the whole run; --sessions N stops after N sessions. --verify-input checks every injected
+//! pointer move and the test key (F24) and puts the pointer back at the end. --version prints the version.
 
 #![windows_subsystem = "windows"]
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use queqiao_account::{Account, AccountEvent, DeviceIdentity, Role as AccountRole, SavedLogin};
 use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
 use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::{InputEvent, Message};
 use queqiao_input::{Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position};
-use queqiao_transport::{Peer, PeerEvent, Role, Signal};
+use queqiao_transport::{Peer, PeerEvent, Role, Signal, Signaling, check_hello, hello_body};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
@@ -28,6 +34,11 @@ const VK_F24: u16 = 0x87;
 struct Options {
     connect: Option<String>,
     listen: Option<String>,
+    server: Option<String>,
+    pin: Option<String>,
+    user: Option<String>,
+    password: Option<String>,
+    sessions: Option<u32>,
     seconds: Option<u64>,
     fps: Option<u32>,
     report: Option<PathBuf>,
@@ -56,8 +67,10 @@ fn main() {
     let Some(options) = parse(std::env::args().skip(1)) else {
         println!("{banner}");
         println!(
-            "usage: queqiao-agent --connect <viewer-ip:port> | --listen <ip:port> [--seconds N] [--fps N] [--report <file>] [--verify-input]"
+            "usage: queqiao-agent [--server <host:port> --pin <fingerprint> --user <name> --password <password>] [--sessions N]"
         );
+        println!("       queqiao-agent --connect <viewer-ip:port> | --listen <ip:port>");
+        println!("       common: [--seconds N] [--fps N] [--report <file>] [--verify-input]");
         return;
     };
     let mut lines = vec![banner];
@@ -84,6 +97,11 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
         match arg.as_str() {
             "--connect" => options.connect = args.next(),
             "--listen" => options.listen = args.next(),
+            "--server" => options.server = args.next(),
+            "--pin" => options.pin = args.next(),
+            "--user" => options.user = args.next(),
+            "--password" => options.password = args.next(),
+            "--sessions" => options.sessions = args.next().and_then(|v| v.parse().ok()),
             "--seconds" => options.seconds = args.next().and_then(|v| v.parse().ok()),
             "--fps" => options.fps = args.next().and_then(|v| v.parse().ok()),
             "--report" => options.report = args.next().map(PathBuf::from),
@@ -91,11 +109,133 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             _ => return None,
         }
     }
-    (options.connect.is_some() || options.listen.is_some()).then_some(options)
+    Some(options)
 }
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    let end = options
+        .seconds
+        .map(|s| Instant::now() + Duration::from_secs(s));
+    if options.connect.is_none() && options.listen.is_none() {
+        return run_account(options, end, lines);
+    }
+    let mut signal = match (&options.connect, &options.listen) {
+        (Some(address), _) => Signal::connect(address, Duration::from_secs(60)),
+        (None, Some(address)) => Signal::listen(address, Duration::from_secs(120)),
+        (None, None) => unreachable!("checked above"),
+    }
+    .map_err(|e| e.to_string())?;
+    signal.hello("agent").map_err(|e| e.to_string())?;
+    let viewer = signal.peer_address().map_err(|e| e.to_string())?;
+    session(options, &mut signal, &viewer.to_string(), end, lines)
+}
+
+/// Logged in to queqiao-server: waits for viewers of the account and serves them one after another.
+/// When the server connection drops, it reconnects with the saved login (waiting 1 s, 2 s, ... 30 s).
+fn run_account(
+    options: &Options,
+    end: Option<Instant>,
+    lines: &mut Vec<String>,
+) -> Result<bool, String> {
+    let identity = DeviceIdentity::load_or_create().map_err(|e| e.to_string())?;
+    let mut login = SavedLogin::load(AccountRole::Agent).unwrap_or_default();
+    if let Some(server) = &options.server {
+        if login.server != *server {
+            login.refresh_token = None;
+        }
+        login.server = server.clone();
+    }
+    if let Some(pin) = &options.pin {
+        login.pin = pin.clone();
+    }
+    if login.server.is_empty() {
+        return Err("not logged in: start once with --server <host:port> --pin <fingerprint> --user <name> --password <password>".into());
+    }
+    let password = options.user.as_deref().zip(options.password.as_deref());
+    let mut account = Account::connect(&mut login, &identity, AccountRole::Agent, password)
+        .map_err(|e| e.to_string())?;
+    login.save(AccountRole::Agent).map_err(|e| e.to_string())?;
+    lines.push(format!(
+        "logged in as {} at {}; this device: {} ({}); {} devices on the account",
+        account.user,
+        login.server,
+        identity.name,
+        identity.id,
+        account.devices.len()
+    ));
+
+    let (mut sessions, mut passed) = (0u32, true);
+    let mut retry = Duration::from_secs(1);
+    loop {
+        if end.is_some_and(|end| Instant::now() > end)
+            || options.sessions.is_some_and(|n| sessions >= n)
+        {
+            break;
+        }
+        match account.next_event(Duration::from_millis(200)) {
+            Some(AccountEvent::Signal {
+                from,
+                from_name,
+                from_role: AccountRole::Viewer,
+                session: id,
+                kind,
+                body,
+            }) if kind == "hello" => {
+                let mut signal = account.session(&from, AccountRole::Viewer, &id);
+                if let Err(error) = check_hello(&body, "agent") {
+                    let _ = signal.send("error", &error.0);
+                    lines.push(format!("refused viewer {from_name}: {error}"));
+                    continue;
+                }
+                signal
+                    .send("hello", &hello_body("agent"))
+                    .map_err(|e| e.to_string())?;
+                sessions += 1;
+                lines.push(format!("session {sessions}: viewer {from_name} ({from})"));
+                match session(options, &mut signal, &from_name, end, lines) {
+                    Ok(ok) => passed &= ok,
+                    Err(error) => {
+                        lines.push(format!("session {sessions} failed: {error}"));
+                        passed = false;
+                    }
+                }
+            }
+            Some(AccountEvent::Closed(reason)) => {
+                lines.push(format!("server connection lost: {reason}"));
+                loop {
+                    if end.is_some_and(|end| Instant::now() + retry > end) {
+                        return Err("the server connection was lost".into());
+                    }
+                    std::thread::sleep(retry);
+                    match Account::connect(&mut login, &identity, AccountRole::Agent, None) {
+                        Ok(new) => {
+                            account = new;
+                            retry = Duration::from_secs(1);
+                            lines.push("reconnected".into());
+                            break;
+                        }
+                        Err(error) if error.0.contains("log in again") => return Err(error.0),
+                        Err(_) => retry = (retry * 2).min(Duration::from_secs(30)),
+                    }
+                }
+            }
+            Some(AccountEvent::Error(message)) => lines.push(format!("server: {message}")),
+            Some(AccountEvent::Devices(_) | AccountEvent::Signal { .. }) | None => {}
+        }
+    }
+    lines.push(format!("{sessions} sessions"));
+    Ok(passed && options.sessions.is_none_or(|n| sessions >= n))
+}
+
+/// One session with one viewer: capture, encode and send the screen, inject the viewer's input.
+fn session(
+    options: &Options,
+    signal: &mut dyn Signaling,
+    viewer: &str,
+    end: Option<Instant>,
+    lines: &mut Vec<String>,
+) -> Result<bool, String> {
     let frequency = qpc_frequency() as f64;
     let ms = |ticks: i64| ticks as f64 * 1000.0 / frequency;
 
@@ -136,20 +276,11 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         height: info.height,
     });
 
-    let mut signal = match (&options.connect, &options.listen) {
-        (Some(address), _) => Signal::connect(address, Duration::from_secs(60)),
-        (None, Some(address)) => Signal::listen(address, Duration::from_secs(120)),
-        (None, None) => unreachable!("parse() requires one of them"),
-    }
-    .map_err(|e| e.to_string())?;
-    signal.hello("agent").map_err(|e| e.to_string())?;
-    let viewer = signal.peer_address().map_err(|e| e.to_string())?;
-    lines.push(format!("viewer at {viewer}"));
+    lines.push(format!("viewer: {viewer}"));
     let started = Instant::now();
-    let peer = Peer::start(Role::Agent, &mut signal).map_err(|e| e.to_string())?;
+    let peer = Peer::start(Role::Agent, signal).map_err(|e| e.to_string())?;
 
     let pointer_start = cursor_position();
-    let end = options.seconds.map(|s| started + Duration::from_secs(s));
     let interval = Duration::from_secs_f64(1.0 / f64::from(config.fps));
     let mut stats = Stats::default();
     let mut connected_after: Option<Duration> = None;
@@ -185,6 +316,10 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
                     }
                     Some(Message::Ping { id, sent_us }) => {
                         peer.send_data(Message::Pong { id, sent_us }.encode());
+                    }
+                    Some(Message::Leave) => {
+                        closed = Some("the viewer left".to_string());
+                        break 'session;
                     }
                     _ => {}
                 },
@@ -253,6 +388,12 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             }
         }
     }
+    if closed.is_none() {
+        // Our end (time is up): tell the viewer at once.
+        peer.send_data(Message::Leave.encode());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(peer);
     if options.verify_input {
         set_cursor_position(pointer_start.0, pointer_start.1);
     }

@@ -1,12 +1,12 @@
 //! Network transport between viewer and agent: WebRTC through str0m (ICE, DTLS-SRTP, H.264 over RTP, an
 //! SCTP data channel for input and control), driven on its own thread ([`Peer`]), and the signaling that
-//! sets it up ([`Signal`]; a direct TCP connection for now, queqiao-server later).
+//! sets it up ([`Signaling`]: a direct TCP connection ([`Signal`]) or queqiao-server through queqiao-account).
 
 mod peer;
 mod signal;
 
 pub use peer::{Peer, PeerEvent, Role};
-pub use signal::Signal;
+pub use signal::{Signal, Signaling, check_hello, hello_body};
 
 /// A transport error, with a readable reason.
 #[derive(Debug)]

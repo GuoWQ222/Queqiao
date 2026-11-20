@@ -1,9 +1,15 @@
 [package]
 name = "queqiao-core"
-description = "Shared code: the viewer-agent wire protocol, test switches, process set-up"
+description = "Shared code: the viewer-agent and device-server protocols, test switches, process set-up"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_System_Threading", "Win32_UI_HiDpi"] }

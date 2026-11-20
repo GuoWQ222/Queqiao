@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -12,6 +13,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 static REGISTER: Once = Once::new();
+/// A message handled for longer than this is reported (`take_slow_messages`).
+const SLOW: Duration = Duration::from_millis(50);
 const CLASS: PCWSTR = w!("QueqiaoViewer");
 
 /// Input in the window. Positions are in pixels of the window's drawing area.
@@ -48,6 +51,7 @@ thread_local! {
 pub struct Window {
     hwnd: HWND,
     closed: bool,
+    slow: Vec<String>,
 }
 
 impl Window {
@@ -95,6 +99,7 @@ impl Window {
         Ok(Self {
             hwnd,
             closed: false,
+            slow: Vec::new(),
         })
     }
 
@@ -105,16 +110,46 @@ impl Window {
     /// Handles pending window messages without waiting. False once the window has been closed.
     pub fn pump(&mut self) -> bool {
         let mut message = MSG::default();
-        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
-            if message.message == WM_QUIT {
-                self.closed = true;
+        loop {
+            // PeekMessage also runs messages sent from other threads or programs: timed separately.
+            let peek_start = Instant::now();
+            let got = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool();
+            let peek = peek_start.elapsed();
+            if peek > SLOW {
+                self.slow
+                    .push(format!("PeekMessage {} ms", peek.as_millis()));
             }
+            if !got {
+                break;
+            }
+            let dispatch_start = Instant::now();
             unsafe {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+            let took = dispatch_start.elapsed();
+            if took > SLOW {
+                let owner = if message.hwnd == self.hwnd {
+                    "this window"
+                } else {
+                    "another window"
+                };
+                self.slow.push(format!(
+                    "message 0x{:04X} to {owner} {} ms",
+                    message.message,
+                    took.as_millis()
+                ));
+            }
         }
+        // Each window tracks its own end (closing it does not end the program, which may have other
+        // windows, such as the device list).
+        self.closed |= !unsafe { IsWindow(Some(self.hwnd)) }.as_bool();
         !self.closed
+    }
+
+    /// Messages that took longer than 50 ms to handle since the last call, described.
+    pub fn take_slow_messages(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.slow)
     }
 
     /// The input collected since the last call (filled by `pump`).
@@ -167,10 +202,6 @@ extern "system" fn window_proc(
         LRESULT(0)
     };
     match message {
-        WM_DESTROY => {
-            unsafe { PostQuitMessage(0) };
-            LRESULT(0)
-        }
         WM_MOUSEMOVE => {
             push(WindowEvent::MouseMove { x: low, y: high });
             LRESULT(0)

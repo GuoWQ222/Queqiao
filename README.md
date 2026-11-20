@@ -8,13 +8,14 @@ machine has and falls back to a path that needs no GPU (`docs\DESIGN.md`, "Runs 
 
 | Folder | Contents |
 |---|---|
-| `crates\queqiao-core` | Shared library: protocol, identity, transport, codec, input |
+| `crates\queqiao-core` | Shared: the viewer-agent protocol, the device-server messages, test switches, process set-up |
 | `crates\queqiao-capture` | Screen capture (DXGI desktop duplication); `examples\capture_probe.rs` checks it |
 | `crates\queqiao-codec` | BGRA -> NV12 (GPU video processor, CPU fallback) and the H.264 encoder: hardware of any vendor via Media Foundation, OpenH264 on the CPU as the fallback; `examples\encode_probe.rs` checks it |
-| `crates\queqiao-display` | Viewer window and presenter (D3D11 swap chain; GPU video processor, CPU fallback); `examples\loopback.rs` runs the whole local loop |
-| `crates\queqiao-transport` | WebRTC through str0m (Windows crypto): ICE, DTLS-SRTP, H.264 over RTP, a data channel; direct signaling over TCP (M2) |
+| `crates\queqiao-display` | Viewer window and presenter (D3D11 swap chain; GPU video processor, CPU fallback), the login form and device list; `examples\loopback.rs` runs the whole local loop |
+| `crates\queqiao-transport` | WebRTC through str0m (Windows crypto): ICE, DTLS-SRTP, H.264 over RTP, a data channel; the signaling interface, and direct signaling over TCP (M2) |
+| `crates\queqiao-account` | Client side of queqiao-server: TLS WebSocket with a pinned certificate, login, device list, session signaling; the saved login (DPAPI); `examples\account_probe.rs` checks a server |
 | `crates\queqiao-input` | Injects the viewer's mouse and keyboard on the controlled PC (SendInput, scancodes) |
-| `crates\queqiao-server` | Accounts, devices, presence, signaling, STUN/TURN relay |
+| `crates\queqiao-server` | Accounts (Argon2id), devices, presence and signaling over TLS WebSockets, SQLite; STUN/TURN relay in M4 |
 | `crates\queqiao-service` | Windows service on each controlled PC |
 | `crates\queqiao-agent` | Controlled side (user session) |
 | `crates\queqiao-viewer` | Controlling side (viewer window) |
@@ -29,7 +30,17 @@ and [NASM](https://www.nasm.us) on the PATH (OpenH264's assembly; without it the
 Build: `cargo build --workspace`. Full check (fmt, clippy, build, test, run each program):
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1`
 
-Remote control by IP address (M2; queqiao-server will find devices by account in M3):
+Remote control with an account (M3):
+1. On the server PC: `queqiao-server init --name <its host name or IP>` prints the certificate fingerprint,
+   `queqiao-server add-user <name> <password>` adds a user, `queqiao-server serve` runs it (TCP 47100 by default;
+   its data, certificate and key are in `queqiao-server-data`).
+2. On each PC to be controlled, once: `queqiao-agent --server <host:47100> --pin <fingerprint> --user <name>
+   --password <password>`; later starts need no options (the login is saved, DPAPI-encrypted, in
+   `%APPDATA%\Queqiao`).
+3. On the controlling PC: start `queqiao-viewer`, log in once, double-click a device.
+`scripts\run_m3_local.ps1` runs all of it on one PC, with the account probe.
+
+Remote control by IP address (M2, for tests):
 `queqiao-viewer --listen <ip:port>` on the controlling PC and `queqiao-agent --connect <ip:port>` on the controlled
 PC (or the other way round: either side may listen). The listening side needs an inbound firewall rule for its
 program. `scripts\run_m2_local.ps1` runs both on one PC with an input test.

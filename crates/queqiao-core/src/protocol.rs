@@ -57,6 +57,8 @@ pub enum Message {
         time_90khz: u64,
         agent_ms: f32,
     },
+    /// The sender ends the session (the other side stops at once instead of waiting for a timeout).
+    Leave,
 }
 
 const INPUT_MOVE: u8 = 1;
@@ -66,6 +68,7 @@ const INPUT_KEY: u8 = 4;
 const PING: u8 = 20;
 const PONG: u8 = 21;
 const FRAME_INFO: u8 = 30;
+const LEAVE: u8 = 40;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -110,6 +113,7 @@ impl Message {
                 out.extend_from_slice(&time_90khz.to_le_bytes());
                 out.extend_from_slice(&agent_ms.to_le_bytes());
             }
+            Message::Leave => out.push(LEAVE),
         }
         out
     }
@@ -161,6 +165,7 @@ impl Message {
                 time_90khz: u64_at(0)?,
                 agent_ms: f32::from_bits(u32_at(8)?),
             },
+            LEAVE => Message::Leave,
             _ => return None,
         })
     }
@@ -196,6 +201,7 @@ mod tests {
                 time_90khz: 1 << 40,
                 agent_ms: 3.25,
             },
+            Message::Leave,
         ];
         for message in messages {
             assert_eq!(Message::decode(&message.encode()), Some(message));

@@ -3,6 +3,7 @@
 //! The wire protocol between viewer and agent ([`protocol`]), the version every program prints at
 //! start-up, and the test switch that forces fallback paths. Planned (docs/DESIGN.md): identity.
 
+pub mod account;
 #[cfg(windows)]
 pub mod platform;
 pub mod protocol;

@@ -1,23 +1,37 @@
 //! queqiao-viewer: the controlling side. Shows the remote screen in a window and sends mouse and
 //! keyboard input made in that window.
 //!
-//! M2, by IP address (queqiao-server takes over finding each other in M3):
-//!   queqiao-viewer --listen <ip:port> | --connect <agent-ip:port>
-//!                  [--seconds N] [--width N] [--report <file>] [--input-test]
+//! With an account (M3), started without options: the login form (once; the login is then saved,
+//! DPAPI-encrypted), then the account's devices; double-click one to control it.
+//! For tests and scripts:
+//!   queqiao-viewer [--server <host:port> --pin <fingerprint> --user <name> --password <password>]
+//!                  [--device <name or id> | --list | --logout | --ui-test <name or id>]
+//!   --device connects without any window but the session's; --list prints the devices; --logout ends the
+//!   saved login; --ui-test goes through the login form and the device list as a user would (filled and
+//!   pressed by the program) and saves pictures of both next to the report.
+//! By IP address (M2): queqiao-viewer --listen <ip:port> | --connect <agent-ip:port>
+//! Common options: [--seconds N] [--width N] [--report <file>] [--input-test]
 //! --input-test sends a fixed sequence instead of the window's input: five pointer moves and a press of
-//! F24 (a key no program uses); the agent run with --verify-input checks them. Without arguments the
-//! viewer prints its version.
+//! F24 (a key no program uses); the agent run with --verify-input checks them. --version prints the
+//! version.
 
 #![windows_subsystem = "windows"]
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use queqiao_account::{
+    Account, AccountEvent, ClientMessage, Device, DeviceIdentity, Role as AccountRole, SavedLogin,
+    new_session_id,
+};
 use queqiao_codec::{DecodedFrame, DecoderChoice, H264Decoder};
 use queqiao_core::protocol::{InputEvent, Message, MouseButton};
-use queqiao_display::{Presenter, Window, WindowEvent, fit};
-use queqiao_transport::{Peer, PeerEvent, Role, Signal};
+use queqiao_display::{
+    DeviceList, DeviceRow, ListAction, LoginAction, LoginFields, LoginForm, Presenter, Window,
+    WindowEvent, fit, show_error,
+};
+use queqiao_transport::{Peer, PeerEvent, Role, Signal, Signaling};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -40,10 +54,34 @@ const TEST_SCANCODE: u16 = 0x76;
 struct Options {
     connect: Option<String>,
     listen: Option<String>,
+    server: Option<String>,
+    pin: Option<String>,
+    user: Option<String>,
+    password: Option<String>,
+    device: Option<String>,
+    list: bool,
+    logout: bool,
+    ui_test: Option<String>,
     seconds: Option<u64>,
     width: Option<i32>,
     report: Option<PathBuf>,
     input_test: bool,
+}
+
+impl Options {
+    fn direct(&self) -> bool {
+        self.connect.is_some() || self.listen.is_some()
+    }
+
+    /// Started by a person (no test or script options): errors go into a message box.
+    fn interactive(&self) -> bool {
+        !self.direct()
+            && self.device.is_none()
+            && !self.list
+            && !self.logout
+            && self.ui_test.is_none()
+            && self.report.is_none()
+    }
 }
 
 #[derive(Default)]
@@ -60,6 +98,11 @@ struct Stats {
     agent_ms: HashMap<u64, f64>,
     rtt_ms: Vec<f64>,
     inputs_sent: u32,
+    /// Where the viewer's loop spends its time: handling window messages, frame arrival -> picked up by
+    /// the loop, putting a picture on screen.
+    pump_ms: Vec<f64>,
+    pickup_ms: Vec<f64>,
+    show_ms: Vec<f64>,
 }
 
 fn main() {
@@ -67,15 +110,22 @@ fn main() {
     let Some(options) = parse(std::env::args().skip(1)) else {
         println!("{banner}");
         println!(
-            "usage: queqiao-viewer --listen <ip:port> | --connect <agent-ip:port> [--seconds N] [--width N] [--report <file>] [--input-test]"
+            "usage: queqiao-viewer [--server <host:port> --pin <fingerprint> --user <name> --password <password>]"
         );
+        println!(
+            "                      [--device <name or id> | --list | --logout | --ui-test <name or id>]"
+        );
+        println!("       queqiao-viewer --listen <ip:port> | --connect <agent-ip:port>");
+        println!("       common: [--seconds N] [--width N] [--report <file>] [--input-test]");
         return;
     };
     let mut lines = vec![banner];
+    let mut failure = None;
     let passed = match run(&options, &mut lines) {
         Ok(passed) => passed,
         Err(error) => {
             lines.push(format!("ERROR {error}"));
+            failure = Some(error);
             false
         }
     };
@@ -86,6 +136,11 @@ fn main() {
         }
         None => lines.iter().for_each(|line| println!("{line}")),
     }
+    if let Some(error) = failure
+        && options.interactive()
+    {
+        show_error("Queqiao", &error);
+    }
     std::process::exit(if passed { 0 } else { 1 });
 }
 
@@ -95,6 +150,14 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
         match arg.as_str() {
             "--connect" => options.connect = args.next(),
             "--listen" => options.listen = args.next(),
+            "--server" => options.server = args.next(),
+            "--pin" => options.pin = args.next(),
+            "--user" => options.user = args.next(),
+            "--password" => options.password = args.next(),
+            "--device" => options.device = args.next(),
+            "--list" => options.list = true,
+            "--logout" => options.logout = true,
+            "--ui-test" => options.ui_test = args.next(),
             "--seconds" => options.seconds = args.next().and_then(|v| v.parse().ok()),
             "--width" => options.width = args.next().and_then(|v| v.parse().ok()),
             "--report" => options.report = args.next().map(PathBuf::from),
@@ -102,35 +165,424 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             _ => return None,
         }
     }
-    (options.connect.is_some() || options.listen.is_some()).then_some(options)
+    Some(options)
 }
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    if !options.direct() {
+        return run_account(options, lines);
+    }
     let (device, context, gpu) = create_device()?;
     lines.push(format!("device: {gpu}"));
-
     let mut signal = match (&options.connect, &options.listen) {
         (Some(address), _) => Signal::connect(address, Duration::from_secs(60)),
         (None, Some(address)) => Signal::listen(address, Duration::from_secs(120)),
-        (None, None) => unreachable!("parse() requires one of them"),
+        (None, None) => unreachable!("direct() checked it"),
     }
     .map_err(|e| e.to_string())?;
     signal.hello("viewer").map_err(|e| e.to_string())?;
     let agent = signal.peer_address().map_err(|e| e.to_string())?;
-    lines.push(format!("agent at {agent}"));
+    session(
+        options,
+        &device,
+        &context,
+        &mut signal,
+        &agent.to_string(),
+        lines,
+    )
+}
 
+fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
+    let identity = DeviceIdentity::load_or_create().map_err(|e| e.to_string())?;
+    let mut login = SavedLogin::load(AccountRole::Viewer).unwrap_or_default();
+    if let Some(server) = &options.server {
+        if login.server != *server {
+            login.refresh_token = None;
+        }
+        login.server = server.clone();
+    }
+    if let Some(pin) = &options.pin {
+        login.pin = pin.clone();
+    }
+    let pictures = options.ui_test.as_ref().map(|_| {
+        options
+            .report
+            .as_ref()
+            .and_then(|report| report.parent())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    });
+    let Some(mut account) = log_in(options, &mut login, &identity, pictures.as_deref(), lines)?
+    else {
+        lines.push("the login form was closed".into());
+        return Ok(true);
+    };
+    login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+    lines.push(format!(
+        "logged in as {} at {}; this device: {} ({})",
+        account.user, login.server, identity.name, identity.id
+    ));
+    if options.logout {
+        account.send(ClientMessage::Logout);
+        login.refresh_token = None;
+        login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+        lines.push("logged out: the saved login is deleted here and revoked on the server".into());
+        return Ok(true);
+    }
+    if options.list {
+        for device in &account.devices {
+            let state = if device.controllable {
+                "online"
+            } else {
+                "offline"
+            };
+            let own = if device.id == account.device_id {
+                ", this device"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "device {} ({}): {state}{own}",
+                device.name, device.id
+            ));
+        }
+        return Ok(true);
+    }
+    let (device, context, gpu) = create_device()?;
+    lines.push(format!("device: {gpu}"));
+    if let Some(key) = &options.device {
+        let target = wait_for_device(&mut account, key, Duration::from_secs(30))?;
+        return connect_to(&mut account, &target, options, &device, &context, lines);
+    }
+    device_list(
+        options,
+        &mut account,
+        &mut login,
+        &identity,
+        &device,
+        &context,
+        pictures.as_deref(),
+        lines,
+    )
+}
+
+/// The account connection: with the password from the options, the saved login, or the login form.
+/// None when the person closed the form.
+fn log_in(
+    options: &Options,
+    login: &mut SavedLogin,
+    identity: &DeviceIdentity,
+    pictures: Option<&Path>,
+    lines: &mut Vec<String>,
+) -> Result<Option<Account>, String> {
+    let given = options.user.as_deref().zip(options.password.as_deref());
+    if options.ui_test.is_none() {
+        if let Some(password) = given {
+            let account = Account::connect(login, identity, AccountRole::Viewer, Some(password));
+            return account.map(Some).map_err(|e| e.to_string());
+        }
+        if login.refresh_token.is_some() && options.user.is_none() {
+            match Account::connect(login, identity, AccountRole::Viewer, None) {
+                Ok(account) => return Ok(Some(account)),
+                Err(error) if !options.interactive() => return Err(error.0),
+                Err(error) => {
+                    lines.push(format!("the saved login was refused: {error}"));
+                    login.refresh_token = None;
+                }
+            }
+        }
+        if !options.interactive() {
+            return Err("not logged in: give --server, --pin, --user and --password once".into());
+        }
+    }
+
+    let defaults = LoginFields {
+        server: login.server.clone(),
+        pin: login.pin.clone(),
+        user: options.user.clone().unwrap_or_default(),
+        password: String::new(),
+    };
+    let mut form = LoginForm::new("Queqiao - log in", &defaults)
+        .map_err(|e| format!("login form: {}", describe(e)))?;
+    if options.ui_test.is_some() {
+        form.set_fields(&LoginFields {
+            password: options.password.clone().unwrap_or_default(),
+            ..defaults.clone()
+        });
+        settle(|| form.next(20).is_some());
+        if let Some(folder) = pictures {
+            form.save_picture(&folder.join("login.bmp"))
+                .map_err(|e| format!("login picture: {e}"))?;
+        }
+        form.submit();
+    }
+    loop {
+        match form.next(15) {
+            Some(LoginAction::Cancel) => return Ok(None),
+            Some(LoginAction::Submit(fields)) => {
+                if [&fields.server, &fields.pin, &fields.user, &fields.password]
+                    .iter()
+                    .any(|value| value.is_empty())
+                {
+                    form.set_status("Please fill in all four fields.");
+                    continue;
+                }
+                if login.server != fields.server {
+                    login.refresh_token = None;
+                }
+                login.server = fields.server.clone();
+                login.pin = fields.pin.clone();
+                form.set_busy(true, "Logging in...");
+                // In the background, so the form keeps responding.
+                let (mut attempt, identity) = (login.clone(), identity.clone());
+                let worker = std::thread::spawn(move || {
+                    let result = Account::connect(
+                        &mut attempt,
+                        &identity,
+                        AccountRole::Viewer,
+                        Some((&fields.user, &fields.password)),
+                    );
+                    (result, attempt)
+                });
+                while !worker.is_finished() {
+                    if let Some(LoginAction::Cancel) = form.next(15) {
+                        return Ok(None);
+                    }
+                }
+                let (result, attempt) = worker
+                    .join()
+                    .map_err(|_| "the login thread failed".to_string())?;
+                match result {
+                    Ok(account) => {
+                        *login = attempt;
+                        return Ok(Some(account));
+                    }
+                    Err(error) if options.ui_test.is_some() => return Err(error.0),
+                    Err(error) => form.set_busy(false, &error.0),
+                }
+            }
+            None => {}
+        }
+    }
+}
+
+/// The device list: double-click (or select and press Connect) to control a device.
+#[allow(clippy::too_many_arguments)]
+fn device_list(
+    options: &Options,
+    account: &mut Account,
+    login: &mut SavedLogin,
+    identity: &DeviceIdentity,
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    pictures: Option<&Path>,
+    lines: &mut Vec<String>,
+) -> Result<bool, String> {
+    let heading = format!("Signed in as {}. Your devices:", account.user);
+    let mut list = DeviceList::new("Queqiao", &heading)
+        .map_err(|e| format!("device list: {}", describe(e)))?;
+    list.set_rows(rows(&account.devices, &account.device_id));
+    let (mut sessions, mut passed) = (0u32, true);
+    let mut reconnect_at: Option<Instant> = None;
+    let mut test_picked = false;
+    let test_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match list.next(15) {
+            Some(ListAction::Closed) => break,
+            Some(ListAction::LogOut) => {
+                account.send(ClientMessage::Logout);
+                login.refresh_token = None;
+                login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+                lines.push("logged out".into());
+                break;
+            }
+            Some(ListAction::Connect(id)) => {
+                match account.devices.iter().find(|d| d.id == id).cloned() {
+                    Some(target) if target.controllable => {
+                        list.set_enabled(false);
+                        list.set_status(&format!("Connected to {}.", target.name));
+                        let result = connect_to(account, &target, options, device, context, lines);
+                        list.set_enabled(true);
+                        sessions += 1;
+                        match result {
+                            Ok(ok) => {
+                                passed &= ok;
+                                list.set_status(&format!(
+                                    "The session with {} has ended.",
+                                    target.name
+                                ));
+                            }
+                            Err(error) => {
+                                passed = false;
+                                lines.push(format!("session failed: {error}"));
+                                list.set_status(&format!(
+                                    "Could not connect to {}: {error}",
+                                    target.name
+                                ));
+                            }
+                        }
+                        if options.ui_test.is_some() {
+                            break;
+                        }
+                    }
+                    Some(target) => {
+                        list.set_status(&format!(
+                            "{} is offline: Queqiao is not running there.",
+                            target.name
+                        ));
+                    }
+                    None => {}
+                }
+            }
+            None => {}
+        }
+        if reconnect_at.is_none() {
+            while let Some(event) = account.next_event(Duration::ZERO) {
+                match event {
+                    AccountEvent::Devices(devices) => {
+                        list.set_rows(rows(&devices, &account.device_id))
+                    }
+                    AccountEvent::Closed(reason) => {
+                        list.set_status(&format!(
+                            "Lost the connection to the server ({reason}). Trying again..."
+                        ));
+                        reconnect_at = Some(Instant::now() + Duration::from_secs(2));
+                        break;
+                    }
+                    AccountEvent::Error(message) => list.set_status(&message),
+                    AccountEvent::Signal { .. } => {}
+                }
+            }
+        }
+        if reconnect_at.is_some_and(|at| Instant::now() >= at) {
+            match Account::connect(login, identity, AccountRole::Viewer, None) {
+                Ok(new) => {
+                    *account = new;
+                    list.set_rows(rows(&account.devices, &account.device_id));
+                    list.set_status("Connected to the server again.");
+                    reconnect_at = None;
+                }
+                Err(error) => {
+                    list.set_status(&format!(
+                        "The server cannot be reached ({error}). Trying again..."
+                    ));
+                    reconnect_at = Some(Instant::now() + Duration::from_secs(5));
+                }
+            }
+        }
+        // The UI test: select the device once it is online and press Connect, as a person would.
+        if let Some(key) = &options.ui_test
+            && !test_picked
+        {
+            let online = account
+                .devices
+                .iter()
+                .any(|d| (d.id == *key || d.name.eq_ignore_ascii_case(key)) && d.controllable);
+            if online && list.select(key) {
+                settle(|| list.next(20).is_some());
+                if let Some(folder) = pictures {
+                    list.save_picture(&folder.join("devices.bmp"))
+                        .map_err(|e| format!("device list picture: {e}"))?;
+                }
+                list.press_connect();
+                test_picked = true;
+            } else if Instant::now() > test_deadline {
+                return Err(format!("{key} did not come online within 30 s"));
+            }
+        }
+    }
+    lines.push(format!("{sessions} sessions from the device list"));
+    Ok(passed && (options.ui_test.is_none() || sessions == 1))
+}
+
+/// Lets a form paint for about 200 ms before its picture is taken; `step` handles messages.
+fn settle(mut step: impl FnMut() -> bool) {
+    for _ in 0..10 {
+        let _ = step();
+    }
+}
+
+/// The device list's rows: devices that can be controlled first, then by name.
+fn rows(devices: &[Device], own: &str) -> Vec<DeviceRow> {
+    let mut sorted: Vec<&Device> = devices.iter().collect();
+    sorted.sort_by_key(|d| (!d.controllable, d.name.to_lowercase()));
+    sorted
+        .into_iter()
+        .map(|d| DeviceRow {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            status: format!(
+                "{}{}",
+                if d.controllable { "Online" } else { "Offline" },
+                if d.id == own { " - this PC" } else { "" }
+            ),
+        })
+        .collect()
+}
+
+/// Waits until the device (id or name, any case) can be controlled.
+fn wait_for_device(account: &mut Account, key: &str, timeout: Duration) -> Result<Device, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let found = account
+            .devices
+            .iter()
+            .find(|d| (d.id == key || d.name.eq_ignore_ascii_case(key)) && d.controllable);
+        if let Some(device) = found {
+            return Ok(device.clone());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            let known: Vec<&str> = account.devices.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!(
+                "{key} is not online (devices on the account: {})",
+                known.join(", ")
+            ));
+        }
+        if let Some(AccountEvent::Closed(reason)) =
+            account.next_event(left.min(Duration::from_millis(200)))
+        {
+            return Err(reason);
+        }
+    }
+}
+
+/// A session with the agent on `target`, set up through the server.
+fn connect_to(
+    account: &mut Account,
+    target: &Device,
+    options: &Options,
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    lines: &mut Vec<String>,
+) -> Result<bool, String> {
+    let id = new_session_id();
+    let mut signal = account.session(&target.id, AccountRole::Agent, &id);
+    signal.hello("viewer").map_err(|e| e.to_string())?;
+    session(options, device, context, &mut signal, &target.name, lines)
+}
+
+/// One session: the agent's screen in a window, this window's input to the agent.
+fn session(
+    options: &Options,
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    signal: &mut dyn Signaling,
+    agent: &str,
+    lines: &mut Vec<String>,
+) -> Result<bool, String> {
+    lines.push(format!("agent: {agent}"));
     let width = options.width.unwrap_or(1280);
     let mut window = Window::new(&format!("Queqiao - {agent}"), width, width * 9 / 16)
         .map_err(|e| format!("window: {}", describe(e)))?;
-    let mut presenter = Presenter::new(&device, &context, &window)
+    let mut presenter = Presenter::new(device, context, &window)
         .map_err(|e| format!("presenter: {}", describe(e)))?;
-    let mut decoder = H264Decoder::new(&device, &context, DecoderChoice::from_env())
+    let mut decoder = H264Decoder::new(device, context, DecoderChoice::from_env())
         .map_err(|e| format!("decoder: {}", describe(e)))?;
     lines.push(format!("decoder: {}", decoder.name()));
 
     let started = Instant::now();
-    let peer = Peer::start(Role::Viewer, &mut signal).map_err(|e| e.to_string())?;
+    let peer = Peer::start(Role::Viewer, signal).map_err(|e| e.to_string())?;
     let end = options.seconds.map(|s| started + Duration::from_secs(s));
     let mut stats = Stats::default();
     let (mut connected_after, mut first_picture_after) = (None, None);
@@ -148,7 +600,16 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         if end.is_some_and(|end| Instant::now() > end) {
             break;
         }
-        if !window.pump() {
+        let pump_start = Instant::now();
+        let open = window.pump();
+        stats.pump_ms.push(pump_start.elapsed().as_secs_f64() * 1e3);
+        for slow in window.take_slow_messages() {
+            lines.push(format!(
+                "slow at {} ms: {slow}",
+                started.elapsed().as_millis()
+            ));
+        }
+        if !open {
             closed = Some("the window was closed".to_string());
             break;
         }
@@ -213,6 +674,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
                     contiguous,
                     received,
                 } => {
+                    stats.pickup_ms.push(received.elapsed().as_secs_f64() * 1e3);
                     stats.received += 1;
                     stats.lost += u32::from(!contiguous);
                     stats.bytes += data.len();
@@ -226,9 +688,11 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
                     for picture in decoded.drain(..) {
                         stats.decoded += 1;
                         picture_size = (picture.width, picture.height);
+                        let show_start = Instant::now();
                         presenter
                             .show(&picture.texture, picture_size, &window)
                             .map_err(|e| format!("show: {}", describe(e)))?;
+                        stats.show_ms.push(show_start.elapsed().as_secs_f64() * 1e3);
                         stats.shown += 1;
                         first_picture_after.get_or_insert(started.elapsed());
                         let viewer_ms = received.elapsed().as_secs_f64() * 1e3;
@@ -247,6 +711,10 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
                         agent_ms,
                     }) => {
                         stats.agent_ms.insert(time_90khz, f64::from(agent_ms));
+                    }
+                    Some(Message::Leave) => {
+                        closed = Some("the agent ended the session".to_string());
+                        break 'session;
                     }
                     _ => {}
                 },
@@ -267,6 +735,10 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             down: false,
         };
         peer.send_data(Message::Input(up).encode());
+    }
+    // Tell the agent at once, unless it ended the session itself.
+    if closed.as_deref() != Some("the agent ended the session") {
+        peer.send_data(Message::Leave.encode());
     }
     std::thread::sleep(Duration::from_millis(100));
     drop(peer);
@@ -316,6 +788,17 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         summary(&mut total)
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
+    for (stage, values) in [
+        ("window messages", &mut stats.pump_ms),
+        ("frame arrival -> picked up", &mut stats.pickup_ms),
+        ("present", &mut stats.show_ms),
+    ] {
+        let slow = values.iter().filter(|&&v| v > 50.0).count();
+        lines.push(format!(
+            "loop, {stage}, ms: {} ({slow} over 50 ms)",
+            summary(values)
+        ));
+    }
     lines.push(format!(
         "ended: {}",
         closed.unwrap_or_else(|| "time is up".into())
