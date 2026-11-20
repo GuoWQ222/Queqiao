@@ -35,6 +35,7 @@ use queqiao_input::{
 use queqiao_transport::{
     Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, check_hello, hello_body,
 };
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
@@ -81,6 +82,8 @@ struct Options {
     sound_device: Option<String>,
     /// Play a test tone into the sound device during the session (tests: use a virtual device).
     sound_test: bool,
+    /// The privacy screen as a small square of a test colour, checked against what capture sees (tests).
+    privacy_test: bool,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -165,6 +168,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--dry-run-commands" => options.dry_run_commands = true,
             "--sound-device" => options.sound_device = Some(args.next()?),
             "--sound-test" => options.sound_test = true,
+            "--privacy-test" => options.privacy_test = true,
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -453,6 +457,107 @@ fn ask_consent(ui: &ui::Ui, viewer: &str, answer: Option<bool>) -> Result<bool, 
     }
 }
 
+/// The privacy test's square: 320 x 200 pixels, 100 pixels in from the captured monitor's top left corner.
+const PRIVACY_TEST_SIZE: (i32, i32) = (320, 200);
+const PRIVACY_TEST_OFFSET: i32 = 100;
+/// Magenta (0x00BBGGRR), rare on a desktop.
+const PRIVACY_TEST_COLOR: u32 = 0x00FF_00FF;
+
+fn privacy_test_area(left: i32, top: i32) -> RECT {
+    RECT {
+        left: left + PRIVACY_TEST_OFFSET,
+        top: top + PRIVACY_TEST_OFFSET,
+        right: left + PRIVACY_TEST_OFFSET + PRIVACY_TEST_SIZE.0,
+        bottom: top + PRIVACY_TEST_OFFSET + PRIVACY_TEST_SIZE.1,
+    }
+}
+
+/// Pixels of the test colour inside the test square of a captured picture (monitor coordinates).
+fn privacy_test_pixels(image: &BgraImage) -> usize {
+    let (width, height) = (image.width as usize, image.height as usize);
+    let start = PRIVACY_TEST_OFFSET as usize;
+    let (right, bottom) = (
+        (start + PRIVACY_TEST_SIZE.0 as usize).min(width),
+        (start + PRIVACY_TEST_SIZE.1 as usize).min(height),
+    );
+    (start..bottom)
+        .flat_map(|y| (start..right).map(move |x| (y * width + x) * 4))
+        .filter(|&at| image.pixels[at..at + 3] == [0xFF, 0x00, 0xFF])
+        .count()
+}
+
+/// The privacy test (the square is up): capture must not see it; with the exclusion turned off it must, so the
+/// check itself is shown to work. Through GDI (a screenshot now) and desktop duplication (frames as they come).
+fn privacy_check(duplicator: &mut Duplicator, ui: &ui::Ui) -> String {
+    let look = |duplicator: &mut Duplicator| {
+        std::thread::sleep(Duration::from_millis(400));
+        let snapshot = duplicator.snapshot_image().ok();
+        let gdi = snapshot.as_ref().map_or(usize::MAX, privacy_test_pixels);
+        let other = snapshot.as_ref().map(privacy_other_pixels);
+        let (mut frames, mut most) = (0, 0);
+        let until = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < until {
+            if let Ok(Some(frame)) = duplicator.acquire(50)
+                && let Ok(image) = duplicator.copy_to_cpu(&frame)
+            {
+                frames += 1;
+                most = most.max(privacy_test_pixels(&image));
+            }
+        }
+        (gdi, frames, most, other)
+    };
+    let hidden = look(duplicator);
+    let shown = match ui.set_privacy_excluded(false) {
+        Ok(()) => look(duplicator),
+        Err(error) => return format!("privacy test: FAIL (turning the exclusion off: {error})"),
+    };
+    let _ = ui.set_privacy_excluded(true);
+    let square = (PRIVACY_TEST_SIZE.0 * PRIVACY_TEST_SIZE.1) as usize;
+    // All but a few pixels (the square is plain; a pointer or a window above it may cover a little).
+    let seen = |pixels: usize| pixels * 100 >= square * 99;
+    let passed = hidden.0 == 0 && hidden.2 == 0 && seen(shown.0) && (shown.1 == 0 || seen(shown.2));
+    format!(
+        "privacy test: {} (test colour pixels of {square}: hidden from capture: GDI {}, duplication {} in {} frames; \
+         not hidden: GDI {}, duplication {} in {} frames; other colours there: {})",
+        if passed { "PASS" } else { "FAIL" },
+        hidden.0,
+        hidden.2,
+        hidden.1,
+        shown.0,
+        shown.2,
+        shown.1,
+        shown.3.flatten().unwrap_or_else(|| "none".into())
+    )
+}
+
+/// Where in the test square the picture is not the test colour, and what is there instead (the first such
+/// pixel): "x a..b, y c..d, first [B, G, R] at (x, y)" in square coordinates.
+fn privacy_other_pixels(image: &BgraImage) -> Option<String> {
+    let width = image.width as usize;
+    let start = PRIVACY_TEST_OFFSET as usize;
+    let (mut x_range, mut y_range) = ((usize::MAX, 0), (usize::MAX, 0));
+    let mut first: Option<([u8; 3], usize, usize)> = None;
+    for y in 0..PRIVACY_TEST_SIZE.1 as usize {
+        for x in 0..PRIVACY_TEST_SIZE.0 as usize {
+            let at = ((start + y) * width + start + x) * 4;
+            let Some(pixel) = image.pixels.get(at..at + 3) else {
+                continue;
+            };
+            if pixel != [0xFF, 0x00, 0xFF] {
+                x_range = (x_range.0.min(x), x_range.1.max(x));
+                y_range = (y_range.0.min(y), y_range.1.max(y));
+                first.get_or_insert(([pixel[0], pixel[1], pixel[2]], x, y));
+            }
+        }
+    }
+    first.map(|(colour, x, y)| {
+        format!(
+            "x {}..{}, y {}..{}, first {colour:?} at ({x}, {y})",
+            x_range.0, x_range.1, y_range.0, y_range.1
+        )
+    })
+}
+
 /// Starts capturing this PC's sound for the session (None, with a report line, when it cannot).
 fn start_sound(peer: &Peer, options: &Options, lines: &mut Vec<String>) -> Option<Capture> {
     match peer.audio_sender() {
@@ -503,7 +608,9 @@ fn run_command(command: Command, dry_run: bool) -> String {
             Err(error) => format!("restarting failed: {error}"),
         },
         // Handled by the session (they change its state).
-        Command::SoundOn | Command::SoundOff => "sound changed".into(),
+        Command::SoundOn | Command::SoundOff | Command::PrivacyOn | Command::PrivacyOff => {
+            "changed".into()
+        }
     }
 }
 
@@ -643,6 +750,7 @@ fn session(
         None
     };
     let mut sound_report = Vec::new();
+    let mut privacy_check_due = false;
     // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
     // never above the size-based bitrate the encoder was opened with.
     let max_bitrate = config.bitrate;
@@ -751,6 +859,38 @@ fn session(
                         closed = Some("the viewer left".to_string());
                         break 'session;
                     }
+                    Some(Message::Command(Command::PrivacyOn)) => {
+                        let look = if options.privacy_test {
+                            ui::PrivacyLook {
+                                area: Some(privacy_test_area(info.left, info.top)),
+                                color: PRIVACY_TEST_COLOR,
+                            }
+                        } else {
+                            ui::PrivacyLook {
+                                area: None,
+                                color: 0x0010_1010,
+                            }
+                        };
+                        let notice = match ui.set_privacy(Some(look)) {
+                            Ok(banner_above) => {
+                                privacy_check_due = options.privacy_test;
+                                lines.push(format!(
+                                    "privacy: the session banner is above the dark screen: {}",
+                                    if banner_above { "yes" } else { "no" }
+                                ));
+                                "that PC's screen is dark: only you see it".to_string()
+                            }
+                            Err(error) => format!("that PC's screen could not be hidden: {error}"),
+                        };
+                        lines.push(format!("command from the viewer: PrivacyOn: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::PrivacyOff)) => {
+                        let _ = ui.set_privacy(None);
+                        let notice = "that PC's screen is shown again".to_string();
+                        lines.push(format!("command from the viewer: PrivacyOff: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
                     Some(Message::Command(Command::SoundOff)) => {
                         if let Some(capture) = sound.take() {
                             sound_report.push(sound_line(&capture));
@@ -817,6 +957,10 @@ fn session(
             peer.send_file_data(message);
         }
         report_files(transfers.outcomes(), lines);
+        if privacy_check_due {
+            privacy_check_due = false;
+            lines.push(privacy_check(&mut duplicator, ui));
+        }
         if let Some(capture) = &sound {
             for note in capture.notes() {
                 lines.push(format!("{} ms: {note}", started.elapsed().as_millis()));

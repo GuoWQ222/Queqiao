@@ -198,6 +198,45 @@ impl Presence {
     }
 
     /// The banner's and the prompt's windows, for pictures and checks.
+    /// Puts the session banner above other always-on-top windows (the privacy screen), so the person at
+    /// this PC can always see the session and end it.
+    pub fn raise_banner(&self) {
+        if let Some(banner) = self.banner_window() {
+            let _ = unsafe {
+                SetWindowPos(
+                    banner,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+            };
+        }
+    }
+
+    /// Whether the session banner is above `other` in the window order (true without a banner).
+    pub fn banner_above(&self, other: HWND) -> bool {
+        let Some(banner) = self.banner_window() else {
+            return true;
+        };
+        let mut current = banner;
+        // Walk down from the banner; finding `other` means the banner is above it.
+        for _ in 0..100_000 {
+            match unsafe { GetWindow(current, GW_HWNDNEXT) } {
+                Ok(next) if !next.is_invalid() => {
+                    if next == other {
+                        return true;
+                    }
+                    current = next;
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
     pub fn banner_window(&self) -> Option<HWND> {
         self.banner.as_ref().map(|form| form.hwnd)
     }

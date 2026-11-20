@@ -35,6 +35,7 @@ const MENU_LOCK: u16 = 0x1010;
 const MENU_RESTART: u16 = 0x1020;
 const MENU_SOUND: u16 = 0x1030;
 const MENU_FULL_SCREEN: u16 = 0x1040;
+const MENU_PRIVACY: u16 = 0x1050;
 /// Scancodes of the full-screen key, Ctrl+Alt+Enter (handled here, not sent): Enter, Ctrl, Alt.
 const KEY_ENTER: u16 = 0x1C;
 const KEY_CTRL: u16 = 0x1D;
@@ -102,6 +103,8 @@ struct Options {
     mute: bool,
     /// Start in full screen.
     full_screen: bool,
+    /// Darken that PC's screen from the start.
+    privacy: bool,
 }
 
 impl Options {
@@ -275,6 +278,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--sound-test" => options.sound_test = true,
             "--mute" => options.mute = true,
             "--full-screen" => options.full_screen = true,
+            "--privacy" => options.privacy = true,
             "--command" => options.commands.push(match args.next()?.as_str() {
                 "lock" => Command::Lock,
                 "restart" => Command::Restart,
@@ -747,8 +751,11 @@ fn session(
         (MENU_LOCK, "Lock that PC"),
         (MENU_RESTART, "Restart that PC..."),
         (MENU_SOUND, "Play that PC's sound"),
+        (MENU_PRIVACY, "Darken that PC's screen"),
         (MENU_FULL_SCREEN, "Full screen (Ctrl+Alt+Enter)"),
     ]);
+    let mut privacy_on = options.privacy;
+    window.check_menu_item(MENU_PRIVACY, privacy_on);
     window.set_full_screen(options.full_screen);
     window.check_menu_item(MENU_SOUND, sound_on);
     let mut closed = None;
@@ -783,6 +790,11 @@ fn session(
                 let command = match id {
                     MENU_CTRL_ALT_DEL => Some(Command::CtrlAltDel),
                     MENU_LOCK => Some(Command::Lock),
+                    MENU_PRIVACY => {
+                        privacy_on = !privacy_on;
+                        window.check_menu_item(MENU_PRIVACY, privacy_on);
+                        Some(if privacy_on { Command::PrivacyOn } else { Command::PrivacyOff })
+                    }
                     MENU_FULL_SCREEN => {
                         let on = !window.is_full_screen();
                         window.set_full_screen(on);
@@ -912,6 +924,9 @@ fn session(
                     channel_open = true;
                     if !sound_on {
                         peer.send_data(Message::Command(Command::SoundOff).encode());
+                    }
+                    if privacy_on {
+                        peer.send_data(Message::Command(Command::PrivacyOn).encode());
                     }
                     for command in &options.commands {
                         peer.send_data(Message::Command(*command).encode());

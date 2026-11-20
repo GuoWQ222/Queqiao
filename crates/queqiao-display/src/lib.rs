@@ -5,6 +5,7 @@
 mod forms;
 mod presence;
 mod present;
+mod privacy;
 mod window;
 mod yuv;
 
@@ -14,5 +15,6 @@ pub use forms::{
 };
 pub use presence::{Presence, PresenceEvent};
 pub use present::{Presenter, fit};
+pub use privacy::PrivacyScreen;
 pub use window::{Window, WindowEvent};
 pub use yuv::nv12_to_bgra;

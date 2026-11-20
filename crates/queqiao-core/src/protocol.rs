@@ -79,6 +79,9 @@ pub enum Command {
     /// Send this PC's sound (the default) or stop sending it.
     SoundOn,
     SoundOff,
+    /// Darken that PC's monitors while controlled (the person there sees a dark screen; capture does not).
+    PrivacyOn,
+    PrivacyOff,
 }
 
 /// Clipboard text larger than this (UTF-8 bytes) is not sent in one message.
@@ -152,6 +155,8 @@ impl Message {
                     Command::Restart => 3,
                     Command::SoundOn => 4,
                     Command::SoundOff => 5,
+                    Command::PrivacyOn => 6,
+                    Command::PrivacyOff => 7,
                 },
             ]),
             Message::Notice(ref text) => {
@@ -217,6 +222,8 @@ impl Message {
                 3 => Command::Restart,
                 4 => Command::SoundOn,
                 5 => Command::SoundOff,
+                6 => Command::PrivacyOn,
+                7 => Command::PrivacyOff,
                 _ => return None,
             }),
             NOTICE => Message::Notice(String::from_utf8(rest.to_vec()).ok()?),
@@ -262,6 +269,8 @@ mod tests {
             Message::Command(Command::CtrlAltDel),
             Message::Command(Command::SoundOn),
             Message::Command(Command::SoundOff),
+            Message::Command(Command::PrivacyOn),
+            Message::Command(Command::PrivacyOff),
             Message::Notice("the PC is locked".into()),
         ];
         for message in messages {

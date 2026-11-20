@@ -11,8 +11,9 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use queqiao_display::{Presence, PresenceEvent};
+use queqiao_display::{Presence, PresenceEvent, PrivacyScreen};
 use serde::{Deserialize, Serialize};
+use windows::Win32::Foundation::RECT;
 
 enum Command {
     SessionStarted(String, Sender<Result<(), String>>),
@@ -21,7 +22,21 @@ enum Command {
     /// For tests: the same path as a click.
     PressConsent(bool),
     PressEnd,
+    /// The privacy screen on (with how it looks) or off.
+    Privacy(Option<PrivacyLook>, Sender<Result<bool, String>>),
+    /// Tests: the privacy screen hidden from capture or not.
+    PrivacyExcluded(bool, Sender<Result<(), String>>),
 }
+
+/// The privacy screen over all monitors (`area` None), or for tests a square of `color` (0x00BBGGRR).
+pub struct PrivacyLook {
+    pub area: Option<RECT>,
+    pub color: u32,
+}
+
+/// What the person at this PC reads on the privacy screen.
+const PRIVACY_TEXT: &str =
+    "This PC is being used remotely with Queqiao. Its screen stays dark until the session ends.";
 
 pub struct Ui {
     commands: Sender<Command>,
@@ -58,6 +73,24 @@ impl Ui {
             thread: Some(thread),
             tray_shown,
         })
+    }
+
+    /// Darkens the monitors (Some) or shows them again (None); an error if the screen cannot be hidden from
+    /// capture here. Ok(true) when the session banner (with its End button) is above the dark screen.
+    pub fn set_privacy(&self, look: Option<PrivacyLook>) -> Result<bool, String> {
+        let (reply, answer) = mpsc::channel();
+        self.send(Command::Privacy(look, reply));
+        answer
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "the UI thread did not answer".to_string())?
+    }
+
+    pub fn set_privacy_excluded(&self, excluded: bool) -> Result<(), String> {
+        let (reply, answer) = mpsc::channel();
+        self.send(Command::PrivacyExcluded(excluded, reply));
+        answer
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "the UI thread did not answer".to_string())?
     }
 
     /// Shows the banner for a session with `viewer`; an error if it cannot be shown.
@@ -137,6 +170,7 @@ fn run(
     let _ = ready.send(Ok(presence.tray_shown()));
     // (when, file name) of a picture to take once the window has drawn itself.
     let mut picture: Option<(Instant, &str)> = None;
+    let mut privacy: Option<PrivacyScreen> = None;
     loop {
         loop {
             match commands.try_recv() {
@@ -144,7 +178,46 @@ fn run(
                     let _ = reply.send(presence.session_started(&viewer).map_err(|e| e.message()));
                     picture = Some((Instant::now() + Duration::from_millis(400), "banner.bmp"));
                 }
-                Ok(Command::SessionEnded) => presence.session_ended(),
+                // The screen always comes back when a session ends, however it ends.
+                Ok(Command::SessionEnded) => {
+                    privacy = None;
+                    presence.session_ended();
+                }
+                Ok(Command::Privacy(look, reply)) => {
+                    privacy = None;
+                    let result = match look {
+                        None => Ok(true),
+                        // The test square is plain, so all of it can be looked for.
+                        Some(look) => match PrivacyScreen::show(
+                            if look.area.is_some() {
+                                ""
+                            } else {
+                                PRIVACY_TEXT
+                            },
+                            look.area,
+                            look.color,
+                        ) {
+                            Ok(screen) => {
+                                presence.raise_banner();
+                                let banner_above = presence.banner_above(screen.hwnd());
+                                privacy = Some(screen);
+                                Ok(banner_above)
+                            }
+                            Err(error) => Err(format!(
+                                "{} (hiding a window from capture needs Windows 10 version 2004 or later)",
+                                error.message()
+                            )),
+                        },
+                    };
+                    let _ = reply.send(result);
+                }
+                Ok(Command::PrivacyExcluded(excluded, reply)) => {
+                    let result = match &privacy {
+                        Some(screen) => screen.set_excluded(excluded).map_err(|e| e.message()),
+                        None => Err("no privacy screen".into()),
+                    };
+                    let _ = reply.send(result);
+                }
                 Ok(Command::Ask(viewer, seconds, reply)) => {
                     let _ = reply.send(
                         presence

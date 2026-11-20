@@ -100,7 +100,7 @@ try {
     $runs = @(
         @('direct', '', "--clipboard-test --dry-run-commands --send-file `"$fileToViewer`"", 'test text from the other side received: yes', 'test text from the other side received: yes', $true),
         @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
-        @('allowed', '', "--ask --answer allow --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
+        @('allowed', '', "--ask --answer allow --privacy-test --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
         @('declined', '', '--ask --answer deny --seconds 45', 'the person at this PC declined', 'the person at that PC declined', $false),
         @('ended-here', '', '--end-after 6', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true)
     )
@@ -114,6 +114,8 @@ try {
         if ($extra -like '*--dry-run-commands*') { $viewerArgs += ' --command ctrl-alt-del --command lock --command restart' }
         # Full screen: the drawing area must cover the monitor (the input test maps to it too).
         if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen' }
+        # Privacy screen: the agent shows a test square instead of darkening the monitors.
+        if ($extra -like '*--privacy-test*') { $viewerArgs += ' --privacy' }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
         if ($soundTest) {
             $agentArgs += " --sound-device `"$AgentSoundDevice`""
@@ -144,6 +146,12 @@ try {
             }
             if ($label -eq 'ended-here' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^window: full screen, drawing area (\d+x\d+), monitor \1$' })) {
                 $failed += "$label viewer (expected the full-screen window to cover the monitor)"
+            }
+            if ($extra -like '*--privacy-test*') {
+                $wanted = if ($program -eq 'agent') { @('^privacy test: PASS', '^privacy: the session banner is above the dark screen: yes') } else { @("^notice from that PC: that PC's screen is dark") }
+                foreach ($pattern in $wanted) {
+                    if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "$label $program (expected '$pattern')" }
+                }
             }
             # The window title shows the network status (the relay session must say so).
             if ($program -eq 'viewer' -and $mustPass) {

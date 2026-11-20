@@ -32,7 +32,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | True colour (4:4:4) for sharp text; HDR | planned |
 | Several monitors: switch, or each in its own window (drag a screen tab out) | planned (M6) |
 | Virtual displays: create / remove, automatic when no monitor is attached, custom high resolution and refresh ("super screen") | planned: needs an IddCx display driver (Microsoft's MS-PL sample), which must be signed for release |
-| Privacy screen: turn the controlled PC's monitor off or cover it with an image while controlled | planned |
+| Privacy screen: the controlled PC's monitors dark while controlled, the controlling side still sees the desktop | done (2026-11-21, "Darken that PC's screen" in the session window menu; needs Windows 10 2004 or later there; the session banner with End stays above it) |
+| Block the controlled PC's own mouse and keyboard while the screen is dark | planned (M5: needs the service) |
 | Window: full screen / window, zoom, scaling, small always-on-top window with opacity, several sessions at once | partly: window, full screen (menu or Ctrl+Alt+Enter, 2026-11-21); rest planned (UI) |
 
 ## Input
