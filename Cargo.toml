@@ -10,4 +10,5 @@ publish = false
 
 [workspace.dependencies]
 queqiao-core = { path = "crates/queqiao-core" }
+queqiao-capture = { path = "crates/queqiao-capture" }
 windows = "0.62"

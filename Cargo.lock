@@ -26,6 +26,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "queqiao-codec"
+version = "0.1.0"
+dependencies = [
+ "queqiao-capture",
+ "windows",
+]
+
+[[package]]
 name = "queqiao-core"
 version = "0.1.0"
 
