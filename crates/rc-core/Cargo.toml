@@ -1,0 +1,6 @@
+[package]
+name = "rc-core"
+description = "Shared code: protocol, identity, transport, capture, codec, input"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

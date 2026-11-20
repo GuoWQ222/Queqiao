@@ -1,0 +1,9 @@
+[package]
+name = "rc-service"
+description = "Windows service: starts and guards rc-agent in the console session"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rc-core.workspace = true
