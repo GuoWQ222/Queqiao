@@ -33,6 +33,8 @@ use queqiao_core::protocol::{Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, M
 const MENU_CTRL_ALT_DEL: u16 = 0x1000;
 const MENU_LOCK: u16 = 0x1010;
 const MENU_RESTART: u16 = 0x1020;
+const MENU_SOUND: u16 = 0x1030;
+use queqiao_audio::{Player, TEST_TONE_HZ};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::Clipboard;
 
@@ -87,6 +89,12 @@ struct Options {
     send_files: Vec<PathBuf>,
     /// Commands to send once the session's control channel is open (tests; people use the window menu).
     commands: Vec<Command>,
+    /// Play the other PC's sound on this render device (part of its name) instead of the default one.
+    sound_device: Option<String>,
+    /// Check the received sound for the agent's test tone and report it.
+    sound_test: bool,
+    /// Start with the other PC's sound off.
+    mute: bool,
 }
 
 impl Options {
@@ -256,6 +264,9 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--input-test" => options.input_test = true,
             "--clipboard-test" => options.clipboard_test = true,
             "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
+            "--sound-device" => options.sound_device = Some(args.next()?),
+            "--sound-test" => options.sound_test = true,
+            "--mute" => options.mute = true,
             "--command" => options.commands.push(match args.next()?.as_str() {
                 "lock" => Command::Lock,
                 "restart" => Command::Restart,
@@ -719,6 +730,17 @@ fn session(
         let _ = transfers.send(path);
     }
     let mut status = TitleStatus::new(agent);
+    // The other PC's sound; "Play that PC's sound" in the window menu turns it off there (no data then).
+    let player = Player::start(options.sound_device.clone(), options.sound_test);
+    let mut sound_on = !options.mute;
+    player.set_muted(options.mute);
+    window.add_menu_items(&[
+        (MENU_CTRL_ALT_DEL, "Send Ctrl+Alt+Del"),
+        (MENU_LOCK, "Lock that PC"),
+        (MENU_RESTART, "Restart that PC..."),
+        (MENU_SOUND, "Play that PC's sound"),
+    ]);
+    window.check_menu_item(MENU_SOUND, sound_on);
     let mut closed = None;
 
     'session: loop {
@@ -751,6 +773,12 @@ fn session(
                 let command = match id {
                     MENU_CTRL_ALT_DEL => Some(Command::CtrlAltDel),
                     MENU_LOCK => Some(Command::Lock),
+                    MENU_SOUND => {
+                        sound_on = !sound_on;
+                        player.set_muted(!sound_on);
+                        window.check_menu_item(MENU_SOUND, sound_on);
+                        Some(if sound_on { Command::SoundOn } else { Command::SoundOff })
+                    }
                     MENU_RESTART
                         if window.confirm(
                             "Queqiao",
@@ -854,6 +882,9 @@ fn session(
                 PeerEvent::Connected => connected_after = Some(started.elapsed()),
                 PeerEvent::ChannelOpen => {
                     channel_open = true;
+                    if !sound_on {
+                        peer.send_data(Message::Command(Command::SoundOff).encode());
+                    }
                     for command in &options.commands {
                         peer.send_data(Message::Command(*command).encode());
                         lines.push(format!("sent command: {command:?}"));
@@ -941,6 +972,7 @@ fn session(
                     lines.push(format!("{} ms: {note}", started.elapsed().as_millis()))
                 }
                 PeerEvent::Bitrate(_) => {}
+                PeerEvent::Audio { data, time_48khz } => player.push(data, time_48khz),
                 PeerEvent::Closed(reason) => {
                     closed = Some(reason);
                     break 'session;
@@ -1011,6 +1043,31 @@ fn session(
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
     lines.push(format!("window title: {}", status.title));
+    lines.extend(player.notes());
+    let sound = player.stats();
+    lines.push(format!(
+        "sound: to {}: {} packets ({:.0} kB) received, {} frames played, {} concealed, {} dropped",
+        if sound.device.is_empty() {
+            "no device"
+        } else {
+            &sound.device
+        },
+        sound.received,
+        sound.bytes as f64 / 1e3,
+        sound.played,
+        sound.concealed,
+        sound.dropped
+    ));
+    if options.sound_test {
+        // At least a second of sound, and nearly all of it the tone.
+        let passed = sound.loud_frames >= 100 && sound.tone_frames * 10 >= sound.loud_frames * 9;
+        lines.push(format!(
+            "sound test: {} (the {TEST_TONE_HZ} Hz tone in {} of {} frames with sound)",
+            if passed { "PASS" } else { "FAIL" },
+            sound.tone_frames,
+            sound.loud_frames
+        ));
+    }
     if transfers.busy() {
         lines.push("files: a transfer was cut off when the session ended".into());
     }

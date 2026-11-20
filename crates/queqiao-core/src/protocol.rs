@@ -76,6 +76,9 @@ pub enum Command {
     Lock,
     /// Restart the PC.
     Restart,
+    /// Send this PC's sound (the default) or stop sending it.
+    SoundOn,
+    SoundOff,
 }
 
 /// Clipboard text larger than this (UTF-8 bytes) is not sent in one message.
@@ -147,6 +150,8 @@ impl Message {
                     Command::CtrlAltDel => 1,
                     Command::Lock => 2,
                     Command::Restart => 3,
+                    Command::SoundOn => 4,
+                    Command::SoundOff => 5,
                 },
             ]),
             Message::Notice(ref text) => {
@@ -210,6 +215,8 @@ impl Message {
                 1 => Command::CtrlAltDel,
                 2 => Command::Lock,
                 3 => Command::Restart,
+                4 => Command::SoundOn,
+                5 => Command::SoundOff,
                 _ => return None,
             }),
             NOTICE => Message::Notice(String::from_utf8(rest.to_vec()).ok()?),
@@ -253,6 +260,8 @@ mod tests {
             Message::Command(Command::Lock),
             Message::Command(Command::Restart),
             Message::Command(Command::CtrlAltDel),
+            Message::Command(Command::SoundOn),
+            Message::Command(Command::SoundOff),
             Message::Notice("the PC is locked".into()),
         ];
         for message in messages {

@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use queqiao_account::{Account, AccountEvent, DeviceIdentity, Role as AccountRole, SavedLogin};
+use queqiao_audio::{Capture, TEST_TONE_HZ, Tone};
 use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
 use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
@@ -76,6 +77,10 @@ struct Options {
     send_files: Vec<PathBuf>,
     /// Report the viewer's commands (lock, restart) instead of carrying them out (tests).
     dry_run_commands: bool,
+    /// Capture the sound of this render device (part of its name) instead of the default one.
+    sound_device: Option<String>,
+    /// Play a test tone into the sound device during the session (tests: use a virtual device).
+    sound_test: bool,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -158,6 +163,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--clipboard-test" => options.clipboard_test = true,
             "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
             "--dry-run-commands" => options.dry_run_commands = true,
+            "--sound-device" => options.sound_device = Some(args.next()?),
+            "--sound-test" => options.sound_test = true,
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -446,6 +453,35 @@ fn ask_consent(ui: &ui::Ui, viewer: &str, answer: Option<bool>) -> Result<bool, 
     }
 }
 
+/// Starts capturing this PC's sound for the session (None, with a report line, when it cannot).
+fn start_sound(peer: &Peer, options: &Options, lines: &mut Vec<String>) -> Option<Capture> {
+    match peer.audio_sender() {
+        Ok(sender) => Some(Capture::start(
+            options.sound_device.clone(),
+            Box::new(move |packet, time| sender.send(packet, time)),
+        )),
+        Err(error) => {
+            lines.push(format!("sound: not sent ({error})"));
+            None
+        }
+    }
+}
+
+fn sound_line(capture: &Capture) -> String {
+    let stats = capture.stats();
+    format!(
+        "sound: from {}: {} packets ({:.0} kB) sent, {} silent frames left out",
+        if stats.device.is_empty() {
+            "no device"
+        } else {
+            &stats.device
+        },
+        stats.packets,
+        stats.bytes as f64 / 1e3,
+        stats.silent
+    )
+}
+
 /// Carries out a command from the viewer; returns what to tell the person controlling.
 fn run_command(command: Command, dry_run: bool) -> String {
     match command {
@@ -466,6 +502,8 @@ fn run_command(command: Command, dry_run: bool) -> String {
             Ok(()) => format!("the PC restarts in {} s", power::RESTART_DELAY),
             Err(error) => format!("restarting failed: {error}"),
         },
+        // Handled by the session (they change its state).
+        Command::SoundOn | Command::SoundOff => "sound changed".into(),
     }
 }
 
@@ -595,6 +633,16 @@ fn session(
     let started = Instant::now();
     let peer = Peer::start(Role::Agent, signal).map_err(|e| e.to_string())?;
     lines.extend(peer.candidates().iter().cloned());
+    // This PC's sound, captured and sent from its own thread (the viewer can turn it off).
+    let mut sound = start_sound(&peer, options, lines);
+    let _tone = if options.sound_test {
+        Tone::start(options.sound_device.clone(), TEST_TONE_HZ)
+            .map_err(|error| lines.push(format!("sound test: no tone ({error})")))
+            .ok()
+    } else {
+        None
+    };
+    let mut sound_report = Vec::new();
     // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
     // never above the size-based bitrate the encoder was opened with.
     let max_bitrate = config.bitrate;
@@ -703,6 +751,18 @@ fn session(
                         closed = Some("the viewer left".to_string());
                         break 'session;
                     }
+                    Some(Message::Command(Command::SoundOff)) => {
+                        if let Some(capture) = sound.take() {
+                            sound_report.push(sound_line(&capture));
+                        }
+                        lines.push("the viewer turned this PC's sound off".into());
+                    }
+                    Some(Message::Command(Command::SoundOn)) => {
+                        if sound.is_none() {
+                            sound = start_sound(&peer, options, lines);
+                        }
+                        lines.push("the viewer turned this PC's sound on".into());
+                    }
                     Some(Message::Command(command)) => {
                         let notice = run_command(command, options.dry_run_commands);
                         lines.push(format!("command from the viewer: {command:?}: {notice}"));
@@ -749,7 +809,7 @@ fn session(
                         peer.send_file_data(reply);
                     }
                 }
-                PeerEvent::Video { .. } => {}
+                PeerEvent::Video { .. } | PeerEvent::Audio { .. } => {}
             }
         }
 
@@ -757,6 +817,11 @@ fn session(
             peer.send_file_data(message);
         }
         report_files(transfers.outcomes(), lines);
+        if let Some(capture) = &sound {
+            for note in capture.notes() {
+                lines.push(format!("{} ms: {note}", started.elapsed().as_millis()));
+            }
+        }
         if let Some(opened) = channel_open_at {
             if let Some(clipboard) = &clipboard
                 && let Some(text) = clipboard.changed()
@@ -863,6 +928,8 @@ fn session(
         summary(&mut stats.agent_ms)
     ));
     lines.push(clipboard_stats.line());
+    sound_report.extend(sound.as_ref().map(sound_line));
+    lines.extend(sound_report);
     if transfers.busy() {
         lines.push("files: a transfer was cut off when the session ended".into());
     }

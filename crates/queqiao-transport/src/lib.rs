@@ -7,7 +7,7 @@ mod peer;
 mod signal;
 mod turn;
 
-pub use peer::{FILES_IN_FLIGHT, Peer, PeerEvent, Role, START_BITRATE, tune};
+pub use peer::{AudioSender, FILES_IN_FLIGHT, Peer, PeerEvent, Role, START_BITRATE, tune};
 pub use signal::{Signal, Signaling, check_hello, hello_body};
 pub use turn::{IceServers, TurnServer};
 

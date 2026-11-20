@@ -50,7 +50,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 
 | Feature | Status |
 |---|---|
-| The controlled PC's sound on the controlling PC; mute its speakers during the session, restore after | planned (M6) |
+| The controlled PC's sound on the controlling PC (Opus, 10 ms packets, follows the default device); turn it off from the session window menu | done (2026-11-21) |
+| Mute the controlled PC's speakers during the session, restore after | planned |
 | The controlling PC's microphone on the controlled PC (virtual microphone) | planned (M6; a virtual audio device needs a driver) |
 
 ## Files and clipboard

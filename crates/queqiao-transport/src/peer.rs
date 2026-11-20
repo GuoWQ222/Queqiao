@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::channel::ChannelId;
-use str0m::media::{Direction, KeyframeRequestKind, MediaKind, MediaTime, Mid};
+use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
@@ -65,11 +65,17 @@ pub enum PeerEvent {
     Note(String),
     /// The estimated bandwidth towards the other side, bits per second (the sender adapts its bitrate).
     Bitrate(u64),
+    /// One Opus packet of the controlled PC's sound; `time_48khz` counts samples at 48 kHz.
+    Audio {
+        data: Arc<[u8]>,
+        time_48khz: u64,
+    },
     Closed(String),
 }
 
 enum Command {
     Video { data: Vec<u8>, time_90khz: u64 },
+    Audio { data: Vec<u8>, time_48khz: u64 },
     Data(Vec<u8>),
     FileData(Vec<u8>),
     RequestKeyframe,
@@ -116,7 +122,10 @@ impl Peer {
         let relay_only = queqiao_core::forced("network").as_deref() == Some("relay");
         let gathered = gather(&socket, local, &servers, relay_only)?;
         let mut rtc = tune(
-            RtcConfig::new().clear_codecs().enable_h264(true),
+            RtcConfig::new()
+                .clear_codecs()
+                .enable_h264(true)
+                .enable_opus(true, false),
             Bitrate::bps(START_BITRATE),
         )
         .build(Instant::now());
@@ -124,11 +133,14 @@ impl Peer {
             rtc.add_local_candidate(candidate);
         }
 
-        let (mut mid, mut channel) = (None, None);
+        let (mut mid, mut audio_mid, mut channel) = (None, None, None);
         match role {
             Role::Viewer => {
                 let mut api = rtc.sdp_api();
                 mid = Some(api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None));
+                // The controlled PC's sound (Opus).
+                audio_mid =
+                    Some(api.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None));
                 channel = Some(api.add_channel("control".to_string()));
                 // A second channel for files, so a large transfer never delays input or control.
                 api.add_channel("files".to_string());
@@ -159,6 +171,7 @@ impl Peer {
             local,
             wake_from,
             mid,
+            audio_mid,
             channel,
             events: event_sender,
             commands: command_receiver,
@@ -241,8 +254,38 @@ impl Peer {
         self.events.recv_timeout(timeout).ok()
     }
 
+    /// A handle another thread can send sound with (sound is captured on its own thread, and waiting for
+    /// the session loop would add delay).
+    pub fn audio_sender(&self) -> Result<AudioSender, Error> {
+        Ok(AudioSender {
+            commands: self.commands.clone(),
+            waker: self.waker.try_clone()?,
+            wake_to: self.wake_to,
+        })
+    }
+
     fn command(&self, command: Command) {
         if self.commands.send(command).is_ok() {
+            let _ = self.waker.send_to(&[0], self.wake_to);
+        }
+    }
+}
+
+/// Sends Opus packets into the session from any thread; see [`Peer::audio_sender`].
+pub struct AudioSender {
+    commands: Sender<Command>,
+    waker: UdpSocket,
+    wake_to: SocketAddr,
+}
+
+impl AudioSender {
+    /// One Opus packet; `time_48khz` counts samples at 48 kHz (gaps for silence are fine).
+    pub fn send(&self, data: Vec<u8>, time_48khz: u64) {
+        if self
+            .commands
+            .send(Command::Audio { data, time_48khz })
+            .is_ok()
+        {
             let _ = self.waker.send_to(&[0], self.wake_to);
         }
     }
@@ -326,6 +369,7 @@ struct Network {
     local: SocketAddr,
     wake_from: SocketAddr,
     mid: Option<Mid>,
+    audio_mid: Option<Mid>,
     channel: Option<ChannelId>,
     files: Option<ChannelId>,
     files_queued: Arc<AtomicUsize>,
@@ -498,9 +542,16 @@ impl Network {
             }
             Event::Closed => return false,
             Event::MediaAdded(added) => {
-                self.mid = Some(added.mid);
+                match added.kind {
+                    MediaKind::Audio => self.audio_mid = Some(added.mid),
+                    MediaKind::Video => self.mid = Some(added.mid),
+                }
                 None
             }
+            Event::MediaData(data) if Some(data.mid) == self.audio_mid => Some(PeerEvent::Audio {
+                data: data.data,
+                time_48khz: data.time.numer(),
+            }),
             Event::MediaData(data) => {
                 if !data.contiguous {
                     self.ask_keyframe(data.mid);
@@ -550,6 +601,20 @@ impl Network {
                     return Ok(true);
                 };
                 let time = MediaTime::from_90khz(time_90khz);
+                writer.write(pt, now, time, data).map_err(err)?;
+            }
+            Command::Audio { data, time_48khz } => {
+                let Some(mid) = self.audio_mid else {
+                    return Ok(true);
+                };
+                let now = self.clock(Instant::now());
+                let Some(writer) = self.rtc.writer(mid) else {
+                    return Ok(true);
+                };
+                let Some(pt) = writer.payload_params().next().map(|params| params.pt()) else {
+                    return Ok(true);
+                };
+                let time = MediaTime::new(time_48khz, Frequency::FORTY_EIGHT_KHZ);
                 writer.write(pt, now, time, data).map_err(err)?;
             }
             Command::Data(bytes) => {

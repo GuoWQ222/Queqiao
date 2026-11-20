@@ -9,6 +9,7 @@ publish.workspace = true
 queqiao-account.workspace = true
 queqiao-capture.workspace = true
 queqiao-codec.workspace = true
+queqiao-audio.workspace = true
 queqiao-display.workspace = true
 queqiao-files.workspace = true
 queqiao-core.workspace = true

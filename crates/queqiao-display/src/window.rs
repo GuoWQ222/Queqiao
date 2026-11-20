@@ -126,6 +126,13 @@ impl Window {
         }
     }
 
+    /// Puts a check mark on a menu item added with [`Window::add_menu_items`], or takes it off.
+    pub fn check_menu_item(&self, id: u16, checked: bool) {
+        let menu = unsafe { GetSystemMenu(self.hwnd, false) };
+        let flags = MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = unsafe { CheckMenuItem(menu, u32::from(id), flags.0) };
+    }
+
     pub fn set_title(&self, title: &str) {
         let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         let _ = unsafe { SetWindowTextW(self.hwnd, PCWSTR(title.as_ptr())) };

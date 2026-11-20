@@ -1,0 +1,18 @@
+[package]
+name = "queqiao-audio"
+description = "Sound: the controlled PC's speakers captured with WASAPI loopback and encoded as Opus; Opus played on the controlling PC"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# libopus built from its bundled source with CMake (Visual Studio's Build Tools include CMake).
+opusic-sys = "0.7"
+windows = { workspace = true, features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }

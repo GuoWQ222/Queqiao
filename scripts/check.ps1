@@ -17,6 +17,19 @@ if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
     'WARNING  nasm not on PATH: OpenH264 is built without its assembly (about 5x slower)'
 }
 
+# libopus (sound) is built from source with CMake. Visual Studio's Build Tools include CMake but do not put it
+# on the PATH: use theirs when there is no other (the change lasts for this PowerShell process).
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsRoot = if (Test-Path -LiteralPath $vswhere) { & $vswhere -latest -products * -property installationPath } else { $null }
+    $vsCmake = if ($vsRoot) { Join-Path $vsRoot 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin' } else { $null }
+    if ($vsCmake -and (Test-Path -LiteralPath (Join-Path $vsCmake 'cmake.exe'))) {
+        $env:Path = "$vsCmake;$env:Path"
+    } else {
+        'WARNING  cmake not found: libopus (sound) cannot be built'
+    }
+}
+
 $failedStep = $null
 $steps = @(
     @{ Name = 'fmt'; CargoArgs = @('fmt', '--all', '--check') },

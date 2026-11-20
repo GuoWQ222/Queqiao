@@ -12,6 +12,12 @@ param(
     [string]$Address = '127.0.0.1',
     # Which sessions to run: all, or some of direct, relay, allowed, declined, ended-here.
     [string[]]$Sessions = @('all'),
+    # Sound: the agent captures -AgentSoundDevice and the viewer plays into -ViewerSoundDevice (parts of the
+    # device names; use two virtual devices, so nothing is heard and the viewer's sound is not captured again).
+    # In the direct and relay sessions the agent plays a test tone there and the viewer must hear it. Without them the
+    # viewer starts muted: on one PC it would otherwise play the agent's sound back into what the agent captures.
+    [string]$AgentSoundDevice = '',
+    [string]$ViewerSoundDevice = '',
     [switch]$SkipProbe
 )
 $ErrorActionPreference = 'Stop'
@@ -106,6 +112,17 @@ try {
         # The clipboard and file tests run on both sides; the viewer sends commands the agent only reports.
         if ($extra -like '*--clipboard-test*') { $viewerArgs += " --clipboard-test --send-file `"$fileToAgent`"" }
         if ($extra -like '*--dry-run-commands*') { $viewerArgs += ' --command ctrl-alt-del --command lock --command restart' }
+        $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
+        if ($soundTest) {
+            $agentArgs += " --sound-device `"$AgentSoundDevice`""
+            $viewerArgs += " --sound-device `"$ViewerSoundDevice`""
+            if ($label -in @('direct', 'relay')) {
+                $agentArgs += ' --sound-test'
+                $viewerArgs += ' --sound-test'
+            }
+        } else {
+            $viewerArgs += ' --mute'
+        }
         Start-SessionTask "Queqiao-M4-Agent-$label" $agent $agentArgs $mode
         Start-Sleep -Seconds 2
         Start-SessionTask "Queqiao-M4-Viewer-$label" $viewer $viewerArgs $mode
@@ -120,6 +137,9 @@ try {
             $text
             if ($mustPass -and $text[-1] -ne 'RESULT PASS') { $failed += "$label $program" }
             if (-not ($text | Where-Object { $_ -match $expects })) { $failed += "$label $program (expected '$expects')" }
+            if ($soundTest -and ($label -in @('direct', 'relay')) -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^sound test: PASS' })) {
+                $failed += "$label viewer (expected 'sound test: PASS')"
+            }
             # The window title shows the network status (the relay session must say so).
             if ($program -eq 'viewer' -and $mustPass) {
                 $pathWord = if ($mode -eq 'network:relay') { 'relayed' } else { 'direct' }
