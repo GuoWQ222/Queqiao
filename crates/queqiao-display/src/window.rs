@@ -190,6 +190,15 @@ impl Window {
         }
     }
 
+    /// Windows shortcuts (Win, Alt+Tab, Alt+Esc, Ctrl+Esc) go to the other PC while this window is in front.
+    pub fn set_send_shortcuts(&mut self, on: bool) {
+        crate::shortcuts::set(self.hwnd, on);
+    }
+
+    pub fn is_sending_shortcuts(&self) -> bool {
+        crate::shortcuts::is_on()
+    }
+
     pub fn is_game_mouse(&self) -> bool {
         GAME_MOUSE.get()
     }
@@ -352,6 +361,8 @@ impl Window {
 impl Drop for Window {
     fn drop(&mut self) {
         // Fails harmlessly when the user already closed the window.
+        // The keyboard hook goes with the window.
+        crate::shortcuts::set(self.hwnd, false);
         let _ = unsafe { DestroyWindow(self.hwnd) };
         self.pump();
         EVENTS.with_borrow_mut(Vec::clear);
@@ -389,6 +400,11 @@ fn clip_to_client(hwnd: HWND) {
         bottom: corners[1].y,
     };
     let _ = unsafe { ClipCursor(Some(&screen)) };
+}
+
+/// For the keyboard hook (same thread): a key event for the window.
+pub(crate) fn push_event(event: WindowEvent) {
+    push(event);
 }
 
 fn push(event: WindowEvent) {

@@ -6,6 +6,7 @@ mod forms;
 mod presence;
 mod present;
 mod privacy;
+mod shortcuts;
 mod window;
 mod yuv;
 

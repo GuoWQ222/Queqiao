@@ -44,7 +44,9 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Feature | Status |
 |---|---|
 | Mouse and keyboard by scancode | done (M2) |
-| Ctrl+Alt+Del, system shortcuts to the remote or kept local, configurable hotkeys, "boss key" | partly: "Send Ctrl+Alt+Del" in the session window menu (the controlled PC answers that it needs the service until M5); rest planned |
+| Windows shortcuts (Win, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc) to the remote while the session window is in front, or kept local | done (2026-11-21, session window menu) |
+| Ctrl+Alt+Del | partly: "Send Ctrl+Alt+Del" in the session window menu (the controlled PC answers that it needs the service until M5) |
+| Configurable hotkeys, "boss key" | planned |
 | Game mouse: relative movement from raw input, the pointer hidden and held in the window (menu or Ctrl+Alt+M; leaving the window gives it back) | done (2026-11-21) |
 | Local cursor vs remote cursor, game mouse speed | planned |
 | Emulated mouse/keyboard through a virtual HID device (games, secure desktop) | later: needs a signed driver |

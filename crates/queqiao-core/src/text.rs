@@ -166,6 +166,10 @@ const CHINESE: &[(&str, &str)] = &[
     ("Open a command line on that PC", "在那台电脑上打开命令行"),
     ("Full screen (Ctrl+Alt+Enter)", "全屏（Ctrl+Alt+Enter）"),
     ("Game mouse (Ctrl+Alt+M)", "游戏鼠标（Ctrl+Alt+M）"),
+    (
+        "Send Windows shortcuts to that PC (Win, Alt+Tab)",
+        "把 Windows 快捷键发给那台电脑（Win、Alt+Tab）",
+    ),
     ("Frame rate", "帧率"),
     ("Picture quality", "画质"),
     ("30 frames per second", "每秒 30 帧"),

@@ -43,6 +43,7 @@ const MENU_PRIVACY: u16 = 0x1050;
 const MENU_TERMINAL: u16 = 0x1060;
 const MENU_GAME_MOUSE: u16 = 0x1070;
 const MENU_MUTE_SPEAKERS: u16 = 0x1080;
+const MENU_SHORTCUTS: u16 = 0x1090;
 /// Ctrl+Alt+M: game mouse on or off.
 const KEY_M: u16 = 0x32;
 /// The game-mouse test's relative moves (mouse counts).
@@ -952,8 +953,15 @@ fn session(
         (MENU_TERMINAL, tr("Open a command line on that PC")),
         (MENU_FULL_SCREEN, tr("Full screen (Ctrl+Alt+Enter)")),
         (MENU_GAME_MOUSE, tr("Game mouse (Ctrl+Alt+M)")),
+        (
+            MENU_SHORTCUTS,
+            tr("Send Windows shortcuts to that PC (Win, Alt+Tab)"),
+        ),
     ]);
     let mut privacy_on = options.privacy;
+    // Windows shortcuts go to that PC while the window is in front (on unless turned off).
+    window.set_send_shortcuts(true);
+    window.check_menu_item(MENU_SHORTCUTS, window.is_sending_shortcuts());
     let mut speakers_muted = options.mute_speakers;
     window.check_menu_item(MENU_MUTE_SPEAKERS, speakers_muted);
     let fps_items: Vec<(u16, &str)> = MENU_FPS
@@ -1033,6 +1041,12 @@ fn session(
                         privacy_on = !privacy_on;
                         window.check_menu_item(MENU_PRIVACY, privacy_on);
                         Some(if privacy_on { Command::PrivacyOn } else { Command::PrivacyOff })
+                    }
+                    MENU_SHORTCUTS => {
+                        let on = !window.is_sending_shortcuts();
+                        window.set_send_shortcuts(on);
+                        window.check_menu_item(MENU_SHORTCUTS, window.is_sending_shortcuts());
+                        None
                     }
                     MENU_MUTE_SPEAKERS => {
                         speakers_muted = !speakers_muted;
