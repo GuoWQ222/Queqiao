@@ -96,6 +96,8 @@ struct Options {
     help_id_file: Option<PathBuf>,
     /// A throwaway device with this name instead of this PC's own (tests with two accounts on one PC).
     test_device: Option<String>,
+    /// Lock this PC when a session ends, for this run only (tests: with --dry-run-commands it is only reported).
+    lock_after_session: bool,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -187,6 +189,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--help-id-file" => options.help_id_file = Some(PathBuf::from(args.next()?)),
             "--test-device" => options.test_device = Some(args.next()?),
+            "--lock-after-session" => options.lock_after_session = true,
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -342,6 +345,13 @@ fn run_account(
                         lines.push(format!("start with Windows could not be set: {error}"))
                     }
                 },
+                PresenceEvent::SetLockAfter(on) => {
+                    settings.lock_after_session = on;
+                    let _ = settings.save();
+                    lines.push(format!(
+                        "the person at this PC set: lock this PC when a session ends: {on}"
+                    ));
+                }
                 PresenceEvent::SetTerminal(on) => {
                     settings.allow_terminal = on;
                     let _ = settings.save();
@@ -488,8 +498,10 @@ fn run_account(
                     Ok(outcome) => {
                         passed &= outcome.passed;
                         ui::record_session(&from_name, &from, started_at, &outcome.ended);
+                        lock_after(options, &settings, lines);
                     }
                     Err(error) => {
+                        lock_after(options, &settings, lines);
                         lines.push(format!("session {sessions} failed: {error}"));
                         ui::record_session(
                             &from_name,
@@ -742,6 +754,21 @@ fn run_command(command: Command, dry_run: bool) -> String {
         | Command::PrivacyOff
         | Command::MuteSpeakers(_)
         | Command::Picture { .. } => "changed".into(),
+    }
+}
+
+/// Locks the PC after a session when the person chose so (or a test asked).
+fn lock_after(options: &Options, settings: &ui::Settings, lines: &mut Vec<String>) {
+    if !(settings.lock_after_session || options.lock_after_session) {
+        return;
+    }
+    if options.dry_run_commands {
+        lines.push("after the session: the PC would be locked now (test run)".into());
+        return;
+    }
+    match power::lock() {
+        Ok(()) => lines.push("after the session: the PC is locked".into()),
+        Err(error) => lines.push(format!("after the session: locking failed: {error}")),
     }
 }
 

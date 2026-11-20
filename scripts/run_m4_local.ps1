@@ -105,7 +105,7 @@ try {
         @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
         @('allowed', '', "--ask --answer allow --privacy-test --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
         @('declined', '', '--ask --answer deny --seconds 45', 'the person at this PC declined', 'the person at that PC declined', $false),
-        @('ended-here', '', '--end-after 6', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true)
+        @('ended-here', '', '--end-after 6 --lock-after-session --dry-run-commands', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true)
     )
     foreach ($run in $runs) {
         $label, $mode, $extra, $agentExpects, $viewerExpects, $bothPass = $run
@@ -151,6 +151,9 @@ try {
             }
             if ($label -eq 'ended-here' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^window: full screen, drawing area (\d+x\d+), monitor \1$' })) {
                 $failed += "$label viewer (expected the full-screen window to cover the monitor)"
+            }
+            if ($label -eq 'ended-here' -and $program -eq 'agent' -and -not ($text | Where-Object { $_ -match '^after the session: the PC would be locked now' })) {
+                $failed += "$label agent (expected the lock after the session)"
             }
             # Picture settings: at most 30 fps (the full-screen window shows itself, so frames keep coming) and
             # twice the size-based bitrate allowed.

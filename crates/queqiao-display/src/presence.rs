@@ -39,6 +39,8 @@ pub enum PresenceEvent {
     SetTerminal(bool),
     /// Start with Windows (true) or not.
     SetAutostart(bool),
+    /// Lock this PC when a session ends (true) or not.
+    SetLockAfter(bool),
     /// "Let someone help me...": open help requests (show the help ID and a code).
     OpenHelp,
     /// The help window asks for a new code.
@@ -64,6 +66,7 @@ const ID_END: u16 = 210;
 const ID_NEW_CODE: u16 = 213;
 const ID_HELP_CLOSE: u16 = 214;
 const MENU_HELP: u16 = 208;
+const MENU_LOCK_AFTER: u16 = 209;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
 /// The tray window asks for its menu (not a control id).
@@ -95,6 +98,7 @@ pub struct Presence {
     files: bool,
     terminal: bool,
     autostart: bool,
+    lock_after: bool,
     viewer: Option<String>,
 }
 
@@ -107,6 +111,7 @@ impl Presence {
         files: bool,
         terminal: bool,
         autostart: bool,
+        lock_after: bool,
     ) -> Result<Presence> {
         let instance = unsafe { GetModuleHandleW(None) }?;
         REGISTER.call_once(|| unsafe {
@@ -152,6 +157,7 @@ impl Presence {
             files,
             terminal,
             autostart,
+            lock_after,
             viewer: None,
         };
         presence.update_tray();
@@ -423,6 +429,7 @@ impl Presence {
         let files = wide(tr("Receive files"));
         let terminal = wide(tr("Allow remote command lines"));
         let autostart = wide(tr("Start with Windows"));
+        let lock_after = wide(tr("Lock this PC when a session ends"));
         let quit = wide(tr("Quit Queqiao on this PC"));
         let help = wide(tr("Let someone help me..."));
         unsafe {
@@ -473,6 +480,12 @@ impl Presence {
                 usize::from(MENU_AUTOSTART),
                 PCWSTR(autostart.as_ptr()),
             );
+            let _ = AppendMenuW(
+                menu,
+                checked(self.lock_after),
+                usize::from(MENU_LOCK_AFTER),
+                PCWSTR(lock_after.as_ptr()),
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
                 menu,
@@ -522,6 +535,10 @@ impl Presence {
                 MENU_AUTOSTART => {
                     self.autostart = !self.autostart;
                     Some(PresenceEvent::SetAutostart(self.autostart))
+                }
+                MENU_LOCK_AFTER => {
+                    self.lock_after = !self.lock_after;
+                    Some(PresenceEvent::SetLockAfter(self.lock_after))
                 }
                 MENU_QUIT => Some(PresenceEvent::Quit),
                 _ => None,

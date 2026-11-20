@@ -150,6 +150,7 @@ const CHINESE: &[(&str, &str)] = &[
     ("Receive files", "接收文件"),
     ("Allow remote command lines", "允许远程命令行"),
     ("Start with Windows", "开机自动启动"),
+    ("Lock this PC when a session ends", "会话结束时锁定这台电脑"),
     ("Quit Queqiao on this PC", "退出这台电脑上的鹊桥"),
     (
         "This PC is being used remotely with Queqiao. Its screen stays dark until the session ends.",

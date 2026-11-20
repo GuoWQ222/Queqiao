@@ -172,6 +172,7 @@ fn run(
         settings.allow_terminal,
         // The Run key is the truth: it may be changed outside Queqiao too.
         crate::autostart::enabled(),
+        settings.lock_after_session,
     ) {
         Ok(presence) => presence,
         Err(error) => {
@@ -287,6 +288,9 @@ pub struct Settings {
     /// Let the controlling device open command lines here.
     #[serde(default = "yes")]
     pub allow_terminal: bool,
+    /// Lock this PC when a session ends (whoever ended it).
+    #[serde(default)]
+    pub lock_after_session: bool,
 }
 
 fn yes() -> bool {
@@ -303,6 +307,7 @@ impl Default for Settings {
             share_clipboard: true,
             receive_files: true,
             allow_terminal: true,
+            lock_after_session: false,
         }
     }
 }
