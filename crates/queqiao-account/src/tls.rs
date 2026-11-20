@@ -185,6 +185,10 @@ pub(crate) fn run(
                         signature,
                     },
                     Ok(ServerMessage::Error { message }) => AccountEvent::Error(message),
+                    Ok(ServerMessage::Notice { message }) => AccountEvent::Notice(message),
+                    Ok(ServerMessage::PasswordChanged { refresh_token }) => {
+                        AccountEvent::PasswordChanged(refresh_token)
+                    }
                     Ok(ServerMessage::IceServers { stun, turn }) => {
                         AccountEvent::IceServers { stun, turn }
                     }

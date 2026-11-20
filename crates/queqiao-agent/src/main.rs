@@ -385,10 +385,12 @@ fn run_account(
                 }
             }
             Some(AccountEvent::Error(message)) => lines.push(format!("server: {message}")),
+            Some(AccountEvent::Notice(message)) => lines.push(format!("notice: {message}")),
             Some(
                 AccountEvent::Devices(_)
                 | AccountEvent::Signal { .. }
-                | AccountEvent::IceServers { .. },
+                | AccountEvent::IceServers { .. }
+                | AccountEvent::PasswordChanged(_),
             )
             | None => {}
         }

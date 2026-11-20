@@ -217,7 +217,13 @@ Open, in this order, all before any release:
    session with a one-click end, and a list of past sessions. A session needs consent on the controlled PC
    (Allow / Deny) unless its owner turned on unattended access for that device, which then needs a separate
    device password (as UU Remote does).
-3. **Logins:** limits per account and per address with lockout, optional two-factor codes (TOTP), a notice to
+3. **Logins:** **Done 2026-11-21 except TOTP:** 20 failed logins per address in 10 minutes, 5 wrong passwords per
+   account name in 15 minutes (names that do not exist count the same, so a lockout tells nothing; saved logins
+   keep working; a wrong current password in a password change counts too); a new device is announced to the
+   account's other devices; removing a device ends its saved logins and disconnects it; a password change needs
+   the current one, revokes every saved login of the account and closes the other connections. Checked from
+   outside by `account_probe` (41 checks). Still open: optional two-factor codes, and leaving the test-only
+   `--password` option out of release builds. Was: limits per account and per address with lockout, optional two-factor codes (TOTP), a notice to
    the account's devices when a new device logs in, removing a device revokes its tokens, a password change
    revokes all of them. Test-only options (`--password` on the command line) are left out of release builds.
 4. **The agent accepts only what it must:** no listening ports; input only from the session the server

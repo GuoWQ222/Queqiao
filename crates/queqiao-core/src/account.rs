@@ -67,6 +67,14 @@ pub enum ClientMessage {
     Logout,
     /// The STUN and TURN servers for a session, with fresh relay credentials.
     GetIceServers,
+    /// Remove a device of this account: its saved logins end and it is disconnected.
+    RemoveDevice { device_id: String },
+    /// Change the account's password: every saved login of the account ends and the account's other
+    /// connections are closed; this connection gets a new refresh token (`PasswordChanged`).
+    ChangePassword {
+        old_password: String,
+        new_password: String,
+    },
 }
 
 /// Relay access for one device: TURN long-term credentials that the server's TURN part accepts for new
@@ -109,6 +117,14 @@ pub enum ServerMessage {
         /// host:port of a STUN server (UDP), if any.
         stun: Option<String>,
         turn: Option<TurnAccess>,
+    },
+    /// Something the person should know, e.g. a new device logged in to the account.
+    Notice {
+        message: String,
+    },
+    /// The password was changed: keep this refresh token (all earlier ones were revoked).
+    PasswordChanged {
+        refresh_token: String,
     },
 }
 

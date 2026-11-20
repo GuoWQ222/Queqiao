@@ -460,8 +460,12 @@ fn device_list(
                         reconnect_at = Some(Instant::now() + Duration::from_secs(2));
                         break;
                     }
-                    AccountEvent::Error(message) => list.set_status(&message),
-                    AccountEvent::Signal { .. } | AccountEvent::IceServers { .. } => {}
+                    AccountEvent::Error(message) | AccountEvent::Notice(message) => {
+                        list.set_status(&message)
+                    }
+                    AccountEvent::Signal { .. }
+                    | AccountEvent::IceServers { .. }
+                    | AccountEvent::PasswordChanged(_) => {}
                 }
             }
         }

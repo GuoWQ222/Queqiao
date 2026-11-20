@@ -373,6 +373,13 @@ fn main() {
         Err(error) => probe.check("viewer D logs in", false, error),
     }
 
+    hardening(
+        &mut probe,
+        server,
+        pin,
+        [(user1, password1), (user2, password2)],
+    );
+
     println!(
         "{}",
         if probe.failed == 0 {
@@ -382,6 +389,178 @@ fn main() {
         }
     );
     std::process::exit(i32::from(probe.failed > 0));
+}
+
+/// Account hardening (security point 3), from outside: new-device notices, removing devices, changing the
+/// password, and the lockout after wrong passwords.
+fn hardening(probe: &mut Probe, server: &str, pin: &str, users: [(&str, &str); 2]) {
+    let [(user1, password1), (user2, password2)] = users;
+    let wait = Duration::from_secs(3);
+    let watcher = device("watch");
+    let mut watcher_login = login(server, pin);
+    let mut watching = match Account::connect(
+        &mut watcher_login,
+        &watcher,
+        Role::Viewer,
+        Some((user1, password1)),
+    ) {
+        Ok(account) => account,
+        Err(error) => return probe.check("watcher logs in", false, error),
+    };
+    // A device the account has not had before is announced to its other devices.
+    let newcomer = device("new");
+    let mut newcomer_login = login(server, pin);
+    let newcomer_account = Account::connect(
+        &mut newcomer_login,
+        &newcomer,
+        Role::Agent,
+        Some((user1, password1)),
+    );
+    let notice = wait_for(
+        &mut watching,
+        wait,
+        |event| matches!(event, AccountEvent::Notice(message) if message.contains("probe-new")),
+    );
+    probe.check(
+        "a new device is announced to the account",
+        notice.is_some(),
+        format!("{notice:?}"),
+    );
+    // Removing it disconnects it (telling it why), takes it off the list and ends its saved login.
+    match newcomer_account {
+        Ok(mut newcomer_account) => {
+            watching.remove_device(&newcomer.id);
+            let told = wait_for(
+                &mut newcomer_account,
+                wait,
+                |event| matches!(event, AccountEvent::Error(message) if message.contains("removed")),
+            );
+            probe.check(
+                "a removed device is disconnected and told why",
+                told.is_some(),
+                format!("{told:?}"),
+            );
+            let gone = wait_for(
+                &mut watching,
+                wait,
+                |event| matches!(event, AccountEvent::Devices(devices) if !devices.iter().any(|d| d.id == newcomer.id)),
+            );
+            probe.check(
+                "a removed device leaves the device list",
+                gone.is_some(),
+                "device list pushed",
+            );
+            drop(newcomer_account);
+            let resumed = Account::connect(&mut newcomer_login, &newcomer, Role::Agent, None);
+            probe.check(
+                "a removed device's saved login is gone",
+                resumed.is_err(),
+                resumed.err().map_or("accepted".into(), |e| e.0),
+            );
+        }
+        Err(error) => probe.check("a new device logs in", false, error),
+    }
+    // Another account's device cannot be removed.
+    let other = device("other");
+    let mut other_login = login(server, pin);
+    let mut first = match Account::connect(
+        &mut other_login,
+        &other,
+        Role::Viewer,
+        Some((user2, password2)),
+    ) {
+        Ok(account) => account,
+        Err(error) => return probe.check("second user logs in", false, error),
+    };
+    watching.remove_device(&other.id);
+    let refused = wait_for(
+        &mut watching,
+        wait,
+        |event| matches!(event, AccountEvent::Error(message) if message.contains("not a device of this account")),
+    );
+    probe.check(
+        "removing another account's device is refused",
+        refused.is_some(),
+        format!("{refused:?}"),
+    );
+    // A password change needs the current password, revokes every saved login and closes the account's
+    // other connections; the old password stops working.
+    let second = device("second");
+    let mut second_login = login(server, pin);
+    let mut second_account = match Account::connect(
+        &mut second_login,
+        &second,
+        Role::Viewer,
+        Some((user2, password2)),
+    ) {
+        Ok(account) => account,
+        Err(error) => return probe.check("second device of the second user logs in", false, error),
+    };
+    let wrong = first.change_password("not the password", "a whole new password");
+    probe.check(
+        "a password change needs the current password",
+        wrong.is_err(),
+        wrong.err().map_or("changed".into(), |e| e.0),
+    );
+    let new_password = format!("{password2}-changed");
+    let changed = first.change_password(password2, &new_password);
+    probe.check(
+        "password changed, new saved login issued",
+        changed.is_ok(),
+        changed.err().map_or("new token".into(), |e| e.0),
+    );
+    let kicked = wait_for(
+        &mut second_account,
+        wait,
+        |event| matches!(event, AccountEvent::Error(message) if message.contains("password was changed")),
+    );
+    probe.check(
+        "the account's other connections are closed",
+        kicked.is_some(),
+        format!("{kicked:?}"),
+    );
+    drop(second_account);
+    let resumed = Account::connect(&mut second_login, &second, Role::Viewer, None);
+    probe.check(
+        "saved logins from before the change are revoked",
+        resumed.is_err(),
+        resumed.err().map_or("accepted".into(), |e| e.0),
+    );
+    let old = Account::connect(
+        &mut login(server, pin),
+        &device("old"),
+        Role::Viewer,
+        Some((user2, password2)),
+    );
+    probe.check(
+        "the old password no longer works",
+        old.is_err(),
+        old.err().map_or("accepted".into(), |e| e.0),
+    );
+    // After 5 wrong passwords (the wrong current password and the old one counted too), even the right
+    // password is refused for a while.
+    for _ in 0..4 {
+        let _ = Account::connect(
+            &mut login(server, pin),
+            &device("guess"),
+            Role::Viewer,
+            Some((user2, "guessing")),
+        );
+    }
+    let locked = Account::connect(
+        &mut login(server, pin),
+        &device("owner"),
+        Role::Viewer,
+        Some((user2, &new_password)),
+    );
+    probe.check(
+        "after 5 wrong passwords the account name is locked",
+        locked
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.0.contains("too many failed logins")),
+        locked.err().map_or("accepted".into(), |e| e.0),
+    );
 }
 
 /// Raw STUN/TURN against the server's relay: who may allocate, where it relays, quotas, and that it relays.

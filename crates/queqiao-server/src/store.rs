@@ -85,8 +85,9 @@ impl Store {
         }))
     }
 
-    /// Records the device and its public key for the user. A device id that belongs to another account is
-    /// refused; a different key for a known device only when `may_change_key` (a password login).
+    /// Records the device and its public key for the user; true if the device is new to the account. A
+    /// device id that belongs to another account is refused; a different key for a known device only when
+    /// `may_change_key` (a password login).
     pub fn register_device(
         &self,
         user_id: i64,
@@ -94,7 +95,7 @@ impl Store {
         name: &str,
         public_key: &str,
         may_change_key: bool,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if public_key.len() != 64 || !public_key.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err("bad device key".into());
         }
@@ -132,7 +133,7 @@ impl Store {
                         params![device_id, name, now(), public_key.to_ascii_lowercase()],
                     )
                     .map_err(|e| e.to_string())?;
-                Ok(())
+                Ok(false)
             }
             None => {
                 self.db
@@ -141,7 +142,7 @@ impl Store {
                         params![device_id, user_id, name, now(), public_key.to_ascii_lowercase()],
                     )
                     .map_err(|e| e.to_string())?;
-                Ok(())
+                Ok(true)
             }
         }
     }
@@ -191,6 +192,66 @@ impl Store {
             )
             .optional()
             .map_err(|e| e.to_string())
+    }
+
+    /// Removes a device of the user with its refresh tokens; false if the user has no such device.
+    pub fn remove_device(&self, user_id: i64, device_id: &str) -> Result<bool, String> {
+        let owned: bool = self
+            .db
+            .query_row(
+                "SELECT 1 FROM devices WHERE id = ?1 AND user_id = ?2",
+                params![device_id, user_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+        if !owned {
+            return Ok(false);
+        }
+        self.db
+            .execute(
+                "DELETE FROM refresh_tokens WHERE device_id = ?1",
+                params![device_id],
+            )
+            .map_err(|e| e.to_string())?;
+        self.db
+            .execute("DELETE FROM devices WHERE id = ?1", params![device_id])
+            .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    /// Sets a new password after checking the old one, and revokes every refresh token of the account.
+    pub fn change_password(
+        &self,
+        user_id: i64,
+        name: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<(), String> {
+        if new.len() < 8 {
+            return Err("the new password needs at least 8 characters".into());
+        }
+        if self
+            .check_password(name, old)?
+            .is_none_or(|user| user.id != user_id)
+        {
+            return Err("the current password is wrong".into());
+        }
+        let hash = hash_password(new)?;
+        self.db
+            .execute(
+                "UPDATE users SET password = ?2 WHERE id = ?1",
+                params![user_id, hash],
+            )
+            .map_err(|e| e.to_string())?;
+        self.db
+            .execute(
+                "DELETE FROM refresh_tokens WHERE user_id = ?1",
+                params![user_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Logs one program of a device out: its refresh token stops working.
@@ -417,6 +478,83 @@ mod tests {
             store.devices(user.id).unwrap(),
             vec![("dev1".into(), "Laptop".into(), key_b.clone())]
         );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_devices_and_changing_passwords() {
+        let dir = std::env::temp_dir().join(format!("queqiao-store-test2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        store.add_user("carol", "correct horse").unwrap();
+        let user = store
+            .check_password("carol", "correct horse")
+            .unwrap()
+            .unwrap();
+        let key = "c".repeat(64);
+        assert!(
+            store
+                .register_device(user.id, "dev1", "PC", &key, true)
+                .unwrap(),
+            "new device"
+        );
+        assert!(
+            !store
+                .register_device(user.id, "dev1", "PC", &key, true)
+                .unwrap(),
+            "known device"
+        );
+        let token = store
+            .issue_refresh_token(user.id, "dev1", "viewer")
+            .unwrap();
+        // A password change needs the current password and revokes every token of the account.
+        assert!(
+            store
+                .change_password(user.id, "carol", "wrong horse", "new horse staple")
+                .is_err()
+        );
+        assert!(
+            store
+                .change_password(user.id, "carol", "correct horse", "short")
+                .is_err()
+        );
+        store
+            .change_password(user.id, "carol", "correct horse", "new horse staple")
+            .unwrap();
+        assert!(
+            store
+                .check_refresh_token(&token, "dev1", "viewer")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .check_password("carol", "correct horse")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .check_password("carol", "new horse staple")
+                .unwrap()
+                .is_some()
+        );
+        // Only the owner removes a device; its tokens go with it.
+        let token = store
+            .issue_refresh_token(user.id, "dev1", "viewer")
+            .unwrap();
+        assert!(!store.remove_device(user.id + 1, "dev1").unwrap());
+        assert!(store.remove_device(user.id, "dev1").unwrap());
+        assert!(
+            store
+                .check_refresh_token(&token, "dev1", "viewer")
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.devices(user.id).unwrap().is_empty());
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

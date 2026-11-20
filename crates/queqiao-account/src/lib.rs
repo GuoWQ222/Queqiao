@@ -38,6 +38,10 @@ pub enum AccountEvent {
     },
     /// The server refused something (for example a signal to a device that is offline).
     Error(String),
+    /// Something the person should know (e.g. a new device logged in to the account).
+    Notice(String),
+    /// The answer to `ChangePassword`: the new refresh token.
+    PasswordChanged(String),
     /// The answer to `GetIceServers`.
     IceServers {
         stun: Option<String>,
@@ -206,6 +210,48 @@ impl Account {
             )));
         }
         Ok(())
+    }
+
+    /// Removes `device` from the account (its saved logins end, it is disconnected); the device list
+    /// update follows, or an `AccountEvent::Error`.
+    pub fn remove_device(&self, device: &str) {
+        self.send(ClientMessage::RemoveDevice {
+            device_id: device.to_string(),
+        });
+    }
+
+    /// Changes the account's password; returns this device's new refresh token (save it: every saved login
+    /// of the account, this one's included, was revoked, and the account's other connections were closed).
+    pub fn change_password(
+        &mut self,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<String, Error> {
+        self.send(ClientMessage::ChangePassword {
+            old_password: old_password.to_string(),
+            new_password: new_password.to_string(),
+        });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut other = Vec::new();
+        let result = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break Err(Error(
+                    "the server did not answer the password change".into(),
+                ));
+            }
+            match self.next_event(left) {
+                Some(AccountEvent::PasswordChanged(token)) => break Ok(token),
+                Some(AccountEvent::Error(message)) => break Err(Error(message)),
+                Some(AccountEvent::Closed(reason)) => break Err(Error(reason)),
+                Some(event) => other.push(event),
+                None => {}
+            }
+        };
+        for event in other.into_iter().rev() {
+            self.pending.push_front(event);
+        }
+        result
     }
 
     /// Accepts a new key for `device` (after the person confirmed it, e.g. a reinstalled PC).

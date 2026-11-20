@@ -3,10 +3,10 @@
 //! and pushes the account's device list whenever a program connects or leaves.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use queqiao_core::account::{ClientMessage, Device, Role, ServerMessage, TurnAccess};
@@ -24,6 +24,53 @@ use crate::turn::TurnConfig;
 const MAX_MESSAGE: usize = 256 * 1024;
 /// A connection that sends nothing for this long is dropped (clients ping every 20 s).
 const IDLE: Duration = Duration::from_secs(60);
+/// Failed logins (wrong password, or a saved login that is not valid) allowed per address in a window, and
+/// wrong passwords per account name (counted the same way for names that do not exist, so a refusal says
+/// nothing about whether an account exists; saved logins keep working during an account's lockout).
+const ADDRESS_FAILURES: u32 = 20;
+const ADDRESS_WINDOW: Duration = Duration::from_secs(600);
+const ACCOUNT_FAILURES: u32 = 5;
+const ACCOUNT_WINDOW: Duration = Duration::from_secs(900);
+
+/// Failures counted since `since`.
+struct Window {
+    count: u32,
+    since: Instant,
+}
+
+#[derive(Default)]
+struct Failures {
+    by_address: HashMap<IpAddr, Window>,
+    by_account: HashMap<String, Window>,
+}
+
+/// Why a login was refused, and whether it counts as a guess.
+struct Refusal {
+    message: String,
+    guess: bool,
+}
+
+impl From<String> for Refusal {
+    fn from(message: String) -> Refusal {
+        Refusal {
+            message,
+            guess: false,
+        }
+    }
+}
+
+impl From<&str> for Refusal {
+    fn from(message: &str) -> Refusal {
+        Refusal::from(message.to_string())
+    }
+}
+
+fn guess(message: &str) -> Refusal {
+    Refusal {
+        message: message.to_string(),
+        guess: true,
+    }
+}
 
 /// To a connection's task: a message for its client, or the order to close (a newer connection of the
 /// same device and program took its place).
@@ -41,6 +88,7 @@ struct Connection {
 
 pub struct Hub {
     store: Mutex<Store>,
+    failures: Mutex<Failures>,
     turn: Option<Arc<TurnConfig>>,
     online: Mutex<HashMap<(String, Role), Connection>>,
     next_id: AtomicU64,
@@ -59,6 +107,7 @@ impl Hub {
     pub fn new(store: Store, turn: Option<Arc<TurnConfig>>) -> Arc<Hub> {
         Arc::new(Hub {
             store: Mutex::new(store),
+            failures: Mutex::new(Failures::default()),
             turn,
             online: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -89,6 +138,7 @@ impl Hub {
         acceptor: TlsAcceptor,
     ) -> Result<(), String> {
         let _ = tcp.set_nodelay(true);
+        let address = tcp.peer_addr().ok().map(|peer| peer.ip());
         let tls = timeout(Duration::from_secs(10), acceptor.accept(tcp))
             .await
             .map_err(|_| "TLS handshake timed out")?
@@ -111,14 +161,32 @@ impl Hub {
             }
             _ => return Err("no login".into()),
         };
+        let account_name = match &first {
+            ClientMessage::Login { user, .. } => Some(user.trim().to_lowercase()),
+            _ => None,
+        };
+        let locked = self.locked(address, account_name.as_deref());
         // Password hashing takes tens of milliseconds: off the network threads.
         let hub = self.clone();
-        let checked = tokio::task::spawn_blocking(move || hub.authenticate(first))
-            .await
-            .map_err(|e| e.to_string())?;
-        let (identity, new_token) = match checked {
+        let checked = match locked {
+            Some(minutes) => Err(Refusal::from(format!(
+                "too many failed logins: try again in {minutes} minutes"
+            ))),
+            None => tokio::task::spawn_blocking(move || hub.authenticate(first))
+                .await
+                .map_err(|e| e.to_string())?,
+        };
+        if checked.as_ref().is_err_and(|refusal| refusal.guess) {
+            self.record_failure(address, account_name.as_deref());
+        } else if checked.is_ok()
+            && let Some(name) = &account_name
+            && let Ok(mut failures) = self.failures.lock()
+        {
+            failures.by_account.remove(name);
+        }
+        let (identity, new_token, new_device) = match checked {
             Ok(result) => result,
-            Err(message) => {
+            Err(Refusal { message, .. }) => {
                 // A failed login waits a little, which slows down guessing.
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let reply = serde_json::to_string(&ServerMessage::Error {
@@ -153,11 +221,21 @@ impl Hub {
         };
         let _ = sender.send(Outgoing::Message(welcome));
         self.push_devices(identity.user_id);
+        if new_device {
+            let message = format!(
+                "A new device, {}, logged in to your account.",
+                identity.device_name
+            );
+            self.notify_account(identity.user_id, Some(&key), &message);
+        }
 
         loop {
             tokio::select! {
                 incoming = timeout(IDLE, stream.next()) => match incoming {
                     Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
+                        Ok(ClientMessage::ChangePassword { old_password, new_password }) => {
+                            self.clone().change_password(&identity, old_password, new_password, &sender).await;
+                        }
                         Ok(message) => self.handle(&identity, message, &sender),
                         Err(error) => {
                             let message = format!("bad message: {error}");
@@ -199,7 +277,151 @@ impl Hub {
         Ok(())
     }
 
-    fn authenticate(&self, first: ClientMessage) -> Result<(Identity, Option<String>), String> {
+    /// Minutes until `address` or `account` may try again, if either is locked out.
+    fn locked(&self, address: Option<IpAddr>, account: Option<&str>) -> Option<u64> {
+        let failures = self.failures.lock().ok()?;
+        let wait = |window: Option<&Window>, limit: u32, length: Duration| {
+            window
+                .filter(|w| w.count >= limit && w.since.elapsed() < length)
+                .map(|w| (length - w.since.elapsed()).as_secs().div_ceil(60).max(1))
+        };
+        let by_address = address.and_then(|a| {
+            wait(
+                failures.by_address.get(&a),
+                ADDRESS_FAILURES,
+                ADDRESS_WINDOW,
+            )
+        });
+        let by_account = account
+            .and_then(|a| wait(failures.by_account.get(a), ACCOUNT_FAILURES, ACCOUNT_WINDOW));
+        by_address.max(by_account)
+    }
+
+    fn record_failure(&self, address: Option<IpAddr>, account: Option<&str>) {
+        let Ok(mut failures) = self.failures.lock() else {
+            return;
+        };
+        let count = |window: &mut Window, length: Duration| {
+            if window.since.elapsed() >= length {
+                *window = Window {
+                    count: 0,
+                    since: Instant::now(),
+                };
+            }
+            window.count += 1;
+        };
+        let fresh = || Window {
+            count: 0,
+            since: Instant::now(),
+        };
+        if let Some(address) = address {
+            count(
+                failures.by_address.entry(address).or_insert_with(fresh),
+                ADDRESS_WINDOW,
+            );
+        }
+        if let Some(account) = account {
+            count(
+                failures
+                    .by_account
+                    .entry(account.to_string())
+                    .or_insert_with(fresh),
+                ACCOUNT_WINDOW,
+            );
+        }
+        // Old entries go, so the maps stay small.
+        failures
+            .by_address
+            .retain(|_, w| w.since.elapsed() < ADDRESS_WINDOW);
+        failures
+            .by_account
+            .retain(|_, w| w.since.elapsed() < ACCOUNT_WINDOW);
+    }
+
+    /// Checks the current password, sets the new one, revokes every saved login of the account, gives this
+    /// connection a new one and closes the account's other connections.
+    async fn change_password(
+        self: Arc<Hub>,
+        identity: &Identity,
+        old_password: String,
+        new_password: String,
+        sender: &UnboundedSender<Outgoing>,
+    ) {
+        let hub = self.clone();
+        let (user_id, user, device_id, role) = (
+            identity.user_id,
+            identity.user.clone(),
+            identity.device_id.clone(),
+            identity.role,
+        );
+        let changed = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let store = hub.store.lock().map_err(|e| e.to_string())?;
+            store.change_password(user_id, &user, &old_password, &new_password)?;
+            store.issue_refresh_token(user_id, &device_id, role_name(role))
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        match changed {
+            Ok(refresh_token) => {
+                let _ = sender.send(Outgoing::Message(ServerMessage::PasswordChanged {
+                    refresh_token,
+                }));
+                let this = (identity.device_id.clone(), identity.role);
+                self.disconnect_account(
+                    identity.user_id,
+                    Some(&this),
+                    "the account's password was changed: log in again",
+                );
+            }
+            Err(message) => {
+                if message.contains("current password is wrong") {
+                    self.record_failure(None, Some(&identity.user.to_lowercase()));
+                }
+                let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
+            }
+        }
+    }
+
+    /// Tells the account's connections (all but `except`) `message`.
+    fn notify_account(&self, user_id: i64, except: Option<&(String, Role)>, message: &str) {
+        if let Ok(online) = self.online.lock() {
+            for (key, connection) in online.iter() {
+                if connection.user_id == user_id && Some(key) != except {
+                    let notice = ServerMessage::Notice {
+                        message: message.to_string(),
+                    };
+                    let _ = connection.sender.send(Outgoing::Message(notice));
+                }
+            }
+        }
+    }
+
+    /// Closes the account's connections (all but `except`), telling them why.
+    fn disconnect_account(&self, user_id: i64, except: Option<&(String, Role)>, reason: &str) {
+        self.disconnect(
+            |key, connection| connection.user_id == user_id && Some(key) != except,
+            reason,
+        );
+    }
+
+    fn disconnect(&self, which: impl Fn(&(String, Role), &Connection) -> bool, reason: &str) {
+        if let Ok(online) = self.online.lock() {
+            for (key, connection) in online.iter() {
+                if which(key, connection) {
+                    let error = ServerMessage::Error {
+                        message: reason.to_string(),
+                    };
+                    let _ = connection.sender.send(Outgoing::Message(error));
+                    let _ = connection.sender.send(Outgoing::Kick);
+                }
+            }
+        }
+    }
+
+    fn authenticate(
+        &self,
+        first: ClientMessage,
+    ) -> Result<(Identity, Option<String>, bool), Refusal> {
         let store = self.store.lock().map_err(|e| e.to_string())?;
         match first {
             ClientMessage::Login {
@@ -212,9 +434,10 @@ impl Hub {
             } => {
                 let row = store
                     .check_password(&user, &password)?
-                    .ok_or("wrong user name or password")?;
+                    .ok_or_else(|| guess("wrong user name or password"))?;
                 check_device_fields(&device_id, &device_name)?;
-                store.register_device(row.id, &device_id, &device_name, &public_key, true)?;
+                let new_device =
+                    store.register_device(row.id, &device_id, &device_name, &public_key, true)?;
                 let token = store.issue_refresh_token(row.id, &device_id, role_name(role))?;
                 let identity = Identity {
                     user_id: row.id,
@@ -223,7 +446,7 @@ impl Hub {
                     device_name,
                     role,
                 };
-                Ok((identity, Some(token)))
+                Ok((identity, Some(token), new_device))
             }
             ClientMessage::Resume {
                 refresh_token,
@@ -234,9 +457,12 @@ impl Hub {
             } => {
                 let row = store
                     .check_refresh_token(&refresh_token, &device_id, role_name(role))?
-                    .ok_or("the saved login has expired or was revoked: log in again")?;
+                    .ok_or_else(|| {
+                        guess("the saved login has expired or was revoked: log in again")
+                    })?;
                 check_device_fields(&device_id, &device_name)?;
-                store.register_device(row.id, &device_id, &device_name, &public_key, false)?;
+                let new_device =
+                    store.register_device(row.id, &device_id, &device_name, &public_key, false)?;
                 let identity = Identity {
                     user_id: row.id,
                     user: row.name,
@@ -244,7 +470,7 @@ impl Hub {
                     device_name,
                     role,
                 };
-                Ok((identity, None))
+                Ok((identity, None, new_device))
             }
             _ => Err("log in first".into()),
         }
@@ -306,6 +532,27 @@ impl Hub {
                 };
                 let _ = sender.send(Outgoing::Message(ServerMessage::IceServers { stun, turn }));
             }
+            ClientMessage::RemoveDevice { device_id } => {
+                let removed = self
+                    .store
+                    .lock()
+                    .ok()
+                    .map(|store| store.remove_device(identity.user_id, &device_id));
+                if let Some(Ok(true)) = removed {
+                    let user_id = identity.user_id;
+                    self.disconnect(
+                        |(device, _), connection| {
+                            connection.user_id == user_id && *device == device_id
+                        },
+                        "this device was removed from the account",
+                    );
+                    self.push_devices(identity.user_id);
+                } else {
+                    let message = format!("{device_id} is not a device of this account");
+                    let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
+                }
+            }
+            ClientMessage::ChangePassword { .. } => {}
             ClientMessage::Logout => {
                 if let Ok(store) = self.store.lock() {
                     let _ = store.revoke_token(&identity.device_id, role_name(identity.role));
