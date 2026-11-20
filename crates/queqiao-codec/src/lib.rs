@@ -3,11 +3,15 @@
 
 mod convert;
 mod cpu_convert;
+mod decoder;
 mod encoder;
 mod mf;
+mod mf_decode;
 mod software;
+mod software_decode;
 
 pub use convert::Nv12Converter;
+pub use decoder::{DecodedFrame, DecoderChoice, H264Decoder, RING};
 pub use encoder::{EncodedFrame, EncoderChoice, EncoderConfig, H264Encoder, SoftwareTiming};
 
 /// Encode sizes to try for a screen, largest first: the screen itself (rounded down to even numbers, as

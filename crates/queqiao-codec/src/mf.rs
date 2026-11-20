@@ -41,18 +41,9 @@ impl MfEncoder {
         config: &EncoderConfig,
         skipped: &mut Vec<String>,
     ) -> Option<Self> {
-        let started = unsafe {
-            // S_FALSE (already initialised) and RPC_E_CHANGED_MODE are fine: MF works in either mode.
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            MFStartup(MF_VERSION, MFSTARTUP_FULL)
-        };
-        if let Err(error) = started {
+        if let Err(error) = start_media_foundation(device) {
             skipped.push(format!("Media Foundation unavailable: {}", error.message()));
             return None;
-        }
-        // Media Foundation uses the device from its own threads.
-        if let Ok(multithread) = device.cast::<ID3D10Multithread>() {
-            let _ = unsafe { multithread.SetMultithreadProtected(true) };
         }
         let encoders = match hardware_encoders() {
             Ok(encoders) => encoders,
@@ -295,6 +286,19 @@ impl Drop for MfEncoder {
     }
 }
 
+/// COM and Media Foundation for this thread, and the device made safe for Media Foundation's threads.
+pub(crate) fn start_media_foundation(device: &ID3D11Device) -> Result<()> {
+    unsafe {
+        // S_FALSE (already initialised) and RPC_E_CHANGED_MODE are fine: MF works in either mode.
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
+    }
+    if let Ok(multithread) = device.cast::<ID3D10Multithread>() {
+        let _ = unsafe { multithread.SetMultithreadProtected(true) };
+    }
+    Ok(())
+}
+
 /// Hardware H.264 encoders, best first (Media Foundation's own order), with their names.
 fn hardware_encoders() -> Result<Vec<(IMFActivate, String)>> {
     let output = MFT_REGISTER_TYPE_INFO {
@@ -362,6 +366,6 @@ fn pack(high: u32, low: u32) -> u64 {
 }
 
 /// Adds which step failed to an error message.
-fn at(step: &'static str) -> impl Fn(Error) -> Error {
+pub(crate) fn at(step: &'static str) -> impl Fn(Error) -> Error {
     move |error| Error::new(error.code(), format!("{step}: {}", error.message()))
 }
