@@ -637,9 +637,11 @@ fn run_command(command: Command, dry_run: bool) -> String {
             Err(error) => format!("restarting failed: {error}"),
         },
         // Handled by the session (they change its state).
-        Command::SoundOn | Command::SoundOff | Command::PrivacyOn | Command::PrivacyOff => {
-            "changed".into()
-        }
+        Command::SoundOn
+        | Command::SoundOff
+        | Command::PrivacyOn
+        | Command::PrivacyOff
+        | Command::Picture { .. } => "changed".into(),
     }
 }
 
@@ -782,7 +784,10 @@ fn session(
     let mut privacy_check_due = false;
     // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
     // never above the size-based bitrate the encoder was opened with.
-    let max_bitrate = config.bitrate;
+    // The viewer's picture settings change the highest bitrate (quality) and the frame interval (frame rate).
+    let size_bitrate = config.bitrate;
+    let mut max_bitrate = size_bitrate;
+    let mut last_estimate = START_BITRATE;
     peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
     let start_bitrate = adapted_bitrate(START_BITRATE, max_bitrate);
     if start_bitrate != encoder.bitrate()
@@ -799,7 +804,8 @@ fn session(
     let mut last_bitrate_change: Option<Instant> = None;
 
     let pointer_start = cursor_position();
-    let interval = Duration::from_secs_f64(1.0 / f64::from(config.fps));
+    let mut interval = Duration::from_secs_f64(1.0 / f64::from(config.fps));
+    let screen_fps = (info.refresh_hz.round() as u32).clamp(1, 240);
     let mut stats = Stats::default();
     let mut connected_after: Option<Duration> = None;
     // The GDI snapshot is the first picture to send; its screen time is unknown (0).
@@ -922,6 +928,31 @@ fn session(
                         lines.push(format!("command from the viewer: PrivacyOff: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
                     }
+                    Some(Message::Command(Command::Picture { fps, quality })) => {
+                        // At most what the screen shows; 0 asks for exactly that.
+                        let frames = if fps == 0 {
+                            screen_fps
+                        } else {
+                            u32::from(fps).min(screen_fps)
+                        };
+                        interval = Duration::from_secs_f64(1.0 / f64::from(frames));
+                        max_bitrate = ((f64::from(size_bitrate) * quality.bitrate_factor()) as u32)
+                            .max(MIN_BITRATE);
+                        peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
+                        let target = adapted_bitrate(last_estimate, max_bitrate);
+                        let changed = encoder.set_bitrate(target).is_ok();
+                        let notice = format!(
+                            "picture: up to {frames} fps, quality {quality:?}: up to {:.1} Mbit/s{}",
+                            f64::from(max_bitrate) / 1e6,
+                            if changed {
+                                ""
+                            } else {
+                                " (the encoder keeps its bitrate)"
+                            }
+                        );
+                        lines.push(format!("command from the viewer: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
                     Some(Message::Command(Command::SoundOff)) => {
                         if let Some(capture) = sound.take() {
                             sound_report.push(sound_line(&capture));
@@ -962,6 +993,7 @@ fn session(
                     lines.push(format!("{} ms: {note}", started.elapsed().as_millis()))
                 }
                 PeerEvent::Bitrate(estimate) => {
+                    last_estimate = estimate;
                     let target = adapted_bitrate(estimate, max_bitrate);
                     let current = encoder.bitrate();
                     let big_enough = target.abs_diff(current) > current / 20;

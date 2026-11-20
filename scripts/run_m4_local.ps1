@@ -113,7 +113,7 @@ try {
         if ($extra -like '*--clipboard-test*') { $viewerArgs += " --clipboard-test --send-file `"$fileToAgent`"" }
         if ($extra -like '*--dry-run-commands*') { $viewerArgs += ' --command ctrl-alt-del --command lock --command restart' }
         # Full screen: the drawing area must cover the monitor (the input test maps to it too).
-        if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen' }
+        if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen --picture 30,sharp' }
         # A command line on that PC, in a window of its own that closes by itself.
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
@@ -148,6 +148,18 @@ try {
             }
             if ($label -eq 'ended-here' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^window: full screen, drawing area (\d+x\d+), monitor \1$' })) {
                 $failed += "$label viewer (expected the full-screen window to cover the monitor)"
+            }
+            # Picture settings: at most 30 fps (the full-screen window shows itself, so frames keep coming) and
+            # twice the size-based bitrate allowed.
+            if ($label -eq 'ended-here') {
+                if ($program -eq 'agent') {
+                    $settingsLine = $text | Where-Object { $_ -match '^command from the viewer: picture: up to 30 fps, quality Sharp: up to ([\d.]+) Mbit/s$' } | Select-Object -First 1
+                    $bitrateLine = $text | Where-Object { $_ -match '^bitrate: .* highest allowed ([\d.]+) Mbit/s' } | Select-Object -First 1
+                    if (-not $settingsLine -or -not $bitrateLine) { $failed += "$label agent (picture settings not applied)" }
+                } else {
+                    $titleLine = $text | Where-Object { $_ -match '^window title: .* \| (\d+) fps \|' } | Select-Object -First 1
+                    if (-not $titleLine -or [int]$Matches[1] -gt 32) { $failed += "$label viewer (expected at most 30 fps: $titleLine)" }
+                }
             }
             if ($extra -like '*--privacy-test*') {
                 $wanted = if ($program -eq 'agent') { @('^privacy test: PASS', '^privacy: the session banner is above the dark screen: yes') } else { @("^notice from that PC: that PC's screen is dark") }

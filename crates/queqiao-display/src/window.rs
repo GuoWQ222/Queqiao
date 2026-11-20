@@ -132,6 +132,24 @@ impl Window {
         }
     }
 
+    /// Adds a submenu `title` with `items` to the window's system menu (ids as for [`Window::add_menu_items`]).
+    pub fn add_submenu(&self, title: &str, items: &[(u16, &str)]) {
+        let menu = unsafe { GetSystemMenu(self.hwnd, false) };
+        let Ok(submenu) = (unsafe { CreatePopupMenu() }) else {
+            return;
+        };
+        if menu.is_invalid() {
+            return;
+        }
+        for (id, text) in items {
+            let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            let _ =
+                unsafe { AppendMenuW(submenu, MF_STRING, usize::from(*id), PCWSTR(text.as_ptr())) };
+        }
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        let _ = unsafe { AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(title.as_ptr())) };
+    }
+
     /// Puts a check mark on a menu item added with [`Window::add_menu_items`], or takes it off.
     pub fn check_menu_item(&self, id: u16, checked: bool) {
         let menu = unsafe { GetSystemMenu(self.hwnd, false) };

@@ -27,7 +27,9 @@ use queqiao_account::{
     new_session_id,
 };
 use queqiao_codec::{DecodedFrame, DecoderChoice, H264Decoder};
-use queqiao_core::protocol::{Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton};
+use queqiao_core::protocol::{
+    Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton, Quality,
+};
 
 /// The session window's menu items for the controlled PC (system-menu ids: multiples of 16).
 const MENU_CTRL_ALT_DEL: u16 = 0x1000;
@@ -37,6 +39,21 @@ const MENU_SOUND: u16 = 0x1030;
 const MENU_FULL_SCREEN: u16 = 0x1040;
 const MENU_PRIVACY: u16 = 0x1050;
 const MENU_TERMINAL: u16 = 0x1060;
+/// Picture settings: frame rate (at most 30, 60, or what that screen shows) and quality.
+const MENU_FPS: [(u16, u8, &str); 3] = [
+    (0x1100, 30, "30 frames per second"),
+    (0x1110, 60, "60 frames per second"),
+    (0x1120, 0, "As many as that screen shows"),
+];
+const MENU_QUALITY: [(u16, Quality, &str); 3] = [
+    (
+        0x1200,
+        Quality::Smooth,
+        "Smooth (fewer bits, slow networks)",
+    ),
+    (0x1210, Quality::Balanced, "Balanced"),
+    (0x1220, Quality::Sharp, "Sharp (twice the bits, for text)"),
+];
 /// A new command line's window size until its window reports its own.
 const TERMINAL_SIZE: (u16, u16) = (120, 30);
 /// Scancodes of the full-screen key, Ctrl+Alt+Enter (handled here, not sent): Enter, Ctrl, Alt.
@@ -111,6 +128,8 @@ struct Options {
     privacy: bool,
     /// Open a command line on that PC and check it (its window closes by itself).
     terminal_test: bool,
+    /// Picture settings to send at the start: frames per second at most (0: the screen's) and quality.
+    picture: Option<(u8, Quality)>,
 }
 
 impl Options {
@@ -298,6 +317,17 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--full-screen" => options.full_screen = true,
             "--privacy" => options.privacy = true,
             "--terminal-test" => options.terminal_test = true,
+            "--picture" => {
+                let value = args.next()?;
+                let (fps, quality) = value.split_once(',')?;
+                let quality = match quality {
+                    "smooth" => Quality::Smooth,
+                    "balanced" => Quality::Balanced,
+                    "sharp" => Quality::Sharp,
+                    _ => return None,
+                };
+                options.picture = Some((fps.parse().ok()?, quality));
+            }
             "--command" => options.commands.push(match args.next()?.as_str() {
                 "lock" => Command::Lock,
                 "restart" => Command::Restart,
@@ -775,6 +805,23 @@ fn session(
         (MENU_FULL_SCREEN, "Full screen (Ctrl+Alt+Enter)"),
     ]);
     let mut privacy_on = options.privacy;
+    let fps_items: Vec<(u16, &str)> = MENU_FPS.iter().map(|(id, _, text)| (*id, *text)).collect();
+    let quality_items: Vec<(u16, &str)> = MENU_QUALITY
+        .iter()
+        .map(|(id, _, text)| (*id, *text))
+        .collect();
+    window.add_submenu("Frame rate", &fps_items);
+    window.add_submenu("Picture quality", &quality_items);
+    let (mut fps_cap, mut quality) = options.picture.unwrap_or((60, Quality::Balanced));
+    let show_picture_choice = |window: &Window, fps_cap: u8, quality: Quality| {
+        for (id, fps, _) in MENU_FPS {
+            window.check_menu_item(id, fps == fps_cap);
+        }
+        for (id, level, _) in MENU_QUALITY {
+            window.check_menu_item(id, level == quality);
+        }
+    };
+    show_picture_choice(&window, fps_cap, quality);
     let mut terminals = TerminalWindows::default();
     window.check_menu_item(MENU_PRIVACY, privacy_on);
     window.set_full_screen(options.full_screen);
@@ -811,6 +858,19 @@ fn session(
                 let command = match id {
                     MENU_CTRL_ALT_DEL => Some(Command::CtrlAltDel),
                     MENU_LOCK => Some(Command::Lock),
+                    id if MENU_FPS.iter().any(|(item, _, _)| *item == id) => {
+                        fps_cap = MENU_FPS.iter().find(|(item, _, _)| *item == id).map_or(60, |(_, fps, _)| *fps);
+                        show_picture_choice(&window, fps_cap, quality);
+                        Some(Command::Picture { fps: fps_cap, quality })
+                    }
+                    id if MENU_QUALITY.iter().any(|(item, _, _)| *item == id) => {
+                        quality = MENU_QUALITY
+                            .iter()
+                            .find(|(item, _, _)| *item == id)
+                            .map_or(Quality::Balanced, |(_, level, _)| *level);
+                        show_picture_choice(&window, fps_cap, quality);
+                        Some(Command::Picture { fps: fps_cap, quality })
+                    }
                     MENU_TERMINAL => {
                         terminals.open(&peer, agent, false, lines);
                         None
@@ -953,6 +1013,15 @@ fn session(
                     }
                     if privacy_on {
                         peer.send_data(Message::Command(Command::PrivacyOn).encode());
+                    }
+                    if options.picture.is_some() {
+                        peer.send_data(
+                            Message::Command(Command::Picture {
+                                fps: fps_cap,
+                                quality,
+                            })
+                            .encode(),
+                        );
                     }
                     for command in &options.commands {
                         peer.send_data(Message::Command(*command).encode());

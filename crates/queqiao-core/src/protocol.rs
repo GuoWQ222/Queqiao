@@ -82,6 +82,30 @@ pub enum Command {
     /// Darken that PC's monitors while controlled (the person there sees a dark screen; capture does not).
     PrivacyOn,
     PrivacyOff,
+    /// Picture settings: frames per second at most (0: as many as the screen shows) and quality.
+    Picture {
+        fps: u8,
+        quality: Quality,
+    },
+}
+
+/// How the bitrate is spent: fewer bits (slow networks), the size-based amount, or twice that (sharp text).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quality {
+    Smooth,
+    Balanced,
+    Sharp,
+}
+
+impl Quality {
+    /// The share of the size-based bitrate the encoder may use at most.
+    pub fn bitrate_factor(self) -> f64 {
+        match self {
+            Quality::Smooth => 0.5,
+            Quality::Balanced => 1.0,
+            Quality::Sharp => 2.0,
+        }
+    }
 }
 
 /// Clipboard text larger than this (UTF-8 bytes) is not sent in one message.
@@ -147,18 +171,27 @@ impl Message {
                 out.push(CLIPBOARD_TEXT);
                 out.extend_from_slice(text.as_bytes());
             }
-            Message::Command(command) => out.extend([
-                COMMAND,
+            Message::Command(command) => {
+                out.push(COMMAND);
                 match command {
-                    Command::CtrlAltDel => 1,
-                    Command::Lock => 2,
-                    Command::Restart => 3,
-                    Command::SoundOn => 4,
-                    Command::SoundOff => 5,
-                    Command::PrivacyOn => 6,
-                    Command::PrivacyOff => 7,
-                },
-            ]),
+                    Command::CtrlAltDel => out.push(1),
+                    Command::Lock => out.push(2),
+                    Command::Restart => out.push(3),
+                    Command::SoundOn => out.push(4),
+                    Command::SoundOff => out.push(5),
+                    Command::PrivacyOn => out.push(6),
+                    Command::PrivacyOff => out.push(7),
+                    Command::Picture { fps, quality } => out.extend([
+                        8,
+                        fps,
+                        match quality {
+                            Quality::Smooth => 0,
+                            Quality::Balanced => 1,
+                            Quality::Sharp => 2,
+                        },
+                    ]),
+                }
+            }
             Message::Notice(ref text) => {
                 out.push(NOTICE);
                 out.extend_from_slice(text.as_bytes());
@@ -224,6 +257,15 @@ impl Message {
                 5 => Command::SoundOff,
                 6 => Command::PrivacyOn,
                 7 => Command::PrivacyOff,
+                8 => Command::Picture {
+                    fps: *rest.get(1)?,
+                    quality: match rest.get(2)? {
+                        0 => Quality::Smooth,
+                        1 => Quality::Balanced,
+                        2 => Quality::Sharp,
+                        _ => return None,
+                    },
+                },
                 _ => return None,
             }),
             NOTICE => Message::Notice(String::from_utf8(rest.to_vec()).ok()?),
@@ -271,6 +313,14 @@ mod tests {
             Message::Command(Command::SoundOff),
             Message::Command(Command::PrivacyOn),
             Message::Command(Command::PrivacyOff),
+            Message::Command(Command::Picture {
+                fps: 30,
+                quality: Quality::Sharp,
+            }),
+            Message::Command(Command::Picture {
+                fps: 0,
+                quality: Quality::Smooth,
+            }),
             Message::Notice("the PC is locked".into()),
         ];
         for message in messages {
