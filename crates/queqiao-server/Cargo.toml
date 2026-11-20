@@ -1,9 +1,9 @@
 [package]
-name = "rc-server"
+name = "queqiao-server"
 description = "Accounts, devices, presence, WebSocket signaling, STUN/TURN relay"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-rc-core.workspace = true
+queqiao-core.workspace = true

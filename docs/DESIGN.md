@@ -1,4 +1,4 @@
-# RemoteControl: design (draft 2, 2026-11-20)
+# Queqiao: design (draft 2, 2026-11-20)
 
 Our own remote-control software for Windows, written in Rust. Users log in; every device on an account can see the
 others and control them. Original code; UU Remote was studied only for its architecture
@@ -16,11 +16,11 @@ others and control them. Original code; UU Remote was studied only for its archi
 
 | Component | Runs on | Job |
 |---|---|---|
-| `rc-server` | server (the PC for testing) | Accounts, devices, presence, session tokens, WebSocket signaling (offer/answer/candidates), STUN + TURN relay. HTTPS API + WebSocket + UDP. SQLite. |
-| `rc-service` | each controlled PC, Windows service (LocalSystem) | Starts and guards `rc-agent` in the active console session with a SYSTEM token (so it can reach the login/UAC desktop); restarts it on session change; Ctrl+Alt+Del (SendSAS); remote restart. |
-| `rc-agent` | controlled PC, user session | Keeps the presence connection; on a session: capture -> encode -> send, receive input -> inject, clipboard, files. Tray icon + banner whenever someone is connected. |
-| `rc-viewer` | controlling PC | Login, device list, viewer window: receive -> decode -> present; local input capture (Raw Input, cursor lock) -> send. |
-| `rc-core` crates | shared | Protocol, crypto/identity, transport, capture, codec, input. |
+| `queqiao-server` | server (the PC for testing) | Accounts, devices, presence, session tokens, WebSocket signaling (offer/answer/candidates), STUN + TURN relay. HTTPS API + WebSocket + UDP. SQLite. |
+| `queqiao-service` | each controlled PC, Windows service (LocalSystem) | Starts and guards `queqiao-agent` in the active console session with a SYSTEM token (so it can reach the login/UAC desktop); restarts it on session change; Ctrl+Alt+Del (SendSAS); remote restart. |
+| `queqiao-agent` | controlled PC, user session | Keeps the presence connection; on a session: capture -> encode -> send, receive input -> inject, clipboard, files. Tray icon + banner whenever someone is connected. |
+| `queqiao-viewer` | controlling PC | Login, device list, viewer window: receive -> decode -> present; local input capture (Raw Input, cursor lock) -> send. |
+| `queqiao-core` crates | shared | Protocol, crypto/identity, transport, capture, codec, input. |
 
 The controlled and controlling roles live in one installed app: every device can be both.
 
@@ -51,14 +51,14 @@ UU builds on WebRTC's standard pieces (`research\uu\STREAMER_FINDINGS.md`). We d
 - **WebRTC via `str0m`** (pure-Rust, sans-IO WebRTC): ICE with STUN for hole punching, DTLS-SRTP encryption,
   RTP/RTCP with transport-wide congestion control and a GCC-style bandwidth estimator, NACK/RTX, SCTP data
   channels. Sans-IO means we own the sockets and threads, which suits a low-latency engine.
-- **Relay: TURN.** `rc-server` includes a TURN server (`turn` crate); agents get relay candidates from it, so ICE
+- **Relay: TURN.** `queqiao-server` includes a TURN server (`turn` crate); agents get relay candidates from it, so ICE
   falls back to the relay automatically when direct UDP fails. Later: TURN over TCP/TLS for UDP-blocked networks.
 - **Data channels:** `control` (reliable, ordered: session control, clipboard), `input` (unordered, low latency),
   `files` (reliable, flow-controlled).
 - **Identity and encryption:** each device has its own DTLS certificate (key protected with DPAPI). The account
   server publishes each device's certificate fingerprint to the other devices on the account; the signed SDP carries
   it and peers check it. The TURN relay only forwards encrypted packets.
-- **Signaling:** our own WebSocket protocol on `rc-server` (JSON or protobuf messages: offer, answer, candidate,
+- **Signaling:** our own WebSocket protocol on `queqiao-server` (JSON or protobuf messages: offer, answer, candidate,
   restart-ice, leave), authorised with the account token. Compressed SDP is optional.
 - **Desktop tuning (from what UU ships):** high start bitrate (about 8 Mbps), no encoder frame dropping, render
   immediately (no jitter-buffer delay), no probing bursts, don't treat random loss as congestion, keyframes at most
@@ -84,8 +84,8 @@ congestion control and FEC, but a large prebuilt C++ dependency and hard to feed
 | M0 | Toolchain, Cargo workspace, empty crates build | `cargo build` passes |
 | M1 | Local loop on one PC: capture -> encode -> decode -> window | latency and fps measured on the PC |
 | M2 | LAN: agent + viewer by IP, video + mouse/keyboard | control the PC from a second process / PC |
-| M3 | `rc-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click |
+| M3 | `queqiao-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click |
 | M4 | NAT traversal + relay | connect across networks, forced-relay test |
-| M5 | `rc-service`: login screen, UAC, Ctrl+Alt+Del, restart | control at the lock screen |
+| M5 | `queqiao-service`: login screen, UAC, Ctrl+Alt+Del, restart | control at the lock screen |
 | M6 | Clipboard, file transfer, multi-monitor, audio | each feature end to end |
 | M7 | Adaptive bitrate, direct NVENC, installer, auto-update | quality under packet loss / low bandwidth |

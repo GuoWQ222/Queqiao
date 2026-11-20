@@ -1,0 +1,9 @@
+[package]
+name = "queqiao-service"
+description = "Windows service: starts and guards queqiao-agent in the console session"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+queqiao-core.workspace = true

@@ -13,7 +13,7 @@ $consoleUser = (Get-CimInstance Win32_ComputerSystem).UserName
 if (-not $consoleUser) { 'RUN_FAIL nobody is logged on at the console'; return }
 if (-not (Test-Path -LiteralPath $Exe)) { "RUN_FAIL not found: $Exe"; return }
 
-$taskName = 'RemoteControl-RunInSession'
+$taskName = 'Queqiao-RunInSession'
 $workDir = Split-Path -Parent $Exe
 if ($Arguments) {
     $action = New-ScheduledTaskAction -Execute $Exe -Argument $Arguments -WorkingDirectory $workDir

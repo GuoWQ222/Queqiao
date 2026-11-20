@@ -1,9 +1,9 @@
 [package]
-name = "rc-agent"
+name = "queqiao-agent"
 description = "Controlled side: presence, capture, encode, send, input injection"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-rc-core.workspace = true
+queqiao-core.workspace = true

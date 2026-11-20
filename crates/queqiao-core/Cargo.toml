@@ -1,5 +1,5 @@
 [package]
-name = "rc-core"
+name = "queqiao-core"
 description = "Shared code: protocol, identity, transport, capture, codec, input"
 version.workspace = true
 edition.workspace = true

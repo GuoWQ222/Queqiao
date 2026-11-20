@@ -1,5 +1,5 @@
 [package]
-name = "rc-capture"
+name = "queqiao-capture"
 description = "Screen capture: DXGI desktop duplication, frames stay on the GPU"
 version.workspace = true
 edition.workspace = true

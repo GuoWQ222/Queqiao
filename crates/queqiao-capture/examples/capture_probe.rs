@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rc_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
+use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::HiDpi::{

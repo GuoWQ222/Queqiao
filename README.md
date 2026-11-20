@@ -1,15 +1,16 @@
-# RemoteControl
+# Queqiao 鹊桥
 
-Our own remote-control software for Windows, in Rust. Design and milestones: `docs\DESIGN.md`.
+Remote control for Windows, in Rust: log in, see your devices, and control any of them from another.
+Named after the magpie bridge (鹊桥) of the Qixi legend, which joins two people across the Milky Way. Design and milestones: `docs\DESIGN.md`.
 
 | Folder | Contents |
 |---|---|
-| `crates\rc-core` | Shared library: protocol, identity, transport, codec, input |
-| `crates\rc-capture` | Screen capture (DXGI desktop duplication); `examples\capture_probe.rs` checks it |
-| `crates\rc-server` | Accounts, devices, presence, signaling, STUN/TURN relay |
-| `crates\rc-service` | Windows service on each controlled PC |
-| `crates\rc-agent` | Controlled side (user session) |
-| `crates\rc-viewer` | Controlling side (viewer window) |
+| `crates\queqiao-core` | Shared library: protocol, identity, transport, codec, input |
+| `crates\queqiao-capture` | Screen capture (DXGI desktop duplication); `examples\capture_probe.rs` checks it |
+| `crates\queqiao-server` | Accounts, devices, presence, signaling, STUN/TURN relay |
+| `crates\queqiao-service` | Windows service on each controlled PC |
+| `crates\queqiao-agent` | Controlled side (user session) |
+| `crates\queqiao-viewer` | Controlling side (viewer window) |
 | `scripts` | Build and check scripts |
 | `docs` | Design |
 | `research` | Design-level notes on other products; no third-party code |

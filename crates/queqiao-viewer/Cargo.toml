@@ -1,9 +1,9 @@
 [package]
-name = "rc-viewer"
+name = "queqiao-viewer"
 description = "Controlling side: login, device list, viewer window, input capture"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-rc-core.workspace = true
+queqiao-core.workspace = true

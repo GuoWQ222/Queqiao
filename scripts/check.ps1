@@ -1,4 +1,4 @@
-# Checks for the RemoteControl workspace: cargo fmt, clippy, build, test, then runs each program once.
+# Checks for the Queqiao workspace: cargo fmt, clippy, build, test, then runs each program once.
 # Usage on the PC: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1
 # Prints one line per step and CHECK_PASS or CHECK_FAIL <step> last; full cargo output in target\check.log.
 

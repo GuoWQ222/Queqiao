@@ -1,4 +1,4 @@
-//! Shared code for all RemoteControl programs.
+//! Shared code for all Queqiao programs.
 //!
 //! Planned modules (docs/DESIGN.md): protocol, identity, transport, capture, codec, input.
 //! M0 holds only the version information that every program prints at start-up.
@@ -21,8 +21,8 @@ mod tests {
 
     #[test]
     fn banner_names_program_and_versions() {
-        let text = banner("rc-agent");
-        assert!(text.starts_with("rc-agent "));
+        let text = banner("queqiao-agent");
+        assert!(text.starts_with("queqiao-agent "));
         assert!(text.ends_with(" (protocol 0)"));
     }
 }

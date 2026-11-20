@@ -1,4 +1,4 @@
-# RemoteControl Cargo workspace. Components and milestones: docs\DESIGN.md.
+# Queqiao Cargo workspace. Components and milestones: docs\DESIGN.md.
 [workspace]
 resolver = "3"
 members = ["crates/*"]
@@ -9,5 +9,5 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-rc-core = { path = "crates/rc-core" }
+queqiao-core = { path = "crates/queqiao-core" }
 windows = "0.62"
