@@ -767,6 +767,7 @@ dependencies = [
  "queqiao-codec",
  "queqiao-core",
  "queqiao-display",
+ "queqiao-files",
  "queqiao-input",
  "queqiao-transport",
  "serde",
@@ -812,6 +813,14 @@ dependencies = [
  "queqiao-capture",
  "queqiao-codec",
  "queqiao-core",
+ "windows",
+]
+
+[[package]]
+name = "queqiao-files"
+version = "0.1.0"
+dependencies = [
+ "sha2",
  "windows",
 ]
 
@@ -868,6 +877,7 @@ dependencies = [
  "queqiao-codec",
  "queqiao-core",
  "queqiao-display",
+ "queqiao-files",
  "queqiao-input",
  "queqiao-transport",
  "windows",

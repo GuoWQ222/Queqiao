@@ -1,0 +1,10 @@
+[package]
+name = "queqiao-files"
+description = "File transfer between viewer and agent over the files data channel: offers, chunks, SHA-256 checks"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2.workspace = true
+windows = { workspace = true, features = ["Win32_System_Com", "Win32_UI_Shell"] }

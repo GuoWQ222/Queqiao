@@ -59,7 +59,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 |---|---|
 | Clipboard both ways: text | done (2026-11-21; the person at the controlled PC can turn it off in the tray) |
 | Clipboard both ways: images and files | planned (M6, with file transfer) |
-| File transfer both ways by copy/paste and drag and drop; transfer list with pause, resume, cancel | planned (M6) |
+| File transfer both ways: drop files on the session window; into DownloadsQueqiao, checked with SHA-256 | done (2026-11-21; receiving can be turned off in the tray) |
+| File transfer by copy and paste, folders, a transfer list with pause, resume and cancel | planned (M6) |
 | Allow or forbid file transfer when helping others | planned |
 
 ## The controlled PC

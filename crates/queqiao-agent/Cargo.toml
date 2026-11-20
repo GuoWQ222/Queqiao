@@ -10,6 +10,7 @@ queqiao-account.workspace = true
 queqiao-capture.workspace = true
 queqiao-codec.workspace = true
 queqiao-display.workspace = true
+queqiao-files.workspace = true
 queqiao-core.workspace = true
 queqiao-input.workspace = true
 queqiao-transport.workspace = true

@@ -36,18 +36,12 @@ impl Ui {
         let (command_sender, commands) = mpsc::channel();
         let (event_sender, events) = mpsc::channel();
         let (ready_sender, ready) = mpsc::channel();
-        let (allow, ask, clipboard) = (
-            settings.allow_account_control,
-            settings.ask_before_session,
-            settings.share_clipboard,
-        );
+        let settings = settings.clone();
         let thread = std::thread::Builder::new()
             .name("queqiao-ui".into())
             .spawn(move || {
                 run(
-                    allow,
-                    ask,
-                    clipboard,
+                    &settings,
                     pictures.as_deref(),
                     &commands,
                     &event_sender,
@@ -122,15 +116,18 @@ impl Drop for Ui {
 }
 
 fn run(
-    allow: bool,
-    ask: bool,
-    clipboard: bool,
+    settings: &Settings,
     pictures: Option<&Path>,
     commands: &Receiver<Command>,
     events: &Sender<PresenceEvent>,
     ready: &Sender<Result<bool, String>>,
 ) {
-    let mut presence = match Presence::new(allow, ask, clipboard) {
+    let mut presence = match Presence::new(
+        settings.allow_account_control,
+        settings.ask_before_session,
+        settings.share_clipboard,
+        settings.receive_files,
+    ) {
         Ok(presence) => presence,
         Err(error) => {
             let _ = ready.send(Err(format!("tray icon: {}", error.message())));
@@ -193,6 +190,9 @@ pub struct Settings {
     /// Share the clipboard with the controlling device.
     #[serde(default = "yes")]
     pub share_clipboard: bool,
+    /// Accept files from the controlling device.
+    #[serde(default = "yes")]
+    pub receive_files: bool,
 }
 
 fn yes() -> bool {
@@ -207,6 +207,7 @@ impl Default for Settings {
             allow_account_control: true,
             ask_before_session: false,
             share_clipboard: true,
+            receive_files: true,
         }
     }
 }

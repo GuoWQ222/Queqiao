@@ -32,6 +32,8 @@ pub enum PresenceEvent {
     SetAsk(bool),
     /// Share the clipboard with the controlling device (true) or not.
     SetClipboard(bool),
+    /// Accept files from the controlling device (true) or not.
+    SetFiles(bool),
     /// The answer to the prompt: allowed, or denied (also when the time ran out or it was closed).
     Consent(bool),
 }
@@ -44,6 +46,7 @@ const MENU_ALLOW: u16 = 201;
 const MENU_ASK: u16 = 202;
 const MENU_QUIT: u16 = 203;
 const MENU_CLIPBOARD: u16 = 204;
+const MENU_FILES: u16 = 205;
 const ID_END: u16 = 210;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
@@ -71,12 +74,13 @@ pub struct Presence {
     allow: bool,
     ask: bool,
     clipboard: bool,
+    files: bool,
     viewer: Option<String>,
 }
 
 impl Presence {
     /// The tray icon, with the current settings.
-    pub fn new(allow: bool, ask: bool, clipboard: bool) -> Result<Presence> {
+    pub fn new(allow: bool, ask: bool, clipboard: bool, files: bool) -> Result<Presence> {
         let instance = unsafe { GetModuleHandleW(None) }?;
         REGISTER.call_once(|| unsafe {
             let class = WNDCLASSEXW {
@@ -117,6 +121,7 @@ impl Presence {
             allow,
             ask,
             clipboard,
+            files,
             viewer: None,
         };
         presence.update_tray();
@@ -283,6 +288,7 @@ impl Presence {
         let allow = wide("Let my account's devices control this PC");
         let ask = wide("Ask me before each session");
         let clipboard = wide("Share the clipboard");
+        let files = wide("Receive files");
         let quit = wide("Quit Queqiao on this PC");
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
@@ -307,6 +313,12 @@ impl Presence {
                 checked(self.clipboard),
                 usize::from(MENU_CLIPBOARD),
                 PCWSTR(clipboard.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                checked(self.files),
+                usize::from(MENU_FILES),
+                PCWSTR(files.as_ptr()),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
@@ -344,6 +356,10 @@ impl Presence {
                 MENU_CLIPBOARD => {
                     self.clipboard = !self.clipboard;
                     Some(PresenceEvent::SetClipboard(self.clipboard))
+                }
+                MENU_FILES => {
+                    self.files = !self.files;
+                    Some(PresenceEvent::SetFiles(self.files))
                 }
                 MENU_QUIT => Some(PresenceEvent::Quit),
                 _ => None,

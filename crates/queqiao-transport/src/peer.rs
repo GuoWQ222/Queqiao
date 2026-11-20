@@ -10,8 +10,10 @@
 //! What str0m sends from the relayed address goes through the TURN client, and what the TURN server
 //! forwards is handed to str0m as received on the relayed address.
 
+use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Once};
 use std::thread::JoinHandle;
@@ -50,6 +52,10 @@ pub enum PeerEvent {
         received: Instant,
     },
     Data(Vec<u8>),
+    /// The "files" channel is open (file transfer may start).
+    FilesOpen,
+    /// A message on the "files" channel.
+    FileData(Vec<u8>),
     /// The viewer lost a frame and needs a keyframe.
     KeyframeRequested,
     /// The way the media goes now: "direct to <address>" or "relayed through <TURN server> to <address>".
@@ -65,6 +71,7 @@ pub enum PeerEvent {
 enum Command {
     Video { data: Vec<u8>, time_90khz: u64 },
     Data(Vec<u8>),
+    FileData(Vec<u8>),
     RequestKeyframe,
     BitrateRange { minimum: u64, desired: u64 },
     Close,
@@ -85,7 +92,13 @@ pub struct Peer {
     wake_to: SocketAddr,
     thread: Option<JoinHandle<()>>,
     notes: Vec<String>,
+    /// Bytes for the "files" channel not yet written into str0m, and waiting in its buffer.
+    files_queued: Arc<AtomicUsize>,
+    files_buffered: Arc<AtomicUsize>,
 }
+
+/// File data the sender keeps in flight at most (queued for the network thread plus in the channel's buffer).
+pub const FILES_IN_FLIGHT: usize = 1024 * 1024;
 
 impl Peer {
     /// Negotiates over `signal` (the viewer offers, the agent answers) and starts the network thread.
@@ -117,6 +130,8 @@ impl Peer {
                 let mut api = rtc.sdp_api();
                 mid = Some(api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None));
                 channel = Some(api.add_channel("control".to_string()));
+                // A second channel for files, so a large transfer never delays input or control.
+                api.add_channel("files".to_string());
                 let (offer, pending) = api
                     .apply()
                     .ok_or_else(|| Error("nothing to offer".into()))?;
@@ -136,6 +151,8 @@ impl Peer {
         let waker = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
         let wake_to = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
         let wake_from = waker.local_addr()?;
+        let files_queued = Arc::new(AtomicUsize::new(0));
+        let files_buffered = Arc::new(AtomicUsize::new(0));
         let mut network = Network {
             rtc,
             socket,
@@ -150,6 +167,11 @@ impl Peer {
             connected: false,
             path: None,
             clock: Instant::now(),
+            files: None,
+            files_queued: files_queued.clone(),
+            files_buffered: files_buffered.clone(),
+            control_pending: VecDeque::new(),
+            files_pending: VecDeque::new(),
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -167,6 +189,8 @@ impl Peer {
             wake_to,
             thread: Some(thread),
             notes: gathered.notes,
+            files_queued,
+            files_buffered,
         })
     }
 
@@ -180,9 +204,22 @@ impl Peer {
         self.command(Command::Video { data, time_90khz });
     }
 
-    /// Sends a message on the data channel (dropped while the channel is not open).
+    /// Sends a message on the data channel (kept until the channel is open and has room; in order).
     pub fn send_data(&self, bytes: Vec<u8>) {
         self.command(Command::Data(bytes));
+    }
+
+    /// Sends a message on the "files" channel (kept until it is open and has room; in order).
+    pub fn send_file_data(&self, bytes: Vec<u8>) {
+        self.files_queued.fetch_add(bytes.len(), Ordering::Relaxed);
+        self.command(Command::FileData(bytes));
+    }
+
+    /// How many more bytes of file data may be sent now ([`FILES_IN_FLIGHT`] minus what is in flight).
+    pub fn files_room(&self) -> usize {
+        let in_flight =
+            self.files_queued.load(Ordering::Relaxed) + self.files_buffered.load(Ordering::Relaxed);
+        FILES_IN_FLIGHT.saturating_sub(in_flight)
     }
 
     /// The bitrate range the sender wants: the bandwidth estimate probes up to `desired` (str0m's BWE).
@@ -226,12 +263,51 @@ impl Drop for Peer {
 ///   costs a new keyframe, a bigger burst and more loss);
 /// - keep the last 4096 sent video packets for retransmission (NACK), so a keyframe can still be repaired;
 /// - bandwidth estimation (transport-wide congestion control) from `start`, which also paces the packets out
-///   instead of sending a keyframe as one burst.
+///   instead of sending a keyframe as one burst;
+/// - 4 MB of data-channel buffer (str0m's default of 128 kB refuses writes beyond it, which dropped file chunks)
+///   and messages up to 1 MiB (the default 256 KiB is just below a full clipboard message).
 pub fn tune(config: RtcConfig, start: Bitrate) -> RtcConfig {
     config
         .set_reordering_size_video(2048)
         .set_send_buffer_video(4096)
         .enable_bwe(Some(start))
+        .set_sctp_max_buffered_amount(4 << 20)
+        .set_sctp_max_message_size(1 << 20)
+}
+
+/// Writes `pending` into channel `id` until str0m refuses (buffer full) or the queue is empty; `queued` counts the
+/// bytes still waiting.
+fn flush_channel(
+    rtc: &mut Rtc,
+    id: Option<ChannelId>,
+    pending: &mut VecDeque<Vec<u8>>,
+    queued: Option<&AtomicUsize>,
+) {
+    let Some(id) = id else {
+        return;
+    };
+    while let Some(bytes) = pending.front() {
+        let Some(mut channel) = rtc.channel(id) else {
+            return;
+        };
+        match channel.write(true, bytes) {
+            Ok(true) => {
+                if let Some(queued) = queued {
+                    queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                }
+                pending.pop_front();
+            }
+            // Full: try again on the next round (or when str0m reports the buffer low).
+            Ok(false) => return,
+            // A message str0m can never take (too large): dropped rather than blocking the channel.
+            Err(_) => {
+                if let Some(queued) = queued {
+                    queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                }
+                pending.pop_front();
+            }
+        }
+    }
 }
 
 fn bind_socket() -> Result<UdpSocket, Error> {
@@ -251,6 +327,12 @@ struct Network {
     wake_from: SocketAddr,
     mid: Option<Mid>,
     channel: Option<ChannelId>,
+    files: Option<ChannelId>,
+    files_queued: Arc<AtomicUsize>,
+    files_buffered: Arc<AtomicUsize>,
+    /// Messages for the control and files channels not yet taken by str0m.
+    control_pending: VecDeque<Vec<u8>>,
+    files_pending: VecDeque<Vec<u8>>,
     events: Sender<PeerEvent>,
     commands: Receiver<Command>,
     last_keyframe_request: Option<Instant>,
@@ -361,6 +443,7 @@ impl Network {
             match self.rtc.poll_output().map_err(err)? {
                 Output::Timeout(deadline) => {
                     self.flush_turn();
+                    self.flush_channels();
                     return Ok(Some(deadline));
                 }
                 Output::Transmit(packet) => {
@@ -429,9 +512,16 @@ impl Network {
                     received: Instant::now(),
                 })
             }
+            Event::ChannelOpen(id, label) if label == "files" => {
+                self.files = Some(id);
+                Some(PeerEvent::FilesOpen)
+            }
             Event::ChannelOpen(id, _) => {
                 self.channel = Some(id);
                 Some(PeerEvent::ChannelOpen)
+            }
+            Event::ChannelData(data) if Some(data.id) == self.files => {
+                Some(PeerEvent::FileData(data.data))
             }
             Event::ChannelData(data) => Some(PeerEvent::Data(data.data)),
             Event::KeyframeRequest(_) => Some(PeerEvent::KeyframeRequested),
@@ -463,11 +553,12 @@ impl Network {
                 writer.write(pt, now, time, data).map_err(err)?;
             }
             Command::Data(bytes) => {
-                if let Some(id) = self.channel
-                    && let Some(mut channel) = self.rtc.channel(id)
-                {
-                    let _ = channel.write(true, &bytes);
-                }
+                self.control_pending.push_back(bytes);
+                self.flush_channels();
+            }
+            Command::FileData(bytes) => {
+                self.files_pending.push_back(bytes);
+                self.flush_channels();
             }
             Command::BitrateRange { minimum, desired } => {
                 self.rtc
@@ -513,6 +604,24 @@ impl Network {
             self.rtc.handle_input(input).map_err(err)?;
         }
         Ok(())
+    }
+
+    /// Writes queued data-channel messages, in order, as far as str0m's buffer takes them (a refused write is
+    /// kept and tried again later, so nothing is lost or reordered; messages wait for their channel to open).
+    fn flush_channels(&mut self) {
+        flush_channel(&mut self.rtc, self.channel, &mut self.control_pending, None);
+        flush_channel(
+            &mut self.rtc,
+            self.files,
+            &mut self.files_pending,
+            Some(&self.files_queued),
+        );
+        if let Some(id) = self.files
+            && let Some(mut channel) = self.rtc.channel(id)
+        {
+            self.files_buffered
+                .store(channel.buffered_amount(), Ordering::Relaxed);
+        }
     }
 
     fn flush_turn(&mut self) {

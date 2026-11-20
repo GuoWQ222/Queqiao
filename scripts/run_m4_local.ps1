@@ -80,10 +80,19 @@ try {
     }
 
     $device = $env:COMPUTERNAME
+    # Files for the direct session, one each way (random content, so a mix-up cannot pass).
+    $fileToAgent = Join-Path $Out 'queqiao-test-to-agent.bin'
+    $fileToViewer = Join-Path $Out 'queqiao-test-to-viewer.bin'
+    $random = [Security.Cryptography.RandomNumberGenerator]::Create()
+    foreach ($testFile in $fileToAgent, $fileToViewer) {
+        $bytes = New-Object byte[] (20MB + 12345)
+        $random.GetBytes($bytes)
+        [IO.File]::WriteAllBytes($testFile, $bytes)
+    }
     # label, QUEQIAO_FORCE, extra agent options, what the agent's report must say, what the viewer's must say,
     # whether both runs must pass (a declined session passes neither). Later options win, so an extra --seconds shortens the agent's run.
     $runs = @(
-        @('direct', '', '--clipboard-test', 'test text from the other side received: yes', 'test text from the other side received: yes', $true),
+        @('direct', '', "--clipboard-test --send-file `"$fileToViewer`"", 'test text from the other side received: yes', 'test text from the other side received: yes', $true),
         @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
         @('allowed', '', "--ask --answer allow --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
         @('declined', '', '--ask --answer deny --seconds 45', 'the person at this PC declined', 'the person at that PC declined', $false),
@@ -94,8 +103,8 @@ try {
         if ($Sessions -notcontains $label -and $Sessions -notcontains 'all') { continue }
         $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`" $extra"
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_$label.txt`""
-        # The clipboard test runs on both sides.
-        if ($extra -like '*--clipboard-test*') { $viewerArgs += ' --clipboard-test' }
+        # The clipboard and file tests run on both sides.
+        if ($extra -like '*--clipboard-test*') { $viewerArgs += " --clipboard-test --send-file `"$fileToAgent`"" }
         Start-SessionTask "Queqiao-M4-Agent-$label" $agent $agentArgs $mode
         Start-Sleep -Seconds 2
         Start-SessionTask "Queqiao-M4-Viewer-$label" $viewer $viewerArgs $mode
@@ -110,6 +119,20 @@ try {
             $text
             if ($mustPass -and $text[-1] -ne 'RESULT PASS') { $failed += "$label $program" }
             if (-not ($text | Where-Object { $_ -match $expects })) { $failed += "$label $program (expected '$expects')" }
+            if ($extra -like '*--send-file*') {
+                # The file from the other side must be on disk, identical; then it is removed again.
+                $original = if ($program -eq 'agent') { $fileToAgent } else { $fileToViewer }
+                $line = $text | Where-Object { $_ -match '^file received: (.+) \(\d+ bytes' } | Select-Object -First 1
+                $received = if ($line -match '^file received: (.+) \(\d+ bytes') { $Matches[1] } else { $null }
+                if ($received -and (Test-Path -LiteralPath $received)) {
+                    $same = (Get-FileHash -LiteralPath $received -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash
+                    "file check ($program): $received identical to the original: $same"
+                    if (-not $same) { $failed += "$label $program file differs" }
+                    Remove-Item -LiteralPath $received -Force
+                } else {
+                    $failed += "$label $program received no file"
+                }
+            }
         }
     }
 } finally {

@@ -3,12 +3,14 @@
 //! [`WindowEvent`]s for the viewer to send to the remote PC.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
@@ -18,7 +20,7 @@ const SLOW: Duration = Duration::from_millis(50);
 const CLASS: PCWSTR = w!("QueqiaoViewer");
 
 /// Input in the window. Positions are in pixels of the window's drawing area.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowEvent {
     MouseMove {
         x: i32,
@@ -42,6 +44,8 @@ pub enum WindowEvent {
     },
     /// The window lost the keyboard: keys still held must be released on the remote side.
     FocusLost,
+    /// Files (or folders) dropped on the window from Explorer: to send to the other PC.
+    FilesDropped(Vec<PathBuf>),
 }
 
 thread_local! {
@@ -96,6 +100,8 @@ impl Window {
             )
         }?;
         let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+        // Files dropped from Explorer come as WM_DROPFILES.
+        unsafe { DragAcceptFiles(hwnd, true) };
         Ok(Self {
             hwnd,
             closed: false,
@@ -232,6 +238,22 @@ extern "system" fn window_proc(
                 down: message == WM_KEYDOWN || message == WM_SYSKEYDOWN,
             });
             // Not passed on: Alt and F10 would otherwise open this window's system menu.
+            LRESULT(0)
+        }
+        WM_DROPFILES => {
+            let drop = HDROP(wparam.0 as *mut _);
+            let count = unsafe { DragQueryFileW(drop, u32::MAX, None) };
+            let mut paths = Vec::new();
+            for index in 0..count {
+                let length = unsafe { DragQueryFileW(drop, index, None) } as usize;
+                let mut buffer = vec![0u16; length + 1];
+                let copied = unsafe { DragQueryFileW(drop, index, Some(&mut buffer)) } as usize;
+                paths.push(PathBuf::from(String::from_utf16_lossy(
+                    &buffer[..copied.min(length)],
+                )));
+            }
+            unsafe { DragFinish(drop) };
+            push(WindowEvent::FilesDropped(paths));
             LRESULT(0)
         }
         WM_KILLFOCUS => {

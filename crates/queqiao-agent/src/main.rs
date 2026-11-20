@@ -26,6 +26,7 @@ use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{InputEvent, Message};
 use queqiao_display::PresenceEvent;
+use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{
     Clipboard, Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position,
 };
@@ -70,6 +71,8 @@ struct Options {
     ui_pictures: Option<PathBuf>,
     /// For tests: send a clipboard text once the session's data channel is open.
     clipboard_test: bool,
+    /// Files to send to the viewer once the session's files channel is open (tests).
+    send_files: Vec<PathBuf>,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -150,6 +153,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--end-after" => options.end_after = args.next().and_then(|v| v.parse().ok()),
             "--ui-pictures" => options.ui_pictures = args.next().map(PathBuf::from),
             "--clipboard-test" => options.clipboard_test = true,
+            "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -204,7 +208,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         "direct",
         end,
         &ui,
-        settings.share_clipboard,
+        [settings.share_clipboard, settings.receive_files],
         &mut deferred,
         lines,
     )?;
@@ -272,6 +276,11 @@ fn run_account(
                     lines.push(format!(
                         "the person at this PC set: this account's devices may control it: {on}"
                     ));
+                }
+                PresenceEvent::SetFiles(on) => {
+                    settings.receive_files = on;
+                    let _ = settings.save();
+                    lines.push(format!("the person at this PC set: receive files: {on}"));
                 }
                 PresenceEvent::SetClipboard(on) => {
                     settings.share_clipboard = on;
@@ -360,7 +369,7 @@ fn run_account(
                     &from,
                     end,
                     ui,
-                    settings.share_clipboard,
+                    [settings.share_clipboard, settings.receive_files],
                     &mut deferred,
                     lines,
                 ) {
@@ -433,6 +442,24 @@ fn ask_consent(ui: &ui::Ui, viewer: &str, answer: Option<bool>) -> Result<bool, 
     }
 }
 
+/// One report line per finished or failed file.
+fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
+    for outcome in outcomes {
+        lines.push(match outcome {
+            Outcome::Sent { name, size } => {
+                format!("file sent: {name} ({size} bytes, checked by the viewer)")
+            }
+            Outcome::Received { path, size } => {
+                format!(
+                    "file received: {} ({size} bytes, SHA-256 checked)",
+                    path.display()
+                )
+            }
+            Outcome::Failed { name, reason } => format!("file failed: {name}: {reason}"),
+        });
+    }
+}
+
 /// How a session went.
 /// The start of the clipboard text the tests send (each side checks it got the other's).
 pub(crate) const CLIPBOARD_TEST_TEXT: &str = "Queqiao clipboard test";
@@ -489,7 +516,7 @@ fn session(
     viewer_id: &str,
     end: Option<Instant>,
     ui: &ui::Ui,
-    share_clipboard: bool,
+    [share_clipboard, receive_files]: [bool; 2],
     deferred: &mut Vec<PresenceEvent>,
     lines: &mut Vec<String>,
 ) -> Result<SessionOutcome, String> {
@@ -580,6 +607,11 @@ fn session(
     };
     let mut clipboard_stats = ClipboardStats::default();
     let mut channel_open_at: Option<Instant> = None;
+    // Files both ways: from the viewer into Downloads\Queqiao (while the person at this PC allows it).
+    let mut transfers = Transfers::new(downloads_folder(), receive_files);
+    for path in &options.send_files {
+        let _ = transfers.send(path);
+    }
     let mut end_pressed = false;
     let mut ended_here = false;
     'session: loop {
@@ -679,10 +711,20 @@ fn session(
                     }
                 }
                 PeerEvent::ChannelOpen => channel_open_at = Some(Instant::now()),
+                PeerEvent::FilesOpen => report_files(transfers.opened(), lines),
+                PeerEvent::FileData(bytes) => {
+                    for reply in transfers.on_message(&bytes) {
+                        peer.send_file_data(reply);
+                    }
+                }
                 PeerEvent::Video { .. } => {}
             }
         }
 
+        for message in transfers.take(peer.files_room()) {
+            peer.send_file_data(message);
+        }
+        report_files(transfers.outcomes(), lines);
         if let Some(opened) = channel_open_at {
             if let Some(clipboard) = &clipboard
                 && let Some(text) = clipboard.changed()
@@ -789,6 +831,9 @@ fn session(
         summary(&mut stats.agent_ms)
     ));
     lines.push(clipboard_stats.line());
+    if transfers.busy() {
+        lines.push("files: a transfer was cut off when the session ended".into());
+    }
     lines.push(format!(
         "bitrate: started at {:.1}, lowest {:.1}, last {:.1}, highest allowed {:.1} Mbit/s; {bitrate_changes} changes",
         f64::from(start_bitrate) / 1e6,

@@ -28,6 +28,7 @@ use queqiao_account::{
 };
 use queqiao_codec::{DecodedFrame, DecoderChoice, H264Decoder};
 use queqiao_core::protocol::{InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton};
+use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::Clipboard;
 
 /// The start of the clipboard text the tests send (each side checks it got the other's).
@@ -77,6 +78,8 @@ struct Options {
     input_test: bool,
     /// For tests: send a clipboard text once the data channel is open.
     clipboard_test: bool,
+    /// Files to send once the session's files channel is open (tests; people drop files on the window).
+    send_files: Vec<PathBuf>,
 }
 
 impl Options {
@@ -174,6 +177,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--report" => options.report = args.next().map(PathBuf::from),
             "--input-test" => options.input_test = true,
             "--clipboard-test" => options.clipboard_test = true,
+            "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
             "--trust-new-key" => options.trust_new_key = args.next(),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
@@ -625,6 +629,11 @@ fn session(
     let mut test_step = 0usize;
     let mut next_test_step: Option<Instant> = None;
     let mut decoded: Vec<DecodedFrame> = Vec::new();
+    // Files both ways: dropped on the window, or from the agent into Downloads\Queqiao.
+    let mut transfers = Transfers::new(downloads_folder(), true);
+    for path in &options.send_files {
+        let _ = transfers.send(path);
+    }
     let mut closed = None;
 
     'session: loop {
@@ -652,6 +661,15 @@ fn session(
             break;
         }
         for event in window.take_events() {
+            if let WindowEvent::FilesDropped(paths) = &event {
+                for path in paths {
+                    match transfers.send(path) {
+                        Ok(()) => lines.push(format!("sending {}", path.display())),
+                        Err(error) => lines.push(format!("not sent: {error}")),
+                    }
+                }
+                continue;
+            }
             if options.input_test {
                 continue;
             }
@@ -719,11 +737,22 @@ fn session(
             next_ping = Instant::now() + Duration::from_millis(500);
         }
 
+        for message in transfers.take(peer.files_room()) {
+            peer.send_file_data(message);
+        }
+        report_files(transfers.outcomes(), lines);
+
         let mut event = peer.wait_event(Duration::from_millis(2));
         while let Some(current) = event.take() {
             match current {
                 PeerEvent::Connected => connected_after = Some(started.elapsed()),
                 PeerEvent::ChannelOpen => channel_open = true,
+                PeerEvent::FilesOpen => report_files(transfers.opened(), lines),
+                PeerEvent::FileData(bytes) => {
+                    for reply in transfers.on_message(&bytes) {
+                        peer.send_file_data(reply);
+                    }
+                }
                 PeerEvent::Video {
                     data,
                     time_90khz,
@@ -862,6 +891,9 @@ fn session(
         summary(&mut total)
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
+    if transfers.busy() {
+        lines.push("files: a transfer was cut off when the session ended".into());
+    }
     lines.push(format!(
         "clipboard: {clipboard_in} received, {clipboard_out} sent; test text from the other side received: {}",
         if clipboard_test_received { "yes" } else { "no" }
@@ -938,6 +970,7 @@ fn translate(
                 down,
             }
         }
+        WindowEvent::FilesDropped(_) => return Vec::new(),
         WindowEvent::FocusLost => {
             return held
                 .drain()
@@ -952,6 +985,24 @@ fn translate(
         }
     };
     vec![Message::Input(input)]
+}
+
+/// One report line per finished or failed file.
+fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
+    for outcome in outcomes {
+        lines.push(match outcome {
+            Outcome::Sent { name, size } => {
+                format!("file sent: {name} ({size} bytes, checked by the agent)")
+            }
+            Outcome::Received { path, size } => {
+                format!(
+                    "file received: {} ({size} bytes, SHA-256 checked)",
+                    path.display()
+                )
+            }
+            Outcome::Failed { name, reason } => format!("file failed: {name}: {reason}"),
+        });
+    }
 }
 
 /// The GPU's D3D11 device with video support; Microsoft's software adapter (WARP) without a usable GPU
