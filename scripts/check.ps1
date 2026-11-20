@@ -15,7 +15,7 @@ $failedStep = $null
 $steps = @(
     @{ Name = 'fmt'; CargoArgs = @('fmt', '--all', '--check') },
     @{ Name = 'clippy'; CargoArgs = @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings') },
-    @{ Name = 'build'; CargoArgs = @('build', '--workspace') },
+    @{ Name = 'build'; CargoArgs = @('build', '--workspace', '--all-targets') },
     @{ Name = 'test'; CargoArgs = @('test', '--workspace') }
 )
 foreach ($step in $steps) {

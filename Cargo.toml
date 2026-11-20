@@ -10,3 +10,4 @@ publish = false
 
 [workspace.dependencies]
 rc-core = { path = "crates/rc-core" }
+windows = "0.62"
