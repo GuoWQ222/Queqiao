@@ -1,6 +1,6 @@
 [package]
 name = "queqiao-codec"
-description = "Video codec: BGRA -> NV12 on the GPU and the hardware H.264 encoder (Media Foundation)"
+description = "Video codec: BGRA -> NV12, H.264 encoders (Media Foundation, NVENC, OpenH264) and decoders"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -17,6 +17,7 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
+    "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Variant",
 ] }

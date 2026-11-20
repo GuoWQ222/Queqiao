@@ -63,6 +63,10 @@ fn main() {
         // runs yet, so changing the environment here is safe.
         unsafe { std::env::set_var("QUEQIAO_FORCE", spec) };
     }
+    if let Some(preset) = options.get("nvenc_preset") {
+        // NVENC preset P1..P7 for measurements (see nvenc.rs).
+        unsafe { std::env::set_var("QUEQIAO_NVENC_PRESET", preset) };
+    }
     let number = |key: &str| options.get(key).and_then(|v| v.parse::<u32>().ok());
     let mut lines = Vec::new();
     if options.get("throttling").map(String::as_str) == Some("on") {

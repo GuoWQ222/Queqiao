@@ -62,6 +62,14 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
 10. **Encoders: Media Foundation and direct vendor SDKs, compared** (user decision 2026-11-20): direct NVENC,
    AMF and oneVPL paths are built beside Media Foundation and measured against it on the same machines; AMD
    cannot be tested on the current machines.
+   NVENC (direct, `QUEQIAO_FORCE=encode:nvenc`) is built against API 11.1 so drivers from R470 (2021) work: the
+   newest header (13.1) was refused by a March 2026 driver (supports 13.0). Measured on the RTX 5080 PC,
+   2560x1440 at 60 fps, live screen: Media Foundation 2.99 ms per frame (p95 3.12), NVENC P1 2.45 ms (p95
+   2.61), NVENC P4 3.68 ms (p95 3.77); round-trip luma PSNR at about the same data rate: Media Foundation
+   70-76 dB, NVENC P4 66-68 dB, P1 61-63 dB (NVENC with a one-frame VBV; keyframes may use 8x a frame's bits,
+   2x gave a 19 dB first picture). So on NVIDIA the direct path saves about 0.5 ms only with the fastest,
+   lowest-quality preset; Media Foundation stays the default. What the direct SDK adds is control Media
+   Foundation does not expose (bitrate changes without a keyframe, intra refresh, 4:4:4 for sharp text).
 9. **Build requirements:** Rust, Visual Studio Build Tools (C++), and NASM on the PATH: without NASM, OpenH264
    builds silently without its assembly and runs about 5x slower (measured 35 ms instead of 6.6 ms per 1080p
    frame); `scripts\check.ps1` warns when NASM is missing.

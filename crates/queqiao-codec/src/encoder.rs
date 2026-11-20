@@ -8,6 +8,7 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID
 use windows::core::{Error, Result};
 
 use crate::mf::MfEncoder;
+use crate::nvenc::NvencEncoder;
 use crate::software::SoftwareEncoder;
 
 /// What to encode.
@@ -60,15 +61,20 @@ pub struct SoftwareTiming {
 pub enum EncoderChoice {
     /// Hardware first, software if no hardware encoder works.
     Auto,
+    /// Hardware only, through Media Foundation (any vendor).
     Hardware,
+    /// NVIDIA's encoder driven directly (NVENC SDK), for comparison with Media Foundation.
+    Nvenc,
     Software,
 }
 
 impl EncoderChoice {
-    /// `Auto`, unless the test switch `QUEQIAO_FORCE` says `encode:hardware` or `encode:software`.
+    /// `Auto`, unless the test switch `QUEQIAO_FORCE` says `encode:hardware` (or `encode:mf`),
+    /// `encode:nvenc` or `encode:software`.
     pub fn from_env() -> Self {
         match queqiao_core::forced("encode").as_deref() {
-            Some("hardware") => Self::Hardware,
+            Some("hardware" | "mf") => Self::Hardware,
+            Some("nvenc") => Self::Nvenc,
             Some("software") => Self::Software,
             _ => Self::Auto,
         }
@@ -77,6 +83,7 @@ impl EncoderChoice {
 
 enum Backend {
     Hardware(MfEncoder),
+    Nvenc(Box<NvencEncoder>),
     /// Boxed: OpenH264's encoder state is several kilobytes.
     Software(Box<SoftwareEncoder>),
 }
@@ -95,6 +102,13 @@ impl H264Encoder {
         choice: EncoderChoice,
     ) -> Result<Self> {
         let mut skipped = Vec::new();
+        if choice == EncoderChoice::Nvenc {
+            let encoder = NvencEncoder::open(device, config)?;
+            return Ok(Self {
+                backend: Backend::Nvenc(Box::new(encoder)),
+                skipped,
+            });
+        }
         if choice == EncoderChoice::Software {
             skipped.push("hardware encoders: not tried (software forced)".into());
         } else if let Some(encoder) = MfEncoder::open(device, config, &mut skipped) {
@@ -121,19 +135,20 @@ impl H264Encoder {
     pub fn name(&self) -> &str {
         match &self.backend {
             Backend::Hardware(encoder) => &encoder.name,
+            Backend::Nvenc(encoder) => &encoder.name,
             Backend::Software(encoder) => &encoder.name,
         }
     }
 
     pub fn is_hardware(&self) -> bool {
-        matches!(self.backend, Backend::Hardware(_))
+        !matches!(self.backend, Backend::Software(_))
     }
 
     /// For the software encoder: where its time went (none for hardware encoders).
     pub fn software_timing(&self) -> Option<SoftwareTiming> {
         match &self.backend {
-            Backend::Hardware(_) => None,
             Backend::Software(encoder) => Some(encoder.timing),
+            _ => None,
         }
     }
 
@@ -146,7 +161,7 @@ impl H264Encoder {
     pub fn refused_settings(&self) -> &[&'static str] {
         match &self.backend {
             Backend::Hardware(encoder) => &encoder.refused,
-            Backend::Software(_) => &[],
+            _ => &[],
         }
     }
 
@@ -154,7 +169,7 @@ impl H264Encoder {
     pub fn wants_input(&self) -> bool {
         match &self.backend {
             Backend::Hardware(encoder) => encoder.wants_input(),
-            Backend::Software(_) => true,
+            _ => true,
         }
     }
 
@@ -162,6 +177,10 @@ impl H264Encoder {
     pub fn poll(&mut self, out: &mut Vec<EncodedFrame>) -> Result<()> {
         match &mut self.backend {
             Backend::Hardware(encoder) => encoder.poll(out),
+            Backend::Nvenc(encoder) => {
+                encoder.poll(out);
+                Ok(())
+            }
             Backend::Software(encoder) => {
                 encoder.poll(out);
                 Ok(())
@@ -174,6 +193,7 @@ impl H264Encoder {
     pub fn encode(&mut self, nv12: &ID3D11Texture2D, time: i64, keyframe: bool) -> Result<()> {
         match &mut self.backend {
             Backend::Hardware(encoder) => encoder.encode(nv12, time, keyframe),
+            Backend::Nvenc(encoder) => encoder.encode(nv12, time, keyframe),
             Backend::Software(encoder) => encoder.encode(nv12, time, keyframe),
         }
     }
@@ -182,14 +202,14 @@ impl H264Encoder {
     pub fn drain(&mut self) -> Result<()> {
         match &mut self.backend {
             Backend::Hardware(encoder) => encoder.drain(),
-            Backend::Software(_) => Ok(()),
+            _ => Ok(()),
         }
     }
 
     pub fn drained(&self) -> bool {
         match &self.backend {
             Backend::Hardware(encoder) => encoder.drained,
-            Backend::Software(_) => true,
+            _ => true,
         }
     }
 }
