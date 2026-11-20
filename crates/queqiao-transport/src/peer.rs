@@ -52,10 +52,10 @@ pub enum PeerEvent {
         received: Instant,
     },
     Data(Vec<u8>),
-    /// The "files" channel is open (file transfer may start).
-    FilesOpen,
-    /// A message on the "files" channel.
-    FileData(Vec<u8>),
+    /// A stream's channel is open (sending on it may start).
+    StreamOpen(Stream),
+    /// A message on a stream's channel.
+    StreamData(Stream, Vec<u8>),
     /// The viewer lost a frame and needs a keyframe.
     KeyframeRequested,
     /// The way the media goes now: "direct to <address>" or "relayed through <TURN server> to <address>".
@@ -77,7 +77,7 @@ enum Command {
     Video { data: Vec<u8>, time_90khz: u64 },
     Audio { data: Vec<u8>, time_48khz: u64 },
     Data(Vec<u8>),
-    FileData(Vec<u8>),
+    StreamData(Stream, Vec<u8>),
     RequestKeyframe,
     BitrateRange { minimum: u64, desired: u64 },
     Close,
@@ -98,13 +98,52 @@ pub struct Peer {
     wake_to: SocketAddr,
     thread: Option<JoinHandle<()>>,
     notes: Vec<String>,
-    /// Bytes for the "files" channel not yet written into str0m, and waiting in its buffer.
-    files_queued: Arc<AtomicUsize>,
-    files_buffered: Arc<AtomicUsize>,
+    in_flight: Arc<[InFlight; STREAMS]>,
 }
 
-/// File data the sender keeps in flight at most (queued for the network thread plus in the channel's buffer).
-pub const FILES_IN_FLIGHT: usize = 1024 * 1024;
+/// Bulk data with a data channel of its own, so it never delays input or control messages, and with flow
+/// control: a sender keeps at most [`STREAM_IN_FLIGHT`] bytes in flight on each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Stream {
+    /// File transfer.
+    Files,
+    /// Remote command lines.
+    Terminal,
+}
+
+const STREAMS: usize = 2;
+
+impl Stream {
+    pub const ALL: [Stream; STREAMS] = [Stream::Files, Stream::Terminal];
+
+    fn label(self) -> &'static str {
+        match self {
+            Stream::Files => "files",
+            Stream::Terminal => "terminal",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn from_label(label: &str) -> Option<Stream> {
+        Stream::ALL
+            .into_iter()
+            .find(|stream| stream.label() == label)
+    }
+}
+
+/// Bytes on one stream not yet written into str0m, and waiting in its buffer.
+#[derive(Default)]
+struct InFlight {
+    queued: AtomicUsize,
+    buffered: AtomicUsize,
+}
+
+/// Bytes a sender keeps in flight at most on one stream (queued for the network thread plus in the channel's
+/// buffer).
+pub const STREAM_IN_FLIGHT: usize = 1024 * 1024;
 
 impl Peer {
     /// Negotiates over `signal` (the viewer offers, the agent answers) and starts the network thread.
@@ -142,8 +181,10 @@ impl Peer {
                 audio_mid =
                     Some(api.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None));
                 channel = Some(api.add_channel("control".to_string()));
-                // A second channel for files, so a large transfer never delays input or control.
-                api.add_channel("files".to_string());
+                // A channel for each stream, so a large transfer never delays input or control.
+                for stream in Stream::ALL {
+                    api.add_channel(stream.label().to_string());
+                }
                 let (offer, pending) = api
                     .apply()
                     .ok_or_else(|| Error("nothing to offer".into()))?;
@@ -163,8 +204,7 @@ impl Peer {
         let waker = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
         let wake_to = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
         let wake_from = waker.local_addr()?;
-        let files_queued = Arc::new(AtomicUsize::new(0));
-        let files_buffered = Arc::new(AtomicUsize::new(0));
+        let in_flight: Arc<[InFlight; STREAMS]> = Arc::new(Default::default());
         let mut network = Network {
             rtc,
             socket,
@@ -180,11 +220,10 @@ impl Peer {
             connected: false,
             path: None,
             clock: Instant::now(),
-            files: None,
-            files_queued: files_queued.clone(),
-            files_buffered: files_buffered.clone(),
+            streams: [None; STREAMS],
+            in_flight: in_flight.clone(),
             control_pending: VecDeque::new(),
-            files_pending: VecDeque::new(),
+            stream_pending: Default::default(),
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -202,8 +241,7 @@ impl Peer {
             wake_to,
             thread: Some(thread),
             notes: gathered.notes,
-            files_queued,
-            files_buffered,
+            in_flight,
         })
     }
 
@@ -222,17 +260,20 @@ impl Peer {
         self.command(Command::Data(bytes));
     }
 
-    /// Sends a message on the "files" channel (kept until it is open and has room; in order).
-    pub fn send_file_data(&self, bytes: Vec<u8>) {
-        self.files_queued.fetch_add(bytes.len(), Ordering::Relaxed);
-        self.command(Command::FileData(bytes));
+    /// Sends a message on a stream's channel (kept until it is open and has room; in order).
+    pub fn send_stream(&self, stream: Stream, bytes: Vec<u8>) {
+        self.in_flight[stream.index()]
+            .queued
+            .fetch_add(bytes.len(), Ordering::Relaxed);
+        self.command(Command::StreamData(stream, bytes));
     }
 
-    /// How many more bytes of file data may be sent now ([`FILES_IN_FLIGHT`] minus what is in flight).
-    pub fn files_room(&self) -> usize {
+    /// How many more bytes may be sent on `stream` now ([`STREAM_IN_FLIGHT`] minus what is in flight).
+    pub fn room(&self, stream: Stream) -> usize {
+        let counters = &self.in_flight[stream.index()];
         let in_flight =
-            self.files_queued.load(Ordering::Relaxed) + self.files_buffered.load(Ordering::Relaxed);
-        FILES_IN_FLIGHT.saturating_sub(in_flight)
+            counters.queued.load(Ordering::Relaxed) + counters.buffered.load(Ordering::Relaxed);
+        STREAM_IN_FLIGHT.saturating_sub(in_flight)
     }
 
     /// The bitrate range the sender wants: the bandwidth estimate probes up to `desired` (str0m's BWE).
@@ -371,12 +412,11 @@ struct Network {
     mid: Option<Mid>,
     audio_mid: Option<Mid>,
     channel: Option<ChannelId>,
-    files: Option<ChannelId>,
-    files_queued: Arc<AtomicUsize>,
-    files_buffered: Arc<AtomicUsize>,
-    /// Messages for the control and files channels not yet taken by str0m.
+    streams: [Option<ChannelId>; STREAMS],
+    in_flight: Arc<[InFlight; STREAMS]>,
+    /// Messages for the control channel and each stream not yet taken by str0m.
     control_pending: VecDeque<Vec<u8>>,
-    files_pending: VecDeque<Vec<u8>>,
+    stream_pending: [VecDeque<Vec<u8>>; STREAMS],
     events: Sender<PeerEvent>,
     commands: Receiver<Command>,
     last_keyframe_request: Option<Instant>,
@@ -563,18 +603,25 @@ impl Network {
                     received: Instant::now(),
                 })
             }
-            Event::ChannelOpen(id, label) if label == "files" => {
-                self.files = Some(id);
-                Some(PeerEvent::FilesOpen)
+            Event::ChannelOpen(id, label) => match Stream::from_label(&label) {
+                Some(stream) => {
+                    self.streams[stream.index()] = Some(id);
+                    Some(PeerEvent::StreamOpen(stream))
+                }
+                None => {
+                    self.channel = Some(id);
+                    Some(PeerEvent::ChannelOpen)
+                }
+            },
+            Event::ChannelData(data) => {
+                match Stream::ALL
+                    .into_iter()
+                    .find(|stream| self.streams[stream.index()] == Some(data.id))
+                {
+                    Some(stream) => Some(PeerEvent::StreamData(stream, data.data)),
+                    None => Some(PeerEvent::Data(data.data)),
+                }
             }
-            Event::ChannelOpen(id, _) => {
-                self.channel = Some(id);
-                Some(PeerEvent::ChannelOpen)
-            }
-            Event::ChannelData(data) if Some(data.id) == self.files => {
-                Some(PeerEvent::FileData(data.data))
-            }
-            Event::ChannelData(data) => Some(PeerEvent::Data(data.data)),
             Event::KeyframeRequest(_) => Some(PeerEvent::KeyframeRequested),
             Event::EgressBitrateEstimate(
                 BweKind::Twcc { estimate, .. } | BweKind::Remb { estimate, .. },
@@ -621,8 +668,8 @@ impl Network {
                 self.control_pending.push_back(bytes);
                 self.flush_channels();
             }
-            Command::FileData(bytes) => {
-                self.files_pending.push_back(bytes);
+            Command::StreamData(stream, bytes) => {
+                self.stream_pending[stream.index()].push_back(bytes);
                 self.flush_channels();
             }
             Command::BitrateRange { minimum, desired } => {
@@ -675,17 +722,21 @@ impl Network {
     /// kept and tried again later, so nothing is lost or reordered; messages wait for their channel to open).
     fn flush_channels(&mut self) {
         flush_channel(&mut self.rtc, self.channel, &mut self.control_pending, None);
-        flush_channel(
-            &mut self.rtc,
-            self.files,
-            &mut self.files_pending,
-            Some(&self.files_queued),
-        );
-        if let Some(id) = self.files
-            && let Some(mut channel) = self.rtc.channel(id)
-        {
-            self.files_buffered
-                .store(channel.buffered_amount(), Ordering::Relaxed);
+        for stream in Stream::ALL {
+            let index = stream.index();
+            flush_channel(
+                &mut self.rtc,
+                self.streams[index],
+                &mut self.stream_pending[index],
+                Some(&self.in_flight[index].queued),
+            );
+            if let Some(id) = self.streams[index]
+                && let Some(mut channel) = self.rtc.channel(id)
+            {
+                self.in_flight[index]
+                    .buffered
+                    .store(channel.buffered_amount(), Ordering::Relaxed);
+            }
         }
     }
 

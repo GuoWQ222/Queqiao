@@ -74,7 +74,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Restart Queqiao, lock the PC when the session ends | planned (M5) |
 | Start with Windows, stay in the tray | planned (M5) |
 | Wake-on-LAN through another Queqiao device on the same LAN, with a set-up check (network card, BIOS) | planned |
-| Remote command line: several terminal sessions (ConPTY), detach and resume, rename | planned |
+| Remote command line: several at once (ConPTY: PowerShell, or cmd), each in a console window; the person at the PC can forbid them in the tray | done (2026-11-21) |
+| Command lines: detach and resume, rename | planned |
 
 ## The program
 

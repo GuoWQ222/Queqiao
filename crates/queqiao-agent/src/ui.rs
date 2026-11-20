@@ -160,6 +160,7 @@ fn run(
         settings.ask_before_session,
         settings.share_clipboard,
         settings.receive_files,
+        settings.allow_terminal,
     ) {
         Ok(presence) => presence,
         Err(error) => {
@@ -266,6 +267,9 @@ pub struct Settings {
     /// Accept files from the controlling device.
     #[serde(default = "yes")]
     pub receive_files: bool,
+    /// Let the controlling device open command lines here.
+    #[serde(default = "yes")]
+    pub allow_terminal: bool,
 }
 
 fn yes() -> bool {
@@ -281,6 +285,7 @@ impl Default for Settings {
             ask_before_session: false,
             share_clipboard: true,
             receive_files: true,
+            allow_terminal: true,
         }
     }
 }

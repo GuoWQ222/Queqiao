@@ -12,6 +12,7 @@ queqiao-codec.workspace = true
 queqiao-audio.workspace = true
 queqiao-display.workspace = true
 queqiao-files.workspace = true
+queqiao-terminal.workspace = true
 queqiao-core.workspace = true
 queqiao-input.workspace = true
 queqiao-transport.workspace = true

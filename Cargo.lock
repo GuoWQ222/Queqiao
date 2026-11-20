@@ -788,6 +788,7 @@ dependencies = [
  "queqiao-display",
  "queqiao-files",
  "queqiao-input",
+ "queqiao-terminal",
  "queqiao-transport",
  "serde",
  "serde_json",
@@ -886,6 +887,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "queqiao-terminal"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "queqiao-transport"
 version = "0.1.0"
 dependencies = [
@@ -907,6 +915,7 @@ dependencies = [
  "queqiao-display",
  "queqiao-files",
  "queqiao-input",
+ "queqiao-terminal",
  "queqiao-transport",
  "windows",
 ]

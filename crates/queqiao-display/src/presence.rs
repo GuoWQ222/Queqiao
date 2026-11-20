@@ -34,6 +34,8 @@ pub enum PresenceEvent {
     SetClipboard(bool),
     /// Accept files from the controlling device (true) or not.
     SetFiles(bool),
+    /// Allow remote command lines (true) or not.
+    SetTerminal(bool),
     /// The answer to the prompt: allowed, or denied (also when the time ran out or it was closed).
     Consent(bool),
 }
@@ -47,6 +49,7 @@ const MENU_ASK: u16 = 202;
 const MENU_QUIT: u16 = 203;
 const MENU_CLIPBOARD: u16 = 204;
 const MENU_FILES: u16 = 205;
+const MENU_TERMINAL: u16 = 206;
 const ID_END: u16 = 210;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
@@ -75,12 +78,19 @@ pub struct Presence {
     ask: bool,
     clipboard: bool,
     files: bool,
+    terminal: bool,
     viewer: Option<String>,
 }
 
 impl Presence {
     /// The tray icon, with the current settings.
-    pub fn new(allow: bool, ask: bool, clipboard: bool, files: bool) -> Result<Presence> {
+    pub fn new(
+        allow: bool,
+        ask: bool,
+        clipboard: bool,
+        files: bool,
+        terminal: bool,
+    ) -> Result<Presence> {
         let instance = unsafe { GetModuleHandleW(None) }?;
         REGISTER.call_once(|| unsafe {
             let class = WNDCLASSEXW {
@@ -122,6 +132,7 @@ impl Presence {
             ask,
             clipboard,
             files,
+            terminal,
             viewer: None,
         };
         presence.update_tray();
@@ -328,6 +339,7 @@ impl Presence {
         let ask = wide("Ask me before each session");
         let clipboard = wide("Share the clipboard");
         let files = wide("Receive files");
+        let terminal = wide("Allow remote command lines");
         let quit = wide("Quit Queqiao on this PC");
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
@@ -358,6 +370,12 @@ impl Presence {
                 checked(self.files),
                 usize::from(MENU_FILES),
                 PCWSTR(files.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                checked(self.terminal),
+                usize::from(MENU_TERMINAL),
+                PCWSTR(terminal.as_ptr()),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
@@ -399,6 +417,10 @@ impl Presence {
                 MENU_FILES => {
                     self.files = !self.files;
                     Some(PresenceEvent::SetFiles(self.files))
+                }
+                MENU_TERMINAL => {
+                    self.terminal = !self.terminal;
+                    Some(PresenceEvent::SetTerminal(self.terminal))
                 }
                 MENU_QUIT => Some(PresenceEvent::Quit),
                 _ => None,

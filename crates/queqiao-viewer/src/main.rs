@@ -36,6 +36,9 @@ const MENU_RESTART: u16 = 0x1020;
 const MENU_SOUND: u16 = 0x1030;
 const MENU_FULL_SCREEN: u16 = 0x1040;
 const MENU_PRIVACY: u16 = 0x1050;
+const MENU_TERMINAL: u16 = 0x1060;
+/// A new command line's window size until its window reports its own.
+const TERMINAL_SIZE: (u16, u16) = (120, 30);
 /// Scancodes of the full-screen key, Ctrl+Alt+Enter (handled here, not sent): Enter, Ctrl, Alt.
 const KEY_ENTER: u16 = 0x1C;
 const KEY_CTRL: u16 = 0x1D;
@@ -50,7 +53,8 @@ use queqiao_display::{
     DeviceList, DeviceRow, ListAction, LoginAction, LoginFields, LoginForm, Presenter, Window,
     WindowEvent, fit, show_error,
 };
-use queqiao_transport::{Peer, PeerEvent, Role, Signal, Signaling};
+use queqiao_terminal::{TerminalMessage, TerminalWindow, WindowEvent as TerminalEvent};
+use queqiao_transport::{Peer, PeerEvent, Role, Signal, Signaling, Stream};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -105,6 +109,8 @@ struct Options {
     full_screen: bool,
     /// Darken that PC's screen from the start.
     privacy: bool,
+    /// Open a command line on that PC and check it (its window closes by itself).
+    terminal_test: bool,
 }
 
 impl Options {
@@ -216,6 +222,18 @@ impl TitleStatus {
 }
 
 fn main() {
+    // A terminal window (started by a session of this viewer): it runs until its command line ends.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--terminal-pipe")
+        && let Some(pipe) = args.get(2)
+    {
+        let title = match args.iter().position(|arg| arg == "--terminal-title") {
+            Some(at) => args.get(at + 1).cloned().unwrap_or_default(),
+            None => String::new(),
+        };
+        let test = args.iter().any(|arg| arg == "--terminal-test");
+        std::process::exit(queqiao_terminal::run_helper(pipe, &title, test));
+    }
     let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
     let Some(options) = parse(std::env::args().skip(1)) else {
         println!("{banner}");
@@ -279,6 +297,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--mute" => options.mute = true,
             "--full-screen" => options.full_screen = true,
             "--privacy" => options.privacy = true,
+            "--terminal-test" => options.terminal_test = true,
             "--command" => options.commands.push(match args.next()?.as_str() {
                 "lock" => Command::Lock,
                 "restart" => Command::Restart,
@@ -752,9 +771,11 @@ fn session(
         (MENU_RESTART, "Restart that PC..."),
         (MENU_SOUND, "Play that PC's sound"),
         (MENU_PRIVACY, "Darken that PC's screen"),
+        (MENU_TERMINAL, "Open a command line on that PC"),
         (MENU_FULL_SCREEN, "Full screen (Ctrl+Alt+Enter)"),
     ]);
     let mut privacy_on = options.privacy;
+    let mut terminals = TerminalWindows::default();
     window.check_menu_item(MENU_PRIVACY, privacy_on);
     window.set_full_screen(options.full_screen);
     window.check_menu_item(MENU_SOUND, sound_on);
@@ -790,6 +811,10 @@ fn session(
                 let command = match id {
                     MENU_CTRL_ALT_DEL => Some(Command::CtrlAltDel),
                     MENU_LOCK => Some(Command::Lock),
+                    MENU_TERMINAL => {
+                        terminals.open(&peer, agent, false, lines);
+                        None
+                    }
                     MENU_PRIVACY => {
                         privacy_on = !privacy_on;
                         window.check_menu_item(MENU_PRIVACY, privacy_on);
@@ -911,9 +936,10 @@ fn session(
             next_ping = Instant::now() + Duration::from_millis(500);
         }
 
-        for message in transfers.take(peer.files_room()) {
-            peer.send_file_data(message);
+        for message in transfers.take(peer.room(Stream::Files)) {
+            peer.send_stream(Stream::Files, message);
         }
+        terminals.poll(&peer, lines);
         report_files(transfers.outcomes(), lines);
 
         let mut event = peer.wait_event(Duration::from_millis(2));
@@ -933,10 +959,20 @@ fn session(
                         lines.push(format!("sent command: {command:?}"));
                     }
                 }
-                PeerEvent::FilesOpen => report_files(transfers.opened(), lines),
-                PeerEvent::FileData(bytes) => {
+                PeerEvent::StreamOpen(Stream::Files) => report_files(transfers.opened(), lines),
+                PeerEvent::StreamOpen(Stream::Terminal) => {
+                    if options.terminal_test {
+                        terminals.open(&peer, agent, true, lines);
+                    }
+                }
+                PeerEvent::StreamData(Stream::Terminal, bytes) => {
+                    if let Some(message) = TerminalMessage::decode(&bytes) {
+                        terminals.on_message(message, &peer, lines);
+                    }
+                }
+                PeerEvent::StreamData(Stream::Files, bytes) => {
                     for reply in transfers.on_message(&bytes) {
-                        peer.send_file_data(reply);
+                        peer.send_stream(Stream::Files, reply);
                     }
                 }
                 PeerEvent::Video {
@@ -1086,6 +1122,10 @@ fn session(
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
     lines.push(format!("window title: {}", status.title));
+    if options.terminal_test {
+        lines.push(terminals.test_result());
+    }
+    drop(terminals);
     if window.is_full_screen()
         && let Some(area) = window.monitor_rect()
     {
@@ -1215,6 +1255,171 @@ fn translate(
         }
     };
     vec![Message::Input(input)]
+}
+
+/// The command lines open on that PC, each in a console window here.
+#[derive(Default)]
+struct TerminalWindows {
+    windows: HashMap<u32, TerminalWindow>,
+    next_id: u32,
+    /// Test: (the shell, its output so far, the test text seen, the exit code, the window size).
+    test: Option<TerminalTest>,
+}
+
+#[derive(Default)]
+struct TerminalTest {
+    shell: String,
+    output: Vec<u8>,
+    seen: bool,
+    exit_code: Option<u32>,
+    size: Option<(u16, u16)>,
+}
+
+/// What the terminal test types, by shell; its output differs from what is typed, so seeing it means the
+/// command ran.
+fn terminal_test_input(shell: &str) -> &'static str {
+    if shell == "PowerShell" {
+        "Write-Output ('queqiao' + '-terminal-ok')\r"
+    } else {
+        "echo queqiao^-terminal-ok\r"
+    }
+}
+
+impl TerminalWindows {
+    fn open(&mut self, peer: &Peer, agent: &str, test: bool, lines: &mut Vec<String>) {
+        self.next_id += 1;
+        let id = self.next_id;
+        let program = match std::env::current_exe() {
+            Ok(program) => program,
+            Err(error) => {
+                lines.push(format!("command line: no window ({error})"));
+                return;
+            }
+        };
+        match TerminalWindow::open(&program, agent, test) {
+            Ok(window) => {
+                self.windows.insert(id, window);
+                if test {
+                    self.test = Some(TerminalTest::default());
+                }
+                let (cols, rows) = TERMINAL_SIZE;
+                let open = TerminalMessage::Open { id, cols, rows };
+                peer.send_stream(Stream::Terminal, open.encode());
+            }
+            Err(error) => lines.push(format!("command line: no window ({error})")),
+        }
+    }
+
+    fn on_message(&mut self, message: TerminalMessage, peer: &Peer, lines: &mut Vec<String>) {
+        match message {
+            TerminalMessage::Opened { id, shell } => {
+                lines.push(format!("command line {id} opened ({shell})"));
+                if let Some(test) = &mut self.test {
+                    test.shell = shell.clone();
+                    let input = terminal_test_input(&shell).as_bytes().to_vec();
+                    peer.send_stream(
+                        Stream::Terminal,
+                        TerminalMessage::Input { id, data: input }.encode(),
+                    );
+                }
+            }
+            TerminalMessage::Output { id, data } => {
+                if let Some(window) = self.windows.get(&id) {
+                    window.output(&data);
+                }
+                if let Some(test) = &mut self.test {
+                    test.output.extend_from_slice(&data);
+                    if !test.seen
+                        && String::from_utf8_lossy(&test.output).contains("queqiao-terminal-ok")
+                    {
+                        test.seen = true;
+                        let exit = TerminalMessage::Input {
+                            id,
+                            data: b"exit\r".to_vec(),
+                        };
+                        peer.send_stream(Stream::Terminal, exit.encode());
+                    }
+                }
+            }
+            TerminalMessage::Exited { id, code } => {
+                lines.push(format!("command line {id} ended with exit code {code}"));
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.end(&format!("The command line ended (exit code {code})."));
+                }
+                if let Some(test) = &mut self.test {
+                    test.exit_code = Some(code);
+                }
+            }
+            TerminalMessage::Failed { id, reason } => {
+                lines.push(format!("command line {id} failed: {reason}"));
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.end(&reason);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Keys and size changes from the windows; a closed window ends its command line.
+    fn poll(&mut self, peer: &Peer, lines: &mut Vec<String>) {
+        let mut closed = Vec::new();
+        for (&id, window) in &self.windows {
+            while let Some(event) = window.try_event() {
+                let message = match event {
+                    TerminalEvent::Input(data) => TerminalMessage::Input { id, data },
+                    TerminalEvent::Resize(cols, rows) => {
+                        if let Some(test) = &mut self.test {
+                            test.size = Some((cols, rows));
+                        }
+                        TerminalMessage::Resize { id, cols, rows }
+                    }
+                    TerminalEvent::Closed => {
+                        closed.push(id);
+                        TerminalMessage::Close { id }
+                    }
+                };
+                peer.send_stream(Stream::Terminal, message.encode());
+            }
+        }
+        for id in closed {
+            // In the test the window stays known, to read its helper's exit code at the end.
+            if self.test.is_none() {
+                self.windows.remove(&id);
+                lines.push(format!("command line {id}: window closed"));
+            }
+        }
+    }
+
+    /// "terminal test: PASS (...)": the command ran, ended with 0, and the window process came up, got the
+    /// output and closed by itself with 0.
+    fn test_result(&self) -> String {
+        let Some(test) = &self.test else {
+            return "terminal test: FAIL (no command line was opened)".into();
+        };
+        let helper = self.windows.values().next().and_then(|window| {
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(code) = window.helper_exit_code() {
+                    return Some(code);
+                }
+                if Instant::now() > until {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let passed =
+            test.seen && test.exit_code == Some(0) && test.size.is_some() && helper == Some(0);
+        format!(
+            "terminal test: {} (shell {}, test output seen: {}, exit code {:?}, window size {:?}, window process exit code {:?})",
+            if passed { "PASS" } else { "FAIL" },
+            test.shell,
+            test.seen,
+            test.exit_code,
+            test.size,
+            helper
+        )
+    }
 }
 
 /// One report line per finished or failed file.

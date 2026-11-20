@@ -32,8 +32,9 @@ use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{
     Clipboard, Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position,
 };
+use queqiao_terminal::{TerminalMessage, Terminals};
 use queqiao_transport::{
-    Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, check_hello, hello_body,
+    Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, Stream, check_hello, hello_body,
 };
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::*;
@@ -223,7 +224,11 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         "direct",
         end,
         &ui,
-        [settings.share_clipboard, settings.receive_files],
+        [
+            settings.share_clipboard,
+            settings.receive_files,
+            settings.allow_terminal,
+        ],
         &mut deferred,
         lines,
     )?;
@@ -290,6 +295,13 @@ fn run_account(
                     let _ = settings.save();
                     lines.push(format!(
                         "the person at this PC set: this account's devices may control it: {on}"
+                    ));
+                }
+                PresenceEvent::SetTerminal(on) => {
+                    settings.allow_terminal = on;
+                    let _ = settings.save();
+                    lines.push(format!(
+                        "the person at this PC set: allow remote command lines: {on}"
                     ));
                 }
                 PresenceEvent::SetFiles(on) => {
@@ -384,7 +396,11 @@ fn run_account(
                     &from,
                     end,
                     ui,
-                    [settings.share_clipboard, settings.receive_files],
+                    [
+                        settings.share_clipboard,
+                        settings.receive_files,
+                        settings.allow_terminal,
+                    ],
                     &mut deferred,
                     lines,
                 ) {
@@ -688,7 +704,7 @@ fn session(
     viewer_id: &str,
     end: Option<Instant>,
     ui: &ui::Ui,
-    [share_clipboard, receive_files]: [bool; 2],
+    [share_clipboard, receive_files, allow_terminal]: [bool; 3],
     deferred: &mut Vec<PresenceEvent>,
     lines: &mut Vec<String>,
 ) -> Result<SessionOutcome, String> {
@@ -792,6 +808,8 @@ fn session(
     let mut channel_open_at: Option<Instant> = None;
     // Files both ways: from the viewer into Downloads\Queqiao (while the person at this PC allows it).
     let mut transfers = Transfers::new(downloads_folder(), receive_files);
+    // Remote command lines (while the person at this PC allows them).
+    let mut terminals = Terminals::new(allow_terminal);
     for path in &options.send_files {
         let _ = transfers.send(path);
     }
@@ -943,18 +961,41 @@ fn session(
                     }
                 }
                 PeerEvent::ChannelOpen => channel_open_at = Some(Instant::now()),
-                PeerEvent::FilesOpen => report_files(transfers.opened(), lines),
-                PeerEvent::FileData(bytes) => {
+                PeerEvent::StreamOpen(Stream::Files) => report_files(transfers.opened(), lines),
+                PeerEvent::StreamOpen(Stream::Terminal) => {}
+                PeerEvent::StreamData(Stream::Terminal, bytes) => {
+                    if let Some(message) = TerminalMessage::decode(&bytes) {
+                        for reply in terminals.handle(message) {
+                            match &reply {
+                                TerminalMessage::Opened { id, shell } => {
+                                    lines.push(format!("command line {id} opened ({shell})"))
+                                }
+                                TerminalMessage::Failed { id, reason } => {
+                                    lines.push(format!("command line {id} failed: {reason}"))
+                                }
+                                _ => {}
+                            }
+                            peer.send_stream(Stream::Terminal, reply.encode());
+                        }
+                    }
+                }
+                PeerEvent::StreamData(Stream::Files, bytes) => {
                     for reply in transfers.on_message(&bytes) {
-                        peer.send_file_data(reply);
+                        peer.send_stream(Stream::Files, reply);
                     }
                 }
                 PeerEvent::Video { .. } | PeerEvent::Audio { .. } => {}
             }
         }
 
-        for message in transfers.take(peer.files_room()) {
-            peer.send_file_data(message);
+        for message in transfers.take(peer.room(Stream::Files)) {
+            peer.send_stream(Stream::Files, message);
+        }
+        for message in terminals.poll(peer.room(Stream::Terminal)) {
+            if let TerminalMessage::Exited { id, code } = &message {
+                lines.push(format!("command line {id} ended with exit code {code}"));
+            }
+            peer.send_stream(Stream::Terminal, message.encode());
         }
         report_files(transfers.outcomes(), lines);
         if privacy_check_due {
@@ -1072,6 +1113,13 @@ fn session(
         summary(&mut stats.agent_ms)
     ));
     lines.push(clipboard_stats.line());
+    if !terminals.is_empty() {
+        lines.push(format!(
+            "{} command lines closed with the session",
+            terminals.len()
+        ));
+    }
+    drop(terminals);
     sound_report.extend(sound.as_ref().map(sound_line));
     lines.extend(sound_report);
     if transfers.busy() {

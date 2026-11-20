@@ -114,6 +114,8 @@ try {
         if ($extra -like '*--dry-run-commands*') { $viewerArgs += ' --command ctrl-alt-del --command lock --command restart' }
         # Full screen: the drawing area must cover the monitor (the input test maps to it too).
         if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen' }
+        # A command line on that PC, in a window of its own that closes by itself.
+        if ($label -eq 'relay') { $viewerArgs += ' --terminal-test' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += ' --privacy' }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
@@ -152,6 +154,9 @@ try {
                 foreach ($pattern in $wanted) {
                     if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "$label $program (expected '$pattern')" }
                 }
+            }
+            if ($label -eq 'relay' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^terminal test: PASS' })) {
+                $failed += "$label viewer (expected 'terminal test: PASS')"
             }
             # The window title shows the network status (the relay session must say so).
             if ($program -eq 'viewer' -and $mustPass) {
