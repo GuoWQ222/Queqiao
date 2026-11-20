@@ -160,6 +160,7 @@ const CHINESE: &[(&str, &str)] = &[
     ("Lock that PC", "锁定那台电脑"),
     ("Restart that PC...", "重启那台电脑……"),
     ("Play that PC's sound", "播放那台电脑的声音"),
+    ("Mute that PC's speakers", "让那台电脑的扬声器静音"),
     ("Darken that PC's screen", "让那台电脑黑屏（隐私屏）"),
     ("Open a command line on that PC", "在那台电脑上打开命令行"),
     ("Full screen (Ctrl+Alt+Enter)", "全屏（Ctrl+Alt+Enter）"),

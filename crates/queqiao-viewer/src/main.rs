@@ -42,6 +42,7 @@ const MENU_FULL_SCREEN: u16 = 0x1040;
 const MENU_PRIVACY: u16 = 0x1050;
 const MENU_TERMINAL: u16 = 0x1060;
 const MENU_GAME_MOUSE: u16 = 0x1070;
+const MENU_MUTE_SPEAKERS: u16 = 0x1080;
 /// Ctrl+Alt+M: game mouse on or off.
 const KEY_M: u16 = 0x32;
 /// The game-mouse test's relative moves (mouse counts).
@@ -138,6 +139,8 @@ struct Options {
     terminal_test: bool,
     /// After the input test, relative moves (game mouse) that the agent checks.
     game_mouse_test: bool,
+    /// Mute that PC's speakers from the start.
+    mute_speakers: bool,
     /// Picture settings to send at the start: frames per second at most (0: the screen's) and quality.
     picture: Option<(u8, Quality)>,
     /// Help someone of another account: their help ID and code (tests; people use "Help someone...").
@@ -336,6 +339,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--privacy" => options.privacy = true,
             "--terminal-test" => options.terminal_test = true,
             "--game-mouse-test" => options.game_mouse_test = true,
+            "--mute-speakers" => options.mute_speakers = true,
             "--help-id" => options.help_id = Some(args.next()?),
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--picture" => {
@@ -889,12 +893,15 @@ fn session(
         (MENU_LOCK, tr("Lock that PC")),
         (MENU_RESTART, tr("Restart that PC...")),
         (MENU_SOUND, tr("Play that PC's sound")),
+        (MENU_MUTE_SPEAKERS, tr("Mute that PC's speakers")),
         (MENU_PRIVACY, tr("Darken that PC's screen")),
         (MENU_TERMINAL, tr("Open a command line on that PC")),
         (MENU_FULL_SCREEN, tr("Full screen (Ctrl+Alt+Enter)")),
         (MENU_GAME_MOUSE, tr("Game mouse (Ctrl+Alt+M)")),
     ]);
     let mut privacy_on = options.privacy;
+    let mut speakers_muted = options.mute_speakers;
+    window.check_menu_item(MENU_MUTE_SPEAKERS, speakers_muted);
     let fps_items: Vec<(u16, &str)> = MENU_FPS
         .iter()
         .map(|(id, _, text)| (*id, tr(text)))
@@ -972,6 +979,11 @@ fn session(
                         privacy_on = !privacy_on;
                         window.check_menu_item(MENU_PRIVACY, privacy_on);
                         Some(if privacy_on { Command::PrivacyOn } else { Command::PrivacyOff })
+                    }
+                    MENU_MUTE_SPEAKERS => {
+                        speakers_muted = !speakers_muted;
+                        window.check_menu_item(MENU_MUTE_SPEAKERS, speakers_muted);
+                        Some(Command::MuteSpeakers(speakers_muted))
                     }
                     MENU_GAME_MOUSE => {
                         let on = !window.is_game_mouse();
@@ -1140,6 +1152,9 @@ fn session(
                     }
                     if privacy_on {
                         peer.send_data(Message::Command(Command::PrivacyOn).encode());
+                    }
+                    if speakers_muted {
+                        peer.send_data(Message::Command(Command::MuteSpeakers(true)).encode());
                     }
                     if options.picture.is_some() {
                         peer.send_data(

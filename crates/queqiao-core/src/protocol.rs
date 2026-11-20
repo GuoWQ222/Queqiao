@@ -92,6 +92,8 @@ pub enum Command {
         fps: u8,
         quality: Quality,
     },
+    /// Mute that PC's speakers for the session (its sound still comes to the viewer), or not.
+    MuteSpeakers(bool),
 }
 
 /// How the bitrate is spent: fewer bits (slow networks), the size-based amount, or twice that (sharp text).
@@ -192,6 +194,7 @@ impl Message {
                     Command::SoundOff => out.push(5),
                     Command::PrivacyOn => out.push(6),
                     Command::PrivacyOff => out.push(7),
+                    Command::MuteSpeakers(on) => out.extend([9, u8::from(on)]),
                     Command::Picture { fps, quality } => out.extend([
                         8,
                         fps,
@@ -280,6 +283,11 @@ impl Message {
                 5 => Command::SoundOff,
                 6 => Command::PrivacyOn,
                 7 => Command::PrivacyOff,
+                9 => Command::MuteSpeakers(match rest.get(1)? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                }),
                 8 => Command::Picture {
                     fps: *rest.get(1)?,
                     quality: match rest.get(2)? {
@@ -337,6 +345,8 @@ mod tests {
             Message::Command(Command::SoundOff),
             Message::Command(Command::PrivacyOn),
             Message::Command(Command::PrivacyOff),
+            Message::Command(Command::MuteSpeakers(true)),
+            Message::Command(Command::MuteSpeakers(false)),
             Message::Command(Command::Picture {
                 fps: 30,
                 quality: Quality::Sharp,

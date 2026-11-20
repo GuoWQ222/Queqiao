@@ -2,6 +2,7 @@
 //! (AUTOCONVERTPCM), so no resampling of our own.
 
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE,
@@ -165,6 +166,18 @@ impl Drop for Stream {
     fn drop(&mut self) {
         let _ = unsafe { self.client.Stop() };
     }
+}
+
+/// Mutes or unmutes a render device (the default one with None); returns whether it was muted before.
+pub fn set_mute(device: Option<&str>, mute: bool) -> Result<bool, String> {
+    let (device, name) = find_device(device)?;
+    let volume: IAudioEndpointVolume = unsafe { device.Activate(CLSCTX_ALL, None) }
+        .map_err(|e| format!("{name}: {}", e.message()))?;
+    let before = unsafe { volume.GetMute() }
+        .map_err(|e| e.message())?
+        .as_bool();
+    unsafe { volume.SetMute(mute, std::ptr::null()) }.map_err(|e| e.message())?;
+    Ok(before)
 }
 
 fn enumerator() -> Result<IMMDeviceEnumerator, String> {

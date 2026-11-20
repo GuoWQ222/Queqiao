@@ -740,6 +740,7 @@ fn run_command(command: Command, dry_run: bool) -> String {
         | Command::SoundOff
         | Command::PrivacyOn
         | Command::PrivacyOff
+        | Command::MuteSpeakers(_)
         | Command::Picture { .. } => "changed".into(),
     }
 }
@@ -908,6 +909,8 @@ fn session(
     };
     let mut sound_report = Vec::new();
     let mut privacy_check_due = false;
+    // Muted speakers: whether they were muted before, to put back when the session ends.
+    let mut speakers_before: Option<bool> = None;
     // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
     // never above the size-based bitrate the encoder was opened with.
     // The viewer's picture settings change the highest bitrate (quality) and the frame interval (frame rate).
@@ -1090,6 +1093,27 @@ fn session(
                                 " (the encoder keeps its bitrate)"
                             }
                         );
+                        lines.push(format!("command from the viewer: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::MuteSpeakers(on))) => {
+                        let device = options.sound_device.as_deref();
+                        let notice = if on {
+                            match queqiao_audio::set_mute(device, true) {
+                                Ok(before) => {
+                                    speakers_before.get_or_insert(before);
+                                    "that PC's speakers are muted (you still hear its sound)"
+                                        .to_string()
+                                }
+                                Err(error) => {
+                                    format!("that PC's speakers could not be muted: {error}")
+                                }
+                            }
+                        } else {
+                            let before = speakers_before.take().unwrap_or(false);
+                            let _ = queqiao_audio::set_mute(device, before);
+                            "that PC's speakers play again".to_string()
+                        };
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
                     }
@@ -1298,6 +1322,14 @@ fn session(
         summary(&mut stats.agent_ms)
     ));
     lines.push(clipboard_stats.line());
+    // The speakers go back to how the person left them, however the session ended.
+    if let Some(before) = speakers_before.take() {
+        let restored = queqiao_audio::set_mute(options.sound_device.as_deref(), before);
+        lines.push(format!(
+            "speakers: put back (muted: {before}){}",
+            if restored.is_ok() { "" } else { " - failed" }
+        ));
+    }
     if !terminals.is_empty() {
         lines.push(format!(
             "{} command lines closed with the session",

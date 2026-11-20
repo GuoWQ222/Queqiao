@@ -113,7 +113,7 @@ try {
         $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`" $extra"
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_$label.txt`""
         # The clipboard and file tests run on both sides; the viewer sends commands the agent only reports.
-        if ($extra -like '*--clipboard-test*') { $viewerArgs += " --clipboard-test --send-file `"$fileToAgent`"" }
+        if ($extra -like '*--clipboard-test*') { $viewerArgs += " --clipboard-test --mute-speakers --send-file `"$fileToAgent`"" }
         if ($extra -like '*--dry-run-commands*') { $viewerArgs += ' --command ctrl-alt-del --command lock --command restart' }
         # Full screen: the drawing area must cover the monitor (the input test maps to it too).
         if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen --picture 30,sharp' }
@@ -181,6 +181,12 @@ try {
                 $pathWord = if ($mode -eq 'network:relay') { 'relayed' } else { 'direct' }
                 $titlePattern = "^window title: Queqiao - .+ \| \d+ ms \| \d+ fps \| \d+(\.\d)? [kM]bit/s \| $pathWord"
                 if (-not ($text | Where-Object { $_ -match $titlePattern })) { $failed += "$label viewer (expected '$titlePattern')" }
+            }
+            # Muted speakers: the tone must still come through (the sound test), and the mute is put back.
+            if ($extra -like '*--clipboard-test*' -and $soundTest -and $program -eq 'agent') {
+                foreach ($pattern in @("^command from the viewer: that PC's speakers are muted", '^speakers: put back \(muted: False\)$')) {
+                    if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "$label agent (expected '$pattern')" }
+                }
             }
             if ($extra -like '*--dry-run-commands*') {
                 $wanted = if ($program -eq 'agent') {

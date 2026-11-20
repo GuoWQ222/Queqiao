@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-pub use wasapi::render_devices;
+pub use wasapi::{render_devices, set_mute};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
@@ -534,5 +534,49 @@ mod tests {
             .collect();
         assert_eq!(tone_check(&other), (true, false));
         assert_eq!(tone_check(&vec![0.0; FRAME * CHANNELS]), (false, false));
+    }
+}
+
+/// Measurement (run by hand: `cargo test -p queqiao-audio -- --ignored --nocapture loopback_while_muted`):
+/// does loopback still capture a device's sound while its endpoint is muted? Uses the virtual device named in
+/// QUEQIAO_TEST_DEVICE (nothing is heard).
+#[cfg(test)]
+mod mute_measurement {
+    use super::*;
+
+    fn loudness(device: &str, seconds: f32) -> f32 {
+        let stream = wasapi::Stream::loopback(Some(device)).expect("loopback");
+        let (mut sum, mut count) = (0f64, 0usize);
+        let mut fresh = Vec::new();
+        let until = Instant::now() + Duration::from_secs_f32(seconds);
+        while Instant::now() < until {
+            stream.read(&mut fresh).expect("read");
+            for sample in &fresh {
+                sum += f64::from(*sample) * f64::from(*sample);
+            }
+            count += fresh.len();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if count == 0 {
+            0.0
+        } else {
+            (sum / count as f64).sqrt() as f32
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn loopback_while_muted() {
+        let device = std::env::var("QUEQIAO_TEST_DEVICE")
+            .unwrap_or_else(|_| "Steam Streaming Speakers".into());
+        let _com = wasapi::Com::init();
+        let _tone = Tone::start(Some(device.clone()), TEST_TONE_HZ).expect("tone");
+        std::thread::sleep(Duration::from_millis(300));
+        let before = loudness(&device, 1.0);
+        wasapi::set_mute(Some(&device), true).expect("mute");
+        let muted = loudness(&device, 1.0);
+        wasapi::set_mute(Some(&device), false).expect("unmute");
+        let after = loudness(&device, 1.0);
+        println!("MUTE_MEASUREMENT before {before:.4} muted {muted:.4} after {after:.4}");
     }
 }
