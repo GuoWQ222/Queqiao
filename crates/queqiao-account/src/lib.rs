@@ -58,6 +58,11 @@ pub enum AccountEvent {
     },
     /// Viewer: the help code was right; a session with `device` may start.
     HelpGranted(Device),
+    /// Agent: send Wake-on-LAN packets for the account's offline device `name`.
+    WakeRequest {
+        name: String,
+        macs: Vec<String>,
+    },
     Closed(String),
 }
 

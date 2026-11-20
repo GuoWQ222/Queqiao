@@ -8,7 +8,9 @@
 
 use std::time::{Duration, Instant};
 
-use queqiao_account::{Account, AccountEvent, DeviceIdentity, Role, SavedLogin, new_session_id};
+use queqiao_account::{
+    Account, AccountEvent, ClientMessage, DeviceIdentity, Role, SavedLogin, new_session_id,
+};
 use queqiao_transport::Signaling;
 
 struct Probe {
@@ -374,6 +376,12 @@ fn main() {
     }
 
     // Before the hardening checks, which lock this address out for a while.
+    wake(
+        &mut probe,
+        server,
+        pin,
+        [(user1, password1), (user2, password2)],
+    );
     help(
         &mut probe,
         server,
@@ -951,4 +959,87 @@ fn help(probe: &mut Probe, server: &str, pin: &str, users: [(&str, &str); 2]) {
         matches!(closed, Some(AccountEvent::HelpClosed(_))) && after.is_err(),
         format!("{closed:?} / {after:?}"),
     );
+}
+
+/// Wake-on-LAN: an offline device of the account is woken through another agent of the account behind the same
+/// address; never for another account's device, and not for one that is online.
+fn wake(probe: &mut Probe, server: &str, pin: &str, users: [(&str, &str); 2]) {
+    let [(user1, password1), (user2, password2)] = users;
+    let wait = Duration::from_secs(5);
+    let connect = |label: &str, role: Role, user: &str, password: &str| {
+        let identity = device(label);
+        let mut saved = login(server, pin);
+        Account::connect(&mut saved, &identity, role, Some((user, password)))
+    };
+    let sleeper_id = match connect("sleeper", Role::Agent, user1, password1) {
+        Ok(sleeper) => {
+            sleeper.send(ClientMessage::DeviceInfo {
+                macs: vec!["02-00-5E-00-00-51".into()],
+            });
+            std::thread::sleep(Duration::from_millis(500));
+            sleeper.device_id.clone()
+            // Dropped here: the sleeper goes offline.
+        }
+        Err(error) => return probe.check("the sleeper logs in", false, error),
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    let (mut waker, mut asker) = match (
+        connect("waker", Role::Agent, user1, password1),
+        connect("asker", Role::Viewer, user1, password1),
+    ) {
+        (Ok(waker), Ok(asker)) => (waker, asker),
+        (waker, asker) => {
+            return probe.check(
+                "waker and asker log in",
+                false,
+                format!("{:?} / {:?}", waker.err(), asker.err()),
+            );
+        }
+    };
+    asker.send(ClientMessage::Wake {
+        device_id: sleeper_id.clone(),
+    });
+    let request = wait_for(&mut waker, wait, |e| {
+        matches!(e, AccountEvent::WakeRequest { .. })
+    });
+    probe.check(
+        "an agent on the same network is asked to wake the offline device",
+        matches!(request, Some(AccountEvent::WakeRequest { ref macs, .. }) if macs == &["02-00-5E-00-00-51".to_string()]),
+        format!("{request:?}"),
+    );
+    let told = wait_for(&mut asker, wait, |e| {
+        matches!(e, AccountEvent::Notice(_) | AccountEvent::Error(_))
+    });
+    probe.check(
+        "the asker is told who wakes it",
+        matches!(told, Some(AccountEvent::Notice(ref m)) if m.contains("sends the wake-up packet")),
+        format!("{told:?}"),
+    );
+    asker.send(ClientMessage::Wake {
+        device_id: waker.device_id.clone(),
+    });
+    let online = wait_for(&mut asker, wait, |e| {
+        matches!(e, AccountEvent::Notice(_) | AccountEvent::Error(_))
+    });
+    probe.check(
+        "an online device is not woken",
+        matches!(online, Some(AccountEvent::Error(ref m)) if m.contains("online already")),
+        format!("{online:?}"),
+    );
+    match connect("stranger", Role::Viewer, user2, password2) {
+        Ok(mut stranger) => {
+            stranger.send(ClientMessage::Wake {
+                device_id: sleeper_id,
+            });
+            let refused = wait_for(&mut stranger, wait, |e| {
+                matches!(e, AccountEvent::Notice(_) | AccountEvent::Error(_))
+            });
+            probe.check(
+                "another account cannot wake the device",
+                matches!(refused, Some(AccountEvent::Error(ref m)) if m.contains("not a device of this account")),
+                format!("{refused:?}"),
+            );
+        }
+        Err(error) => probe.check("a stranger logs in", false, error),
+    }
 }

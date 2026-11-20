@@ -215,6 +215,10 @@ impl Hub {
             }
         };
 
+        // Where the device connects from: Wake-on-LAN looks for another device behind the same address.
+        if let (Some(address), Ok(store)) = (address, self.store.lock()) {
+            let _ = store.set_last_address(&identity.device_id, &address.to_string());
+        }
         let (sender, mut receiver) = unbounded_channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let key = (identity.device_id.clone(), identity.role);
@@ -297,6 +301,53 @@ impl Hub {
         }
         self.push_devices(identity.user_id);
         Ok(())
+    }
+
+    /// Wake-on-LAN for an offline device of the account: another agent of the account that connects from the
+    /// same address (so most likely the same network) sends the magic packets.
+    fn wake(&self, identity: &Identity, device_id: &str) -> Result<String, String> {
+        let not_ours = || format!("{device_id} is not a device of this account");
+        let store = self.store.lock().map_err(|e| e.to_string())?;
+        let target = store.wake_info(device_id)?.ok_or_else(not_ours)?;
+        let (name, macs, address) = (target.name, target.macs, target.address);
+        if target.user_id != identity.user_id {
+            return Err(not_ours());
+        }
+        let online = self.online.lock().map_err(|e| e.to_string())?;
+        if online.contains_key(&(device_id.to_string(), Role::Agent)) {
+            return Err(format!("{name} is online already"));
+        }
+        if macs.is_empty() {
+            return Err(format!(
+                "{name} has not told its network cards yet (it must have run Queqiao once)"
+            ));
+        }
+        let helper = online.iter().find(|((device, role), connection)| {
+            *role == Role::Agent
+                && connection.user_id == identity.user_id
+                && device != device_id
+                && store
+                    .wake_info(device)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|there| !address.is_empty() && there.address == address)
+        });
+        match helper {
+            Some((_, connection)) => {
+                let request = ServerMessage::WakeRequest {
+                    name: name.clone(),
+                    macs,
+                };
+                let _ = connection.sender.send(Outgoing::Message(request));
+                Ok(format!(
+                    "{} sends the wake-up packet to {name}",
+                    connection.device_name
+                ))
+            }
+            None => Err(format!(
+                "no other device of this account is on {name}'s network right now (waking needs one there)"
+            )),
+        }
     }
 
     fn close_help(&self, device_id: &str) {
@@ -743,6 +794,25 @@ impl Hub {
                 }
             }
             ClientMessage::CloseHelp => self.close_help(&identity.device_id),
+            ClientMessage::DeviceInfo { macs } => {
+                let valid = macs.len() <= 16 && macs.iter().all(|mac| is_mac(mac));
+                let stored = valid
+                    && self
+                        .store
+                        .lock()
+                        .is_ok_and(|store| store.set_macs(&identity.device_id, &macs).is_ok());
+                if !stored {
+                    let message = "bad device information".into();
+                    let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
+                }
+            }
+            ClientMessage::Wake { device_id } => {
+                let reply = match self.wake(identity, &device_id) {
+                    Ok(message) => ServerMessage::Notice { message },
+                    Err(message) => ServerMessage::Error { message },
+                };
+                let _ = sender.send(Outgoing::Message(reply));
+            }
             ClientMessage::RequestHelp { help_id, code } => {
                 self.request_help(identity, &help_id, &code, sender, address)
             }
@@ -808,6 +878,15 @@ fn role_name(role: Role) -> &'static str {
         Role::Agent => "agent",
         Role::Viewer => "viewer",
     }
+}
+
+/// "AA-BB-CC-DD-EE-FF" (or with colons): six hex pairs.
+fn is_mac(text: &str) -> bool {
+    let parts: Vec<&str> = text.split(['-', ':']).collect();
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn check_device_fields(device_id: &str, device_name: &str) -> Result<(), String> {

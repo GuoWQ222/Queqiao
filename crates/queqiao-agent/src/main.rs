@@ -18,11 +18,14 @@
 mod autostart;
 mod power;
 mod ui;
+mod wake;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use queqiao_account::{Account, AccountEvent, DeviceIdentity, Role as AccountRole, SavedLogin};
+use queqiao_account::{
+    Account, AccountEvent, ClientMessage, DeviceIdentity, Role as AccountRole, SavedLogin,
+};
 use queqiao_audio::{Capture, TEST_TONE_HZ, Tone};
 use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
 use queqiao_codec::ScreenEncoder;
@@ -302,6 +305,11 @@ fn run_account(
     let (mut sessions, mut passed) = (0u32, true);
     let mut retry = Duration::from_secs(1);
     let mut deferred: Vec<PresenceEvent> = Vec::new();
+    // This PC's network cards, so another device of the account can wake it later.
+    let macs = wake::macs();
+    if !macs.is_empty() {
+        account.send(ClientMessage::DeviceInfo { macs });
+    }
     // Help for someone of another account: the code shown while help requests are open.
     let mut help_code: Option<String> = options.help_code.clone();
     if let Some(code) = &help_code {
@@ -523,6 +531,10 @@ fn run_account(
                     ui.show_help(Some((&help_id, code)));
                 }
             }
+            Some(AccountEvent::WakeRequest { name, macs }) => match wake::send(&macs) {
+                Ok(sent) => lines.push(format!("wake: sent {sent} wake-up packets for {name}")),
+                Err(error) => lines.push(format!("wake: could not wake {name}: {error}")),
+            },
             Some(AccountEvent::HelpClosed(reason)) => {
                 lines.push(format!("help: closed: {reason}"));
                 help_code = None;

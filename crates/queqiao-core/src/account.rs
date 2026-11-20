@@ -84,6 +84,10 @@ pub enum ClientMessage {
     /// Viewer: help the device with this help ID, with the code its person read out. Answered by `HelpGranted`
     /// (the device to start a session with) or an error.
     RequestHelp { help_id: String, code: String },
+    /// Agent: this PC's network cards (MAC addresses, "AA-BB-CC-DD-EE-FF"), for Wake-on-LAN.
+    DeviceInfo { macs: Vec<String> },
+    /// Wake a device of this account that is offline, through another device of the account on its network.
+    Wake { device_id: String },
 }
 
 /// Relay access for one device: TURN long-term credentials that the server's TURN part accepts for new
@@ -152,6 +156,12 @@ pub enum ServerMessage {
     /// To a viewer: the code was right; `device` (of another account) may be asked for a session now.
     HelpGranted {
         device: Device,
+    },
+    /// To an agent: send Wake-on-LAN magic packets for `macs` (the account's offline device `name`, on this
+    /// agent's network).
+    WakeRequest {
+        name: String,
+        macs: Vec<String>,
     },
 }
 

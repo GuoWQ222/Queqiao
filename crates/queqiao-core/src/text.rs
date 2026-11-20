@@ -196,6 +196,8 @@ const CHINESE: &[(&str, &str)] = &[
     ("New code", "换一个验证码"),
     ("Close", "关闭"),
     ("Help someone...", "帮助别人……"),
+    ("Wake up", "唤醒"),
+    ("Select a device first.", "请先选择一台设备。"),
     ("Queqiao - help someone", "鹊桥 - 帮助别人"),
     (
         "Ask the person you help for the help ID and code that Queqiao shows them (tray menu: Let someone help me...).",

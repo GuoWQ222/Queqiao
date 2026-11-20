@@ -48,6 +48,7 @@ pub(crate) const ID_CANCEL: u16 = 2;
 const ID_LIST: u16 = 100;
 const ID_LOGOUT: u16 = 101;
 const ID_HELP: u16 = 102;
+const ID_WAKE: u16 = 103;
 /// The window was closed (not a control id).
 pub(crate) const CLOSED: u16 = 0xFFFF;
 
@@ -600,6 +601,8 @@ pub enum ListAction {
     Connect(String),
     /// "Help someone...": connect to another account's device with its help ID and code.
     Help,
+    /// Wake the device with this id (Wake-on-LAN through another device on its network).
+    Wake(String),
     LogOut,
     Closed,
 }
@@ -645,9 +648,10 @@ impl DeviceList {
             tr("Double-click a device to connect to it."),
             [20, 304, 400, 36],
         )?;
-        form.button(tr("Log out"), ID_LOGOUT, false, [20, 352, 100, 30])?;
-        form.button(tr("Help someone..."), ID_HELP, false, [130, 352, 150, 30])?;
-        form.button(tr("Connect"), ID_OK, true, [320, 352, 100, 30])?;
+        form.button(tr("Log out"), ID_LOGOUT, false, [20, 352, 90, 30])?;
+        form.button(tr("Wake up"), ID_WAKE, false, [116, 352, 94, 30])?;
+        form.button(tr("Help someone..."), ID_HELP, false, [216, 352, 100, 30])?;
+        form.button(tr("Connect"), ID_OK, true, [322, 352, 98, 30])?;
         form.show();
         let _ = unsafe { SetFocus(Some(list)) };
         Ok(DeviceList {
@@ -726,12 +730,19 @@ impl DeviceList {
             ID_OK => match self.selected() {
                 Some(row) => Some(ListAction::Connect(row.id.clone())),
                 None => {
-                    self.set_status("Select a device first.");
+                    self.set_status(tr("Select a device first."));
                     None
                 }
             },
             ID_LOGOUT => Some(ListAction::LogOut),
             ID_HELP => Some(ListAction::Help),
+            ID_WAKE => match self.selected() {
+                Some(row) => Some(ListAction::Wake(row.id.clone())),
+                None => {
+                    self.set_status(tr("Select a device first."));
+                    None
+                }
+            },
             CLOSED => Some(ListAction::Closed),
             _ => None,
         }

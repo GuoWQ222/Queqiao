@@ -198,6 +198,9 @@ pub(crate) fn run(
                         AccountEvent::HelpRequested { device, user }
                     }
                     Ok(ServerMessage::HelpGranted { device }) => AccountEvent::HelpGranted(device),
+                    Ok(ServerMessage::WakeRequest { name, macs }) => {
+                        AccountEvent::WakeRequest { name, macs }
+                    }
                     Ok(ServerMessage::Welcome { .. }) => continue,
                     Err(error) => {
                         AccountEvent::Error(format!("bad message from the server: {error}"))

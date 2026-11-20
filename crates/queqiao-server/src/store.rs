@@ -14,6 +14,14 @@ const LANES: u32 = 1;
 /// Refresh tokens expire after this many days without a new login.
 const TOKEN_DAYS: i64 = 90;
 
+/// A device's owner, name, MAC addresses and the address it last connected from.
+pub struct WakeInfo {
+    pub user_id: i64,
+    pub name: String,
+    pub macs: Vec<String>,
+    pub address: String,
+}
+
 pub struct Store {
     db: Connection,
 }
@@ -47,6 +55,25 @@ impl Store {
         if !has_key {
             db.execute_batch("ALTER TABLE devices ADD COLUMN public_key TEXT NOT NULL DEFAULT ''")
                 .map_err(|e| e.to_string())?;
+        }
+        // Wake-on-LAN: the device's MAC addresses and the address it last connected from.
+        for (column, definition) in [
+            (
+                "macs",
+                "ALTER TABLE devices ADD COLUMN macs TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "last_address",
+                "ALTER TABLE devices ADD COLUMN last_address TEXT NOT NULL DEFAULT ''",
+            ),
+        ] {
+            let present: bool = db
+                .prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = ?1")
+                .and_then(|mut query| query.exists([column]))
+                .map_err(|e| e.to_string())?;
+            if !present {
+                db.execute_batch(definition).map_err(|e| e.to_string())?;
+            }
         }
         // Help IDs (short numbers for helping someone of another account), unique when set.
         let has_help_id: bool = db
@@ -326,6 +353,50 @@ impl Store {
                 "SELECT id, user_id, name, public_key FROM devices WHERE help_id = ?1",
                 [help_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn set_macs(&self, device_id: &str, macs: &[String]) -> Result<(), String> {
+        self.db
+            .execute(
+                "UPDATE devices SET macs = ?1 WHERE id = ?2",
+                params![macs.join(","), device_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn set_last_address(&self, device_id: &str, address: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "UPDATE devices SET last_address = ?1 WHERE id = ?2",
+                params![address, device_id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// What waking a device needs to know about it.
+    pub fn wake_info(&self, device_id: &str) -> Result<Option<WakeInfo>, String> {
+        self.db
+            .query_row(
+                "SELECT user_id, name, macs, last_address FROM devices WHERE id = ?1",
+                [device_id],
+                |row| {
+                    let macs: String = row.get(2)?;
+                    Ok(WakeInfo {
+                        user_id: row.get(0)?,
+                        name: row.get(1)?,
+                        macs: macs
+                            .split(',')
+                            .filter(|m| !m.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                        address: row.get(3)?,
+                    })
+                },
             )
             .optional()
             .map_err(|e| e.to_string())

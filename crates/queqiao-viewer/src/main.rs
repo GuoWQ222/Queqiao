@@ -598,6 +598,10 @@ fn device_list(
     loop {
         match list.next(15) {
             Some(ListAction::Closed) => break,
+            Some(ListAction::Wake(id)) => {
+                // The server's answer (who sends the packet, or why not) comes as a notice or error.
+                account.send(ClientMessage::Wake { device_id: id });
+            }
             Some(ListAction::Help) => {
                 list.set_enabled(false);
                 if let Some(target) = ask_for_help_target(account, lines) {
@@ -691,7 +695,8 @@ fn device_list(
                     | AccountEvent::HelpOpen(_)
                     | AccountEvent::HelpClosed(_)
                     | AccountEvent::HelpRequested { .. }
-                    | AccountEvent::HelpGranted(_) => {}
+                    | AccountEvent::HelpGranted(_)
+                    | AccountEvent::WakeRequest { .. } => {}
                 }
             }
         }
