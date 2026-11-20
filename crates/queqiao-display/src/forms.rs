@@ -43,11 +43,11 @@ const PW_RENDERFULLCONTENT: u32 = 2;
 
 /// Command ids. IDOK and IDCANCEL are what Enter and Esc send.
 const ID_OK: u16 = 1;
-const ID_CANCEL: u16 = 2;
+pub(crate) const ID_CANCEL: u16 = 2;
 const ID_LIST: u16 = 100;
 const ID_LOGOUT: u16 = 101;
 /// The window was closed (not a control id).
-const CLOSED: u16 = 0xFFFF;
+pub(crate) const CLOSED: u16 = 0xFFFF;
 
 thread_local! {
     /// (window, command) pairs collected by the window procedure, read by the forms' `next`.
@@ -55,15 +55,32 @@ thread_local! {
 }
 
 /// A top-level window with child controls laid out in 96-DPI units.
-struct Form {
-    hwnd: HWND,
+/// How a form's window looks and where it goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// A normal window with a caption, centred.
+    Dialog,
+    /// A dialog that stays on top and comes to the front (a question the person must see).
+    Prompt,
+    /// No caption, always on top, never takes the keyboard, at the top centre of the screen.
+    Banner,
+}
+
+pub(crate) struct Form {
+    pub(crate) hwnd: HWND,
     font: HFONT,
     scale: f64,
+    kind: Kind,
 }
 
 impl Form {
     /// A fixed-size window whose drawing area is `width` x `height` at 96 DPI, centred on its monitor.
     fn new(title: &str, width: i32, height: i32) -> Result<Form> {
+        Form::create(title, width, height, Kind::Dialog)
+    }
+
+    /// A window whose drawing area is `width` x `height` at 96 DPI.
+    pub(crate) fn create(title: &str, width: i32, height: i32, kind: Kind) -> Result<Form> {
         let instance = unsafe { GetModuleHandleW(None) }?;
         REGISTER.call_once(|| unsafe {
             let class = WNDCLASSEXW {
@@ -77,11 +94,24 @@ impl Form {
             };
             RegisterClassExW(&class);
         });
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        let (style, ex_style) = match kind {
+            Kind::Dialog => (
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                WS_EX_CONTROLPARENT,
+            ),
+            Kind::Prompt => (
+                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                WS_EX_CONTROLPARENT | WS_EX_TOPMOST,
+            ),
+            Kind::Banner => (
+                WS_POPUP | WS_BORDER,
+                WS_EX_CONTROLPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            ),
+        };
         let title = wide(title);
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_CONTROLPARENT,
+                ex_style,
                 CLASS,
                 PCWSTR(title.as_ptr()),
                 style,
@@ -103,7 +133,7 @@ impl Form {
             right: (f64::from(width) * scale).round() as i32,
             bottom: (f64::from(height) * scale).round() as i32,
         };
-        unsafe { AdjustWindowRectExForDpi(&mut frame, style, false, WS_EX_CONTROLPARENT, dpi) }?;
+        unsafe { AdjustWindowRectExForDpi(&mut frame, style, false, ex_style, dpi) }?;
         let (outer_w, outer_h) = (frame.right - frame.left, frame.bottom - frame.top);
         let mut monitor = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
@@ -117,7 +147,10 @@ impl Form {
         };
         let work = monitor.rcWork;
         let x = work.left + ((work.right - work.left) - outer_w).max(0) / 2;
-        let y = work.top + ((work.bottom - work.top) - outer_h).max(0) / 2;
+        let y = match kind {
+            Kind::Banner => work.top + (8.0 * scale).round() as i32,
+            _ => work.top + ((work.bottom - work.top) - outer_h).max(0) / 2,
+        };
         unsafe { SetWindowPos(hwnd, None, x, y, outer_w, outer_h, SWP_NOZORDER) }?;
 
         // The system's message font (Segoe UI on current Windows) at this window's DPI.
@@ -136,18 +169,27 @@ impl Form {
             .map(|()| CreateFontIndirectW(&metrics.lfMessageFont))
             .unwrap_or_default()
         };
-        Ok(Form { hwnd, font, scale })
+        Ok(Form {
+            hwnd,
+            font,
+            scale,
+            kind,
+        })
     }
 
-    fn show(&self) {
+    pub(crate) fn show(&self) {
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
-            let _ = SetForegroundWindow(self.hwnd);
+            if self.kind == Kind::Banner {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            } else {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
+                let _ = SetForegroundWindow(self.hwnd);
+            }
         }
     }
 
     /// A child control at (x, y, w, h) in 96-DPI units.
-    fn control(
+    pub(crate) fn control(
         &self,
         class: PCWSTR,
         text: &str,
@@ -186,7 +228,19 @@ impl Form {
         Ok(hwnd)
     }
 
-    fn label(&self, text: &str, place: [i32; 4]) -> Result<HWND> {
+    /// Text that wraps onto as many lines as `place` holds (a label cuts long text with an ellipsis instead).
+    pub(crate) fn text(&self, text: &str, place: [i32; 4]) -> Result<HWND> {
+        self.control(
+            w!("STATIC"),
+            text,
+            SS_NOPREFIX,
+            WINDOW_EX_STYLE::default(),
+            0,
+            place,
+        )
+    }
+
+    pub(crate) fn label(&self, text: &str, place: [i32; 4]) -> Result<HWND> {
         self.control(
             w!("STATIC"),
             text,
@@ -202,7 +256,13 @@ impl Form {
         self.control(w!("EDIT"), text, style, WS_EX_CLIENTEDGE, 0, place)
     }
 
-    fn button(&self, text: &str, id: u16, default: bool, place: [i32; 4]) -> Result<HWND> {
+    pub(crate) fn button(
+        &self,
+        text: &str,
+        id: u16,
+        default: bool,
+        place: [i32; 4],
+    ) -> Result<HWND> {
         let style = WS_TABSTOP.0 | if default { BS_DEFPUSHBUTTON } else { 0 };
         self.control(
             w!("BUTTON"),
@@ -216,7 +276,7 @@ impl Form {
 
     /// Handles window messages, waiting up to `wait_ms` for one, and returns the next command for this
     /// form.
-    fn next_command(&self, wait_ms: u32) -> Option<u16> {
+    pub(crate) fn next_command(&self, wait_ms: u32) -> Option<u16> {
         if let Some(command) = take_action(self.hwnd) {
             return Some(command);
         }
@@ -238,7 +298,7 @@ impl Form {
         take_action(self.hwnd)
     }
 
-    fn post(&self, command: u16) {
+    pub(crate) fn post(&self, command: u16) {
         ACTIONS.with_borrow_mut(|actions| actions.push((self.hwnd.0 as usize, command)));
     }
 
@@ -258,7 +318,24 @@ impl Drop for Form {
     }
 }
 
-fn take_action(hwnd: HWND) -> Option<u16> {
+/// Queues `command` for the window `hwnd` (read with `take_action`).
+pub(crate) fn push_action(hwnd: HWND, command: u16) {
+    ACTIONS.with_borrow_mut(|actions| actions.push((hwnd.0 as usize, command)));
+}
+
+/// Handles this thread's window messages, waiting up to `wait_ms` for one (no keyboard navigation).
+pub(crate) fn pump(wait_ms: u32) {
+    unsafe { MsgWaitForMultipleObjects(None, false, wait_ms, QS_ALLINPUT) };
+    let mut message = MSG::default();
+    while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
+pub(crate) fn take_action(hwnd: HWND) -> Option<u16> {
     ACTIONS.with_borrow_mut(|actions| {
         let index = actions
             .iter()
@@ -309,7 +386,7 @@ fn text_of(hwnd: HWND) -> String {
     String::from_utf16_lossy(&buffer[..length])
 }
 
-fn set_text(hwnd: HWND, text: &str) {
+pub(crate) fn set_text(hwnd: HWND, text: &str) {
     let text = wide(text);
     let _ = unsafe { SetWindowTextW(hwnd, PCWSTR(text.as_ptr())) };
 }

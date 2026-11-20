@@ -18,7 +18,7 @@ use queqiao_core::account::{ServerMessage, TurnAccess, signed_bytes};
 use queqiao_transport::{Error, IceServers, Signaling, TurnServer};
 use tungstenite::Message;
 
-pub use config::{DeviceIdentity, SavedLogin};
+pub use config::{DeviceIdentity, SavedLogin, folder as data_folder};
 pub use keys::{DeviceKey, KnownDevices, Pin, verify};
 pub use queqiao_core::account::{ClientMessage, Device, Role};
 
@@ -330,6 +330,10 @@ impl Signaling for SessionSignal<'_> {
                     }
                     if got == kind {
                         break Ok(body);
+                    }
+                    // The other side refused (declined by the person there, control turned off, ...).
+                    if got == "error" {
+                        break Err(Error(body));
                     }
                     break Err(Error(format!("expected {kind}, got {got}: {body}")));
                 }

@@ -1,0 +1,409 @@
+//! What the person at the controlled PC sees and can do (security point 2: nothing happens unseen):
+//! - a tray icon whenever the agent runs, with a menu: end the session, let this account's devices control
+//!   the PC, ask before each session, quit;
+//! - a banner at the top of the screen during every session, with an End button;
+//! - a prompt (Allow / Deny, denied after a countdown) before a session when the PC asks first.
+//!
+//! All on one thread (the agent's UI thread), polled with [`Presence::next`].
+
+use std::time::{Duration, Instant};
+
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Shell::{
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
+};
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{PCWSTR, Result, w};
+
+use crate::forms::{Form, Kind, set_text};
+
+/// What the person did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresenceEvent {
+    /// End the current session (banner or tray).
+    EndSession,
+    /// Quit Queqiao on this PC.
+    Quit,
+    /// Allow this account's devices to control the PC (true) or not.
+    SetAllow(bool),
+    /// Ask before each session (true) or not.
+    SetAsk(bool),
+    /// The answer to the prompt: allowed, or denied (also when the time ran out or it was closed).
+    Consent(bool),
+}
+
+const TRAY_CALLBACK: u32 = WM_APP + 1;
+const TRAY_ID: u32 = 1;
+// Menu and button ids.
+const MENU_END: u16 = 200;
+const MENU_ALLOW: u16 = 201;
+const MENU_ASK: u16 = 202;
+const MENU_QUIT: u16 = 203;
+const ID_END: u16 = 210;
+const ID_ALLOW: u16 = 211;
+const ID_DENY: u16 = 212;
+/// The tray window asks for its menu (not a control id).
+const SHOW_MENU: u16 = 0xFFFE;
+
+static REGISTER: std::sync::Once = std::sync::Once::new();
+const TRAY_CLASS: PCWSTR = w!("QueqiaoPresence");
+
+thread_local! {
+    static TASKBAR_CREATED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct Prompt {
+    form: Form,
+    countdown: HWND,
+    deadline: Instant,
+}
+
+pub struct Presence {
+    tray: HWND,
+    tray_shown: bool,
+    banner: Option<Form>,
+    prompt: Option<Prompt>,
+    allow: bool,
+    ask: bool,
+    viewer: Option<String>,
+}
+
+impl Presence {
+    /// The tray icon, with the current settings.
+    pub fn new(allow: bool, ask: bool) -> Result<Presence> {
+        let instance = unsafe { GetModuleHandleW(None) }?;
+        REGISTER.call_once(|| unsafe {
+            let class = WNDCLASSEXW {
+                cbSize: size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(tray_proc),
+                hInstance: instance.into(),
+                lpszClassName: TRAY_CLASS,
+                ..Default::default()
+            };
+            RegisterClassExW(&class);
+            TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
+        });
+        if TASKBAR_CREATED.get() == 0 {
+            TASKBAR_CREATED.set(unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) });
+        }
+        // A hidden window that owns the icon and gets its clicks.
+        let tray = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                TRAY_CLASS,
+                w!("Queqiao"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(instance.into()),
+                None,
+            )
+        }?;
+        let mut presence = Presence {
+            tray,
+            tray_shown: false,
+            banner: None,
+            prompt: None,
+            allow,
+            ask,
+            viewer: None,
+        };
+        presence.update_tray();
+        Ok(presence)
+    }
+
+    /// True once the icon is in the notification area (false without a taskbar, e.g. Explorer not running;
+    /// it is added when the taskbar comes back).
+    pub fn tray_shown(&self) -> bool {
+        self.tray_shown
+    }
+
+    pub fn set_settings(&mut self, allow: bool, ask: bool) {
+        self.allow = allow;
+        self.ask = ask;
+    }
+
+    /// The banner for a session with `viewer`.
+    pub fn session_started(&mut self, viewer: &str) -> Result<()> {
+        self.viewer = Some(viewer.to_string());
+        self.banner = None;
+        let form = Form::create("Queqiao", 440, 40, Kind::Banner)?;
+        form.label(
+            &format!("\u{25CF}  {viewer} is controlling this PC"),
+            [14, 11, 320, 20],
+        )?;
+        form.button("End", ID_END, false, [346, 6, 84, 28])?;
+        form.show();
+        self.banner = Some(form);
+        self.update_tray();
+        Ok(())
+    }
+
+    pub fn session_ended(&mut self) {
+        self.viewer = None;
+        self.banner = None;
+        self.update_tray();
+    }
+
+    /// Asks the person whether `viewer` may control the PC; denied after `seconds`.
+    pub fn ask_consent(&mut self, viewer: &str, seconds: u32) -> Result<()> {
+        self.prompt = None;
+        let form = Form::create("Queqiao - allow remote control?", 420, 170, Kind::Prompt)?;
+        form.text(
+            &format!("{viewer}, a device of your account, wants to control this PC."),
+            [20, 18, 380, 40],
+        )?;
+        let countdown = form.label("", [20, 66, 380, 20])?;
+        // Deny is the default button: Enter (or Esc, or closing the window) never lets anyone in.
+        form.button("Deny", ID_DENY, true, [190, 122, 100, 30])?;
+        form.button("Allow", ID_ALLOW, false, [300, 122, 100, 30])?;
+        form.show();
+        self.prompt = Some(Prompt {
+            form,
+            countdown,
+            deadline: Instant::now() + Duration::from_secs(u64::from(seconds)),
+        });
+        self.update_countdown();
+        Ok(())
+    }
+
+    /// Presses Allow or Deny on the prompt (for tests: the same path as a click).
+    pub fn press_consent(&self, allow: bool) {
+        if let Some(prompt) = &self.prompt {
+            prompt.form.post(if allow { ID_ALLOW } else { ID_DENY });
+        }
+    }
+
+    /// Presses End on the banner (for tests).
+    pub fn press_end(&self) {
+        if let Some(banner) = &self.banner {
+            banner.post(ID_END);
+        }
+    }
+
+    /// The banner's and the prompt's windows, for pictures and checks.
+    pub fn banner_window(&self) -> Option<HWND> {
+        self.banner.as_ref().map(|form| form.hwnd)
+    }
+
+    pub fn prompt_window(&self) -> Option<HWND> {
+        self.prompt.as_ref().map(|prompt| prompt.form.hwnd)
+    }
+
+    /// Handles window messages for up to `wait_ms` and returns what the person did, if anything.
+    pub fn next(&mut self, wait_ms: u32) -> Option<PresenceEvent> {
+        // The prompt pumps for all windows of this thread (with keyboard navigation for itself).
+        let pumped = match (&self.prompt, &self.banner) {
+            (Some(prompt), _) => prompt.form.next_command(wait_ms),
+            (None, Some(banner)) => banner.next_command(wait_ms),
+            (None, None) => {
+                crate::forms::pump(wait_ms);
+                None
+            }
+        };
+        let mut commands: Vec<u16> = pumped.into_iter().collect();
+        for hwnd in [
+            self.prompt.as_ref().map(|p| p.form.hwnd),
+            self.banner.as_ref().map(|b| b.hwnd),
+            Some(self.tray),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            while let Some(command) = crate::forms::take_action(hwnd) {
+                commands.push(command);
+            }
+        }
+        if self.prompt.is_some() {
+            self.update_countdown();
+            if self
+                .prompt
+                .as_ref()
+                .is_some_and(|prompt| Instant::now() >= prompt.deadline)
+            {
+                self.prompt = None;
+                return Some(PresenceEvent::Consent(false));
+            }
+        }
+        for command in commands {
+            if let Some(event) = self.event_for(command) {
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    fn event_for(&mut self, command: u16) -> Option<PresenceEvent> {
+        match command {
+            ID_ALLOW | ID_DENY if self.prompt.is_some() => {
+                self.prompt = None;
+                Some(PresenceEvent::Consent(command == ID_ALLOW))
+            }
+            // Esc or closing the prompt denies.
+            crate::forms::ID_CANCEL | crate::forms::CLOSED if self.prompt.is_some() => {
+                self.prompt = None;
+                Some(PresenceEvent::Consent(false))
+            }
+            ID_END | MENU_END => Some(PresenceEvent::EndSession),
+            SHOW_MENU => self.show_menu(),
+            TASKBAR_RESTARTED => {
+                self.tray_shown = false;
+                self.update_tray();
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn show_menu(&mut self) -> Option<PresenceEvent> {
+        let menu = unsafe { CreatePopupMenu() }.ok()?;
+        let checked = |on: bool| {
+            if on {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            }
+        };
+        let status = wide(&match &self.viewer {
+            Some(viewer) => format!("Queqiao: {viewer} is controlling this PC"),
+            None => "Queqiao: ready".into(),
+        });
+        let end = wide("End the session");
+        let allow = wide("Let my account's devices control this PC");
+        let ask = wide("Ask me before each session");
+        let quit = wide("Quit Queqiao on this PC");
+        unsafe {
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            if self.viewer.is_some() {
+                let _ = AppendMenuW(menu, MF_STRING, usize::from(MENU_END), PCWSTR(end.as_ptr()));
+            }
+            let _ = AppendMenuW(
+                menu,
+                checked(self.allow),
+                usize::from(MENU_ALLOW),
+                PCWSTR(allow.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                checked(self.ask),
+                usize::from(MENU_ASK),
+                PCWSTR(ask.as_ptr()),
+            );
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                usize::from(MENU_QUIT),
+                PCWSTR(quit.as_ptr()),
+            );
+            let mut at = POINT::default();
+            let _ = GetCursorPos(&mut at);
+            // The menu closes when clicking elsewhere only if its owner is in front.
+            let _ = SetForegroundWindow(self.tray);
+            let chosen = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                at.x,
+                at.y,
+                None,
+                self.tray,
+                None,
+            )
+            .0;
+            let _ = PostMessageW(Some(self.tray), WM_NULL, WPARAM(0), LPARAM(0));
+            let _ = DestroyMenu(menu);
+            match u16::try_from(chosen).unwrap_or(0) {
+                MENU_END => Some(PresenceEvent::EndSession),
+                MENU_ALLOW => {
+                    self.allow = !self.allow;
+                    Some(PresenceEvent::SetAllow(self.allow))
+                }
+                MENU_ASK => {
+                    self.ask = !self.ask;
+                    Some(PresenceEvent::SetAsk(self.ask))
+                }
+                MENU_QUIT => Some(PresenceEvent::Quit),
+                _ => None,
+            }
+        }
+    }
+
+    fn update_countdown(&self) {
+        if let Some(prompt) = &self.prompt {
+            let left = prompt
+                .deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+                + 1;
+            set_text(
+                prompt.countdown,
+                &format!("Denied automatically in {left} s unless you allow it."),
+            );
+        }
+    }
+
+    /// Adds the icon, or updates its tooltip.
+    fn update_tray(&mut self) {
+        let tip = match &self.viewer {
+            Some(viewer) => format!("Queqiao: {viewer} is controlling this PC"),
+            None => "Queqiao: ready for your devices".into(),
+        };
+        let mut data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.tray,
+            uID: TRAY_ID,
+            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
+            uCallbackMessage: TRAY_CALLBACK,
+            hIcon: unsafe { LoadIconW(None, IDI_SHIELD) }.unwrap_or_default(),
+            ..Default::default()
+        };
+        for (slot, unit) in data.szTip.iter_mut().zip(tip.encode_utf16().take(127)) {
+            *slot = unit;
+        }
+        let action = if self.tray_shown { NIM_MODIFY } else { NIM_ADD };
+        self.tray_shown = unsafe { Shell_NotifyIconW(action, &data) }.as_bool() || self.tray_shown;
+    }
+}
+
+impl Drop for Presence {
+    fn drop(&mut self) {
+        let data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.tray,
+            uID: TRAY_ID,
+            ..Default::default()
+        };
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+            let _ = DestroyWindow(self.tray);
+        }
+    }
+}
+
+extern "system" fn tray_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let mouse = (lparam.0 & 0xFFFF) as u32;
+    if message == TRAY_CALLBACK && (mouse == WM_RBUTTONUP || mouse == WM_LBUTTONUP) {
+        crate::forms::push_action(hwnd, SHOW_MENU);
+        return LRESULT(0);
+    }
+    if message != 0 && message == TASKBAR_CREATED.get() {
+        // Explorer restarted: the icon must be added again (the next update does it).
+        crate::forms::push_action(hwnd, TASKBAR_RESTARTED);
+        return LRESULT(0);
+    }
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// Explorer restarted (not a control id).
+const TASKBAR_RESTARTED: u16 = 0xFFFD;
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}

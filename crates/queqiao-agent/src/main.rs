@@ -15,6 +15,8 @@
 
 #![windows_subsystem = "windows"]
 
+mod ui;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -22,6 +24,7 @@ use queqiao_account::{Account, AccountEvent, DeviceIdentity, Role as AccountRole
 use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
 use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::{InputEvent, Message};
+use queqiao_display::PresenceEvent;
 use queqiao_input::{Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position};
 use queqiao_transport::{
     Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, check_hello, hello_body,
@@ -44,6 +47,9 @@ fn adapted_bitrate(estimate: u64, max: u32) -> u32 {
         .clamp(u64::from(MIN_BITRATE), u64::from(max.max(MIN_BITRATE))) as u32
 }
 
+/// How long the person at the PC has to allow a session (the viewer waits 30 s for the answer).
+const CONSENT_SECONDS: u32 = 25;
+
 /// A session that is not connected after this long is given up.
 const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
@@ -51,6 +57,14 @@ const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 struct Options {
     /// A device whose new key the person confirmed (its old pin is dropped).
     trust_new_key: Option<String>,
+    /// Ask the person at the PC before each session in this run (whatever the setting says).
+    ask: bool,
+    /// For tests: answer the consent prompt (true = Allow) as a click would, after 1 s.
+    answer: Option<bool>,
+    /// For tests: press the banner's End button this many seconds into a session.
+    end_after: Option<u64>,
+    /// For tests: save pictures of the banner and the consent prompt in this folder.
+    ui_pictures: Option<PathBuf>,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -126,6 +140,10 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--report" => options.report = args.next().map(PathBuf::from),
             "--verify-input" => options.verify_input = true,
             "--trust-new-key" => options.trust_new_key = args.next(),
+            "--ask" => options.ask = true,
+            "--answer" => options.answer = Some(args.next()? == "allow"),
+            "--end-after" => options.end_after = args.next().and_then(|v| v.parse().ok()),
+            "--ui-pictures" => options.ui_pictures = args.next().map(PathBuf::from),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -138,8 +156,31 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     let end = options
         .seconds
         .map(|s| Instant::now() + Duration::from_secs(s));
+    // Nothing happens unseen: the tray icon whenever the agent runs, a banner during every session.
+    let settings = ui::Settings::load();
+    let mut shown = settings.clone();
+    shown.ask_before_session |= options.ask;
+    let ui = ui::Ui::start(&shown, options.ui_pictures.clone())?;
+    lines.push(format!(
+        "tray icon {}; this account's devices may control this PC: {}; ask first: {}",
+        if ui.tray_shown {
+            "shown"
+        } else {
+            "not shown (no taskbar yet)"
+        },
+        if settings.allow_account_control {
+            "yes"
+        } else {
+            "no"
+        },
+        if shown.ask_before_session {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
     if options.connect.is_none() && options.listen.is_none() {
-        return run_account(options, end, lines);
+        return run_account(options, end, &ui, settings, lines);
     }
     let mut signal = match (&options.connect, &options.listen) {
         (Some(address), _) => Signal::connect(address, Duration::from_secs(60)),
@@ -149,7 +190,18 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     .map_err(|e| e.to_string())?;
     signal.hello("agent").map_err(|e| e.to_string())?;
     let viewer = signal.peer_address().map_err(|e| e.to_string())?;
-    session(options, &mut signal, &viewer.to_string(), end, lines)
+    let mut deferred = Vec::new();
+    let outcome = session(
+        options,
+        &mut signal,
+        &viewer.to_string(),
+        "direct",
+        end,
+        &ui,
+        &mut deferred,
+        lines,
+    )?;
+    Ok(outcome.passed)
 }
 
 /// Logged in to queqiao-server: waits for viewers of the account and serves them one after another.
@@ -157,6 +209,8 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
 fn run_account(
     options: &Options,
     end: Option<Instant>,
+    ui: &ui::Ui,
+    mut settings: ui::Settings,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
     let identity = DeviceIdentity::load_or_create().map_err(|e| e.to_string())?;
@@ -192,10 +246,38 @@ fn run_account(
 
     let (mut sessions, mut passed) = (0u32, true);
     let mut retry = Duration::from_secs(1);
+    let mut deferred: Vec<PresenceEvent> = Vec::new();
     loop {
         if end.is_some_and(|end| Instant::now() > end)
             || options.sessions.is_some_and(|n| sessions >= n)
         {
+            break;
+        }
+        // What the person did in the tray (also during the last session).
+        deferred.extend(std::iter::from_fn(|| ui.try_event()));
+        let mut quit = false;
+        for event in deferred.drain(..) {
+            match event {
+                PresenceEvent::Quit => quit = true,
+                PresenceEvent::SetAllow(on) => {
+                    settings.allow_account_control = on;
+                    let _ = settings.save();
+                    lines.push(format!(
+                        "the person at this PC set: this account's devices may control it: {on}"
+                    ));
+                }
+                PresenceEvent::SetAsk(on) => {
+                    settings.ask_before_session = on;
+                    let _ = settings.save();
+                    lines.push(format!(
+                        "the person at this PC set: ask before each session: {on}"
+                    ));
+                }
+                PresenceEvent::EndSession | PresenceEvent::Consent(_) => {}
+            }
+        }
+        if quit {
+            lines.push("quit from the tray icon".into());
             break;
         }
         match account.next_event(Duration::from_millis(200)) {
@@ -221,15 +303,64 @@ fn run_account(
                     lines.push(format!("refused viewer {from_name}: {error}"));
                     continue;
                 }
+                if !settings.allow_account_control {
+                    let _ = signal.send(
+                        "error",
+                        "control by this account's devices is turned off on that PC",
+                    );
+                    lines.push(format!(
+                        "refused viewer {from_name}: control by this account's devices is off"
+                    ));
+                    continue;
+                }
+                if options.ask || settings.ask_before_session {
+                    match ask_consent(ui, &from_name, options.answer) {
+                        Ok(true) => {
+                            lines.push(format!("the person at this PC allowed {from_name}"))
+                        }
+                        Ok(false) => {
+                            let _ = signal.send("error", "the person at that PC declined");
+                            lines.push(format!("the person at this PC declined {from_name}"));
+                            continue;
+                        }
+                        Err(error) => {
+                            let _ = signal
+                                .send("error", "the consent prompt could not be shown on that PC");
+                            lines.push(format!(
+                                "refused viewer {from_name}: consent prompt: {error}"
+                            ));
+                            continue;
+                        }
+                    }
+                }
                 signal
                     .send("hello", &hello_body("agent"))
                     .map_err(|e| e.to_string())?;
                 sessions += 1;
                 lines.push(format!("session {sessions}: viewer {from_name} ({from})"));
-                match session(options, &mut signal, &from_name, end, lines) {
-                    Ok(ok) => passed &= ok,
+                let started_at = std::time::SystemTime::now();
+                match session(
+                    options,
+                    &mut signal,
+                    &from_name,
+                    &from,
+                    end,
+                    ui,
+                    &mut deferred,
+                    lines,
+                ) {
+                    Ok(outcome) => {
+                        passed &= outcome.passed;
+                        ui::record_session(&from_name, &from, started_at, &outcome.ended);
+                    }
                     Err(error) => {
                         lines.push(format!("session {sessions} failed: {error}"));
+                        ui::record_session(
+                            &from_name,
+                            &from,
+                            started_at,
+                            &format!("failed: {error}"),
+                        );
                         passed = false;
                     }
                 }
@@ -266,14 +397,58 @@ fn run_account(
     Ok(passed && options.sessions.is_none_or(|n| sessions >= n))
 }
 
-/// One session with one viewer: capture, encode and send the screen, inject the viewer's input.
+/// Asks the person at the PC whether `viewer` may control it; false when denied or unanswered.
+fn ask_consent(ui: &ui::Ui, viewer: &str, answer: Option<bool>) -> Result<bool, String> {
+    ui.ask(viewer, CONSENT_SECONDS)?;
+    if let Some(answer) = answer {
+        std::thread::sleep(Duration::from_secs(1));
+        ui.press_consent(answer);
+    }
+    let deadline = Instant::now() + Duration::from_secs(u64::from(CONSENT_SECONDS) + 2);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        if let Some(PresenceEvent::Consent(allowed)) = ui.wait_event(left) {
+            return Ok(allowed);
+        }
+    }
+}
+
+/// How a session went.
+struct SessionOutcome {
+    passed: bool,
+    ended: String,
+}
+
+/// Takes the banner down however the session ends.
+struct BannerGuard<'a>(&'a ui::Ui);
+
+impl Drop for BannerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.session_ended();
+    }
+}
+
+/// One session with one viewer: capture, encode and send the screen, inject the viewer's input. The banner
+/// shows it on this PC the whole time; tray and banner actions that are not about the session are put in
+/// `deferred`.
+#[allow(clippy::too_many_arguments)]
 fn session(
     options: &Options,
     signal: &mut dyn Signaling,
     viewer: &str,
+    viewer_id: &str,
     end: Option<Instant>,
+    ui: &ui::Ui,
+    deferred: &mut Vec<PresenceEvent>,
     lines: &mut Vec<String>,
-) -> Result<bool, String> {
+) -> Result<SessionOutcome, String> {
+    let _ = viewer_id;
+    ui.session_started(viewer)
+        .map_err(|e| format!("the banner could not be shown, so the session is refused: {e}"))?;
+    let _banner = BannerGuard(ui);
     let frequency = qpc_frequency() as f64;
     let ms = |ticks: i64| ticks as f64 * 1000.0 / frequency;
 
@@ -346,9 +521,35 @@ fn session(
     let mut last_encode: Option<Instant> = None;
     let mut closed = None;
 
+    let mut end_pressed = false;
+    let mut ended_here = false;
     'session: loop {
         if end.is_some_and(|end| Instant::now() > end) {
             break;
+        }
+        if !end_pressed
+            && options
+                .end_after
+                .is_some_and(|seconds| started.elapsed() >= Duration::from_secs(seconds))
+        {
+            ui.press_end();
+            end_pressed = true;
+        }
+        while let Some(event) = ui.try_event() {
+            match event {
+                PresenceEvent::EndSession => {
+                    closed = Some("ended by the person at this PC".to_string());
+                    ended_here = true;
+                    break 'session;
+                }
+                PresenceEvent::Quit => {
+                    closed = Some("ended by the person at this PC (quit)".to_string());
+                    ended_here = true;
+                    deferred.push(PresenceEvent::Quit);
+                    break 'session;
+                }
+                other => deferred.push(other),
+            }
         }
         if connected_after.is_none() && started.elapsed() > CONNECT_LIMIT {
             closed = Some(format!(
@@ -470,8 +671,8 @@ fn session(
             }
         }
     }
-    if closed.is_none() {
-        // Our end (time is up): tell the viewer at once.
+    if closed.is_none() || ended_here {
+        // Our end (time is up, or the person here ended it): tell the viewer at once.
         peer.send_data(Message::Leave.encode());
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -521,16 +722,16 @@ fn session(
             stats.moves_ok, stats.moves_checked, stats.keys_ok, stats.keys_checked
         ));
     }
-    lines.push(format!(
-        "ended: {}",
-        closed.unwrap_or_else(|| "time is up".into())
-    ));
+    let ended = closed.unwrap_or_else(|| "time is up".into());
+    lines.push(format!("ended: {ended}"));
     let input_ok = !options.verify_input
         || (stats.moves_checked > 0
             && stats.moves_ok == stats.moves_checked
             && stats.keys_checked == 2
             && stats.keys_ok == 2);
-    Ok(connected_after.is_some() && stats.sent > 0 && stats.inject_failures == 0 && input_ok)
+    let passed =
+        connected_after.is_some() && stats.sent > 0 && stats.inject_failures == 0 && input_ok;
+    Ok(SessionOutcome { passed, ended })
 }
 
 /// After an injected event: is the pointer where it should be, is the test key in the right state?

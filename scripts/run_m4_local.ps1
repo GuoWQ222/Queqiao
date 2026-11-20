@@ -10,8 +10,8 @@ param(
     [string]$Out = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\probe\m4_local'),
     [int]$Seconds = 10,
     [string]$Address = '127.0.0.1',
-    # Which sessions to run: direct, relay.
-    [string[]]$Sessions = @('direct', 'relay'),
+    # Which sessions to run: all, or some of direct, relay, allowed, declined, ended-here.
+    [string[]]$Sessions = @('all'),
     [switch]$SkipProbe
 )
 $ErrorActionPreference = 'Stop'
@@ -80,25 +80,34 @@ try {
     }
 
     $device = $env:COMPUTERNAME
-    foreach ($run in @(@('direct', '', 'direct to'), @('relay', 'network:relay', 'relayed through'))) {
-        $label, $mode, $expected = $run
-        if ($Sessions -notcontains $label) { continue }
-        $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`""
+    # label, QUEQIAO_FORCE, extra agent options, what the agent's report must say, what the viewer's must say,
+    # whether both runs must pass (a declined session passes neither). Later options win, so an extra --seconds shortens the agent's run.
+    $runs = @(
+        @('direct', '', '', 'path after .*: direct to ', 'path after .*: direct to ', $true),
+        @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
+        @('allowed', '', "--ask --answer allow --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
+        @('declined', '', '--ask --answer deny --seconds 45', 'the person at this PC declined', 'the person at that PC declined', $false),
+        @('ended-here', '', '--end-after 6', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true)
+    )
+    foreach ($run in $runs) {
+        $label, $mode, $extra, $agentExpects, $viewerExpects, $bothPass = $run
+        if ($Sessions -notcontains $label -and $Sessions -notcontains 'all') { continue }
+        $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`" $extra"
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_$label.txt`""
         Start-SessionTask "Queqiao-M4-Agent-$label" $agent $agentArgs $mode
         Start-Sleep -Seconds 2
         Start-SessionTask "Queqiao-M4-Viewer-$label" $viewer $viewerArgs $mode
         $viewerResult = Wait-SessionTask "Queqiao-M4-Viewer-$label" ($Seconds + 120)
-        $agentResult = Wait-SessionTask "Queqiao-M4-Agent-$label" 30
-        "=== session '$label' (QUEQIAO_FORCE=$mode): agent exit $agentResult, viewer exit $viewerResult"
-        foreach ($program in 'agent', 'viewer') {
+        $agentResult = Wait-SessionTask "Queqiao-M4-Agent-$label" 60
+        "=== session '$label' (QUEQIAO_FORCE=$mode $extra): agent exit $agentResult, viewer exit $viewerResult"
+        foreach ($check in @(@('agent', $agentExpects, $bothPass), @('viewer', $viewerExpects, $bothPass))) {
+            $program, $expects, $mustPass = $check
             $report = Join-Path $Out "${program}_$label.txt"
             $text = if (Test-Path -LiteralPath $report) { @(Get-Content -LiteralPath $report -Encoding UTF8) } else { @("no report at $report") }
             "--- $program"
             $text
-            $pathLine = $text | Where-Object { $_ -like 'path after*' } | Select-Object -Last 1
-            if ($text[-1] -ne 'RESULT PASS') { $failed += "$label $program" }
-            if (-not $pathLine -or $pathLine -notlike "*: $expected *") { $failed += "$label $program path (expected '$expected')" }
+            if ($mustPass -and $text[-1] -ne 'RESULT PASS') { $failed += "$label $program" }
+            if (-not ($text | Where-Object { $_ -match $expects })) { $failed += "$label $program (expected '$expects')" }
         }
     }
 } finally {

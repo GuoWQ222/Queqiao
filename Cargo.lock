@@ -766,8 +766,11 @@ dependencies = [
  "queqiao-capture",
  "queqiao-codec",
  "queqiao-core",
+ "queqiao-display",
  "queqiao-input",
  "queqiao-transport",
+ "serde",
+ "serde_json",
  "windows",
 ]
 

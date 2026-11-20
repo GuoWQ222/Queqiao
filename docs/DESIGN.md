@@ -205,7 +205,15 @@ Open, in this order, all before any release:
    own long-lived key (DPAPI-protected) at its first login; the account's devices learn each other's public keys
    and pin them (a changed key is refused until the user confirms it on a device they trust); the DTLS
    fingerprint in every offer and answer is signed with the device key and checked by the other side.
-2. **Nothing happens unseen on the controlled PC.** A tray icon whenever the agent runs, a banner during every
+2. **Nothing happens unseen on the controlled PC.** **Done 2026-11-21 (except the device password):** a tray
+   icon whenever the agent runs (re-added when Explorer restarts; menu: end the session, let this account's devices
+   control the PC, ask before each session, quit); a banner on top of the screen during every session, with End
+   (a session whose banner cannot be shown is refused); an Allow / Deny prompt before each session when asking is on
+   (Deny is the default button; denied after 25 s); every session in `sessions.log`. As UU Remote does, the
+   account's own devices connect without a prompt by default (unattended access to your own PCs), and the person at
+   the PC can turn that off or turn the prompt on; the separate device password belongs to helping devices of other
+   accounts (planned). Tested by `run_m4_local.ps1` (allowed, declined, ended at the PC).
+   Was: A tray icon whenever the agent runs, a banner during every
    session with a one-click end, and a list of past sessions. A session needs consent on the controlled PC
    (Allow / Deny) unless its owner turned on unattended access for that device, which then needs a separate
    device password (as UU Remote does).

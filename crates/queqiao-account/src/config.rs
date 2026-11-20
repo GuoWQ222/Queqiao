@@ -138,7 +138,8 @@ fn file_name(role: Role) -> &'static str {
     }
 }
 
-pub(crate) fn folder() -> Result<PathBuf, Error> {
+/// `%APPDATA%\Queqiao`, where this device keeps its files.
+pub fn folder() -> Result<PathBuf, Error> {
     let base = std::env::var_os("APPDATA").ok_or_else(|| Error("APPDATA is not set".into()))?;
     let folder = PathBuf::from(base).join("Queqiao");
     std::fs::create_dir_all(&folder)?;

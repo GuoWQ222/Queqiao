@@ -16,7 +16,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Device names, remarks, favourites | planned (UI) |
 | Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); manual "switch to relay" while connected: planned |
 | Help someone else: connect to a device of another account with its device ID and a code (temporary code, own fixed code, or both), or ask and let the other side approve; invitation link; code read from the clipboard | planned (after security points 1-2) |
-| Consent on the controlled PC (code plus local confirmation), auto-lock the client UI while being helped | planned (security point 2) |
+| Consent on the controlled PC before a session (Allow / Deny), tray icon, session banner with End, session history | done (security point 2) |
+| Code plus local confirmation for helpers from other accounts, auto-lock the client UI while being helped | planned (with helping others) |
 | Lock the client's settings with a separate password | planned |
 | Network status overlay: delay, frame rate, bandwidth | planned |
 
