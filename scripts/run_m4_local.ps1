@@ -120,6 +120,12 @@ try {
             $text
             if ($mustPass -and $text[-1] -ne 'RESULT PASS') { $failed += "$label $program" }
             if (-not ($text | Where-Object { $_ -match $expects })) { $failed += "$label $program (expected '$expects')" }
+            # The window title shows the network status (the relay session must say so).
+            if ($program -eq 'viewer' -and $mustPass) {
+                $pathWord = if ($mode -eq 'network:relay') { 'relayed' } else { 'direct' }
+                $titlePattern = "^window title: Queqiao - .+ \| \d+ ms \| \d+ fps \| \d+(\.\d)? [kM]bit/s \| $pathWord"
+                if (-not ($text | Where-Object { $_ -match $titlePattern })) { $failed += "$label viewer (expected '$titlePattern')" }
+            }
             if ($extra -like '*--dry-run-commands*') {
                 $wanted = if ($program -eq 'agent') {
                     @('command from the viewer: CtrlAltDel: Ctrl\+Alt\+Del needs the Queqiao service', 'command from the viewer: Lock: the PC would be locked now', 'command from the viewer: Restart: the PC would restart in \d+ s')

@@ -19,7 +19,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Consent on the controlled PC before a session (Allow / Deny), tray icon, session banner with End, session history | done (security point 2) |
 | Code plus local confirmation for helpers from other accounts, auto-lock the client UI while being helped | planned (with helping others) |
 | Lock the client's settings with a separate password | planned |
-| Network status overlay: delay, frame rate, bandwidth | planned |
+| Network status: delay, frame rate, data rate, direct or relayed | done (2026-11-21, in the session window title, once a second); an overlay on the picture: planned (UI) |
 
 ## Picture
 

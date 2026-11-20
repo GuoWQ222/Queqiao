@@ -126,6 +126,77 @@ struct Stats {
     show_ms: Vec<f64>,
 }
 
+/// The session's state in the window title, once a second: delay (round trip), frames shown per second,
+/// data received and whether the session is direct or relayed. A notice from the controlled PC stays there
+/// for a few seconds.
+struct TitleStatus {
+    agent: String,
+    relayed: bool,
+    title: String,
+    notice: Option<(String, Instant)>,
+    /// Counters at the last update, for the rates.
+    last: (Instant, u32, usize),
+}
+
+const NOTICE_SHOWN: Duration = Duration::from_secs(6);
+
+impl TitleStatus {
+    fn new(agent: &str) -> TitleStatus {
+        TitleStatus {
+            agent: agent.to_string(),
+            relayed: false,
+            title: String::new(),
+            notice: None,
+            last: (Instant::now(), 0, 0),
+        }
+    }
+
+    fn notice(&mut self, text: &str) {
+        let short: String = text.chars().take(120).collect();
+        self.notice = Some((short, Instant::now() + NOTICE_SHOWN));
+        // Shown at once rather than at the next update.
+        self.last.0 -= Duration::from_secs(1);
+    }
+
+    fn update(&mut self, window: &Window, stats: &Stats) {
+        let now = Instant::now();
+        let (at, shown, bytes) = self.last;
+        let seconds = now.duration_since(at).as_secs_f64();
+        if seconds < 1.0 {
+            return;
+        }
+        let fps = f64::from(stats.shown.saturating_sub(shown)) / seconds;
+        let kbit = stats.bytes.saturating_sub(bytes) as f64 * 8.0 / seconds / 1e3;
+        // A still screen sends little: kbit/s then, so it does not read as 0.0.
+        let rate = if kbit < 1000.0 {
+            format!("{kbit:.0} kbit/s")
+        } else {
+            format!("{:.1} Mbit/s", kbit / 1e3)
+        };
+        let delay = match stats.rtt_ms.last() {
+            Some(rtt) => format!("{rtt:.0} ms"),
+            None => "- ms".into(),
+        };
+        let path = if self.relayed { "relayed" } else { "direct" };
+        let mut title = format!(
+            "Queqiao - {} | {delay} | {fps:.0} fps | {rate} | {path}",
+            self.agent
+        );
+        if let Some((text, until)) = &self.notice {
+            if now < *until {
+                title = format!("{title} | {text}");
+            } else {
+                self.notice = None;
+            }
+        }
+        if title != self.title {
+            window.set_title(&title);
+            self.title = title;
+        }
+        self.last = (now, stats.shown, stats.bytes);
+    }
+}
+
 fn main() {
     let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
     let Some(options) = parse(std::env::args().skip(1)) else {
@@ -647,9 +718,11 @@ fn session(
     for path in &options.send_files {
         let _ = transfers.send(path);
     }
+    let mut status = TitleStatus::new(agent);
     let mut closed = None;
 
     'session: loop {
+        status.update(&window, &stats);
         if end.is_some_and(|end| Instant::now() > end) {
             break;
         }
@@ -842,8 +915,7 @@ fn session(
                     }
                     Some(Message::Notice(text)) => {
                         lines.push(format!("notice from that PC: {text}"));
-                        let short: String = text.chars().take(120).collect();
-                        window.set_title(&format!("Queqiao - {agent} - {short}"));
+                        status.notice(&text);
                     }
                     Some(Message::ClipboardText(text)) => {
                         clipboard_in += 1;
@@ -858,10 +930,13 @@ fn session(
                     _ => {}
                 },
                 PeerEvent::KeyframeRequested => {}
-                PeerEvent::Path(path) => lines.push(format!(
-                    "path after {} ms: {path}",
-                    started.elapsed().as_millis()
-                )),
+                PeerEvent::Path(path) => {
+                    status.relayed = path.starts_with("relayed");
+                    lines.push(format!(
+                        "path after {} ms: {path}",
+                        started.elapsed().as_millis()
+                    ))
+                }
                 PeerEvent::Note(note) => {
                     lines.push(format!("{} ms: {note}", started.elapsed().as_millis()))
                 }
@@ -935,6 +1010,7 @@ fn session(
         summary(&mut total)
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
+    lines.push(format!("window title: {}", status.title));
     if transfers.busy() {
         lines.push("files: a transfer was cut off when the session ended".into());
     }
