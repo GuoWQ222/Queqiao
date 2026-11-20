@@ -36,13 +36,18 @@ impl Ui {
         let (command_sender, commands) = mpsc::channel();
         let (event_sender, events) = mpsc::channel();
         let (ready_sender, ready) = mpsc::channel();
-        let (allow, ask) = (settings.allow_account_control, settings.ask_before_session);
+        let (allow, ask, clipboard) = (
+            settings.allow_account_control,
+            settings.ask_before_session,
+            settings.share_clipboard,
+        );
         let thread = std::thread::Builder::new()
             .name("queqiao-ui".into())
             .spawn(move || {
                 run(
                     allow,
                     ask,
+                    clipboard,
                     pictures.as_deref(),
                     &commands,
                     &event_sender,
@@ -119,12 +124,13 @@ impl Drop for Ui {
 fn run(
     allow: bool,
     ask: bool,
+    clipboard: bool,
     pictures: Option<&Path>,
     commands: &Receiver<Command>,
     events: &Sender<PresenceEvent>,
     ready: &Sender<Result<bool, String>>,
 ) {
-    let mut presence = match Presence::new(allow, ask) {
+    let mut presence = match Presence::new(allow, ask, clipboard) {
         Ok(presence) => presence,
         Err(error) => {
             let _ = ready.send(Err(format!("tray icon: {}", error.message())));
@@ -184,6 +190,13 @@ pub struct Settings {
     pub allow_account_control: bool,
     /// Ask the person at the PC before each session.
     pub ask_before_session: bool,
+    /// Share the clipboard with the controlling device.
+    #[serde(default = "yes")]
+    pub share_clipboard: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -193,6 +206,7 @@ impl Default for Settings {
         Settings {
             allow_account_control: true,
             ask_before_session: false,
+            share_clipboard: true,
         }
     }
 }

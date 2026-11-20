@@ -40,7 +40,7 @@ pub enum InputEvent {
 }
 
 /// Everything sent on the data channel.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     Input(InputEvent),
     /// Round-trip measurement: the receiver answers with `Pong` carrying the same values.
@@ -59,7 +59,12 @@ pub enum Message {
     },
     /// The sender ends the session (the other side stops at once instead of waiting for a timeout).
     Leave,
+    /// The sender's clipboard now holds this text (both directions; at most [`MAX_CLIPBOARD_TEXT`] bytes).
+    ClipboardText(String),
 }
+
+/// Clipboard text larger than this (UTF-8 bytes) is not sent in one message.
+pub const MAX_CLIPBOARD_TEXT: usize = 256 * 1024;
 
 const INPUT_MOVE: u8 = 1;
 const INPUT_BUTTON: u8 = 2;
@@ -69,6 +74,7 @@ const PING: u8 = 20;
 const PONG: u8 = 21;
 const FRAME_INFO: u8 = 30;
 const LEAVE: u8 = 40;
+const CLIPBOARD_TEXT: u8 = 50;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -114,6 +120,10 @@ impl Message {
                 out.extend_from_slice(&agent_ms.to_le_bytes());
             }
             Message::Leave => out.push(LEAVE),
+            Message::ClipboardText(ref text) => {
+                out.push(CLIPBOARD_TEXT);
+                out.extend_from_slice(text.as_bytes());
+            }
         }
         out
     }
@@ -166,6 +176,7 @@ impl Message {
                 agent_ms: f32::from_bits(u32_at(8)?),
             },
             LEAVE => Message::Leave,
+            CLIPBOARD_TEXT => Message::ClipboardText(String::from_utf8(rest.to_vec()).ok()?),
             _ => return None,
         })
     }
@@ -202,6 +213,7 @@ mod tests {
                 agent_ms: 3.25,
             },
             Message::Leave,
+            Message::ClipboardText("copied text, ä 中文".into()),
         ];
         for message in messages {
             assert_eq!(Message::decode(&message.encode()), Some(message));

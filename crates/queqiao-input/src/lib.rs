@@ -5,6 +5,10 @@
 //! hardware scancodes, so the controlled PC's keyboard layout decides the characters. The process must
 //! be per-monitor DPI aware (the agent is), so desktop positions are physical pixels.
 
+mod clipboard;
+
+pub use clipboard::{Clipboard, read_text as clipboard_text};
+
 use queqiao_core::protocol::{InputEvent, MouseButton};
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;

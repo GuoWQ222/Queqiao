@@ -868,6 +868,7 @@ dependencies = [
  "queqiao-codec",
  "queqiao-core",
  "queqiao-display",
+ "queqiao-input",
  "queqiao-transport",
  "windows",
 ]

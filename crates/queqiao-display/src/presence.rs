@@ -30,6 +30,8 @@ pub enum PresenceEvent {
     SetAllow(bool),
     /// Ask before each session (true) or not.
     SetAsk(bool),
+    /// Share the clipboard with the controlling device (true) or not.
+    SetClipboard(bool),
     /// The answer to the prompt: allowed, or denied (also when the time ran out or it was closed).
     Consent(bool),
 }
@@ -41,6 +43,7 @@ const MENU_END: u16 = 200;
 const MENU_ALLOW: u16 = 201;
 const MENU_ASK: u16 = 202;
 const MENU_QUIT: u16 = 203;
+const MENU_CLIPBOARD: u16 = 204;
 const ID_END: u16 = 210;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
@@ -67,12 +70,13 @@ pub struct Presence {
     prompt: Option<Prompt>,
     allow: bool,
     ask: bool,
+    clipboard: bool,
     viewer: Option<String>,
 }
 
 impl Presence {
     /// The tray icon, with the current settings.
-    pub fn new(allow: bool, ask: bool) -> Result<Presence> {
+    pub fn new(allow: bool, ask: bool, clipboard: bool) -> Result<Presence> {
         let instance = unsafe { GetModuleHandleW(None) }?;
         REGISTER.call_once(|| unsafe {
             let class = WNDCLASSEXW {
@@ -112,6 +116,7 @@ impl Presence {
             prompt: None,
             allow,
             ask,
+            clipboard,
             viewer: None,
         };
         presence.update_tray();
@@ -277,6 +282,7 @@ impl Presence {
         let end = wide("End the session");
         let allow = wide("Let my account's devices control this PC");
         let ask = wide("Ask me before each session");
+        let clipboard = wide("Share the clipboard");
         let quit = wide("Quit Queqiao on this PC");
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
@@ -295,6 +301,12 @@ impl Presence {
                 checked(self.ask),
                 usize::from(MENU_ASK),
                 PCWSTR(ask.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                checked(self.clipboard),
+                usize::from(MENU_CLIPBOARD),
+                PCWSTR(clipboard.as_ptr()),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
@@ -328,6 +340,10 @@ impl Presence {
                 MENU_ASK => {
                     self.ask = !self.ask;
                     Some(PresenceEvent::SetAsk(self.ask))
+                }
+                MENU_CLIPBOARD => {
+                    self.clipboard = !self.clipboard;
+                    Some(PresenceEvent::SetClipboard(self.clipboard))
                 }
                 MENU_QUIT => Some(PresenceEvent::Quit),
                 _ => None,

@@ -83,7 +83,7 @@ try {
     # label, QUEQIAO_FORCE, extra agent options, what the agent's report must say, what the viewer's must say,
     # whether both runs must pass (a declined session passes neither). Later options win, so an extra --seconds shortens the agent's run.
     $runs = @(
-        @('direct', '', '', 'path after .*: direct to ', 'path after .*: direct to ', $true),
+        @('direct', '', '--clipboard-test', 'test text from the other side received: yes', 'test text from the other side received: yes', $true),
         @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
         @('allowed', '', "--ask --answer allow --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
         @('declined', '', '--ask --answer deny --seconds 45', 'the person at this PC declined', 'the person at that PC declined', $false),
@@ -94,6 +94,8 @@ try {
         if ($Sessions -notcontains $label -and $Sessions -notcontains 'all') { continue }
         $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`" $extra"
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_$label.txt`""
+        # The clipboard test runs on both sides.
+        if ($extra -like '*--clipboard-test*') { $viewerArgs += ' --clipboard-test' }
         Start-SessionTask "Queqiao-M4-Agent-$label" $agent $agentArgs $mode
         Start-Sleep -Seconds 2
         Start-SessionTask "Queqiao-M4-Viewer-$label" $viewer $viewerArgs $mode

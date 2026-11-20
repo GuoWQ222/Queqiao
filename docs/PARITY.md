@@ -57,7 +57,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 
 | Feature | Status |
 |---|---|
-| Clipboard both ways (text, images, files) | planned (M6) |
+| Clipboard both ways: text | done (2026-11-21; the person at the controlled PC can turn it off in the tray) |
+| Clipboard both ways: images and files | planned (M6, with file transfer) |
 | File transfer both ways by copy/paste and drag and drop; transfer list with pause, resume, cancel | planned (M6) |
 | Allow or forbid file transfer when helping others | planned |
 

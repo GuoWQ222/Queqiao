@@ -23,9 +23,12 @@ use std::time::{Duration, Instant};
 use queqiao_account::{Account, AccountEvent, DeviceIdentity, Role as AccountRole, SavedLogin};
 use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
 use queqiao_codec::ScreenEncoder;
+use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{InputEvent, Message};
 use queqiao_display::PresenceEvent;
-use queqiao_input::{Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position};
+use queqiao_input::{
+    Clipboard, Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position,
+};
 use queqiao_transport::{
     Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, check_hello, hello_body,
 };
@@ -65,6 +68,8 @@ struct Options {
     end_after: Option<u64>,
     /// For tests: save pictures of the banner and the consent prompt in this folder.
     ui_pictures: Option<PathBuf>,
+    /// For tests: send a clipboard text once the session's data channel is open.
+    clipboard_test: bool,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -144,6 +149,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--answer" => options.answer = Some(args.next()? == "allow"),
             "--end-after" => options.end_after = args.next().and_then(|v| v.parse().ok()),
             "--ui-pictures" => options.ui_pictures = args.next().map(PathBuf::from),
+            "--clipboard-test" => options.clipboard_test = true,
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -198,6 +204,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         "direct",
         end,
         &ui,
+        settings.share_clipboard,
         &mut deferred,
         lines,
     )?;
@@ -264,6 +271,13 @@ fn run_account(
                     let _ = settings.save();
                     lines.push(format!(
                         "the person at this PC set: this account's devices may control it: {on}"
+                    ));
+                }
+                PresenceEvent::SetClipboard(on) => {
+                    settings.share_clipboard = on;
+                    let _ = settings.save();
+                    lines.push(format!(
+                        "the person at this PC set: share the clipboard: {on}"
                     ));
                 }
                 PresenceEvent::SetAsk(on) => {
@@ -346,6 +360,7 @@ fn run_account(
                     &from,
                     end,
                     ui,
+                    settings.share_clipboard,
                     &mut deferred,
                     lines,
                 ) {
@@ -419,6 +434,36 @@ fn ask_consent(ui: &ui::Ui, viewer: &str, answer: Option<bool>) -> Result<bool, 
 }
 
 /// How a session went.
+/// The start of the clipboard text the tests send (each side checks it got the other's).
+pub(crate) const CLIPBOARD_TEST_TEXT: &str = "Queqiao clipboard test";
+
+/// Clipboard texts in a session.
+#[derive(Default)]
+struct ClipboardStats {
+    received: u32,
+    sent: u32,
+    test_received: bool,
+    test_sent: bool,
+    /// The last text from the other side (not sent back, not set again).
+    last_in: Option<String>,
+}
+
+impl ClipboardStats {
+    fn received(&mut self, text: &str) {
+        self.received += 1;
+        self.test_received |= text.starts_with(CLIPBOARD_TEST_TEXT);
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "clipboard: {} received, {} sent; test text from the other side received: {}",
+            self.received,
+            self.sent,
+            if self.test_received { "yes" } else { "no" }
+        )
+    }
+}
+
 struct SessionOutcome {
     passed: bool,
     ended: String,
@@ -444,6 +489,7 @@ fn session(
     viewer_id: &str,
     end: Option<Instant>,
     ui: &ui::Ui,
+    share_clipboard: bool,
     deferred: &mut Vec<PresenceEvent>,
     lines: &mut Vec<String>,
 ) -> Result<SessionOutcome, String> {
@@ -523,6 +569,17 @@ fn session(
     let mut last_encode: Option<Instant> = None;
     let mut closed = None;
 
+    // The clipboard both ways, while the person at this PC allows it.
+    let clipboard = if share_clipboard {
+        Clipboard::start()
+            .map_err(|error| lines.push(format!("clipboard: not shared ({error})")))
+            .ok()
+    } else {
+        lines.push("clipboard: not shared (turned off on this PC)".into());
+        None
+    };
+    let mut clipboard_stats = ClipboardStats::default();
+    let mut channel_open_at: Option<Instant> = None;
     let mut end_pressed = false;
     let mut ended_here = false;
     'session: loop {
@@ -587,6 +644,15 @@ fn session(
                         closed = Some("the viewer left".to_string());
                         break 'session;
                     }
+                    Some(Message::ClipboardText(text)) => {
+                        clipboard_stats.received(&text);
+                        if let Some(clipboard) = &clipboard
+                            && clipboard_stats.last_in.as_ref() != Some(&text)
+                        {
+                            clipboard.set_text(text.clone());
+                            clipboard_stats.last_in = Some(text);
+                        }
+                    }
                     _ => {}
                 },
                 PeerEvent::Closed(reason) => {
@@ -612,7 +678,28 @@ fn session(
                         last_bitrate_change = Some(Instant::now());
                     }
                 }
-                PeerEvent::ChannelOpen | PeerEvent::Video { .. } => {}
+                PeerEvent::ChannelOpen => channel_open_at = Some(Instant::now()),
+                PeerEvent::Video { .. } => {}
+            }
+        }
+
+        if let Some(opened) = channel_open_at {
+            if let Some(clipboard) = &clipboard
+                && let Some(text) = clipboard.changed()
+                && clipboard_stats.last_in.as_ref() != Some(&text)
+                && text.len() <= MAX_CLIPBOARD_TEXT
+            {
+                peer.send_data(Message::ClipboardText(text).encode());
+                clipboard_stats.sent += 1;
+            }
+            if options.clipboard_test
+                && !clipboard_stats.test_sent
+                && opened.elapsed() >= Duration::from_secs(1)
+            {
+                let text = format!("{CLIPBOARD_TEST_TEXT} (from the agent)");
+                peer.send_data(Message::ClipboardText(text).encode());
+                clipboard_stats.sent += 1;
+                clipboard_stats.test_sent = true;
             }
         }
 
@@ -701,6 +788,7 @@ fn session(
         "screen change -> sent, ms: {}",
         summary(&mut stats.agent_ms)
     ));
+    lines.push(clipboard_stats.line());
     lines.push(format!(
         "bitrate: started at {:.1}, lowest {:.1}, last {:.1}, highest allowed {:.1} Mbit/s; {bitrate_changes} changes",
         f64::from(start_bitrate) / 1e6,

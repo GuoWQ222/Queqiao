@@ -27,7 +27,11 @@ use queqiao_account::{
     new_session_id,
 };
 use queqiao_codec::{DecodedFrame, DecoderChoice, H264Decoder};
-use queqiao_core::protocol::{InputEvent, Message, MouseButton};
+use queqiao_core::protocol::{InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton};
+use queqiao_input::Clipboard;
+
+/// The start of the clipboard text the tests send (each side checks it got the other's).
+const CLIPBOARD_TEST_TEXT: &str = "Queqiao clipboard test";
 use queqiao_display::{
     DeviceList, DeviceRow, ListAction, LoginAction, LoginFields, LoginForm, Presenter, Window,
     WindowEvent, fit, show_error,
@@ -71,6 +75,8 @@ struct Options {
     width: Option<i32>,
     report: Option<PathBuf>,
     input_test: bool,
+    /// For tests: send a clipboard text once the data channel is open.
+    clipboard_test: bool,
 }
 
 impl Options {
@@ -167,6 +173,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--width" => options.width = args.next().and_then(|v| v.parse().ok()),
             "--report" => options.report = args.next().map(PathBuf::from),
             "--input-test" => options.input_test = true,
+            "--clipboard-test" => options.clipboard_test = true,
             "--trust-new-key" => options.trust_new_key = args.next(),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
@@ -603,6 +610,14 @@ fn session(
     let mut stats = Stats::default();
     let (mut connected_after, mut first_picture_after) = (None, None);
     let mut channel_open = false;
+    // The clipboard both ways (text); the last text from the agent is neither set again nor sent back.
+    let clipboard = Clipboard::start()
+        .map_err(|error| lines.push(format!("clipboard: not shared ({error})")))
+        .ok();
+    let (mut clipboard_in, mut clipboard_out) = (0u32, 0u32);
+    let mut clipboard_last_in: Option<String> = None;
+    let mut clipboard_test_received = false;
+    let mut clipboard_test_at: Option<Instant> = None;
     let mut picture_size = (0u32, 0u32);
     let mut held_keys: HashSet<(u16, bool)> = HashSet::new();
     let mut next_ping = Instant::now();
@@ -673,6 +688,24 @@ fn session(
                 next_test_step = Some(due + Duration::from_millis(300));
             }
         }
+        if channel_open {
+            if let Some(clipboard) = &clipboard
+                && let Some(text) = clipboard.changed()
+                && clipboard_last_in.as_ref() != Some(&text)
+                && text.len() <= MAX_CLIPBOARD_TEXT
+            {
+                peer.send_data(Message::ClipboardText(text).encode());
+                clipboard_out += 1;
+            }
+            let due = *clipboard_test_at.get_or_insert(Instant::now() + Duration::from_secs(1));
+            if options.clipboard_test && clipboard_test_at.is_some() && Instant::now() >= due {
+                let text = format!("{CLIPBOARD_TEST_TEXT} (from the viewer)");
+                peer.send_data(Message::ClipboardText(text).encode());
+                clipboard_out += 1;
+                // Sent once: far in the future from now on.
+                clipboard_test_at = Some(Instant::now() + Duration::from_secs(1 << 30));
+            }
+        }
         if channel_open && Instant::now() >= next_ping {
             let sent_us = started.elapsed().as_micros() as u64;
             peer.send_data(
@@ -738,6 +771,16 @@ fn session(
                     Some(Message::Leave) => {
                         closed = Some("the agent ended the session".to_string());
                         break 'session;
+                    }
+                    Some(Message::ClipboardText(text)) => {
+                        clipboard_in += 1;
+                        clipboard_test_received |= text.starts_with(CLIPBOARD_TEST_TEXT);
+                        if let Some(clipboard) = &clipboard
+                            && clipboard_last_in.as_ref() != Some(&text)
+                        {
+                            clipboard.set_text(text.clone());
+                            clipboard_last_in = Some(text);
+                        }
                     }
                     _ => {}
                 },
@@ -819,6 +862,10 @@ fn session(
         summary(&mut total)
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
+    lines.push(format!(
+        "clipboard: {clipboard_in} received, {clipboard_out} sent; test text from the other side received: {}",
+        if clipboard_test_received { "yes" } else { "no" }
+    ));
     for (stage, values) in [
         ("window messages", &mut stats.pump_ms),
         ("frame arrival -> picked up", &mut stats.pickup_ms),

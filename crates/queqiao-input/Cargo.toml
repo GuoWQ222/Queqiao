@@ -1,6 +1,6 @@
 [package]
 name = "queqiao-input"
-description = "Input on the controlled PC: injects the viewer's mouse and keyboard events with SendInput"
+description = "Input on the controlled PC (SendInput) and the clipboard shared between viewer and agent"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -9,6 +9,10 @@ publish.workspace = true
 queqiao-core.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
