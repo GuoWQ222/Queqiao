@@ -33,7 +33,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Several monitors: switch, or each in its own window (drag a screen tab out) | planned (M6) |
 | Virtual displays: create / remove, automatic when no monitor is attached, custom high resolution and refresh ("super screen") | planned: needs an IddCx display driver (Microsoft's MS-PL sample), which must be signed for release |
 | Privacy screen: turn the controlled PC's monitor off or cover it with an image while controlled | planned |
-| Window: full screen / window, zoom, scaling, small always-on-top window with opacity, several sessions at once | partly (window); rest planned (UI) |
+| Window: full screen / window, zoom, scaling, small always-on-top window with opacity, several sessions at once | partly: window, full screen (menu or Ctrl+Alt+Enter, 2026-11-21); rest planned (UI) |
 
 ## Input
 

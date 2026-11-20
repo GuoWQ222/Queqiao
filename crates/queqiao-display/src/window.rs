@@ -8,6 +8,9 @@ use std::sync::Once;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
@@ -58,6 +61,8 @@ pub struct Window {
     hwnd: HWND,
     closed: bool,
     slow: Vec<String>,
+    /// While full screen: the style and placement to go back to.
+    restore: Option<(isize, WINDOWPLACEMENT)>,
 }
 
 impl Window {
@@ -108,6 +113,7 @@ impl Window {
             hwnd,
             closed: false,
             slow: Vec::new(),
+            restore: None,
         })
     }
 
@@ -131,6 +137,76 @@ impl Window {
         let menu = unsafe { GetSystemMenu(self.hwnd, false) };
         let flags = MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED };
         let _ = unsafe { CheckMenuItem(menu, u32::from(id), flags.0) };
+    }
+
+    pub fn is_full_screen(&self) -> bool {
+        self.restore.is_some()
+    }
+
+    /// Full screen on the window's monitor (no frame), or back to the window it was.
+    pub fn set_full_screen(&mut self, on: bool) {
+        if on == self.restore.is_some() {
+            return;
+        }
+        if on {
+            let style = unsafe { GetWindowLongPtrW(self.hwnd, GWL_STYLE) };
+            let mut placement = WINDOWPLACEMENT {
+                length: size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            if unsafe { GetWindowPlacement(self.hwnd, &mut placement) }.is_err() {
+                return;
+            }
+            let Some(area) = self.monitor_rect() else {
+                return;
+            };
+            let framed = WS_OVERLAPPEDWINDOW.0 as isize;
+            unsafe {
+                SetWindowLongPtrW(
+                    self.hwnd,
+                    GWL_STYLE,
+                    (style & !framed) | WS_POPUP.0 as isize,
+                )
+            };
+            let _ = unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOP),
+                    area.left,
+                    area.top,
+                    area.right - area.left,
+                    area.bottom - area.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                )
+            };
+            self.restore = Some((style, placement));
+        } else if let Some((style, placement)) = self.restore.take() {
+            unsafe { SetWindowLongPtrW(self.hwnd, GWL_STYLE, style) };
+            let _ = unsafe { SetWindowPlacement(self.hwnd, &placement) };
+            let _ = unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                )
+            };
+        }
+    }
+
+    /// The whole monitor the window is (mostly) on.
+    pub fn monitor_rect(&self) -> Option<RECT> {
+        let monitor = unsafe { MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST) };
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe { GetMonitorInfoW(monitor, &mut info) }
+            .as_bool()
+            .then_some(info.rcMonitor)
     }
 
     pub fn set_title(&self, title: &str) {

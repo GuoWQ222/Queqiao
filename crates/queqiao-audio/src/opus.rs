@@ -46,8 +46,8 @@ impl Encoder {
         if pcm.len() != FRAME * CHANNELS {
             return Err(format!(
                 "a frame has {} samples, not {}",
-                FRAME * CHANNELS,
-                pcm.len()
+                pcm.len(),
+                FRAME * CHANNELS
             ));
         }
         let mut packet = vec![0u8; 1275];

@@ -112,6 +112,8 @@ try {
         # The clipboard and file tests run on both sides; the viewer sends commands the agent only reports.
         if ($extra -like '*--clipboard-test*') { $viewerArgs += " --clipboard-test --send-file `"$fileToAgent`"" }
         if ($extra -like '*--dry-run-commands*') { $viewerArgs += ' --command ctrl-alt-del --command lock --command restart' }
+        # Full screen: the drawing area must cover the monitor (the input test maps to it too).
+        if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen' }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
         if ($soundTest) {
             $agentArgs += " --sound-device `"$AgentSoundDevice`""
@@ -139,6 +141,9 @@ try {
             if (-not ($text | Where-Object { $_ -match $expects })) { $failed += "$label $program (expected '$expects')" }
             if ($soundTest -and ($label -in @('direct', 'relay')) -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^sound test: PASS' })) {
                 $failed += "$label viewer (expected 'sound test: PASS')"
+            }
+            if ($label -eq 'ended-here' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^window: full screen, drawing area (\d+x\d+), monitor \1$' })) {
+                $failed += "$label viewer (expected the full-screen window to cover the monitor)"
             }
             # The window title shows the network status (the relay session must say so).
             if ($program -eq 'viewer' -and $mustPass) {

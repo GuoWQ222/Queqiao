@@ -34,6 +34,11 @@ const MENU_CTRL_ALT_DEL: u16 = 0x1000;
 const MENU_LOCK: u16 = 0x1010;
 const MENU_RESTART: u16 = 0x1020;
 const MENU_SOUND: u16 = 0x1030;
+const MENU_FULL_SCREEN: u16 = 0x1040;
+/// Scancodes of the full-screen key, Ctrl+Alt+Enter (handled here, not sent): Enter, Ctrl, Alt.
+const KEY_ENTER: u16 = 0x1C;
+const KEY_CTRL: u16 = 0x1D;
+const KEY_ALT: u16 = 0x38;
 use queqiao_audio::{Player, TEST_TONE_HZ};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::Clipboard;
@@ -95,6 +100,8 @@ struct Options {
     sound_test: bool,
     /// Start with the other PC's sound off.
     mute: bool,
+    /// Start in full screen.
+    full_screen: bool,
 }
 
 impl Options {
@@ -267,6 +274,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--sound-device" => options.sound_device = Some(args.next()?),
             "--sound-test" => options.sound_test = true,
             "--mute" => options.mute = true,
+            "--full-screen" => options.full_screen = true,
             "--command" => options.commands.push(match args.next()?.as_str() {
                 "lock" => Command::Lock,
                 "restart" => Command::Restart,
@@ -739,7 +747,9 @@ fn session(
         (MENU_LOCK, "Lock that PC"),
         (MENU_RESTART, "Restart that PC..."),
         (MENU_SOUND, "Play that PC's sound"),
+        (MENU_FULL_SCREEN, "Full screen (Ctrl+Alt+Enter)"),
     ]);
+    window.set_full_screen(options.full_screen);
     window.check_menu_item(MENU_SOUND, sound_on);
     let mut closed = None;
 
@@ -773,6 +783,11 @@ fn session(
                 let command = match id {
                     MENU_CTRL_ALT_DEL => Some(Command::CtrlAltDel),
                     MENU_LOCK => Some(Command::Lock),
+                    MENU_FULL_SCREEN => {
+                        let on = !window.is_full_screen();
+                        window.set_full_screen(on);
+                        None
+                    }
                     MENU_SOUND => {
                         sound_on = !sound_on;
                         player.set_muted(!sound_on);
@@ -793,6 +808,19 @@ fn session(
                     peer.send_data(Message::Command(command).encode());
                     lines.push(format!("sent command: {command:?}"));
                 }
+                continue;
+            }
+            // Ctrl+Alt+Enter: full screen on or off (every other key goes to that PC).
+            if let WindowEvent::Key {
+                scancode: KEY_ENTER,
+                down: true,
+                ..
+            } = event
+                && held_keys.iter().any(|(code, _)| *code == KEY_CTRL)
+                && held_keys.iter().any(|(code, _)| *code == KEY_ALT)
+            {
+                let on = !window.is_full_screen();
+                window.set_full_screen(on);
                 continue;
             }
             if let WindowEvent::FilesDropped(paths) = &event {
@@ -1043,6 +1071,16 @@ fn session(
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
     lines.push(format!("window title: {}", status.title));
+    if window.is_full_screen()
+        && let Some(area) = window.monitor_rect()
+    {
+        let (width, height) = window.client_size();
+        lines.push(format!(
+            "window: full screen, drawing area {width}x{height}, monitor {}x{}",
+            area.right - area.left,
+            area.bottom - area.top
+        ));
+    }
     lines.extend(player.notes());
     let sound = player.stats();
     lines.push(format!(
