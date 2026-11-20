@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 queqiao-core.workspace = true
+getrandom.workspace = true
 socket2 = "0.6"
 # Windows' own crypto (CNG) for DTLS: no C toolchain or CMake needed, x64 and ARM64.
 str0m = { version = "0.25", default-features = false, features = ["wincrypto"] }

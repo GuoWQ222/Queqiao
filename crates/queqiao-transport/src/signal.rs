@@ -6,6 +6,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
+use crate::turn::IceServers;
 use crate::{Error, err};
 
 const MAX_MESSAGE: usize = 1 << 20;
@@ -113,6 +114,11 @@ pub trait Signaling {
     fn expect(&mut self, kind: &str) -> Result<String, Error>;
     /// Our address as the other side can reach it (for the ICE host candidate).
     fn local_ip(&self) -> Result<IpAddr, Error>;
+
+    /// The STUN and TURN servers for this session (none for a direct connection).
+    fn ice_servers(&mut self) -> Result<IceServers, Error> {
+        Ok(IceServers::default())
+    }
 
     /// Exchanges hellos: both sides must speak the same protocol version and have different roles.
     /// Returns the other side's role.

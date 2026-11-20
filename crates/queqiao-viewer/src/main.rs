@@ -10,7 +10,8 @@
 //!   saved login; --ui-test goes through the login form and the device list as a user would (filled and
 //!   pressed by the program) and saves pictures of both next to the report.
 //! By IP address (M2): queqiao-viewer --listen <ip:port> | --connect <agent-ip:port>
-//! Common options: [--seconds N] [--width N] [--report <file>] [--input-test]
+//! Common options: [--seconds N] [--width N] [--report <file>] [--input-test] [--force <switches>]
+//! --force sets test switches as QUEQIAO_FORCE does (for example network:relay).
 //! --input-test sends a fixed sequence instead of the window's input: five pointer moves and a press of
 //! F24 (a key no program uses); the agent run with --verify-input checks them. --version prints the
 //! version.
@@ -49,6 +50,8 @@ const TEST_POINTS: [(f64, f64); 5] = [
     (0.5, 0.5),
 ];
 const TEST_SCANCODE: u16 = 0x76;
+/// A session that is not connected after this long is given up.
+const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Options {
@@ -162,6 +165,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--width" => options.width = args.next().and_then(|v| v.parse().ok()),
             "--report" => options.report = args.next().map(PathBuf::from),
             "--input-test" => options.input_test = true,
+            "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
     }
@@ -450,7 +454,7 @@ fn device_list(
                         break;
                     }
                     AccountEvent::Error(message) => list.set_status(&message),
-                    AccountEvent::Signal { .. } => {}
+                    AccountEvent::Signal { .. } | AccountEvent::IceServers { .. } => {}
                 }
             }
         }
@@ -583,6 +587,7 @@ fn session(
 
     let started = Instant::now();
     let peer = Peer::start(Role::Viewer, signal).map_err(|e| e.to_string())?;
+    lines.extend(peer.candidates().iter().cloned());
     let end = options.seconds.map(|s| started + Duration::from_secs(s));
     let mut stats = Stats::default();
     let (mut connected_after, mut first_picture_after) = (None, None);
@@ -598,6 +603,13 @@ fn session(
 
     'session: loop {
         if end.is_some_and(|end| Instant::now() > end) {
+            break;
+        }
+        if connected_after.is_none() && started.elapsed() > CONNECT_LIMIT {
+            closed = Some(format!(
+                "could not connect within {} s",
+                CONNECT_LIMIT.as_secs()
+            ));
             break;
         }
         let pump_start = Instant::now();
@@ -719,6 +731,13 @@ fn session(
                     _ => {}
                 },
                 PeerEvent::KeyframeRequested => {}
+                PeerEvent::Path(path) => lines.push(format!(
+                    "path after {} ms: {path}",
+                    started.elapsed().as_millis()
+                )),
+                PeerEvent::Note(note) => {
+                    lines.push(format!("{} ms: {note}", started.elapsed().as_millis()))
+                }
                 PeerEvent::Closed(reason) => {
                     closed = Some(reason);
                     break 'session;

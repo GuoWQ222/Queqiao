@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use queqiao_core::account::{ClientMessage, Device, Role, ServerMessage};
+use queqiao_core::account::{ClientMessage, Device, Role, ServerMessage, TurnAccess};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
@@ -18,6 +18,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::store::Store;
+use crate::turn::TurnConfig;
 
 /// Messages are small (an SDP is a few kB): anything over 256 kB is refused.
 const MAX_MESSAGE: usize = 256 * 1024;
@@ -40,6 +41,7 @@ struct Connection {
 
 pub struct Hub {
     store: Mutex<Store>,
+    turn: Option<Arc<TurnConfig>>,
     online: Mutex<HashMap<(String, Role), Connection>>,
     next_id: AtomicU64,
 }
@@ -54,9 +56,10 @@ struct Identity {
 }
 
 impl Hub {
-    pub fn new(store: Store) -> Arc<Hub> {
+    pub fn new(store: Store, turn: Option<Arc<TurnConfig>>) -> Arc<Hub> {
         Arc::new(Hub {
             store: Mutex::new(store),
+            turn,
             online: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
         })
@@ -281,6 +284,23 @@ impl Hub {
                     let message = format!("device {to} is not online");
                     let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
                 }
+            }
+            ClientMessage::GetIceServers => {
+                // Relay credentials only ever go to a logged-in device, for itself.
+                let (stun, turn) = match &self.turn {
+                    Some(config) => {
+                        let (username, password, expires) = config.credentials(&identity.device_id);
+                        let access = TurnAccess {
+                            address: config.address(),
+                            username,
+                            password,
+                            expires,
+                        };
+                        (Some(config.address()), Some(access))
+                    }
+                    None => (None, None),
+                };
+                let _ = sender.send(Outgoing::Message(ServerMessage::IceServers { stun, turn }));
             }
             ClientMessage::Logout => {
                 if let Ok(store) = self.store.lock() {

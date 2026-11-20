@@ -8,7 +8,7 @@
 //!   queqiao-agent [--sessions N] [--seconds N]
 //! By IP address (M2, for tests):
 //!   queqiao-agent --connect <viewer-ip:port> | --listen <ip:port>
-//! Common options: [--seconds N] [--fps N] [--report <file>] [--verify-input]
+//! Common options: [--seconds N] [--fps N] [--report <file>] [--verify-input] [--force <switches>]
 //! --seconds limits the whole run; --sessions N stops after N sessions. --verify-input checks every injected
 //! pointer move and the test key (F24) and puts the pointer back at the end. --version prints the version.
 
@@ -29,6 +29,8 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SA
 /// The test key: F24 exists on no normal keyboard and no program reacts to it.
 const TEST_SCANCODE: u16 = 0x76;
 const VK_F24: u16 = 0x87;
+/// A session that is not connected after this long is given up.
+const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Options {
@@ -106,6 +108,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--fps" => options.fps = args.next().and_then(|v| v.parse().ok()),
             "--report" => options.report = args.next().map(PathBuf::from),
             "--verify-input" => options.verify_input = true,
+            "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
     }
@@ -221,7 +224,12 @@ fn run_account(
                 }
             }
             Some(AccountEvent::Error(message)) => lines.push(format!("server: {message}")),
-            Some(AccountEvent::Devices(_) | AccountEvent::Signal { .. }) | None => {}
+            Some(
+                AccountEvent::Devices(_)
+                | AccountEvent::Signal { .. }
+                | AccountEvent::IceServers { .. },
+            )
+            | None => {}
         }
     }
     lines.push(format!("{sessions} sessions"));
@@ -279,6 +287,7 @@ fn session(
     lines.push(format!("viewer: {viewer}"));
     let started = Instant::now();
     let peer = Peer::start(Role::Agent, signal).map_err(|e| e.to_string())?;
+    lines.extend(peer.candidates().iter().cloned());
 
     let pointer_start = cursor_position();
     let interval = Duration::from_secs_f64(1.0 / f64::from(config.fps));
@@ -292,6 +301,13 @@ fn session(
 
     'session: loop {
         if end.is_some_and(|end| Instant::now() > end) {
+            break;
+        }
+        if connected_after.is_none() && started.elapsed() > CONNECT_LIMIT {
+            closed = Some(format!(
+                "could not connect within {} s",
+                CONNECT_LIMIT.as_secs()
+            ));
             break;
         }
         while let Some(event) = peer.try_event() {
@@ -326,6 +342,13 @@ fn session(
                 PeerEvent::Closed(reason) => {
                     closed = Some(reason);
                     break 'session;
+                }
+                PeerEvent::Path(path) => lines.push(format!(
+                    "path after {} ms: {path}",
+                    started.elapsed().as_millis()
+                )),
+                PeerEvent::Note(note) => {
+                    lines.push(format!("{} ms: {note}", started.elapsed().as_millis()))
                 }
                 PeerEvent::ChannelOpen | PeerEvent::Video { .. } => {}
             }

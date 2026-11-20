@@ -52,6 +52,19 @@ pub enum ClientMessage {
     },
     /// Revoke this device's refresh token: the next start needs the password again.
     Logout,
+    /// The STUN and TURN servers for a session, with fresh relay credentials.
+    GetIceServers,
+}
+
+/// Relay access for one device: TURN long-term credentials that the server's TURN part accepts for new
+/// allocations until `expires` (Unix seconds); an allocation made in time lives on while it is refreshed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnAccess {
+    /// host:port of the TURN server (UDP).
+    pub address: String,
+    pub username: String,
+    pub password: String,
+    pub expires: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +90,11 @@ pub enum ServerMessage {
     },
     Error {
         message: String,
+    },
+    IceServers {
+        /// host:port of a STUN server (UDP), if any.
+        stun: Option<String>,
+        turn: Option<TurnAccess>,
     },
 }
 

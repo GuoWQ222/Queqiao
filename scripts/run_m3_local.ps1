@@ -59,7 +59,7 @@ $password1 = [guid]::NewGuid().ToString('N')
 $password2 = [guid]::NewGuid().ToString('N')
 & $server add-user alice $password1 --data $data
 & $server add-user bob $password2 --data $data
-$serverProcess = Start-Process -FilePath $server -ArgumentList @('serve', '--listen', $Listen, '--data', "`"$data`"") -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
+$serverProcess = Start-Process -FilePath $server -ArgumentList @('serve', '--listen', $Listen, '--data', "`"$data`"", '--public-ip', $Listen.Split(':')[0], '--relay-private') -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
 try {
     $hostName, $port = $Listen.Split(':')
     $deadline = (Get-Date).AddSeconds(10)

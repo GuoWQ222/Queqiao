@@ -134,7 +134,18 @@ UU builds on WebRTC's standard pieces (`research\uu\STREAMER_FINDINGS.md`). We d
 - **WebRTC via `str0m`** (pure-Rust, sans-IO WebRTC): ICE with STUN for hole punching, DTLS-SRTP encryption,
   RTP/RTCP with transport-wide congestion control and a GCC-style bandwidth estimator, NACK/RTX, SCTP data
   channels. Sans-IO means we own the sockets and threads, which suits a low-latency engine.
-- **Relay: TURN.** `queqiao-server` includes a TURN server (`turn` crate); agents get relay candidates from it, so ICE
+- **As built in M4:** STUN and TURN over UDP are our own code (`queqiao-core::stun`, a sans-IO TURN client in
+  queqiao-transport, a tokio TURN server in queqiao-server); no third-party TURN crate. Before the offer or answer each
+  side gathers its host candidate, its public address (from the allocation, or a STUN Binding) and a relayed
+  address, within 1.5 s. Relay credentials are issued over the account connection only, per device, valid an hour
+  for new allocations (username "<expiry>:<device>", password HMAC-SHA1 with a secret made at each server start).
+  The server relays only to peers with a permission, never to loopback, link-local, multicast or its own services,
+  to private and 100.64/10 addresses only with `--relay-private`; 4 allocations per device; every request after the
+  Allocate is checked against the allocation's key. str0m's controlled ICE side asks for its first timeout years away
+  until it is given time, which deadlocks behind a TURN permission: the network thread starts with a timeout and
+  waits at most 50 ms until connected (tests/relay_ice.rs reproduces both). `QUEQIAO_FORCE=network:relay` (or
+  `--force network:relay`) offers only the relayed candidate.
+- **Relay: TURN.** `queqiao-server` includes a TURN server (our own, see "As built in M4" above); both sides get relay candidates from it, so ICE
   falls back to the relay automatically when direct UDP fails. Later: TURN over TCP/TLS for UDP-blocked networks.
 - **Data channels:** `control` (reliable, ordered: session control, clipboard), `input` (unordered, low latency),
   `files` (reliable, flow-controlled).
@@ -210,7 +221,7 @@ Open, in this order, all before any release:
 | M1 | Local loop on one PC: capture -> encode -> decode -> window, with the software fallbacks | latency and fps measured; every fallback forced and tested. **Done 2026-11-20**: RTX 5080 PC 4/4 paths pass (hardware: 12 ms median screen change -> shown); Intel Iris Xe laptop 3/4 (hardware 20 ms; no-GPU path 55 ms, needs adaptive size) |
 | M2 | LAN: agent + viewer by IP, video + mouse/keyboard | control the PC from a second process / PC. **Done 2026-11-20**: one PC (611/611 frames, input 7/7) and PC viewer -> Intel laptop agent over Tailscale (direct, 5 ms ping): 17 ms median / 29 ms p95 screen change -> shown, input checked 7/7, 2 frames lost in 20 s and recovered by keyframe requests |
 | M3 | `queqiao-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click. **Done on one PC 2026-11-20** (`scripts\run_m3_local.ps1`): account probe 17/17 (pinned certificate, wrong password answered after 1 s, tokens per device and program, logout revokes, live presence, other accounts cannot see or reach a device); viewer through the login form and device list controls the PC through the server (connected in 107-137 ms, all frames shown, input 7/7); saved login, logout. Across machines the same day (server and viewer on the PC, agent on the Intel laptop over Tailscale, after the laptop's Kaspersky was told to allow the test folder): connected in 467 ms, first picture 603 ms, 746/746 frames shown (4 after a loss, repaired by keyframe requests), screen change -> shown median 33 ms / p95 40 ms at a 29 ms round trip, Intel Quick Sync at 2240x1400 60 fps, input 7/7 |
-| M4 | NAT traversal + relay | connect across networks, forced-relay test |
+| M4 | NAT traversal + relay | connect across networks, forced-relay test. **Relay done 2026-11-21**: one PC (`scripts\run_m4_local.ps1`): probe 27/27 incl. 10 relay checks (no credentials / wrong password / forged expiry refused, no relaying to loopback or the server's services, unsigned requests refused, quota, relaying works); a normal session goes direct, a forced one through TURN (connected in 396 ms, all frames, input 7/7). PC viewer -> Intel laptop agent over Tailscale: direct 599 ms to connect, 36 ms median / 43 p95 screen change -> shown; forced relay 793 ms, 34 / 42 ms; input 7/7 both. Open: a test across two real NATs without Tailscale (needs a server reachable from the Internet), TURN over TCP/TLS for networks without UDP, host candidates on every interface. Loss on the laptop's Wi-Fi (66 frames after a loss in 20 s, keyframes resent as unpaced bursts) is next: pacing, NACK/RTX, adaptive bitrate |
 | M5 | `queqiao-service`: login screen, UAC, Ctrl+Alt+Del, restart | control at the lock screen |
 | M6 | Clipboard, file transfer, multi-monitor, audio | each feature end to end |
 | M7 | Adaptive bitrate, optional vendor fast paths, installer, auto-update | quality under packet loss / low bandwidth |

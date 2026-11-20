@@ -1,6 +1,7 @@
 //! Checks a running queqiao-server from outside, as clients see it: the pinned certificate, logins,
 //! refresh tokens (per device and program, revoked on logout), presence, and that signals only reach
-//! devices of the same account. Needs two users on the server; saves nothing on this PC.
+//! devices of the same account; then the relay (TURN) as an attacker and as a client would use it. Needs two
+//! users on the server; saves nothing on this PC.
 //!
 //! account_probe <host:port> <fingerprint> <user1> <password1> <user2> <password2>
 //! Prints a CHECK line per check and PROBE_PASS or PROBE_FAIL.
@@ -292,6 +293,17 @@ fn main() {
                 gone.is_some(),
                 "device list pushed",
             );
+            // The relay, as an attacker and as a client would use it.
+            let servers = viewer_d
+                .session(&dev_a.id, Role::Agent, "relay-probe")
+                .ice_servers();
+            match servers {
+                Ok(servers) => match servers.turn {
+                    Some(turn) => relay::checks(&mut probe, &turn),
+                    None => probe.check("server offers a relay", false, "no TURN server"),
+                },
+                Err(error) => probe.check("relay credentials for a logged-in device", false, error),
+            }
         }
         Err(error) => probe.check("viewer D logs in", false, error),
     }
@@ -305,4 +317,246 @@ fn main() {
         }
     );
     std::process::exit(i32::from(probe.failed > 0));
+}
+
+/// Raw STUN/TURN against the server's relay: who may allocate, where it relays, quotas, and that it relays.
+mod relay {
+    use std::net::{SocketAddr, UdpSocket};
+    use std::time::Duration;
+
+    use queqiao_core::stun::{self, Class, Message, attr, method};
+    use queqiao_transport::TurnServer;
+
+    use super::Probe;
+
+    fn id() -> [u8; 12] {
+        let mut id = [0u8; 12];
+        getrandom::fill(&mut id).unwrap();
+        id
+    }
+
+    fn client() -> UdpSocket {
+        let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(700)))
+            .unwrap();
+        socket
+    }
+
+    /// Sends `bytes` (up to 3 times) and returns the first STUN reply.
+    fn ask(socket: &UdpSocket, server: SocketAddr, bytes: &[u8]) -> Option<(Message, Vec<u8>)> {
+        let mut buffer = vec![0u8; 2048];
+        for _ in 0..3 {
+            socket.send_to(bytes, server).ok()?;
+            while let Ok((length, from)) = socket.recv_from(&mut buffer) {
+                if from == server
+                    && let Some(message) = Message::decode(&buffer[..length])
+                {
+                    return Some((message, buffer[..length].to_vec()));
+                }
+            }
+        }
+        None
+    }
+
+    fn code(reply: &Option<(Message, Vec<u8>)>) -> String {
+        match reply {
+            Some((message, _)) if message.class == Class::Success => "success".into(),
+            Some((message, _)) => format!("error {}", message.error_code().unwrap_or(0)),
+            None => "no answer".into(),
+        }
+    }
+
+    struct Session {
+        socket: UdpSocket,
+        key: [u8; 16],
+        realm: String,
+        nonce: Vec<u8>,
+        username: String,
+        relayed: Option<SocketAddr>,
+    }
+
+    impl Session {
+        /// Allocates with `username` / `password` after the server's 401 challenge.
+        fn allocate(
+            server: SocketAddr,
+            username: &str,
+            password: &str,
+        ) -> (Session, Option<(Message, Vec<u8>)>) {
+            let socket = client();
+            let first = Message::new(Class::Request, method::ALLOCATE, id())
+                .with(attr::REQUESTED_TRANSPORT, stun::TRANSPORT_UDP);
+            let challenge = ask(&socket, server, &first.encode(None, true));
+            let (realm, nonce) = match &challenge {
+                Some((message, _)) => (
+                    message.text(attr::REALM).unwrap_or_default(),
+                    message.get(attr::NONCE).unwrap_or_default().to_vec(),
+                ),
+                None => (String::new(), Vec::new()),
+            };
+            let key = stun::long_term_key(username, &realm, password);
+            let mut session = Session {
+                socket,
+                key,
+                realm,
+                nonce,
+                username: username.to_string(),
+                relayed: None,
+            };
+            let request = Message::new(Class::Request, method::ALLOCATE, id())
+                .with(attr::REQUESTED_TRANSPORT, stun::TRANSPORT_UDP);
+            let reply = session.signed(server, request);
+            if let Some((message, _)) = &reply
+                && message.class == Class::Success
+            {
+                session.relayed = message.address(attr::XOR_RELAYED_ADDRESS);
+            }
+            (session, reply)
+        }
+
+        fn signed(&self, server: SocketAddr, message: Message) -> Option<(Message, Vec<u8>)> {
+            let bytes = message
+                .with(attr::USERNAME, self.username.as_bytes())
+                .with(attr::REALM, self.realm.as_bytes())
+                .with(attr::NONCE, self.nonce.clone())
+                .encode(Some(&self.key), true);
+            ask(&self.socket, server, &bytes)
+        }
+
+        fn permit(&self, server: SocketAddr, peer: SocketAddr) -> Option<(Message, Vec<u8>)> {
+            self.signed(
+                server,
+                Message::new(Class::Request, method::CREATE_PERMISSION, id())
+                    .with_address(attr::XOR_PEER_ADDRESS, peer),
+            )
+        }
+
+        fn release(&self, server: SocketAddr) {
+            let _ = self.signed(
+                server,
+                Message::new(Class::Request, method::REFRESH, id())
+                    .with(attr::LIFETIME, 0u32.to_be_bytes()),
+            );
+        }
+    }
+
+    pub fn checks(probe: &mut Probe, turn: &TurnServer) {
+        let server = turn.address;
+        let socket = client();
+        let binding = ask(
+            &socket,
+            server,
+            &Message::new(Class::Request, method::BINDING, id()).encode(None, true),
+        );
+        let mapped = binding
+            .as_ref()
+            .and_then(|(m, _)| m.address(attr::XOR_MAPPED_ADDRESS));
+        probe.check(
+            "STUN answers with the public address",
+            mapped.is_some(),
+            format!("{mapped:?}"),
+        );
+
+        let bare = Message::new(Class::Request, method::ALLOCATE, id())
+            .with(attr::REQUESTED_TRANSPORT, stun::TRANSPORT_UDP);
+        let reply = ask(&socket, server, &bare.encode(None, true));
+        probe.check(
+            "relay refused without credentials (401)",
+            code(&reply) == "error 401",
+            code(&reply),
+        );
+
+        let (_, reply) = Session::allocate(server, &turn.username, "not the password");
+        probe.check(
+            "relay refused with a wrong password",
+            code(&reply) == "error 401",
+            code(&reply),
+        );
+        let forged = match turn.username.split_once(':') {
+            Some((_, device)) => format!("9999999999:{device}"),
+            None => "9999999999:x".into(),
+        };
+        let (_, reply) = Session::allocate(server, &forged, &turn.password);
+        probe.check(
+            "relay refused with a forged expiry",
+            code(&reply) == "error 401",
+            code(&reply),
+        );
+
+        let (a, reply) = Session::allocate(server, &turn.username, &turn.password);
+        let signed_ok = reply
+            .as_ref()
+            .is_some_and(|(_, bytes)| stun::check_integrity(bytes, &a.key));
+        probe.check(
+            "relay allocated with the issued credentials, answer signed",
+            a.relayed.is_some() && signed_ok,
+            format!("{:?}", a.relayed),
+        );
+        let Some(relayed_a) = a.relayed else {
+            return;
+        };
+        let reply = a.permit(server, "127.0.0.1:9".parse().unwrap());
+        probe.check(
+            "no relaying to loopback (403)",
+            code(&reply) == "error 403",
+            code(&reply),
+        );
+        let account_port = SocketAddr::new(relayed_a.ip(), 47100);
+        let reply = a.permit(server, account_port);
+        probe.check(
+            "no relaying to the server's own services (403)",
+            code(&reply) == "error 403",
+            code(&reply),
+        );
+        let unsigned = Message::new(Class::Request, method::REFRESH, id()).encode(None, true);
+        let reply = ask(&a.socket, server, &unsigned);
+        probe.check(
+            "unsigned refresh refused (401)",
+            code(&reply) == "error 401",
+            code(&reply),
+        );
+
+        // Two allocations of the device relay to each other.
+        let (b, _) = Session::allocate(server, &turn.username, &turn.password);
+        if let Some(relayed_b) = b.relayed {
+            let both = code(&a.permit(server, relayed_b)) == "success"
+                && code(&b.permit(server, relayed_a)) == "success";
+            let send = Message::new(Class::Indication, method::SEND, id())
+                .with_address(attr::XOR_PEER_ADDRESS, relayed_b)
+                .with(attr::DATA, &b"relayed hello"[..]);
+            let mut delivered = None;
+            for _ in 0..3 {
+                let _ = a.socket.send_to(&send.encode(None, false), server);
+                let mut buffer = vec![0u8; 2048];
+                if let Ok((length, _)) = b.socket.recv_from(&mut buffer)
+                    && let Some(message) = Message::decode(&buffer[..length])
+                {
+                    delivered = Some((
+                        message.address(attr::XOR_PEER_ADDRESS),
+                        message.get(attr::DATA).map(<[u8]>::to_vec),
+                    ));
+                    break;
+                }
+            }
+            probe.check(
+                "relay carries data between permitted peers",
+                both && delivered == Some((Some(relayed_a), Some(b"relayed hello".to_vec()))),
+                format!("{delivered:?}"),
+            );
+        } else {
+            probe.check("second allocation", false, "none");
+        }
+        // Quota: four allocations per device.
+        let (c, _) = Session::allocate(server, &turn.username, &turn.password);
+        let (d, _) = Session::allocate(server, &turn.username, &turn.password);
+        let (e, reply) = Session::allocate(server, &turn.username, &turn.password);
+        probe.check(
+            "fifth allocation of a device refused (486)",
+            code(&reply) == "error 486",
+            code(&reply),
+        );
+        for session in [&a, &b, &c, &d, &e] {
+            session.release(server);
+        }
+    }
 }

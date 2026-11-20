@@ -8,13 +8,13 @@ mod config;
 mod tls;
 
 use std::collections::VecDeque;
-use std::net::{IpAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use queqiao_core::account::ServerMessage;
-use queqiao_transport::{Error, Signaling};
+use queqiao_core::account::{ServerMessage, TurnAccess};
+use queqiao_transport::{Error, IceServers, Signaling, TurnServer};
 use tungstenite::Message;
 
 pub use config::{DeviceIdentity, SavedLogin};
@@ -34,6 +34,11 @@ pub enum AccountEvent {
     },
     /// The server refused something (for example a signal to a device that is offline).
     Error(String),
+    /// The answer to `GetIceServers`.
+    IceServers {
+        stun: Option<String>,
+        turn: Option<TurnAccess>,
+    },
     Closed(String),
 }
 
@@ -246,4 +251,50 @@ impl Signaling for SessionSignal<'_> {
     fn local_ip(&self) -> Result<IpAddr, Error> {
         Ok(self.account.local_ip)
     }
+
+    /// Asks the server for its STUN and TURN servers and fresh relay credentials (waits up to 5 s).
+    fn ice_servers(&mut self) -> Result<IceServers, Error> {
+        self.account.send(ClientMessage::GetIceServers);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut other = Vec::new();
+        let result = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break Err(Error(
+                    "the server did not send its STUN and TURN servers".into(),
+                ));
+            }
+            match self.account.next_event(left) {
+                Some(AccountEvent::IceServers { stun, turn }) => {
+                    let turn = match turn {
+                        Some(access) => Some(TurnServer {
+                            address: resolve(&access.address)?,
+                            username: access.username,
+                            password: access.password,
+                        }),
+                        None => None,
+                    };
+                    let stun = match stun {
+                        Some(address) => Some(resolve(&address)?),
+                        None => None,
+                    };
+                    break Ok(IceServers { stun, turn });
+                }
+                Some(AccountEvent::Closed(reason)) => break Err(Error(reason)),
+                Some(event) => other.push(event),
+                None => {}
+            }
+        };
+        for event in other.into_iter().rev() {
+            self.account.pending.push_front(event);
+        }
+        result
+    }
+}
+
+fn resolve(address: &str) -> Result<SocketAddr, Error> {
+    address
+        .to_socket_addrs()?
+        .find(SocketAddr::is_ipv4)
+        .ok_or_else(|| Error(format!("no IPv4 address for {address}")))
 }

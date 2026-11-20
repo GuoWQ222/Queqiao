@@ -5,6 +5,10 @@
 //! application talks to the thread through channels; to make outgoing video leave at once, each command
 //! also sends a one-byte "wake-up" datagram to the thread's own socket from a local socket, which ends
 //! the thread's wait (a socket timeout would otherwise round up to Windows' 15.6 ms timer tick).
+//!
+//! Before the offer or answer, the candidates are gathered (`gather`): host, server-reflexive and relayed.
+//! What str0m sends from the relayed address goes through the TURN client, and what the TURN server
+//! forwards is handed to str0m as received on the relayed address.
 
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
@@ -17,9 +21,11 @@ use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::channel::ChannelId;
 use str0m::media::{Direction, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
+use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use crate::gather::gather;
 use crate::signal::Signaling;
+use crate::turn::{Incoming, TurnClient};
 use crate::{Error, err};
 
 /// The agent sends video and receives the data channel; the viewer receives video, makes the offer and
@@ -45,6 +51,11 @@ pub enum PeerEvent {
     Data(Vec<u8>),
     /// The viewer lost a frame and needs a keyframe.
     KeyframeRequested,
+    /// The way the media goes now: "direct to <address>" or "relayed through <TURN server> to <address>".
+    /// Sent when it is first known and whenever it changes.
+    Path(String),
+    /// Something worth a line in a report: ICE state changes, relay events.
+    Note(String),
     Closed(String),
 }
 
@@ -57,6 +68,8 @@ enum Command {
 
 /// Keyframe requests at most this often (UU Remote limits keyframes to one per 600 ms on loss).
 const KEYFRAME_REQUEST_GAP: Duration = Duration::from_millis(600);
+/// Until connected, the network thread gives str0m time at least this often (see `Network::run`).
+const UNCONNECTED_WAIT: Duration = Duration::from_millis(50);
 
 pub struct Peer {
     commands: Sender<Command>,
@@ -64,6 +77,7 @@ pub struct Peer {
     waker: UdpSocket,
     wake_to: SocketAddr,
     thread: Option<JoinHandle<()>>,
+    notes: Vec<String>,
 }
 
 impl Peer {
@@ -78,12 +92,16 @@ impl Peer {
         let socket = bind_socket()?;
         let port = socket.local_addr()?.port();
         let local = SocketAddr::new(signal.local_ip()?, port);
+        let servers = signal.ice_servers()?;
+        let relay_only = queqiao_core::forced("network").as_deref() == Some("relay");
+        let gathered = gather(&socket, local, &servers, relay_only)?;
         let mut rtc = RtcConfig::new()
             .clear_codecs()
             .enable_h264(true)
             .build(Instant::now());
-        let candidate = Candidate::host(local, "udp").map_err(err)?;
-        rtc.add_local_candidate(candidate);
+        for candidate in gathered.candidates {
+            rtc.add_local_candidate(candidate);
+        }
 
         let (mut mid, mut channel) = (None, None);
         match role {
@@ -120,6 +138,9 @@ impl Peer {
             events: event_sender,
             commands: command_receiver,
             last_keyframe_request: None,
+            turn: gathered.turn,
+            connected: false,
+            path: None,
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -136,7 +157,13 @@ impl Peer {
             waker,
             wake_to,
             thread: Some(thread),
+            notes: gathered.notes,
         })
+    }
+
+    /// The candidates gathered for this session, and what failed, one line each.
+    pub fn candidates(&self) -> &[String] {
+        &self.notes
     }
 
     /// Sends one encoded frame (Annex-B H.264). Dropped while not connected yet.
@@ -199,15 +226,29 @@ struct Network {
     events: Sender<PeerEvent>,
     commands: Receiver<Command>,
     last_keyframe_request: Option<Instant>,
+    turn: Option<TurnClient>,
+    connected: bool,
+    path: Option<String>,
 }
 
 impl Network {
     fn run(&mut self) -> Result<(), Error> {
         let mut buffer = vec![0u8; 2048];
+        // str0m's ICE in the controlled role (the agent) schedules its first check only once it is given
+        // time: until then it asks for a timeout years away (measured: 315,360,000 s). Directly, the
+        // viewer's checks wake it; through TURN they are dropped until we have sent something ourselves
+        // (permissions), so nothing would move. Hence a timeout input at once, and short waits until
+        // connected (tests/relay_ice.rs).
+        self.rtc
+            .handle_input(Input::Timeout(Instant::now()))
+            .map_err(err)?;
         loop {
-            let Some(deadline) = self.drain()? else {
+            let Some(mut deadline) = self.drain()? else {
                 return Ok(());
             };
+            if !self.connected {
+                deadline = deadline.min(Instant::now() + UNCONNECTED_WAIT);
+            }
             match self.commands.try_recv() {
                 Ok(command) => {
                     if !self.apply(command)? {
@@ -218,12 +259,22 @@ impl Network {
                 Err(TryRecvError::Disconnected) => return Ok(()),
                 Err(TryRecvError::Empty) => {}
             }
+            let deadline = match self.turn.as_ref().and_then(TurnClient::next_deadline) {
+                Some(turn) => deadline.min(turn),
+                None => deadline,
+            };
             let wait = deadline
                 .saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(1));
             self.socket.set_read_timeout(Some(wait))?;
             let input = match self.socket.recv_from(&mut buffer) {
                 Ok((_, source)) if source == self.wake_from => continue,
+                Ok((length, source))
+                    if self.turn.as_ref().is_some_and(|turn| turn.server == source) =>
+                {
+                    self.handle_turn_packet(&buffer[..length])?;
+                    continue;
+                }
                 Ok((length, source)) => Input::Receive(
                     Instant::now(),
                     Receive {
@@ -236,6 +287,10 @@ impl Network {
                 Err(error)
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
                 {
+                    if let Some(turn) = self.turn.as_mut() {
+                        turn.poll(Instant::now());
+                    }
+                    self.flush_turn();
                     Input::Timeout(Instant::now())
                 }
                 // Windows reports an earlier ICMP "port unreachable" on the next receive: not fatal.
@@ -250,9 +305,35 @@ impl Network {
     fn drain(&mut self) -> Result<Option<Instant>, Error> {
         loop {
             match self.rtc.poll_output().map_err(err)? {
-                Output::Timeout(deadline) => return Ok(Some(deadline)),
+                Output::Timeout(deadline) => {
+                    self.flush_turn();
+                    return Ok(Some(deadline));
+                }
                 Output::Transmit(packet) => {
-                    let _ = self.socket.send_to(&packet.contents, packet.destination);
+                    let relayed = match self.turn.as_mut() {
+                        Some(turn) if turn.relayed == Some(packet.source) => {
+                            turn.send(packet.destination, &packet.contents, Instant::now());
+                            Some(turn.server)
+                        }
+                        _ => {
+                            let _ = self.socket.send_to(&packet.contents, packet.destination);
+                            None
+                        }
+                    };
+                    // DTLS and SRTP packets (first byte 20 and up; STUN starts with 0 or 1) go only on the
+                    // selected pair, so they show which way the session goes.
+                    if self.connected && packet.contents.first().is_some_and(|byte| *byte >= 20) {
+                        let path = match relayed {
+                            Some(server) => {
+                                format!("relayed through {server} to {}", packet.destination)
+                            }
+                            None => format!("direct to {}", packet.destination),
+                        };
+                        if self.path.as_ref() != Some(&path) {
+                            self.path = Some(path.clone());
+                            let _ = self.events.send(PeerEvent::Path(path));
+                        }
+                    }
                 }
                 Output::Event(event) => {
                     if !self.handle(event) {
@@ -265,12 +346,18 @@ impl Network {
 
     fn handle(&mut self, event: Event) -> bool {
         let forward = match event {
-            Event::Connected => Some(PeerEvent::Connected),
+            Event::Connected => {
+                self.connected = true;
+                Some(PeerEvent::Connected)
+            }
             Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
                 let _ = self
                     .events
                     .send(PeerEvent::Closed("ICE disconnected".into()));
                 return false;
+            }
+            Event::IceConnectionStateChange(state) => {
+                Some(PeerEvent::Note(format!("ICE {state:?}")))
             }
             Event::Closed => return false,
             Event::MediaAdded(added) => {
@@ -331,10 +418,49 @@ impl Network {
             }
             Command::Close => {
                 self.rtc.disconnect();
+                if let Some(turn) = self.turn.as_mut() {
+                    turn.close(Instant::now());
+                }
+                self.flush_turn();
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    /// A datagram from the TURN server: a peer's data for str0m, or the TURN client's own business.
+    fn handle_turn_packet(&mut self, packet: &[u8]) -> Result<(), Error> {
+        let Some(turn) = self.turn.as_mut() else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        let incoming = turn.handle(packet, now);
+        let relayed = turn.relayed;
+        self.flush_turn();
+        if let (Incoming::Data { peer, payload }, Some(relayed)) = (incoming, relayed) {
+            let input = Input::Receive(
+                now,
+                Receive {
+                    proto: Protocol::Udp,
+                    source: peer,
+                    destination: relayed,
+                    contents: payload.as_slice().try_into().map_err(err)?,
+                },
+            );
+            self.rtc.handle_input(input).map_err(err)?;
+        }
+        Ok(())
+    }
+
+    fn flush_turn(&mut self) {
+        if let Some(turn) = self.turn.as_mut() {
+            for datagram in turn.take_outbox() {
+                let _ = self.socket.send_to(&datagram, turn.server);
+            }
+            for note in turn.take_notes() {
+                let _ = self.events.send(PeerEvent::Note(note));
+            }
+        }
     }
 
     fn ask_keyframe(&mut self, mid: Mid) {

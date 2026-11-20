@@ -31,14 +31,17 @@ Build: `cargo build --workspace`. Full check (fmt, clippy, build, test, run each
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1`
 
 Remote control with an account (M3):
-1. On the server PC: `queqiao-server init --name <its host name or IP>` prints the certificate fingerprint,
-   `queqiao-server add-user <name> <password>` adds a user, `queqiao-server serve` runs it (TCP 47100 by default;
-   its data, certificate and key are in `queqiao-server-data`).
+1. On the server PC: `queqiao-server init --name <its IP>` prints the certificate fingerprint,
+   `queqiao-server add-user <name> <password>` adds a user, `queqiao-server serve --name <its IP>` runs it: accounts
+   on TCP 47100, STUN/TURN on UDP 3478, relayed addresses on UDP 47200-47399 (`--turn-port`, `--relay-ports`,
+   `--public-ip`; `--relay-private` also relays to private addresses, for LAN-only servers). Its data, certificate
+   and key are in `queqiao-server-data`. The firewall must let those ports in.
 2. On each PC to be controlled, once: `queqiao-agent --server <host:47100> --pin <fingerprint> --user <name>
    --password <password>`; later starts need no options (the login is saved, DPAPI-encrypted, in
    `%APPDATA%\Queqiao`).
 3. On the controlling PC: start `queqiao-viewer`, log in once, double-click a device.
-`scripts\run_m3_local.ps1` runs all of it on one PC, with the account probe.
+`scripts\run_m3_local.ps1` runs all of it on one PC, with the account probe; `scripts\run_m4_local.ps1` adds a session
+forced through the relay (`--force network:relay` or `QUEQIAO_FORCE=network:relay`).
 
 Remote control by IP address (M2, for tests):
 `queqiao-viewer --listen <ip:port>` on the controlling PC and `queqiao-agent --connect <ip:port>` on the controlled

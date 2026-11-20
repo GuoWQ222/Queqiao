@@ -8,7 +8,9 @@ param(
     [string]$Out = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\probe\m3_server'),
     [string]$Listen = '0.0.0.0:47100',
     [string]$Name = '',
-    [int]$Minutes = 10
+    [int]$Minutes = 10,
+    # Relay also to private and 100.64/10 (Tailscale) addresses.
+    [switch]$RelayPrivate
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $Out | Out-Null
@@ -24,7 +26,9 @@ $password = [guid]::NewGuid().ToString('N')
 $port = $Listen.Split(':')[-1]
 $address = if ($Name) { "${Name}:$port" } else { $Listen }
 @("server $address", "pin $pin", 'user tester', "password $password") | Set-Content -LiteralPath (Join-Path $Out 'account.txt') -Encoding ascii
-$process = Start-Process -FilePath $server -ArgumentList @('serve', '--listen', $Listen, '--data', "`"$data`"") -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
+# STUN/TURN on the address the others use (-Name); without it, off.
+$turnArgs = if ($Name) { @('--public-ip', $Name) + $(if ($RelayPrivate) { @('--relay-private') } else { @() }) } else { @('--turn-port', '0') }
+$process = Start-Process -FilePath $server -ArgumentList (@('serve', '--listen', $Listen, '--data', "`"$data`"") + $turnArgs) -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
 try {
     $deadline = (Get-Date).AddSeconds(10)
     do {

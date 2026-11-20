@@ -7,6 +7,7 @@ pub mod account;
 #[cfg(windows)]
 pub mod platform;
 pub mod protocol;
+pub mod stun;
 
 /// Version of the messages exchanged between agent, viewer and server.
 /// Peers with a different version refuse to connect.
@@ -23,8 +24,20 @@ pub fn banner(program: &str) -> String {
 /// Test switch for fallback paths, so every path can run on any machine: the environment variable
 /// `QUEQIAO_FORCE` holds `stage:choice` pairs separated by commas, for example
 /// `encode:software,adapter:warp`. Returns the forced choice for `stage` (lower case), if any.
+/// The programs' `--force` option ([`set_forced`]) takes precedence over the variable.
 pub fn forced(stage: &str) -> Option<String> {
-    forced_in(&std::env::var("QUEQIAO_FORCE").ok()?, stage)
+    let spec = match FORCED.get() {
+        Some(spec) => spec.clone(),
+        None => std::env::var("QUEQIAO_FORCE").ok()?,
+    };
+    forced_in(&spec, stage)
+}
+
+static FORCED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Sets this process's test switches (same form as `QUEQIAO_FORCE`); the first call wins.
+pub fn set_forced(spec: &str) {
+    let _ = FORCED.set(spec.to_string());
 }
 
 fn forced_in(spec: &str, stage: &str) -> Option<String> {

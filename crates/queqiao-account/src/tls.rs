@@ -183,6 +183,9 @@ pub(crate) fn run(
                         body,
                     },
                     Ok(ServerMessage::Error { message }) => AccountEvent::Error(message),
+                    Ok(ServerMessage::IceServers { stun, turn }) => {
+                        AccountEvent::IceServers { stun, turn }
+                    }
                     Ok(ServerMessage::Welcome { .. }) => continue,
                     Err(error) => {
                         AccountEvent::Error(format!("bad message from the server: {error}"))
