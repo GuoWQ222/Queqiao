@@ -92,7 +92,7 @@ try {
     # label, QUEQIAO_FORCE, extra agent options, what the agent's report must say, what the viewer's must say,
     # whether both runs must pass (a declined session passes neither). Later options win, so an extra --seconds shortens the agent's run.
     $runs = @(
-        @('direct', '', "--clipboard-test --send-file `"$fileToViewer`"", 'test text from the other side received: yes', 'test text from the other side received: yes', $true),
+        @('direct', '', "--clipboard-test --dry-run-commands --send-file `"$fileToViewer`"", 'test text from the other side received: yes', 'test text from the other side received: yes', $true),
         @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
         @('allowed', '', "--ask --answer allow --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
         @('declined', '', '--ask --answer deny --seconds 45', 'the person at this PC declined', 'the person at that PC declined', $false),
@@ -103,8 +103,9 @@ try {
         if ($Sessions -notcontains $label -and $Sessions -notcontains 'all') { continue }
         $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`" $extra"
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_$label.txt`""
-        # The clipboard and file tests run on both sides.
+        # The clipboard and file tests run on both sides; the viewer sends commands the agent only reports.
         if ($extra -like '*--clipboard-test*') { $viewerArgs += " --clipboard-test --send-file `"$fileToAgent`"" }
+        if ($extra -like '*--dry-run-commands*') { $viewerArgs += ' --command ctrl-alt-del --command lock --command restart' }
         Start-SessionTask "Queqiao-M4-Agent-$label" $agent $agentArgs $mode
         Start-Sleep -Seconds 2
         Start-SessionTask "Queqiao-M4-Viewer-$label" $viewer $viewerArgs $mode
@@ -119,6 +120,16 @@ try {
             $text
             if ($mustPass -and $text[-1] -ne 'RESULT PASS') { $failed += "$label $program" }
             if (-not ($text | Where-Object { $_ -match $expects })) { $failed += "$label $program (expected '$expects')" }
+            if ($extra -like '*--dry-run-commands*') {
+                $wanted = if ($program -eq 'agent') {
+                    @('command from the viewer: CtrlAltDel: Ctrl\+Alt\+Del needs the Queqiao service', 'command from the viewer: Lock: the PC would be locked now', 'command from the viewer: Restart: the PC would restart in \d+ s')
+                } else {
+                    @('notice from that PC: Ctrl\+Alt\+Del needs', 'notice from that PC: the PC would be locked now', 'notice from that PC: the PC would restart')
+                }
+                foreach ($pattern in $wanted) {
+                    if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "$label $program (expected '$pattern')" }
+                }
+            }
             if ($extra -like '*--send-file*') {
                 # The file from the other side must be on disk, identical; then it is removed again.
                 $original = if ($program -eq 'agent') { $fileToAgent } else { $fileToViewer }

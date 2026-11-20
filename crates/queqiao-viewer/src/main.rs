@@ -27,7 +27,12 @@ use queqiao_account::{
     new_session_id,
 };
 use queqiao_codec::{DecodedFrame, DecoderChoice, H264Decoder};
-use queqiao_core::protocol::{InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton};
+use queqiao_core::protocol::{Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton};
+
+/// The session window's menu items for the controlled PC (system-menu ids: multiples of 16).
+const MENU_CTRL_ALT_DEL: u16 = 0x1000;
+const MENU_LOCK: u16 = 0x1010;
+const MENU_RESTART: u16 = 0x1020;
 use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::Clipboard;
 
@@ -80,6 +85,8 @@ struct Options {
     clipboard_test: bool,
     /// Files to send once the session's files channel is open (tests; people drop files on the window).
     send_files: Vec<PathBuf>,
+    /// Commands to send once the session's control channel is open (tests; people use the window menu).
+    commands: Vec<Command>,
 }
 
 impl Options {
@@ -178,6 +185,12 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--input-test" => options.input_test = true,
             "--clipboard-test" => options.clipboard_test = true,
             "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
+            "--command" => options.commands.push(match args.next()?.as_str() {
+                "lock" => Command::Lock,
+                "restart" => Command::Restart,
+                "ctrl-alt-del" => Command::CtrlAltDel,
+                _ => return None,
+            }),
             "--trust-new-key" => options.trust_new_key = args.next(),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
@@ -661,6 +674,26 @@ fn session(
             break;
         }
         for event in window.take_events() {
+            if let WindowEvent::Menu(id) = event {
+                let command = match id {
+                    MENU_CTRL_ALT_DEL => Some(Command::CtrlAltDel),
+                    MENU_LOCK => Some(Command::Lock),
+                    MENU_RESTART
+                        if window.confirm(
+                            "Queqiao",
+                            &format!("Restart {agent}? Programs there may ask to save their work; unsaved work can be lost."),
+                        ) =>
+                    {
+                        Some(Command::Restart)
+                    }
+                    _ => None,
+                };
+                if let Some(command) = command {
+                    peer.send_data(Message::Command(command).encode());
+                    lines.push(format!("sent command: {command:?}"));
+                }
+                continue;
+            }
             if let WindowEvent::FilesDropped(paths) = &event {
                 for path in paths {
                     match transfers.send(path) {
@@ -746,7 +779,13 @@ fn session(
         while let Some(current) = event.take() {
             match current {
                 PeerEvent::Connected => connected_after = Some(started.elapsed()),
-                PeerEvent::ChannelOpen => channel_open = true,
+                PeerEvent::ChannelOpen => {
+                    channel_open = true;
+                    for command in &options.commands {
+                        peer.send_data(Message::Command(*command).encode());
+                        lines.push(format!("sent command: {command:?}"));
+                    }
+                }
                 PeerEvent::FilesOpen => report_files(transfers.opened(), lines),
                 PeerEvent::FileData(bytes) => {
                     for reply in transfers.on_message(&bytes) {
@@ -800,6 +839,11 @@ fn session(
                     Some(Message::Leave) => {
                         closed = Some("the agent ended the session".to_string());
                         break 'session;
+                    }
+                    Some(Message::Notice(text)) => {
+                        lines.push(format!("notice from that PC: {text}"));
+                        let short: String = text.chars().take(120).collect();
+                        window.set_title(&format!("Queqiao - {agent} - {short}"));
                     }
                     Some(Message::ClipboardText(text)) => {
                         clipboard_in += 1;
@@ -970,7 +1014,7 @@ fn translate(
                 down,
             }
         }
-        WindowEvent::FilesDropped(_) => return Vec::new(),
+        WindowEvent::FilesDropped(_) | WindowEvent::Menu(_) => return Vec::new(),
         WindowEvent::FocusLost => {
             return held
                 .drain()

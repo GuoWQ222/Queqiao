@@ -15,6 +15,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod power;
 mod ui;
 
 use std::path::PathBuf;
@@ -24,7 +25,7 @@ use queqiao_account::{Account, AccountEvent, DeviceIdentity, Role as AccountRole
 use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
 use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
-use queqiao_core::protocol::{InputEvent, Message};
+use queqiao_core::protocol::{Command, InputEvent, Message};
 use queqiao_display::PresenceEvent;
 use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{
@@ -73,6 +74,8 @@ struct Options {
     clipboard_test: bool,
     /// Files to send to the viewer once the session's files channel is open (tests).
     send_files: Vec<PathBuf>,
+    /// Report the viewer's commands (lock, restart) instead of carrying them out (tests).
+    dry_run_commands: bool,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -154,6 +157,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--ui-pictures" => options.ui_pictures = args.next().map(PathBuf::from),
             "--clipboard-test" => options.clipboard_test = true,
             "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
+            "--dry-run-commands" => options.dry_run_commands = true,
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -442,6 +446,29 @@ fn ask_consent(ui: &ui::Ui, viewer: &str, answer: Option<bool>) -> Result<bool, 
     }
 }
 
+/// Carries out a command from the viewer; returns what to tell the person controlling.
+fn run_command(command: Command, dry_run: bool) -> String {
+    match command {
+        // SendSAS works only for a service running as SYSTEM (M5).
+        Command::CtrlAltDel => {
+            "Ctrl+Alt+Del needs the Queqiao service on that PC, which is not running".into()
+        }
+        Command::Lock if dry_run => "the PC would be locked now (test run)".into(),
+        Command::Lock => match power::lock() {
+            Ok(()) => "the PC is locked".into(),
+            Err(error) => format!("locking failed: {error}"),
+        },
+        Command::Restart if dry_run => format!(
+            "the PC would restart in {} s (test run)",
+            power::RESTART_DELAY
+        ),
+        Command::Restart => match power::restart() {
+            Ok(()) => format!("the PC restarts in {} s", power::RESTART_DELAY),
+            Err(error) => format!("restarting failed: {error}"),
+        },
+    }
+}
+
 /// One report line per finished or failed file.
 fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
     for outcome in outcomes {
@@ -675,6 +702,11 @@ fn session(
                     Some(Message::Leave) => {
                         closed = Some("the viewer left".to_string());
                         break 'session;
+                    }
+                    Some(Message::Command(command)) => {
+                        let notice = run_command(command, options.dry_run_commands);
+                        lines.push(format!("command from the viewer: {command:?}: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
                     }
                     Some(Message::ClipboardText(text)) => {
                         clipboard_stats.received(&text);

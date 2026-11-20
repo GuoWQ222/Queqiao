@@ -40,7 +40,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Feature | Status |
 |---|---|
 | Mouse and keyboard by scancode | done (M2) |
-| Ctrl+Alt+Del, system shortcuts to the remote or kept local, configurable hotkeys, "boss key" | planned (M5 for Ctrl+Alt+Del) |
+| Ctrl+Alt+Del, system shortcuts to the remote or kept local, configurable hotkeys, "boss key" | partly: "Send Ctrl+Alt+Del" in the session window menu (the controlled PC answers that it needs the service until M5); rest planned |
 | Local cursor vs remote cursor; game mouse (relative, locked, speed) | planned |
 | Emulated mouse/keyboard through a virtual HID device (games, secure desktop) | later: needs a signed driver |
 | Gamepads (virtual Xbox / DualShock through ViGEmBus) | planned |
@@ -59,7 +59,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 |---|---|
 | Clipboard both ways: text | done (2026-11-21; the person at the controlled PC can turn it off in the tray) |
 | Clipboard both ways: images and files | planned (M6, with file transfer) |
-| File transfer both ways: drop files on the session window; into DownloadsQueqiao, checked with SHA-256 | done (2026-11-21; receiving can be turned off in the tray) |
+| File transfer both ways: drop files on the session window; into Downloads\Queqiao, checked with SHA-256 | done (2026-11-21; receiving can be turned off in the tray) |
 | File transfer by copy and paste, folders, a transfer list with pause, resume and cancel | planned (M6) |
 | Allow or forbid file transfer when helping others | planned |
 
@@ -68,7 +68,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Feature | Status |
 |---|---|
 | Runs as a service: login screen, UAC prompts, lock screen; unlock with the PC's account password | planned (M5) |
-| Restart the PC, restart Queqiao, lock the PC when the session ends | planned (M5) |
+| Restart (after confirming, with Windows' 10-second notice) or lock the controlled PC from the session window menu | done (2026-11-21) |
+| Restart Queqiao, lock the PC when the session ends | planned (M5) |
 | Start with Windows, stay in the tray | planned (M5) |
 | Wake-on-LAN through another Queqiao device on the same LAN, with a set-up check (network card, BIOS) | planned |
 | Remote command line: several terminal sessions (ConPTY), detach and resume, rename | planned |

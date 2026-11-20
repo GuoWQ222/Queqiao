@@ -61,6 +61,21 @@ pub enum Message {
     Leave,
     /// The sender's clipboard now holds this text (both directions; at most [`MAX_CLIPBOARD_TEXT`] bytes).
     ClipboardText(String),
+    /// Viewer -> agent: do something on the controlled PC.
+    Command(Command),
+    /// Agent -> viewer: something to show the person controlling (e.g. why a command cannot run).
+    Notice(String),
+}
+
+/// What the viewer can ask the controlled PC to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    /// Ctrl+Alt+Del (the secure attention sequence: needs the Queqiao service).
+    CtrlAltDel,
+    /// Lock the PC (Windows' lock screen).
+    Lock,
+    /// Restart the PC.
+    Restart,
 }
 
 /// Clipboard text larger than this (UTF-8 bytes) is not sent in one message.
@@ -75,6 +90,8 @@ const PONG: u8 = 21;
 const FRAME_INFO: u8 = 30;
 const LEAVE: u8 = 40;
 const CLIPBOARD_TEXT: u8 = 50;
+const COMMAND: u8 = 60;
+const NOTICE: u8 = 61;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -122,6 +139,18 @@ impl Message {
             Message::Leave => out.push(LEAVE),
             Message::ClipboardText(ref text) => {
                 out.push(CLIPBOARD_TEXT);
+                out.extend_from_slice(text.as_bytes());
+            }
+            Message::Command(command) => out.extend([
+                COMMAND,
+                match command {
+                    Command::CtrlAltDel => 1,
+                    Command::Lock => 2,
+                    Command::Restart => 3,
+                },
+            ]),
+            Message::Notice(ref text) => {
+                out.push(NOTICE);
                 out.extend_from_slice(text.as_bytes());
             }
         }
@@ -177,6 +206,13 @@ impl Message {
             },
             LEAVE => Message::Leave,
             CLIPBOARD_TEXT => Message::ClipboardText(String::from_utf8(rest.to_vec()).ok()?),
+            COMMAND => Message::Command(match rest.first()? {
+                1 => Command::CtrlAltDel,
+                2 => Command::Lock,
+                3 => Command::Restart,
+                _ => return None,
+            }),
+            NOTICE => Message::Notice(String::from_utf8(rest.to_vec()).ok()?),
             _ => return None,
         })
     }
@@ -214,6 +250,10 @@ mod tests {
             },
             Message::Leave,
             Message::ClipboardText("copied text, ä 中文".into()),
+            Message::Command(Command::Lock),
+            Message::Command(Command::Restart),
+            Message::Command(Command::CtrlAltDel),
+            Message::Notice("the PC is locked".into()),
         ];
         for message in messages {
             assert_eq!(Message::decode(&message.encode()), Some(message));

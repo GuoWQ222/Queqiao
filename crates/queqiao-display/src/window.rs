@@ -46,6 +46,8 @@ pub enum WindowEvent {
     FocusLost,
     /// Files (or folders) dropped on the window from Explorer: to send to the other PC.
     FilesDropped(Vec<PathBuf>),
+    /// An item added with [`Window::add_menu_items`] was chosen.
+    Menu(u16),
 }
 
 thread_local! {
@@ -107,6 +109,41 @@ impl Window {
             closed: false,
             slow: Vec::new(),
         })
+    }
+
+    /// Adds items to the window's system menu (the title-bar menu, also on Alt+Space); choosing one gives
+    /// [`WindowEvent::Menu`]. Ids must be multiples of 16 below 0xF000: Windows uses the low 4 bits itself.
+    pub fn add_menu_items(&self, items: &[(u16, &str)]) {
+        let menu = unsafe { GetSystemMenu(self.hwnd, false) };
+        if menu.is_invalid() {
+            return;
+        }
+        let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) };
+        for (id, text) in items {
+            let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            let _ =
+                unsafe { AppendMenuW(menu, MF_STRING, usize::from(*id), PCWSTR(text.as_ptr())) };
+        }
+    }
+
+    pub fn set_title(&self, title: &str) {
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        let _ = unsafe { SetWindowTextW(self.hwnd, PCWSTR(title.as_ptr())) };
+    }
+
+    /// Asks a yes/no question in a message box owned by this window; No is the default button.
+    pub fn confirm(&self, title: &str, text: &str) -> bool {
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let answer = unsafe {
+            MessageBoxW(
+                Some(self.hwnd),
+                PCWSTR(text.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+            )
+        };
+        answer == IDYES
     }
 
     pub fn hwnd(&self) -> HWND {
@@ -238,6 +275,11 @@ extern "system" fn window_proc(
                 down: message == WM_KEYDOWN || message == WM_SYSKEYDOWN,
             });
             // Not passed on: Alt and F10 would otherwise open this window's system menu.
+            LRESULT(0)
+        }
+        // Our own system-menu items (Windows' own commands are 0xF000 and above).
+        WM_SYSCOMMAND if (wparam.0 & 0xFFF0) < 0xF000 => {
+            push(WindowEvent::Menu((wparam.0 & 0xFFF0) as u16));
             LRESULT(0)
         }
         WM_DROPFILES => {
