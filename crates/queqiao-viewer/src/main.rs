@@ -44,6 +44,12 @@ const MENU_TERMINAL: u16 = 0x1060;
 const MENU_GAME_MOUSE: u16 = 0x1070;
 const MENU_MUTE_SPEAKERS: u16 = 0x1080;
 const MENU_SHORTCUTS: u16 = 0x1090;
+/// Resolution: that screen's own, or its short side at most 1080 or 720 pixels.
+const MENU_RESOLUTION: [(u16, u16, &str); 3] = [
+    (0x1300, 0, "As that screen"),
+    (0x1310, 1080, "1080p"),
+    (0x1320, 720, "720p"),
+];
 /// Ctrl+Alt+M: game mouse on or off.
 const KEY_M: u16 = 0x32;
 /// The game-mouse test's relative moves (mouse counts).
@@ -143,6 +149,8 @@ struct Options {
     game_mouse_test: bool,
     /// Mute that PC's speakers from the start.
     mute_speakers: bool,
+    /// The picture's short side at most this (720, 1080) from the start; 0 or none: the screen's own.
+    resolution: Option<u16>,
     /// Picture settings to send at the start: frames per second at most (0: the screen's) and quality.
     picture: Option<(u8, Quality)>,
     /// Help someone of another account: their help ID and code (tests; people use "Help someone...").
@@ -342,6 +350,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--terminal-test" => options.terminal_test = true,
             "--game-mouse-test" => options.game_mouse_test = true,
             "--mute-speakers" => options.mute_speakers = true,
+            "--resolution" => options.resolution = Some(args.next()?.parse().ok()?),
             "--help-id" => options.help_id = Some(args.next()?),
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--picture" => {
@@ -974,6 +983,18 @@ fn session(
         .collect();
     window.add_submenu(tr("Frame rate"), &fps_items);
     window.add_submenu(tr("Picture quality"), &quality_items);
+    let resolution_items: Vec<(u16, &str)> = MENU_RESOLUTION
+        .iter()
+        .map(|(id, _, text)| (*id, tr(text)))
+        .collect();
+    window.add_submenu(tr("Resolution"), &resolution_items);
+    let mut resolution = options.resolution.unwrap_or(0);
+    let show_resolution = |window: &Window, resolution: u16| {
+        for (id, short, _) in MENU_RESOLUTION {
+            window.check_menu_item(id, short == resolution);
+        }
+    };
+    show_resolution(&window, resolution);
     let (mut fps_cap, mut quality) = options.picture.unwrap_or((60, Quality::Balanced));
     let show_picture_choice = |window: &Window, fps_cap: u8, quality: Quality| {
         for (id, fps, _) in MENU_FPS {
@@ -1032,6 +1053,11 @@ fn session(
                             .map_or(Quality::Balanced, |(_, level, _)| *level);
                         show_picture_choice(&window, fps_cap, quality);
                         Some(Command::Picture { fps: fps_cap, quality })
+                    }
+                    id if MENU_RESOLUTION.iter().any(|(item, _, _)| *item == id) => {
+                        resolution = MENU_RESOLUTION.iter().find(|(item, _, _)| *item == id).map_or(0, |(_, short, _)| *short);
+                        show_resolution(&window, resolution);
+                        Some(Command::Resolution(resolution))
                     }
                     MENU_TERMINAL => {
                         terminals.open(&peer, agent, false, lines);
@@ -1239,6 +1265,9 @@ fn session(
                     if speakers_muted {
                         peer.send_data(Message::Command(Command::MuteSpeakers(true)).encode());
                     }
+                    if resolution != 0 {
+                        peer.send_data(Message::Command(Command::Resolution(resolution)).encode());
+                    }
                     if options.picture.is_some() {
                         peer.send_data(
                             Message::Command(Command::Picture {
@@ -1435,6 +1464,10 @@ fn session(
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
     lines.push(format!("window title: {}", status.title));
+    lines.push(format!(
+        "last picture size: {}x{}",
+        picture_size.0, picture_size.1
+    ));
     if options.terminal_test {
         lines.push(terminals.test_result());
     }

@@ -94,6 +94,8 @@ pub enum Command {
     },
     /// Mute that PC's speakers for the session (its sound still comes to the viewer), or not.
     MuteSpeakers(bool),
+    /// The picture's size: its short side at most this many pixels (e.g. 720, 1080), or 0 for the screen's own.
+    Resolution(u16),
 }
 
 /// How the bitrate is spent: fewer bits (slow networks), the size-based amount, or twice that (sharp text).
@@ -195,6 +197,10 @@ impl Message {
                     Command::PrivacyOn => out.push(6),
                     Command::PrivacyOff => out.push(7),
                     Command::MuteSpeakers(on) => out.extend([9, u8::from(on)]),
+                    Command::Resolution(short) => {
+                        out.push(10);
+                        out.extend_from_slice(&short.to_le_bytes());
+                    }
                     Command::Picture { fps, quality } => out.extend([
                         8,
                         fps,
@@ -283,6 +289,7 @@ impl Message {
                 5 => Command::SoundOff,
                 6 => Command::PrivacyOn,
                 7 => Command::PrivacyOff,
+                10 => Command::Resolution(u16::from_le_bytes(rest.get(1..3)?.try_into().ok()?)),
                 9 => Command::MuteSpeakers(match rest.get(1)? {
                     0 => false,
                     1 => true,
@@ -347,6 +354,8 @@ mod tests {
             Message::Command(Command::PrivacyOff),
             Message::Command(Command::MuteSpeakers(true)),
             Message::Command(Command::MuteSpeakers(false)),
+            Message::Command(Command::Resolution(720)),
+            Message::Command(Command::Resolution(0)),
             Message::Command(Command::Picture {
                 fps: 30,
                 quality: Quality::Sharp,

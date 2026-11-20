@@ -36,9 +36,21 @@ impl ScreenEncoder {
         fps: u32,
         fixed_fps: bool,
     ) -> Result<Self> {
+        Self::with_limit(device, context, screen, fps, fixed_fps, None)
+    }
+
+    /// As `new`, with the picture no larger than `limit` (long side, short side), e.g. (1280, 720).
+    pub fn with_limit(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        screen: (u32, u32),
+        fps: u32,
+        fixed_fps: bool,
+        limit: Option<(u32, u32)>,
+    ) -> Result<Self> {
         let mut notes = Vec::new();
         let mut choice = EncoderChoice::from_env();
-        let mut limit = (u32::MAX, u32::MAX);
+        let mut limit = limit.unwrap_or((u32::MAX, u32::MAX));
         let mut fps = fps.max(1);
         let mut opened = None;
         'attempts: for _ in 0..2 {

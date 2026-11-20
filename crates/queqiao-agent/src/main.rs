@@ -754,6 +754,7 @@ fn run_command(command: Command, dry_run: bool) -> String {
         | Command::PrivacyOn
         | Command::PrivacyOff
         | Command::MuteSpeakers(_)
+        | Command::Resolution(_)
         | Command::Picture { .. } => "changed".into(),
     }
 }
@@ -942,7 +943,9 @@ fn session(
     // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
     // never above the size-based bitrate the encoder was opened with.
     // The viewer's picture settings change the highest bitrate (quality) and the frame interval (frame rate).
-    let size_bitrate = config.bitrate;
+    let mut size_bitrate = config.bitrate;
+    // The quality the viewer chose (a share of the size-based bitrate), kept when the size changes.
+    let mut quality_factor = 1.0f64;
     let mut max_bitrate = size_bitrate;
     let mut last_estimate = START_BITRATE;
     peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
@@ -1112,8 +1115,9 @@ fn session(
                             u32::from(fps).min(screen_fps)
                         };
                         interval = Duration::from_secs_f64(1.0 / f64::from(frames));
-                        max_bitrate = ((f64::from(size_bitrate) * quality.bitrate_factor()) as u32)
-                            .max(MIN_BITRATE);
+                        quality_factor = quality.bitrate_factor();
+                        max_bitrate =
+                            ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE);
                         peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
                         let target = adapted_bitrate(last_estimate, max_bitrate);
                         let changed = encoder.set_bitrate(target).is_ok();
@@ -1146,6 +1150,41 @@ fn session(
                             let before = speakers_before.take().unwrap_or(false);
                             let _ = queqiao_audio::set_mute(device, before);
                             "that PC's speakers play again".to_string()
+                        };
+                        lines.push(format!("command from the viewer: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::Resolution(short))) => {
+                        // A new encoder for the new size (the screen is still captured whole and scaled).
+                        let limit =
+                            (short > 0).then(|| (u32::from(short) * 16 / 9, u32::from(short)));
+                        let notice = match ScreenEncoder::with_limit(
+                            &device,
+                            &context,
+                            screen,
+                            fps,
+                            options.fps.is_some(),
+                            limit,
+                        ) {
+                            Ok(new) => {
+                                encoder = new;
+                                force_keyframe = true;
+                                size_bitrate = encoder.config().bitrate;
+                                max_bitrate = ((f64::from(size_bitrate) * quality_factor) as u32)
+                                    .max(MIN_BITRATE);
+                                peer.set_bitrate_range(
+                                    u64::from(MIN_BITRATE),
+                                    u64::from(max_bitrate),
+                                );
+                                let _ = encoder
+                                    .set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
+                                format!(
+                                    "picture size {}x{}",
+                                    encoder.config().width,
+                                    encoder.config().height
+                                )
+                            }
+                            Err(error) => format!("the picture size stays: {}", describe(error)),
                         };
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());

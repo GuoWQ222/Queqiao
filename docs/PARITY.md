@@ -30,7 +30,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Hardware encode and decode on any GPU, software fallback | done (M1) |
 | Adaptive bitrate from the network's bandwidth estimate, paced sending, retransmission of lost packets | done (M4) |
 | Frame-rate cap (30, 60, or what that screen shows, up to 240) and quality presets (smooth, balanced, sharp = up to twice the size-based bitrate) from the session window menu | done (2026-11-21) |
-| Resolution choice, custom bitrate | planned |
+| Resolution choice during the session (that screen's own, 1080p, 720p) | done (2026-11-21, session window menu) |
+| Custom bitrate | planned |
 | Codec choice: H.264, H.265, AV1 when both ends have hardware | planned |
 | True colour (4:4:4) for sharp text; HDR | planned |
 | Several monitors: switch, or each in its own window (drag a screen tab out) | planned (M6) |
