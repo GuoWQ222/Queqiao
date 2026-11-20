@@ -412,3 +412,113 @@ mod tests {
         assert!(!is_stun(&framed));
     }
 }
+
+/// Robustness: STUN and ChannelData come from anyone on the network. Random messages with well-formed and
+/// broken attributes must never panic the decoder, the integrity check or the attribute readers.
+#[cfg(test)]
+mod robustness {
+    use super::*;
+
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    /// A STUN-looking message: right header and cookie, random attributes (known kinds and others), and
+    /// sometimes a length that does not fit.
+    fn random_message(random: &mut Random) -> Vec<u8> {
+        let kinds = [
+            attr::USERNAME,
+            attr::MESSAGE_INTEGRITY,
+            attr::ERROR_CODE,
+            attr::CHANNEL_NUMBER,
+            attr::LIFETIME,
+            attr::XOR_PEER_ADDRESS,
+            attr::DATA,
+            attr::REALM,
+            attr::NONCE,
+            attr::XOR_RELAYED_ADDRESS,
+            attr::REQUESTED_TRANSPORT,
+            attr::XOR_MAPPED_ADDRESS,
+            attr::SOFTWARE,
+            attr::FINGERPRINT,
+        ];
+        let mut attributes = Vec::new();
+        for _ in 0..random.below(6) {
+            let kind = if random.below(4) == 0 {
+                random.next() as u16
+            } else {
+                kinds[random.below(kinds.len())]
+            };
+            let length = random.below(40);
+            attributes.extend_from_slice(&kind.to_be_bytes());
+            let claimed = if random.below(8) == 0 {
+                random.next() as u16
+            } else {
+                length as u16
+            };
+            attributes.extend_from_slice(&claimed.to_be_bytes());
+            attributes.extend(random.bytes(length));
+            attributes.extend(vec![0u8; (4 - length % 4) % 4]);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&((random.next() as u16) & 0x3FFF).to_be_bytes());
+        let length = if random.below(8) == 0 {
+            random.next() as u16
+        } else {
+            attributes.len() as u16
+        };
+        out.extend_from_slice(&length.to_be_bytes());
+        out.extend_from_slice(&0x2112_A442u32.to_be_bytes());
+        out.extend(random.bytes(12));
+        out.extend(attributes);
+        out
+    }
+
+    #[test]
+    fn random_messages_never_panic() {
+        let mut random = Random(0xD1B5_4A32_D192_ED03);
+        for round in 0..200_000 {
+            let bytes = if round % 4 == 0 {
+                let length = random.below(64);
+                random.bytes(length)
+            } else {
+                random_message(&mut random)
+            };
+            let _ = check_integrity(&bytes, b"key");
+            let _ = parse_channel_data(&bytes);
+            if let Some(message) = Message::decode(&bytes) {
+                for kind in [
+                    attr::USERNAME,
+                    attr::XOR_PEER_ADDRESS,
+                    attr::XOR_MAPPED_ADDRESS,
+                    attr::XOR_RELAYED_ADDRESS,
+                    attr::LIFETIME,
+                    attr::CHANNEL_NUMBER,
+                    attr::REALM,
+                ] {
+                    let _ = (
+                        message.get(kind),
+                        message.text(kind),
+                        message.address(kind),
+                        message.u32(kind),
+                    );
+                }
+                let _ = message.error_code();
+                let _ = message.encode(Some(b"key"), true);
+            }
+        }
+    }
+}

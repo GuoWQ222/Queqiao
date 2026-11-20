@@ -232,6 +232,15 @@ Open, in this order, all before any release:
 5. **The code and the release:** `cargo audit` / `cargo deny` on every build, fuzzing of everything that parses
    network input (the data-channel protocol, the server's JSON), signed binaries and signed updates (see also
    point 11 of "Runs on any PC"), and a review of all of the above before the first public build.
+   *Partly done (2026-11-21):* every decoder of the other side's bytes (the session protocol, STUN and
+   ChannelData, file and command-line messages) has a robustness test: 200 000 random and mutated inputs each,
+   which must never panic, and whatever is accepted must encode back to the same message. The receiving side of
+   file transfer gets random streams of offers, chunks and endings and must leave nothing outside its folder and
+   no part files. They found two faults, both fixed: a frame delay that was NaN or infinite was accepted (now
+   refused), and a second offer under a number still on its way replaced the first and left its part file
+   behind (now refused). The receiver also refuses more than 16 files at once and files larger than the free
+   disk space less 1 GB. Still to do: `cargo audit` / `cargo deny` (installing them on the build PC is the
+   user's call), coverage-guided fuzzing, signed binaries.
 
 ## Milestones
 

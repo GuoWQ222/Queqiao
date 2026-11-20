@@ -261,3 +261,40 @@ mod tests {
         assert!(terminals.is_empty());
     }
 }
+
+/// Robustness: messages from the other side never panic the decoder, and what is accepted encodes back.
+#[cfg(test)]
+mod robustness {
+    use super::*;
+
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+    }
+
+    #[test]
+    fn random_messages_never_panic() {
+        let mut random = Random(0x0123_4567_89AB_CDEF);
+        for _ in 0..200_000 {
+            let length = random.below(24);
+            let mut bytes: Vec<u8> = (0..length).map(|_| random.next() as u8).collect();
+            // Often a known tag, so the bodies get exercised too.
+            if !bytes.is_empty() && random.below(2) == 0 {
+                bytes[0] =
+                    [OPEN, INPUT, RESIZE, CLOSE, OPENED, OUTPUT, EXITED, FAILED][random.below(8)];
+            }
+            if let Some(message) = TerminalMessage::decode(&bytes) {
+                assert_eq!(TerminalMessage::decode(&message.encode()), Some(message));
+            }
+        }
+    }
+}

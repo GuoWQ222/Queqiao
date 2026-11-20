@@ -243,10 +243,18 @@ impl Message {
                 id: u32_at(0)?,
                 sent_us: u64_at(4)?,
             },
-            FRAME_INFO => Message::FrameInfo {
-                time_90khz: u64_at(0)?,
-                agent_ms: f32::from_bits(u32_at(8)?),
-            },
+            FRAME_INFO => {
+                let agent_ms = f32::from_bits(u32_at(8)?);
+                // A delay is a finite, non-negative number of milliseconds; anything else (NaN, infinity) would
+                // spoil the delay statistics.
+                if !agent_ms.is_finite() || agent_ms < 0.0 {
+                    return None;
+                }
+                Message::FrameInfo {
+                    time_90khz: u64_at(0)?,
+                    agent_ms,
+                }
+            }
             LEAVE => Message::Leave,
             CLIPBOARD_TEXT => Message::ClipboardText(String::from_utf8(rest.to_vec()).ok()?),
             COMMAND => Message::Command(match rest.first()? {
@@ -334,5 +342,103 @@ mod tests {
         assert_eq!(Message::decode(&[200, 1, 2]), None);
         assert_eq!(Message::decode(&[INPUT_MOVE, 1, 2, 3]), None);
         assert_eq!(Message::decode(&[INPUT_BUTTON, 9, 1]), None);
+    }
+
+    #[test]
+    fn frame_delays_must_be_numbers() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            let mut bytes = vec![FRAME_INFO];
+            bytes.extend_from_slice(&7u64.to_le_bytes());
+            bytes.extend_from_slice(&bad.to_bits().to_le_bytes());
+            assert_eq!(Message::decode(&bytes), None, "{bad}");
+        }
+    }
+}
+
+/// Robustness: the other side's bytes are not trusted. Random and mutated inputs must never panic, and whatever
+/// is accepted must encode back to the same message.
+#[cfg(test)]
+mod robustness {
+    use super::*;
+
+    /// xorshift64: a fixed seed, so a failure repeats.
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next() as u8).collect()
+        }
+        fn mutate(&mut self, valid: &[u8]) -> Vec<u8> {
+            let mut out = valid.to_vec();
+            match self.below(4) {
+                0 if !out.is_empty() => {
+                    let at = self.below(out.len());
+                    out[at] ^= 1 << self.below(8);
+                }
+                1 => out.truncate(self.below(out.len() + 1)),
+                2 => {
+                    let extra = self.below(16);
+                    out.extend(self.bytes(extra));
+                }
+                _ if !out.is_empty() => {
+                    let at = self.below(out.len());
+                    out[at] = self.next() as u8;
+                }
+                _ => {}
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn random_and_mutated_messages_never_panic() {
+        let samples: Vec<Vec<u8>> = [
+            Message::Input(InputEvent::MouseMove { x: 10, y: 20 }),
+            Message::Input(InputEvent::Key {
+                scancode: 0x1C,
+                extended: false,
+                down: true,
+            }),
+            Message::Ping { id: 1, sent_us: 2 },
+            Message::FrameInfo {
+                time_90khz: 3,
+                agent_ms: 4.0,
+            },
+            Message::ClipboardText("text".into()),
+            Message::Command(Command::Picture {
+                fps: 60,
+                quality: Quality::Balanced,
+            }),
+            Message::Notice("notice".into()),
+        ]
+        .iter()
+        .map(Message::encode)
+        .collect();
+        let mut random = Random(0x9E37_79B9_7F4A_7C15);
+        for round in 0..200_000 {
+            let bytes = if round % 2 == 0 {
+                let length = random.below(48);
+                random.bytes(length)
+            } else {
+                let sample = &samples[random.below(samples.len())];
+                random.mutate(sample)
+            };
+            if let Some(message) = Message::decode(&bytes) {
+                assert_eq!(
+                    Message::decode(&message.encode()),
+                    Some(message),
+                    "{bytes:?}"
+                );
+            }
+        }
     }
 }

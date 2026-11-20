@@ -322,6 +322,28 @@ impl Outbox {
     }
 }
 
+/// Files coming at once, at most (each holds an open part file).
+const MAX_INCOMING: usize = 16;
+/// Disk space a received file must leave free.
+const DISK_RESERVE: u64 = 1 << 30;
+
+/// Bytes free for this user on the disk of `folder`.
+fn free_space(folder: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = folder.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut free = 0u64;
+    unsafe {
+        windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            Some(&mut free),
+            None,
+            None,
+        )
+    }
+    .ok()?;
+    Some(free)
+}
+
 struct Incoming {
     part: PathBuf,
     target: PathBuf,
@@ -434,7 +456,19 @@ impl Inbox {
         if !self.allow {
             return Err("receiving files is turned off on that PC".into());
         }
+        // A number already on its way: the transfer under it goes on (replacing it would lose its part file).
+        if self.files.contains_key(&id) {
+            return Err(format!("file {id} is on its way already"));
+        }
+        if self.files.len() >= MAX_INCOMING {
+            return Err(format!("at most {MAX_INCOMING} files can come at once"));
+        }
         std::fs::create_dir_all(&self.folder).map_err(|e| e.to_string())?;
+        if let Some(free) = free_space(&self.folder)
+            && size.saturating_add(DISK_RESERVE) > free
+        {
+            return Err("there is not enough free disk space on that PC".into());
+        }
         let target = self.folder.join(safe_name(name));
         let part = unique(&target.with_file_name(format!(
             "{}.queqiao-part",
@@ -787,5 +821,184 @@ mod tests {
         assert_eq!(safe_name("trailing. . "), "trailing");
         assert_eq!(safe_name(".."), "file");
         assert_eq!(safe_name("名字.docx"), "名字.docx");
+    }
+}
+
+/// Robustness: the other side's messages are not trusted. Random and mutated messages must never panic, and a
+/// random stream of offers, chunks and endings must never leave anything outside the folder or a part file.
+#[cfg(test)]
+mod robustness {
+    use super::*;
+
+    struct Random(u64);
+
+    impl Random {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+        fn bytes(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    fn random_name(random: &mut Random) -> String {
+        let names = [
+            "a.txt",
+            r"..\..\evil.exe",
+            "../up.txt",
+            r"C:\Windows\x.dll",
+            "CON",
+            "nul.txt",
+            "",
+            ".",
+            "..",
+            "name\u{0}zero",
+            "trailing. ",
+            "ä 中文.bin",
+        ];
+        if random.below(4) == 0 {
+            let length = random.below(300);
+            String::from_utf8_lossy(&random.bytes(length)).into_owned()
+        } else {
+            names[random.below(names.len())].to_string()
+        }
+    }
+
+    fn random_message(random: &mut Random) -> FileMessage {
+        let id = random.below(4) as u32;
+        match random.below(5) {
+            0 => FileMessage::Offer {
+                id,
+                name: random_name(random),
+                size: if random.below(4) == 0 {
+                    random.next()
+                } else {
+                    random.below(3 * CHUNK) as u64
+                },
+            },
+            1 | 2 => {
+                let length = random.below(2 * CHUNK);
+                FileMessage::Chunk {
+                    id,
+                    offset: if random.below(4) == 0 {
+                        random.next()
+                    } else {
+                        (random.below(4) * CHUNK) as u64
+                    },
+                    data: random.bytes(length),
+                }
+            }
+            3 => FileMessage::Done {
+                id,
+                sha256: random.bytes(32).try_into().unwrap(),
+            },
+            _ => FileMessage::Cancel {
+                id,
+                reason: "stop".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn random_and_mutated_messages_never_panic() {
+        let mut random = Random(0x2545_F491_4F6C_DD1D);
+        for round in 0..200_000 {
+            let bytes = if round % 2 == 0 {
+                let length = random.below(64);
+                random.bytes(length)
+            } else {
+                let mut bytes = random_message(&mut random).encode();
+                if !bytes.is_empty() {
+                    let at = random.below(bytes.len());
+                    bytes[at] ^= 1 << random.below(8);
+                    bytes.truncate(bytes.len() - random.below(bytes.len().min(8) + 1));
+                }
+                bytes
+            };
+            if let Some(message) = FileMessage::decode(&bytes) {
+                assert_eq!(FileMessage::decode(&message.encode()), Some(message));
+            }
+        }
+    }
+
+    #[test]
+    fn a_number_on_its_way_and_a_file_too_big_are_refused() {
+        let folder =
+            std::env::temp_dir().join(format!("queqiao-files-limits-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let mut inbox = Inbox::new(folder.clone(), true);
+        let offer = |id, size| FileMessage::Offer {
+            id,
+            name: "a.txt".into(),
+            size,
+        };
+        assert_eq!(
+            inbox.handle(offer(1, 10)),
+            vec![FileMessage::Accept { id: 1 }]
+        );
+        assert!(matches!(
+            inbox.handle(offer(1, 10)).as_slice(),
+            [FileMessage::Reject { id: 1, .. }]
+        ));
+        // The first transfer is still there and finishes.
+        inbox.handle(FileMessage::Chunk {
+            id: 1,
+            offset: 0,
+            data: b"0123456789".to_vec(),
+        });
+        let sha256: [u8; 32] = Sha256::digest(b"0123456789").into();
+        assert_eq!(
+            inbox.handle(FileMessage::Done { id: 1, sha256 }),
+            vec![FileMessage::Received { id: 1 }]
+        );
+        assert!(matches!(
+            inbox.handle(offer(2, u64::MAX / 2)).as_slice(),
+            [FileMessage::Reject { id: 2, .. }]
+        ));
+        drop(inbox);
+        let names: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("a.txt")]);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn random_streams_stay_in_the_folder() {
+        let parent =
+            std::env::temp_dir().join(format!("queqiao-files-robust-{}", std::process::id()));
+        let folder = parent.join("inbox");
+        let _ = std::fs::remove_dir_all(&parent);
+        let mut random = Random(0x8BAD_F00D_DEAD_BEEF);
+        for _ in 0..40 {
+            let mut inbox = Inbox::new(folder.clone(), true);
+            for _ in 0..200 {
+                let _ = inbox.handle(random_message(&mut random));
+            }
+            drop(inbox);
+            // Nothing beside the folder, and no part files left behind.
+            let beside: Vec<_> = std::fs::read_dir(&parent)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name())
+                .collect();
+            assert!(beside.iter().all(|name| name == "inbox"), "{beside:?}");
+            if let Ok(entries) = std::fs::read_dir(&folder) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    assert!(!name.ends_with(".queqiao-part"), "left behind: {name}");
+                    assert!(entry.path().is_file(), "not a plain file: {name}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }
