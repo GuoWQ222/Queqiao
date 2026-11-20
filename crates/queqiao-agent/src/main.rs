@@ -28,7 +28,8 @@ use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_n
 use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{Command, InputEvent, Message};
-use queqiao_display::PresenceEvent;
+use queqiao_core::text::trf;
+use queqiao_display::{PresenceEvent, normalize_code};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{
     Clipboard, Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position,
@@ -86,6 +87,12 @@ struct Options {
     sound_test: bool,
     /// The privacy screen as a small square of a test colour, checked against what capture sees (tests).
     privacy_test: bool,
+    /// Take help requests from the start with this code (tests; people use the tray menu).
+    help_code: Option<String>,
+    /// Write the help ID into this file once the server gave it (tests).
+    help_id_file: Option<PathBuf>,
+    /// A throwaway device with this name instead of this PC's own (tests with two accounts on one PC).
+    test_device: Option<String>,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -171,6 +178,9 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--sound-device" => options.sound_device = Some(args.next()?),
             "--sound-test" => options.sound_test = true,
             "--privacy-test" => options.privacy_test = true,
+            "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
+            "--help-id-file" => options.help_id_file = Some(PathBuf::from(args.next()?)),
+            "--test-device" => options.test_device = Some(args.next()?),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -229,11 +239,12 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         "direct",
         end,
         &ui,
-        [
-            settings.share_clipboard,
-            settings.receive_files,
-            settings.allow_terminal,
-        ],
+        Permissions {
+            clipboard: settings.share_clipboard,
+            files: settings.receive_files,
+            terminal: settings.allow_terminal,
+            helper: false,
+        },
         &mut deferred,
         lines,
     )?;
@@ -249,7 +260,12 @@ fn run_account(
     mut settings: ui::Settings,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
-    let identity = DeviceIdentity::load_or_create().map_err(|e| e.to_string())?;
+    // Tests run two accounts on one PC: a throwaway device (own key, pins in memory) for the second.
+    let identity = match &options.test_device {
+        Some(label) => DeviceIdentity::in_memory(label),
+        None => DeviceIdentity::load_or_create(),
+    }
+    .map_err(|e| e.to_string())?;
     let mut login = SavedLogin::load(AccountRole::Agent).unwrap_or_default();
     if let Some(server) = &options.server {
         if login.server != *server {
@@ -283,6 +299,11 @@ fn run_account(
     let (mut sessions, mut passed) = (0u32, true);
     let mut retry = Duration::from_secs(1);
     let mut deferred: Vec<PresenceEvent> = Vec::new();
+    // Help for someone of another account: the code shown while help requests are open.
+    let mut help_code: Option<String> = options.help_code.clone();
+    if let Some(code) = &help_code {
+        account.open_help(code);
+    }
     loop {
         if end.is_some_and(|end| Instant::now() > end)
             || options.sessions.is_some_and(|n| sessions >= n)
@@ -336,6 +357,16 @@ fn run_account(
                         "the person at this PC set: ask before each session: {on}"
                     ));
                 }
+                PresenceEvent::OpenHelp | PresenceEvent::HelpNewCode => {
+                    let code = new_help_code();
+                    account.open_help(&code);
+                    help_code = Some(code);
+                }
+                PresenceEvent::HelpClose => {
+                    account.close_help();
+                    help_code = None;
+                    lines.push("help: closed by the person at this PC".into());
+                }
                 PresenceEvent::EndSession | PresenceEvent::Consent(_) => {}
             }
         }
@@ -360,13 +391,22 @@ fn run_account(
                     lines.push(format!("refused a session request: {error}"));
                     continue;
                 }
+                // A device of another account, joined by this PC's help code.
+                let helper = account.helper_account(&from).map(str::to_string);
+                let shown_name = match &helper {
+                    Some(user) => trf(
+                        "{viewer} (account {user}) is helping on this PC",
+                        &[("viewer", &from_name), ("user", user)],
+                    ),
+                    None => from_name.clone(),
+                };
                 let mut signal = account.session(&from, AccountRole::Viewer, &id);
                 if let Err(error) = check_hello(&body, "agent") {
                     let _ = signal.send("error", &error.0);
                     lines.push(format!("refused viewer {from_name}: {error}"));
                     continue;
                 }
-                if !settings.allow_account_control {
+                if helper.is_none() && !settings.allow_account_control {
                     let _ = signal.send(
                         "error",
                         "control by this account's devices is turned off on that PC",
@@ -376,8 +416,19 @@ fn run_account(
                     ));
                     continue;
                 }
-                if options.ask || settings.ask_before_session {
-                    match ask_consent(ui, &from_name, options.answer) {
+                // Someone of another account is always asked about, whatever the settings.
+                if helper.is_some() || options.ask || settings.ask_before_session {
+                    let question = match &helper {
+                        Some(user) => trf(
+                            "{viewer} (account {user}) wants to control this PC to help you.",
+                            &[("viewer", &from_name), ("user", user)],
+                        ),
+                        None => trf(
+                            "{viewer}, a device of your account, wants to control this PC.",
+                            &[("viewer", &from_name)],
+                        ),
+                    };
+                    match ask_consent(ui, &question, options.answer) {
                         Ok(true) => {
                             lines.push(format!("the person at this PC allowed {from_name}"))
                         }
@@ -401,19 +452,25 @@ fn run_account(
                     .map_err(|e| e.to_string())?;
                 sessions += 1;
                 lines.push(format!("session {sessions}: viewer {from_name} ({from})"));
+                if let Some(user) = &helper {
+                    lines.push(format!(
+                        "helper session: {from_name} of account {user}; file transfer, command lines, the privacy screen and restarting are off"
+                    ));
+                }
                 let started_at = std::time::SystemTime::now();
                 match session(
                     options,
                     &mut signal,
-                    &from_name,
+                    &shown_name,
                     &from,
                     end,
                     ui,
-                    [
-                        settings.share_clipboard,
-                        settings.receive_files,
-                        settings.allow_terminal,
-                    ],
+                    Permissions {
+                        clipboard: settings.share_clipboard,
+                        files: settings.receive_files && helper.is_none(),
+                        terminal: settings.allow_terminal && helper.is_none(),
+                        helper: helper.is_some(),
+                    },
                     &mut deferred,
                     lines,
                 ) {
@@ -454,11 +511,38 @@ fn run_account(
             }
             Some(AccountEvent::Error(message)) => lines.push(format!("server: {message}")),
             Some(AccountEvent::Notice(message)) => lines.push(format!("notice: {message}")),
+            Some(AccountEvent::HelpOpen(help_id)) => {
+                lines.push(format!("help: open, help ID {help_id}"));
+                if let Some(path) = &options.help_id_file {
+                    let _ = std::fs::write(path, &help_id);
+                }
+                if let Some(code) = &help_code {
+                    ui.show_help(Some((&help_id, code)));
+                }
+            }
+            Some(AccountEvent::HelpClosed(reason)) => {
+                lines.push(format!("help: closed: {reason}"));
+                help_code = None;
+                ui.show_help(None);
+            }
+            Some(AccountEvent::HelpRequested { device, user }) => {
+                lines.push(format!(
+                    "help: {} of account {user} gave the code",
+                    device.name
+                ));
+                // The code is used up: a new one, while the window is open.
+                if help_code.is_some() {
+                    let code = new_help_code();
+                    account.open_help(&code);
+                    help_code = Some(code);
+                }
+            }
             Some(
                 AccountEvent::Devices(_)
                 | AccountEvent::Signal { .. }
                 | AccountEvent::IceServers { .. }
-                | AccountEvent::PasswordChanged(_),
+                | AccountEvent::PasswordChanged(_)
+                | AccountEvent::HelpGranted(_),
             )
             | None => {}
         }
@@ -468,8 +552,8 @@ fn run_account(
 }
 
 /// Asks the person at the PC whether `viewer` may control it; false when denied or unanswered.
-fn ask_consent(ui: &ui::Ui, viewer: &str, answer: Option<bool>) -> Result<bool, String> {
-    ui.ask(viewer, CONSENT_SECONDS)?;
+fn ask_consent(ui: &ui::Ui, question: &str, answer: Option<bool>) -> Result<bool, String> {
+    ui.ask(question, CONSENT_SECONDS)?;
     if let Some(answer) = answer {
         std::thread::sleep(Duration::from_secs(1));
         ui.press_consent(answer);
@@ -645,6 +729,27 @@ fn run_command(command: Command, dry_run: bool) -> String {
     }
 }
 
+/// What a session may do: the person's settings, and less for someone helping from another account.
+struct Permissions {
+    clipboard: bool,
+    files: bool,
+    terminal: bool,
+    /// Another account's device, joined by a help code: no privacy screen, no restart.
+    helper: bool,
+}
+
+/// A help code: 8 of 32 letters and digits without look-alikes (no 0, O, 1 or I), 40 bits.
+fn new_help_code() -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let random = queqiao_account::new_session_id();
+    random
+        .as_bytes()
+        .chunks(2)
+        .filter_map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .map(|byte| char::from(ALPHABET[usize::from(byte % 32)]))
+        .collect()
+}
+
 /// One report line per finished or failed file.
 fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
     for outcome in outcomes {
@@ -719,11 +824,17 @@ fn session(
     viewer_id: &str,
     end: Option<Instant>,
     ui: &ui::Ui,
-    [share_clipboard, receive_files, allow_terminal]: [bool; 3],
+    permissions: Permissions,
     deferred: &mut Vec<PresenceEvent>,
     lines: &mut Vec<String>,
 ) -> Result<SessionOutcome, String> {
     let _ = viewer_id;
+    let Permissions {
+        clipboard: share_clipboard,
+        files: receive_files,
+        terminal: allow_terminal,
+        helper,
+    } = permissions;
     ui.session_started(viewer)
         .map_err(|e| format!("the banner could not be shown, so the session is refused: {e}"))?;
     let _banner = BannerGuard(ui);
@@ -895,6 +1006,13 @@ fn session(
                     Some(Message::Leave) => {
                         closed = Some("the viewer left".to_string());
                         break 'session;
+                    }
+                    Some(Message::Command(Command::PrivacyOn | Command::Restart)) if helper => {
+                        let notice =
+                            "someone helping from another account cannot do that on this PC"
+                                .to_string();
+                        lines.push(format!("command from the helper refused: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
                     }
                     Some(Message::Command(Command::PrivacyOn)) => {
                         let look = if options.privacy_test {

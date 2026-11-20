@@ -31,6 +31,7 @@ use queqiao_core::protocol::{
     Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton, Quality,
 };
 use queqiao_core::text::{tr, trf};
+use queqiao_display::{HelpAction, HelpForm, normalize_code};
 
 /// The session window's menu items for the controlled PC (system-menu ids: multiples of 16).
 const MENU_CTRL_ALT_DEL: u16 = 0x1000;
@@ -132,6 +133,9 @@ struct Options {
     terminal_test: bool,
     /// Picture settings to send at the start: frames per second at most (0: the screen's) and quality.
     picture: Option<(u8, Quality)>,
+    /// Help someone of another account: their help ID and code (tests; people use "Help someone...").
+    help_id: Option<String>,
+    help_code: Option<String>,
 }
 
 impl Options {
@@ -324,6 +328,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--full-screen" => options.full_screen = true,
             "--privacy" => options.privacy = true,
             "--terminal-test" => options.terminal_test = true,
+            "--help-id" => options.help_id = Some(args.next()?),
+            "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--picture" => {
                 let value = args.next()?;
                 let (fps, quality) = value.split_once(',')?;
@@ -437,6 +443,13 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
     lines.push(format!("device: {gpu}"));
     if let Some(key) = &options.device {
         let target = wait_for_device(&mut account, key, Duration::from_secs(30))?;
+        return connect_to(&mut account, &target, options, &device, &context, lines);
+    }
+    if let (Some(help_id), Some(code)) = (&options.help_id, &options.help_code) {
+        let target = account
+            .request_help(help_id, code)
+            .map_err(|e| e.to_string())?;
+        lines.push(format!("help granted: {} ({})", target.name, target.id));
         return connect_to(&mut account, &target, options, &device, &context, lines);
     }
     device_list(
@@ -577,6 +590,29 @@ fn device_list(
     loop {
         match list.next(15) {
             Some(ListAction::Closed) => break,
+            Some(ListAction::Help) => {
+                list.set_enabled(false);
+                if let Some(target) = ask_for_help_target(account, lines) {
+                    sessions += 1;
+                    match connect_to(account, &target, options, device, context, lines) {
+                        Ok(ok) => {
+                            passed &= ok;
+                            list.set_status(&trf(
+                                "The session with {name} has ended.",
+                                &[("name", &target.name)],
+                            ));
+                        }
+                        Err(error) => {
+                            passed = false;
+                            list.set_status(&trf(
+                                "Could not connect to {name}: {error}",
+                                &[("name", &target.name), ("error", &error)],
+                            ));
+                        }
+                    }
+                }
+                list.set_enabled(true);
+            }
             Some(ListAction::LogOut) => {
                 account.send(ClientMessage::Logout);
                 login.refresh_token = None;
@@ -643,7 +679,11 @@ fn device_list(
                     }
                     AccountEvent::Signal { .. }
                     | AccountEvent::IceServers { .. }
-                    | AccountEvent::PasswordChanged(_) => {}
+                    | AccountEvent::PasswordChanged(_)
+                    | AccountEvent::HelpOpen(_)
+                    | AccountEvent::HelpClosed(_)
+                    | AccountEvent::HelpRequested { .. }
+                    | AccountEvent::HelpGranted(_) => {}
                 }
             }
         }
@@ -746,6 +786,26 @@ fn wait_for_device(account: &mut Account, key: &str, timeout: Duration) -> Resul
 }
 
 /// A session with the agent on `target`, set up through the server.
+/// The "Help someone..." dialog: the help ID and code, until the server grants them (or the person gives up).
+fn ask_for_help_target(account: &mut Account, lines: &mut Vec<String>) -> Option<Device> {
+    let mut form = HelpForm::new().ok()?;
+    loop {
+        match form.next(50) {
+            Some(HelpAction::Submit { help_id, code }) => {
+                match account.request_help(&help_id, &code) {
+                    Ok(target) => {
+                        lines.push(format!("help granted: {} ({})", target.name, target.id));
+                        return Some(target);
+                    }
+                    Err(error) => form.set_status(&error.0),
+                }
+            }
+            Some(HelpAction::Cancel) => return None,
+            None => {}
+        }
+    }
+}
+
 fn connect_to(
     account: &mut Account,
     target: &Device,

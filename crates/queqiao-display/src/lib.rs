@@ -10,8 +10,8 @@ mod window;
 mod yuv;
 
 pub use forms::{
-    DeviceList, DeviceRow, ListAction, LoginAction, LoginFields, LoginForm, save_window_picture,
-    show_error,
+    DeviceList, DeviceRow, HelpAction, HelpForm, ListAction, LoginAction, LoginFields, LoginForm,
+    normalize_code, save_window_picture, show_error,
 };
 pub use presence::{Presence, PresenceEvent};
 pub use present::{Presenter, fit};

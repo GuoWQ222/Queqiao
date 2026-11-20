@@ -47,6 +47,17 @@ pub enum AccountEvent {
         stun: Option<String>,
         turn: Option<TurnAccess>,
     },
+    /// Agent: help requests are open under this help ID.
+    HelpOpen(String),
+    /// Agent: help requests were closed (why).
+    HelpClosed(String),
+    /// Agent: `device` of account `user` gave the help code; its session request may follow.
+    HelpRequested {
+        device: Device,
+        user: String,
+    },
+    /// Viewer: the help code was right; a session with `device` may start.
+    HelpGranted(Device),
     Closed(String),
 }
 
@@ -61,6 +72,9 @@ pub struct Account {
     thread: Option<JoinHandle<()>>,
     key: DeviceKey,
     known: KnownDevices,
+    /// Devices of other accounts joined by a help code (their keys came with the server's answer), with the
+    /// account they belong to.
+    helpers: Vec<(Device, String)>,
     role: Role,
 }
 
@@ -164,6 +178,7 @@ impl Account {
             key,
             known,
             role,
+            helpers: Vec::new(),
         })
     }
 
@@ -178,9 +193,14 @@ impl Account {
         body: &str,
         signature: &str,
     ) -> Result<(), Error> {
-        let Some(device) = self.devices.iter().find(|d| d.id == from) else {
+        let helper = self
+            .helpers
+            .iter()
+            .map(|(device, _)| device)
+            .find(|d| d.id == from);
+        let Some(device) = self.devices.iter().find(|d| d.id == from).or(helper) else {
             return Err(Error(format!(
-                "a signal from {from}, which is not a device of this account"
+                "a signal from {from}, which is not a device of this account (nor joined by a help code)"
             )));
         };
         let (key, name) = (device.public_key.clone(), device.name.clone());
@@ -292,10 +312,68 @@ impl Account {
                 }
             },
         };
-        if let Some(AccountEvent::Devices(devices)) = &event {
-            self.devices = devices.clone();
+        match &event {
+            Some(AccountEvent::Devices(devices)) => self.devices = devices.clone(),
+            Some(AccountEvent::HelpRequested { device, user }) => self.add_helper(device, user),
+            Some(AccountEvent::HelpGranted(device)) => self.add_helper(device, ""),
+            _ => {}
         }
         event
+    }
+
+    fn add_helper(&mut self, device: &Device, user: &str) {
+        self.helpers.retain(|(known, _)| known.id != device.id);
+        self.helpers.push((device.clone(), user.to_string()));
+    }
+
+    /// The account of `device` when a help code joined it (another account), or None for the account's own.
+    pub fn helper_account(&self, device: &str) -> Option<&str> {
+        if self.devices.iter().any(|d| d.id == device) {
+            return None;
+        }
+        self.helpers
+            .iter()
+            .find(|(known, _)| known.id == device)
+            .map(|(_, user)| user.as_str())
+    }
+
+    /// Agent: takes help requests with `code` (answered by `AccountEvent::HelpOpen` with the help ID).
+    pub fn open_help(&self, code: &str) {
+        self.send(ClientMessage::OpenHelp {
+            code: code.to_string(),
+        });
+    }
+
+    pub fn close_help(&self) {
+        self.send(ClientMessage::CloseHelp);
+    }
+
+    /// Viewer: asks to help the device with `help_id`; returns it (a device of another account) when the code
+    /// is right.
+    pub fn request_help(&mut self, help_id: &str, code: &str) -> Result<Device, Error> {
+        self.send(ClientMessage::RequestHelp {
+            help_id: help_id.to_string(),
+            code: code.to_string(),
+        });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut other = Vec::new();
+        let result = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break Err(Error("the server did not answer the help request".into()));
+            }
+            match self.next_event(left) {
+                Some(AccountEvent::HelpGranted(device)) => break Ok(device),
+                Some(AccountEvent::Error(message)) => break Err(Error(message)),
+                Some(AccountEvent::Closed(reason)) => break Err(Error(reason)),
+                Some(event) => other.push(event),
+                None => {}
+            }
+        };
+        for event in other.into_iter().rev() {
+            self.pending.push_front(event);
+        }
+        result
     }
 
     /// Signaling for one session with the program `role` on `device`.

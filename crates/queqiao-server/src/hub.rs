@@ -2,7 +2,7 @@
 //! or viewer of a device) gets a channel; the hub forwards signals between the programs of one account only
 //! and pushes the account's device list whenever a program connects or leaves.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,6 +16,8 @@ use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+
+use sha2::{Digest, Sha256};
 
 use crate::store::Store;
 use crate::turn::TurnConfig;
@@ -31,6 +33,14 @@ const ADDRESS_FAILURES: u32 = 20;
 const ADDRESS_WINDOW: Duration = Duration::from_secs(600);
 const ACCOUNT_FAILURES: u32 = 5;
 const ACCOUNT_WINDOW: Duration = Duration::from_secs(900);
+/// Wrong help codes for one device before its help requests close (the person opens them again for a new code).
+const HELP_FAILURES: u32 = 5;
+
+/// An agent's open help requests: the code's SHA-256 and the wrong tries so far.
+struct HelpOffer {
+    code_hash: [u8; 32],
+    wrong: u32,
+}
 
 /// Failures counted since `since`.
 struct Window {
@@ -92,6 +102,11 @@ pub struct Hub {
     turn: Option<Arc<TurnConfig>>,
     online: Mutex<HashMap<(String, Role), Connection>>,
     next_id: AtomicU64,
+    /// Agents taking help requests, by device id.
+    help: Mutex<HashMap<String, HelpOffer>>,
+    /// (viewer device, agent device) of different accounts that may signal each other: the viewer gave the
+    /// agent's help code. Ends when the agent closes help or leaves.
+    grants: Mutex<HashSet<(String, String)>>,
 }
 
 /// Who a connection is, after login.
@@ -111,6 +126,8 @@ impl Hub {
             turn,
             online: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            help: Mutex::new(HashMap::new()),
+            grants: Mutex::new(HashSet::new()),
         })
     }
 
@@ -236,7 +253,7 @@ impl Hub {
                         Ok(ClientMessage::ChangePassword { old_password, new_password }) => {
                             self.clone().change_password(&identity, old_password, new_password, &sender).await;
                         }
-                        Ok(message) => self.handle(&identity, message, &sender),
+                        Ok(message) => self.handle(&identity, message, &sender, address),
                         Err(error) => {
                             let message = format!("bad message: {error}");
                             let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
@@ -272,9 +289,145 @@ impl Hub {
                 .is_some_and(|connection| connection.id == id)
         {
             online.remove(&key);
+            drop(online);
+            // An agent that leaves takes its help requests and grants with it.
+            if identity.role == Role::Agent {
+                self.close_help(&identity.device_id);
+            }
         }
         self.push_devices(identity.user_id);
         Ok(())
+    }
+
+    fn close_help(&self, device_id: &str) {
+        if let Ok(mut help) = self.help.lock() {
+            help.remove(device_id);
+        }
+        if let Ok(mut grants) = self.grants.lock() {
+            grants.retain(|(_, agent)| agent != device_id);
+        }
+    }
+
+    /// Whether `from` may signal `to` across accounts (a help grant in either direction).
+    fn granted(&self, from: &str, to: &str) -> bool {
+        self.grants.lock().is_ok_and(|grants| {
+            grants.contains(&(from.to_string(), to.to_string()))
+                || grants.contains(&(to.to_string(), from.to_string()))
+        })
+    }
+
+    /// A viewer's help request: the right code for an agent taking requests grants signalling between the two
+    /// (the code is then used up); wrong codes count against the address and the agent (5 close its requests).
+    /// Unknown IDs and wrong codes get the same answer.
+    fn request_help(
+        &self,
+        identity: &Identity,
+        help_id: &str,
+        code: &str,
+        sender: &UnboundedSender<Outgoing>,
+        address: Option<IpAddr>,
+    ) {
+        let refuse = |message: &str| {
+            let _ = sender.send(Outgoing::Message(ServerMessage::Error {
+                message: message.to_string(),
+            }));
+        };
+        if identity.role != Role::Viewer {
+            return refuse("only a viewer can ask to help");
+        }
+        if let Some(minutes) = self.locked(address, None) {
+            return refuse(&format!("too many wrong tries: try again in {minutes} min"));
+        }
+        let wrong = "wrong help ID or code";
+        let target = self
+            .store
+            .lock()
+            .ok()
+            .and_then(|store| store.device_by_help_id(help_id.trim()).ok().flatten());
+        let Some((agent_id, agent_user, agent_name, agent_key)) = target else {
+            self.record_failure(address, None);
+            return refuse(wrong);
+        };
+        let agent_sender = self.online.lock().ok().and_then(|online| {
+            online
+                .get(&(agent_id.clone(), Role::Agent))
+                .filter(|c| c.user_id == agent_user)
+                .map(|c| c.sender.clone())
+        });
+        let hash: [u8; 32] = Sha256::digest(code.trim().as_bytes()).into();
+        let verdict = {
+            let Ok(mut help) = self.help.lock() else {
+                return refuse("server error");
+            };
+            match (help.get_mut(&agent_id), &agent_sender) {
+                (Some(offer), Some(_)) => {
+                    // Compared in constant time.
+                    let same = offer
+                        .code_hash
+                        .iter()
+                        .zip(hash)
+                        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                        == 0;
+                    if same {
+                        help.remove(&agent_id);
+                        Ok(())
+                    } else {
+                        offer.wrong += 1;
+                        let close = offer.wrong >= HELP_FAILURES;
+                        if close {
+                            help.remove(&agent_id);
+                        }
+                        Err(close)
+                    }
+                }
+                _ => Err(false),
+            }
+        };
+        match verdict {
+            Ok(()) => {
+                if let Ok(mut grants) = self.grants.lock() {
+                    grants.insert((identity.device_id.clone(), agent_id.clone()));
+                }
+                let viewer_key = self
+                    .store
+                    .lock()
+                    .ok()
+                    .and_then(|store| store.public_key(&identity.device_id).ok())
+                    .unwrap_or_default();
+                if let Some(agent_sender) = agent_sender {
+                    let _ = agent_sender.send(Outgoing::Message(ServerMessage::HelpRequested {
+                        device: Device {
+                            id: identity.device_id.clone(),
+                            name: identity.device_name.clone(),
+                            controllable: false,
+                            online: true,
+                            public_key: viewer_key,
+                        },
+                        user: identity.user.clone(),
+                    }));
+                }
+                let _ = sender.send(Outgoing::Message(ServerMessage::HelpGranted {
+                    device: Device {
+                        id: agent_id,
+                        name: agent_name,
+                        controllable: true,
+                        online: true,
+                        public_key: agent_key,
+                    },
+                }));
+            }
+            Err(closed) => {
+                self.record_failure(address, None);
+                if closed && let Some(agent_sender) = agent_sender {
+                    let reason = format!(
+                        "{HELP_FAILURES} wrong codes were tried: open help again for a new code"
+                    );
+                    let _ =
+                        agent_sender.send(Outgoing::Message(ServerMessage::HelpClosed { reason }));
+                }
+                refuse(wrong);
+            }
+        }
     }
 
     /// Minutes until `address` or `account` may try again, if either is locked out.
@@ -481,6 +634,7 @@ impl Hub {
         identity: &Identity,
         message: ClientMessage,
         sender: &UnboundedSender<Outgoing>,
+        address: Option<IpAddr>,
     ) {
         match message {
             ClientMessage::Signal {
@@ -493,21 +647,22 @@ impl Hub {
             } => {
                 let delivered = self.online.lock().ok().and_then(|online| {
                     let target = online.get(&(to.clone(), to_role))?;
-                    // Only between the devices of one account.
-                    (target.user_id == identity.user_id).then(|| {
-                        target
-                            .sender
-                            .send(Outgoing::Message(ServerMessage::Signal {
-                                from: identity.device_id.clone(),
-                                from_name: identity.device_name.clone(),
-                                from_role: identity.role,
-                                session,
-                                kind,
-                                body,
-                                signature,
-                            }))
-                            .is_ok()
-                    })
+                    // Between the devices of one account, or two that a help code joined.
+                    (target.user_id == identity.user_id || self.granted(&identity.device_id, &to))
+                        .then(|| {
+                            target
+                                .sender
+                                .send(Outgoing::Message(ServerMessage::Signal {
+                                    from: identity.device_id.clone(),
+                                    from_name: identity.device_name.clone(),
+                                    from_role: identity.role,
+                                    session,
+                                    kind,
+                                    body,
+                                    signature,
+                                }))
+                                .is_ok()
+                        })
                 });
                 // The same answer whether the device is offline or another account's (nothing to learn).
                 if delivered != Some(true) {
@@ -553,6 +708,44 @@ impl Hub {
                 }
             }
             ClientMessage::ChangePassword { .. } => {}
+            ClientMessage::OpenHelp { code } => {
+                let code = code.trim();
+                let fits = (6..=32).contains(&code.len())
+                    && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+                if identity.role != Role::Agent || !fits {
+                    let message =
+                        "help needs the agent and a code of 6 to 32 letters or digits".into();
+                    let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
+                    return;
+                }
+                let help_id = self
+                    .store
+                    .lock()
+                    .ok()
+                    .map(|store| store.help_id(&identity.device_id));
+                match help_id {
+                    Some(Ok(help_id)) => {
+                        if let Ok(mut help) = self.help.lock() {
+                            help.insert(
+                                identity.device_id.clone(),
+                                HelpOffer {
+                                    code_hash: Sha256::digest(code.as_bytes()).into(),
+                                    wrong: 0,
+                                },
+                            );
+                        }
+                        let _ = sender.send(Outgoing::Message(ServerMessage::HelpOpen { help_id }));
+                    }
+                    _ => {
+                        let message = "no help ID for this device".into();
+                        let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
+                    }
+                }
+            }
+            ClientMessage::CloseHelp => self.close_help(&identity.device_id),
+            ClientMessage::RequestHelp { help_id, code } => {
+                self.request_help(identity, &help_id, &code, sender, address)
+            }
             ClientMessage::Logout => {
                 if let Ok(store) = self.store.lock() {
                     let _ = store.revoke_token(&identity.device_id, role_name(identity.role));

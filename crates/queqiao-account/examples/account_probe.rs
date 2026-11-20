@@ -373,6 +373,13 @@ fn main() {
         Err(error) => probe.check("viewer D logs in", false, error),
     }
 
+    // Before the hardening checks, which lock this address out for a while.
+    help(
+        &mut probe,
+        server,
+        pin,
+        [(user1, password1), (user2, password2)],
+    );
     hardening(
         &mut probe,
         server,
@@ -803,4 +810,145 @@ mod relay {
             session.release(server);
         }
     }
+}
+
+/// Helping someone of another account: an agent of account 2 takes help requests with a code; a viewer of
+/// account 1 may signal it only after giving that code, once; wrong codes close the requests after five.
+fn help(probe: &mut Probe, server: &str, pin: &str, users: [(&str, &str); 2]) {
+    let [(user1, password1), (user2, password2)] = users;
+    let wait = Duration::from_secs(5);
+    let connect = |label: &str, role: Role, user: &str, password: &str| {
+        let identity = device(label);
+        let mut saved = login(server, pin);
+        Account::connect(&mut saved, &identity, role, Some((user, password)))
+            .map(|account| (account, identity))
+    };
+    let (mut helped, _helped_identity) = match connect("helped", Role::Agent, user2, password2) {
+        Ok(pair) => pair,
+        Err(error) => return probe.check("the helped agent logs in", false, error),
+    };
+    let (mut helper, _helper_identity) = match connect("helper", Role::Viewer, user1, password1) {
+        Ok(pair) => pair,
+        Err(error) => return probe.check("the helper logs in", false, error),
+    };
+    // Before any code: no signal reaches the other account.
+    let session = new_session_id();
+    let early = helper
+        .session(&helped.device_id.clone(), Role::Agent, &session)
+        .send("hello", "{}");
+    let refused = wait_for(&mut helper, wait, |e| matches!(e, AccountEvent::Error(_)));
+    probe.check(
+        "no signal to another account without a help code",
+        early.is_ok()
+            && matches!(refused, Some(AccountEvent::Error(ref m)) if m.contains("not online")),
+        format!("{refused:?}"),
+    );
+    helped.open_help("PROBECODE1");
+    let help_id = match wait_for(&mut helped, wait, |e| {
+        matches!(e, AccountEvent::HelpOpen(_))
+    }) {
+        Some(AccountEvent::HelpOpen(id)) => id,
+        other => return probe.check("help opens with a help ID", false, format!("{other:?}")),
+    };
+    probe.check(
+        "help opens with a 9-digit help ID",
+        help_id.len() == 9 && help_id.chars().all(|c| c.is_ascii_digit()),
+        &help_id,
+    );
+    let wrong = helper.request_help(&help_id, "WRONGCODE1");
+    probe.check(
+        "a wrong code is refused",
+        matches!(wrong, Err(ref e) if e.0.contains("wrong help ID or code")),
+        format!("{wrong:?}"),
+    );
+    let unknown = helper.request_help("123", "PROBECODE1");
+    probe.check(
+        "an unknown help ID gets the same answer",
+        matches!(unknown, Err(ref e) if e.0.contains("wrong help ID or code")),
+        format!("{unknown:?}"),
+    );
+    let granted = helper.request_help(&help_id, "PROBECODE1");
+    probe.check(
+        "the right code grants the helped device",
+        matches!(granted, Ok(ref d) if d.id == helped.device_id && !d.public_key.is_empty()),
+        format!("{granted:?}"),
+    );
+    let requested = wait_for(&mut helped, wait, |e| {
+        matches!(e, AccountEvent::HelpRequested { .. })
+    });
+    probe.check(
+        "the helped agent hears who gave the code",
+        matches!(requested, Some(AccountEvent::HelpRequested { ref device, ref user }) if device.id == helper.device_id && user == user1),
+        format!("{requested:?}"),
+    );
+    // Now a signed signal goes through and checks out on the helped side.
+    let session = new_session_id();
+    let sent = helper
+        .session(&helped.device_id.clone(), Role::Agent, &session)
+        .send("hello", "{\"probe\":1}");
+    let arrived = wait_for(&mut helped, wait, |e| {
+        matches!(e, AccountEvent::Signal { .. })
+    });
+    let checked = match &arrived {
+        Some(AccountEvent::Signal {
+            from,
+            from_role,
+            session,
+            kind,
+            body,
+            signature,
+            ..
+        }) => helped
+            .check_signal(from, *from_role, session, kind, body, signature)
+            .is_ok(),
+        _ => false,
+    };
+    probe.check(
+        "after the code, the helper's signed signal arrives and checks out",
+        sent.is_ok() && checked,
+        format!("{arrived:?}"),
+    );
+    probe.check(
+        "the helped side knows it is another account",
+        helped.helper_account(&helper.device_id) == Some(user1),
+        format!("{:?}", helped.helper_account(&helper.device_id)),
+    );
+    // The code was used up.
+    let again = helper.request_help(&help_id, "PROBECODE1");
+    probe.check("a code works once", again.is_err(), format!("{again:?}"));
+    // A third device (of account 1, without a grant) still cannot reach the helped agent.
+    match connect("bystander", Role::Viewer, user1, password1) {
+        Ok((mut bystander, _)) => {
+            let session = new_session_id();
+            let _ = bystander
+                .session(&helped.device_id.clone(), Role::Agent, &session)
+                .send("hello", "{}");
+            let refused = wait_for(&mut bystander, wait, |e| {
+                matches!(e, AccountEvent::Error(_))
+            });
+            probe.check(
+                "a grant is for the one helper device only",
+                matches!(refused, Some(AccountEvent::Error(ref m)) if m.contains("not online")),
+                format!("{refused:?}"),
+            );
+        }
+        Err(error) => probe.check("a bystander logs in", false, error),
+    }
+    // Five wrong codes close the requests: even the right new code is refused then.
+    helped.open_help("PROBECODE2");
+    let _ = wait_for(&mut helped, wait, |e| {
+        matches!(e, AccountEvent::HelpOpen(_))
+    });
+    for _ in 0..5 {
+        let _ = helper.request_help(&help_id, "WRONGCODE2");
+    }
+    let closed = wait_for(&mut helped, wait, |e| {
+        matches!(e, AccountEvent::HelpClosed(_))
+    });
+    let after = helper.request_help(&help_id, "PROBECODE2");
+    probe.check(
+        "five wrong codes close help (the agent is told)",
+        matches!(closed, Some(AccountEvent::HelpClosed(_))) && after.is_err(),
+        format!("{closed:?} / {after:?}"),
+    );
 }

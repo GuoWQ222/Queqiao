@@ -192,6 +192,12 @@ pub(crate) fn run(
                     Ok(ServerMessage::IceServers { stun, turn }) => {
                         AccountEvent::IceServers { stun, turn }
                     }
+                    Ok(ServerMessage::HelpOpen { help_id }) => AccountEvent::HelpOpen(help_id),
+                    Ok(ServerMessage::HelpClosed { reason }) => AccountEvent::HelpClosed(reason),
+                    Ok(ServerMessage::HelpRequested { device, user }) => {
+                        AccountEvent::HelpRequested { device, user }
+                    }
+                    Ok(ServerMessage::HelpGranted { device }) => AccountEvent::HelpGranted(device),
                     Ok(ServerMessage::Welcome { .. }) => continue,
                     Err(error) => {
                         AccountEvent::Error(format!("bad message from the server: {error}"))

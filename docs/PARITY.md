@@ -15,9 +15,11 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Saved login, log out, remove (unbind) a device from the account | partly (M3: saved login, log out; removing a device: planned M5) |
 | Device names, remarks, favourites | planned (UI) |
 | Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); manual "switch to relay" while connected: planned |
-| Help someone else: connect to a device of another account with its device ID and a code (temporary code, own fixed code, or both), or ask and let the other side approve; invitation link; code read from the clipboard | planned (after security points 1-2) |
+| Help someone else: connect to a device of another account with its help ID (9 digits) and a one-use code (8 characters, 40 bits) that the person there reads out from "Let someone help me..."; "Help someone..." in the device list | done (2026-11-21) |
+| Help: an own fixed code, asking without a code (the other side approves), invitation links, the code read from the clipboard | planned |
 | Consent on the controlled PC before a session (Allow / Deny), tray icon, session banner with End, session history | done (security point 2) |
-| Code plus local confirmation for helpers from other accounts, auto-lock the client UI while being helped | planned (with helping others) |
+| Code plus local confirmation for helpers from other accounts (always asked, whatever the settings); 5 wrong codes close help; the code works once | done (2026-11-21) |
+| Auto-lock the client UI while being helped | planned |
 | Lock the client's settings with a separate password | planned |
 | Network status: delay, frame rate, data rate, direct or relayed | done (2026-11-21, in the session window title, once a second); an overlay on the picture: planned (UI) |
 
@@ -64,7 +66,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Clipboard both ways: images and files | planned (M6, with file transfer) |
 | File transfer both ways: drop files on the session window; into Downloads\Queqiao, checked with SHA-256 | done (2026-11-21; receiving can be turned off in the tray) |
 | File transfer by copy and paste, folders, a transfer list with pause, resume and cancel | planned (M6) |
-| Allow or forbid file transfer when helping others | planned |
+| Helpers from other accounts get no file transfer, command lines, privacy screen or restart | done (2026-11-21); a setting to allow file transfer for helpers: planned |
 
 ## The controlled PC
 

@@ -22,6 +22,8 @@ enum Command {
     /// For tests: the same path as a click.
     PressConsent(bool),
     PressEnd,
+    /// The help window with this help ID and code, or none.
+    Help(Option<(String, String)>),
     /// The privacy screen on (with how it looks) or off.
     Privacy(Option<PrivacyLook>, Sender<Result<bool, String>>),
     /// Tests: the privacy screen hidden from capture or not.
@@ -75,6 +77,13 @@ impl Ui {
         })
     }
 
+    /// Shows the help window (help ID and code), or closes it (None).
+    pub fn show_help(&self, shown: Option<(&str, &str)>) {
+        self.send(Command::Help(
+            shown.map(|(id, code)| (id.to_string(), code.to_string())),
+        ));
+    }
+
     /// Darkens the monitors (Some) or shows them again (None); an error if the screen cannot be hidden from
     /// capture here. Ok(true) when the session banner (with its End button) is above the dark screen.
     pub fn set_privacy(&self, look: Option<PrivacyLook>) -> Result<bool, String> {
@@ -108,9 +117,9 @@ impl Ui {
 
     /// Asks the person whether `viewer` may control the PC; the answer comes as
     /// `PresenceEvent::Consent` (denied after `seconds`).
-    pub fn ask(&self, viewer: &str, seconds: u32) -> Result<(), String> {
+    pub fn ask(&self, question: &str, seconds: u32) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
-        self.send(Command::Ask(viewer.to_string(), seconds, reply));
+        self.send(Command::Ask(question.to_string(), seconds, reply));
         answer
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| "the UI thread did not answer".to_string())?
@@ -221,10 +230,16 @@ fn run(
                     };
                     let _ = reply.send(result);
                 }
-                Ok(Command::Ask(viewer, seconds, reply)) => {
+                Ok(Command::Help(shown)) => match shown {
+                    Some((help_id, code)) => {
+                        let _ = presence.show_help(&help_id, &code);
+                    }
+                    None => presence.hide_help(),
+                },
+                Ok(Command::Ask(question, seconds, reply)) => {
                     let _ = reply.send(
                         presence
-                            .ask_consent(&viewer, seconds)
+                            .ask_consent(&question, seconds)
                             .map_err(|e| e.message()),
                     );
                     picture = Some((Instant::now() + Duration::from_millis(400), "prompt.bmp"));

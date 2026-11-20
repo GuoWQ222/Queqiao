@@ -65,6 +65,9 @@ $password1 = [guid]::NewGuid().ToString('N')
 $password2 = [guid]::NewGuid().ToString('N')
 & $server add-user alice $password1 --data $data | Out-Null
 & $server add-user bob $password2 --data $data | Out-Null
+# The help session's second account: the probe's lockout checks leave bob locked for 15 minutes.
+$password3 = [guid]::NewGuid().ToString('N')
+& $server add-user carol $password3 --data $data | Out-Null
 $serveArgs = @('serve', '--listen', $listen, '--data', "`"$data`"", '--public-ip', $Address, '--relay-private')
 $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
 $failed = @()
@@ -199,6 +202,47 @@ try {
                 } else {
                     $failed += "$label $program received no file"
                 }
+            }
+        }
+    }
+    # Helping another account: carol's agent (a throwaway device) takes help requests with a code; alice's viewer
+    # gives its help ID and code. The agent must ask (answered here), and the session runs with fewer rights.
+    if ($Sessions -contains 'help' -or $Sessions -contains 'all') {
+        $idFile = Join-Path $Out 'help_id.txt'
+        Remove-Item -LiteralPath $idFile -ErrorAction SilentlyContinue
+        $helpCode = 'M4HELPCODE'
+        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 1 --seconds $($Seconds + 90) --verify-input --dry-run-commands --answer allow --help-code $helpCode --help-id-file `"$idFile`" --report `"$Out\agent_help.txt`""
+        $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_help.txt`""
+        if ($AgentSoundDevice -and $ViewerSoundDevice) {
+            $agentArgs += " --sound-device `"$AgentSoundDevice`""
+            $viewerArgs += " --sound-device `"$ViewerSoundDevice`""
+        } else {
+            $viewerArgs += ' --mute'
+        }
+        Start-SessionTask 'Queqiao-M4-Agent-help' $agent $agentArgs ''
+        $until = (Get-Date).AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $idFile) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
+        $helpId = if (Test-Path -LiteralPath $idFile) { (Get-Content -LiteralPath $idFile -Raw).Trim() } else { '' }
+        if (-not $helpId) { $failed += 'help agent (no help ID within 30 s)' }
+        # What a helper may not do: restart, darken the screen, command lines, sending files.
+        $viewerArgs += " --command restart --privacy --terminal-test --send-file `"$fileToAgent`""
+        Start-SessionTask 'Queqiao-M4-Viewer-help' $viewer "$viewerArgs --help-id $helpId --help-code $helpCode" ''
+        $viewerResult = Wait-SessionTask 'Queqiao-M4-Viewer-help' ($Seconds + 120)
+        $agentResult = Wait-SessionTask 'Queqiao-M4-Agent-help' 60
+        "=== session 'help' (help ID $helpId): agent exit $agentResult, viewer exit $viewerResult"
+        $helpChecks = @(
+            @('agent', @('^help: open, help ID \d{9}$', '^help: .* of account alice gave the code$', '^the person at this PC allowed ', '^helper session: .* of account alice; ', '^command from the helper refused: ')),
+            @('viewer', @('^help granted: ', '^input events sent: [1-9]', '^notice from that PC: someone helping from another account cannot do that', '^command line \d+ failed: the person at that PC does not allow remote command lines', '^file failed: .*receiving files is turned off on that PC'))
+        )
+        foreach ($check in $helpChecks) {
+            $program, $patterns = $check
+            $report = Join-Path $Out "${program}_help.txt"
+            $text = if (Test-Path -LiteralPath $report) { @(Get-Content -LiteralPath $report -Encoding UTF8) } else { @("no report at $report") }
+            "--- $program"
+            $text
+            if ($text[-1] -ne 'RESULT PASS') { $failed += "help $program" }
+            foreach ($pattern in $patterns) {
+                if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "help $program (expected '$pattern')" }
             }
         }
     }

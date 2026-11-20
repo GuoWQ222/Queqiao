@@ -39,6 +39,12 @@ pub enum PresenceEvent {
     SetTerminal(bool),
     /// Start with Windows (true) or not.
     SetAutostart(bool),
+    /// "Let someone help me...": open help requests (show the help ID and a code).
+    OpenHelp,
+    /// The help window asks for a new code.
+    HelpNewCode,
+    /// The help window was closed: no more help requests.
+    HelpClose,
     /// The answer to the prompt: allowed, or denied (also when the time ran out or it was closed).
     Consent(bool),
 }
@@ -55,6 +61,9 @@ const MENU_FILES: u16 = 205;
 const MENU_TERMINAL: u16 = 206;
 const MENU_AUTOSTART: u16 = 207;
 const ID_END: u16 = 210;
+const ID_NEW_CODE: u16 = 213;
+const ID_HELP_CLOSE: u16 = 214;
+const MENU_HELP: u16 = 208;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
 /// The tray window asks for its menu (not a control id).
@@ -77,6 +86,8 @@ pub struct Presence {
     tray: HWND,
     tray_shown: bool,
     banner: Option<Form>,
+    /// The help window (help ID and code), while help requests are open.
+    help: Option<Form>,
     prompt: Option<Prompt>,
     allow: bool,
     ask: bool,
@@ -134,6 +145,7 @@ impl Presence {
             tray_shown: false,
             banner: None,
             prompt: None,
+            help: None,
             allow,
             ask,
             clipboard,
@@ -183,7 +195,8 @@ impl Presence {
     }
 
     /// Asks the person whether `viewer` may control the PC; denied after `seconds`.
-    pub fn ask_consent(&mut self, viewer: &str, seconds: u32) -> Result<()> {
+    /// Asks the person `question` (who wants to control the PC); denied after `seconds`.
+    pub fn ask_consent(&mut self, question: &str, seconds: u32) -> Result<()> {
         self.prompt = None;
         let form = Form::create(
             tr("Queqiao - allow remote control?"),
@@ -191,13 +204,7 @@ impl Presence {
             170,
             Kind::Prompt,
         )?;
-        form.text(
-            &trf(
-                "{viewer}, a device of your account, wants to control this PC.",
-                &[("viewer", viewer)],
-            ),
-            [20, 18, 380, 40],
-        )?;
+        form.text(question, [20, 18, 380, 40])?;
         let countdown = form.label("", [20, 66, 380, 20])?;
         // Deny is the default button: Enter (or Esc, or closing the window) never lets anyone in.
         form.button(tr("Deny"), ID_DENY, true, [190, 122, 100, 30])?;
@@ -275,6 +282,47 @@ impl Presence {
     }
 
     /// Handles window messages for up to `wait_ms` and returns what the person did, if anything.
+    /// Shows the help ID and code to give to whoever helps (replacing an earlier window).
+    pub fn show_help(&mut self, help_id: &str, code: &str) -> Result<()> {
+        self.help = None;
+        let form = Form::create(tr("Queqiao - let someone help you"), 420, 230, Kind::Dialog)?;
+        form.text(
+            tr("Give these to the person who helps you. They can ask once to control this PC; you decide in a prompt."),
+            [20, 14, 380, 44],
+        )?;
+        // The ID in groups of three, the code in two halves: easier to read out.
+        let spaced: String = help_id
+            .chars()
+            .enumerate()
+            .flat_map(|(at, c)| {
+                (at > 0 && at % 3 == 0)
+                    .then_some(' ')
+                    .into_iter()
+                    .chain(Some(c))
+            })
+            .collect();
+        let halves = if code.len() == 8 {
+            format!("{}-{}", &code[..4], &code[4..])
+        } else {
+            code.to_string()
+        };
+        form.label(&format!("{}   {spaced}", tr("Help ID:")), [20, 74, 380, 24])?;
+        form.label(&format!("{}   {halves}", tr("Code:")), [20, 106, 380, 24])?;
+        form.button(tr("New code"), ID_NEW_CODE, false, [190, 176, 100, 30])?;
+        form.button(tr("Close"), ID_HELP_CLOSE, true, [300, 176, 100, 30])?;
+        form.show();
+        self.help = Some(form);
+        Ok(())
+    }
+
+    pub fn hide_help(&mut self) {
+        self.help = None;
+    }
+
+    pub fn help_window(&self) -> Option<HWND> {
+        self.help.as_ref().map(|form| form.hwnd)
+    }
+
     pub fn next(&mut self, wait_ms: u32) -> Option<PresenceEvent> {
         // The prompt pumps for all windows of this thread (with keyboard navigation for itself).
         let pumped = match (&self.prompt, &self.banner) {
@@ -285,6 +333,19 @@ impl Presence {
                 None
             }
         };
+        // The help window's buttons (its closing too) are its own.
+        if let Some(hwnd) = self.help.as_ref().map(|form| form.hwnd) {
+            while let Some(command) = crate::forms::take_action(hwnd) {
+                match command {
+                    ID_NEW_CODE => return Some(PresenceEvent::HelpNewCode),
+                    ID_HELP_CLOSE | crate::forms::ID_CANCEL | crate::forms::CLOSED => {
+                        self.help = None;
+                        return Some(PresenceEvent::HelpClose);
+                    }
+                    _ => {}
+                }
+            }
+        }
         let mut commands: Vec<u16> = pumped.into_iter().collect();
         for hwnd in [
             self.prompt.as_ref().map(|p| p.form.hwnd),
@@ -363,12 +424,19 @@ impl Presence {
         let terminal = wide(tr("Allow remote command lines"));
         let autostart = wide(tr("Start with Windows"));
         let quit = wide(tr("Quit Queqiao on this PC"));
+        let help = wide(tr("Let someone help me..."));
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             if self.viewer.is_some() {
                 let _ = AppendMenuW(menu, MF_STRING, usize::from(MENU_END), PCWSTR(end.as_ptr()));
             }
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                usize::from(MENU_HELP),
+                PCWSTR(help.as_ptr()),
+            );
             let _ = AppendMenuW(
                 menu,
                 checked(self.allow),
@@ -430,6 +498,7 @@ impl Presence {
             let _ = DestroyMenu(menu);
             match u16::try_from(chosen).unwrap_or(0) {
                 MENU_END => Some(PresenceEvent::EndSession),
+                MENU_HELP => Some(PresenceEvent::OpenHelp),
                 MENU_ALLOW => {
                     self.allow = !self.allow;
                     Some(PresenceEvent::SetAllow(self.allow))

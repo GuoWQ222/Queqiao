@@ -47,6 +47,7 @@ const ID_OK: u16 = 1;
 pub(crate) const ID_CANCEL: u16 = 2;
 const ID_LIST: u16 = 100;
 const ID_LOGOUT: u16 = 101;
+const ID_HELP: u16 = 102;
 /// The window was closed (not a control id).
 pub(crate) const CLOSED: u16 = 0xFFFF;
 
@@ -403,6 +404,86 @@ pub struct LoginFields {
     pub password: String,
 }
 
+pub enum HelpAction {
+    /// The help ID (digits only) and the code (letters and digits, upper case).
+    Submit {
+        help_id: String,
+        code: String,
+    },
+    Cancel,
+}
+
+/// Asks for the help ID and code of someone to help (another account's device).
+pub struct HelpForm {
+    form: Form,
+    help_id: HWND,
+    code: HWND,
+    status: HWND,
+}
+
+impl HelpForm {
+    pub fn new() -> Result<HelpForm> {
+        let form = Form::new(tr("Queqiao - help someone"), 380, 260)?;
+        form.text(
+            tr("Ask the person you help for the help ID and code that Queqiao shows them (tray menu: Let someone help me...)."),
+            [20, 14, 340, 44],
+        )?;
+        form.label(tr("Help ID"), [20, 64, 340, 18])?;
+        let help_id = form.edit("", false, [20, 84, 340, 24])?;
+        form.label(tr("Code"), [20, 118, 340, 18])?;
+        let code = form.edit("", false, [20, 138, 340, 24])?;
+        let status = form.label("", [20, 170, 340, 36])?;
+        form.button(tr("Connect"), ID_OK, true, [260, 214, 100, 30])?;
+        form.show();
+        let _ = unsafe { SetFocus(Some(help_id)) };
+        Ok(HelpForm {
+            form,
+            help_id,
+            code,
+            status,
+        })
+    }
+
+    pub fn hwnd(&self) -> HWND {
+        self.form.hwnd
+    }
+
+    /// Fills the form and presses Connect (tests).
+    pub fn submit_with(&self, help_id: &str, code: &str) {
+        set_text(self.help_id, help_id);
+        set_text(self.code, code);
+        self.form.post(ID_OK);
+    }
+
+    pub fn set_status(&self, text: &str) {
+        set_text(self.status, text);
+    }
+
+    pub fn next(&mut self, wait_ms: u32) -> Option<HelpAction> {
+        match self.form.next_command(wait_ms)? {
+            ID_OK => Some(HelpAction::Submit {
+                help_id: text_of(self.help_id)
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect(),
+                code: normalize_code(&text_of(self.code)),
+            }),
+            ID_CANCEL | CLOSED => Some(HelpAction::Cancel),
+            _ => None,
+        }
+    }
+}
+
+/// A help code as typed (spaces, dashes, any case) in the form the server compares: letters and digits, upper
+/// case.
+pub fn normalize_code(typed: &str) -> String {
+    typed
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
 pub enum LoginAction {
     Submit(LoginFields),
     Cancel,
@@ -517,6 +598,8 @@ impl LoginForm {
 pub enum ListAction {
     /// Connect to the device with this id (double-click, Enter or the Connect button).
     Connect(String),
+    /// "Help someone...": connect to another account's device with its help ID and code.
+    Help,
     LogOut,
     Closed,
 }
@@ -563,6 +646,7 @@ impl DeviceList {
             [20, 304, 400, 36],
         )?;
         form.button(tr("Log out"), ID_LOGOUT, false, [20, 352, 100, 30])?;
+        form.button(tr("Help someone..."), ID_HELP, false, [130, 352, 150, 30])?;
         form.button(tr("Connect"), ID_OK, true, [320, 352, 100, 30])?;
         form.show();
         let _ = unsafe { SetFocus(Some(list)) };
@@ -647,6 +731,7 @@ impl DeviceList {
                 }
             },
             ID_LOGOUT => Some(ListAction::LogOut),
+            ID_HELP => Some(ListAction::Help),
             CLOSED => Some(ListAction::Closed),
             _ => None,
         }

@@ -183,6 +183,33 @@ const CHINESE: &[(&str, &str)] = &[
     ),
     ("direct", "直连"),
     ("relayed", "中转"),
+    // Helping someone of another account.
+    ("Let someone help me...", "让别人帮助我……"),
+    ("Queqiao - let someone help you", "鹊桥 - 让别人帮助你"),
+    (
+        "Give these to the person who helps you. They can ask once to control this PC; you decide in a prompt.",
+        "把下面的信息告诉帮助你的人。对方可以请求一次控制这台电脑，由你在弹出的提示中决定是否允许。",
+    ),
+    ("Help ID:", "帮助 ID："),
+    ("Code:", "验证码："),
+    ("New code", "换一个验证码"),
+    ("Close", "关闭"),
+    ("Help someone...", "帮助别人……"),
+    ("Queqiao - help someone", "鹊桥 - 帮助别人"),
+    (
+        "Ask the person you help for the help ID and code that Queqiao shows them (tray menu: Let someone help me...).",
+        "请向你要帮助的人索取鹊桥显示的帮助 ID 和验证码（托盘菜单：让别人帮助我……）。",
+    ),
+    ("Help ID", "帮助 ID"),
+    ("Code", "验证码"),
+    (
+        "{viewer} (account {user}) wants to control this PC to help you.",
+        "{viewer}（账号 {user}）想要控制这台电脑来帮助你。",
+    ),
+    (
+        "{viewer} (account {user}) is helping on this PC",
+        "{viewer}（账号 {user}）正在这台电脑上帮助你",
+    ),
     // Command line windows.
     ("The session has ended.", "会话已结束。"),
     (

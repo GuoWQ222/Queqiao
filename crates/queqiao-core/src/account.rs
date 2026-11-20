@@ -2,8 +2,9 @@
 //!
 //! A connection starts with `Login` (user name and password) or `Resume` (a refresh token from an earlier
 //! login); the server answers `Welcome`. After that the server pushes the account's device list as it
-//! changes, and forwards `Signal`s between the account's own devices only (the WebRTC offer and answer
-//! of a session). Every device on an account can be both agent (controlled) and viewer (controlling).
+//! changes, and forwards `Signal`s between the account's own devices (the WebRTC offer and answer of a
+//! session), and between two devices of different accounts only after a help code was given (`RequestHelp`).
+//! Every device on an account can be both agent (controlled) and viewer (controlling).
 //!
 //! Each device has its own Ed25519 key; the server publishes the public keys in the device list, and every
 //! signal carries the sender's signature over [`signed_bytes`], which the receiving device checks against the
@@ -75,6 +76,14 @@ pub enum ClientMessage {
         old_password: String,
         new_password: String,
     },
+    /// Agent: someone of another account may help, with this code (once). Answered by `HelpOpen`; a new code
+    /// replaces the old one.
+    OpenHelp { code: String },
+    /// Agent: no more help requests.
+    CloseHelp,
+    /// Viewer: help the device with this help ID, with the code its person read out. Answered by `HelpGranted`
+    /// (the device to start a session with) or an error.
+    RequestHelp { help_id: String, code: String },
 }
 
 /// Relay access for one device: TURN long-term credentials that the server's TURN part accepts for new
@@ -125,6 +134,24 @@ pub enum ServerMessage {
     /// The password was changed: keep this refresh token (all earlier ones were revoked).
     PasswordChanged {
         refresh_token: String,
+    },
+    /// To an agent: help requests are open; the person gives `help_id` and the code to whoever helps.
+    HelpOpen {
+        help_id: String,
+    },
+    /// To an agent: help requests are closed (e.g. too many wrong codes were tried).
+    HelpClosed {
+        reason: String,
+    },
+    /// To an agent: `device` of account `user` gave the right code; its session request may follow (the code
+    /// is used up). Its key is in `device`.
+    HelpRequested {
+        device: Device,
+        user: String,
+    },
+    /// To a viewer: the code was right; `device` (of another account) may be asked for a session now.
+    HelpGranted {
+        device: Device,
     },
 }
 

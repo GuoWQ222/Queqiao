@@ -48,6 +48,18 @@ impl Store {
             db.execute_batch("ALTER TABLE devices ADD COLUMN public_key TEXT NOT NULL DEFAULT ''")
                 .map_err(|e| e.to_string())?;
         }
+        // Help IDs (short numbers for helping someone of another account), unique when set.
+        let has_help_id: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'help_id'")
+            .and_then(|mut query| query.exists([]))
+            .map_err(|e| e.to_string())?;
+        if !has_help_id {
+            db.execute_batch(
+                "ALTER TABLE devices ADD COLUMN help_id TEXT NOT NULL DEFAULT '';
+                 CREATE UNIQUE INDEX IF NOT EXISTS devices_help_id ON devices(help_id) WHERE help_id != '';",
+            )
+            .map_err(|e| e.to_string())?;
+        }
         Ok(Store { db })
     }
 
@@ -266,6 +278,69 @@ impl Store {
     }
 
     /// The account's devices: id, name and public key, oldest first.
+    /// The device's help ID: a 9-digit number, made when first asked for and kept.
+    pub fn help_id(&self, device_id: &str) -> Result<String, String> {
+        let existing: String = self
+            .db
+            .query_row(
+                "SELECT help_id FROM devices WHERE id = ?1",
+                [device_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+        for _ in 0..50 {
+            let mut bytes = [0u8; 8];
+            getrandom::fill(&mut bytes).map_err(|e| e.to_string())?;
+            let candidate = (100_000_000 + u64::from_le_bytes(bytes) % 900_000_000).to_string();
+            let taken = self
+                .db
+                .prepare("SELECT 1 FROM devices WHERE help_id = ?1")
+                .and_then(|mut query| query.exists([&candidate]))
+                .map_err(|e| e.to_string())?;
+            if !taken {
+                self.db
+                    .execute(
+                        "UPDATE devices SET help_id = ?1 WHERE id = ?2",
+                        [&candidate, device_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                return Ok(candidate);
+            }
+        }
+        Err("no free help ID".into())
+    }
+
+    /// (device id, user id, name, public key) of the device with this help ID.
+    pub fn device_by_help_id(
+        &self,
+        help_id: &str,
+    ) -> Result<Option<(String, i64, String, String)>, String> {
+        if help_id.is_empty() {
+            return Ok(None);
+        }
+        self.db
+            .query_row(
+                "SELECT id, user_id, name, public_key FROM devices WHERE help_id = ?1",
+                [help_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn public_key(&self, device_id: &str) -> Result<String, String> {
+        self.db
+            .query_row(
+                "SELECT public_key FROM devices WHERE id = ?1",
+                [device_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())
+    }
+
     pub fn devices(&self, user_id: i64) -> Result<Vec<(String, String, String)>, String> {
         let mut query = self
             .db
