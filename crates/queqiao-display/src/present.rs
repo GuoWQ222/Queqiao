@@ -154,7 +154,7 @@ impl Presenter {
 }
 
 /// The aspect-preserving area of `output` that an `input`-sized picture fills, centred.
-fn fit(input: (u32, u32), output: (u32, u32)) -> RECT {
+pub fn fit(input: (u32, u32), output: (u32, u32)) -> RECT {
     let scale =
         (f64::from(output.0) / f64::from(input.0)).min(f64::from(output.1) / f64::from(input.1));
     let width = ((f64::from(input.0) * scale).round() as i32).clamp(1, output.0 as i32);

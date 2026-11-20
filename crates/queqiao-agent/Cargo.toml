@@ -1,9 +1,17 @@
 [package]
 name = "queqiao-agent"
-description = "Controlled side: presence, capture, encode, send, input injection"
+description = "Controlled side: captures and streams the screen, injects the viewer's input"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+queqiao-capture.workspace = true
+queqiao-codec.workspace = true
 queqiao-core.workspace = true
+queqiao-input.workspace = true
+queqiao-transport.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }

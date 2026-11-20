@@ -12,6 +12,9 @@ publish = false
 queqiao-core = { path = "crates/queqiao-core" }
 queqiao-capture = { path = "crates/queqiao-capture" }
 queqiao-codec = { path = "crates/queqiao-codec" }
+queqiao-display = { path = "crates/queqiao-display" }
+queqiao-input = { path = "crates/queqiao-input" }
+queqiao-transport = { path = "crates/queqiao-transport" }
 windows = "0.62"
 
 # OpenH264 is C++ built by the cc crate. Unoptimised it is many times slower, which would hide real encode

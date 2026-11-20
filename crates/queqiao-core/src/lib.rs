@@ -1,12 +1,15 @@
 //! Shared code for all Queqiao programs.
 //!
-//! Planned modules (docs/DESIGN.md): protocol, identity, transport, input.
-//! For now: the version information every program prints at start-up, and the test switch that forces
-//! fallback paths.
+//! The wire protocol between viewer and agent ([`protocol`]), the version every program prints at
+//! start-up, and the test switch that forces fallback paths. Planned (docs/DESIGN.md): identity.
+
+#[cfg(windows)]
+pub mod platform;
+pub mod protocol;
 
 /// Version of the messages exchanged between agent, viewer and server.
 /// Peers with a different version refuse to connect.
-pub const PROTOCOL_VERSION: u32 = 0;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// One-line start-up banner: program name, workspace version, protocol version.
 pub fn banner(program: &str) -> String {
@@ -38,7 +41,7 @@ mod tests {
     fn banner_names_program_and_versions() {
         let text = banner("queqiao-agent");
         assert!(text.starts_with("queqiao-agent "));
-        assert!(text.ends_with(" (protocol 0)"));
+        assert!(text.ends_with(&format!(" (protocol {PROTOCOL_VERSION})")));
     }
 
     #[test]

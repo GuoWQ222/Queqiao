@@ -7,12 +7,14 @@ mod decoder;
 mod encoder;
 mod mf;
 mod mf_decode;
+mod screen;
 mod software;
 mod software_decode;
 
 pub use convert::Nv12Converter;
 pub use decoder::{DecodedFrame, DecoderChoice, H264Decoder, RING};
 pub use encoder::{EncodedFrame, EncoderChoice, EncoderConfig, H264Encoder, SoftwareTiming};
+pub use screen::{SOFTWARE_START, ScreenEncoder};
 
 /// Encode sizes to try for a screen, largest first: the screen itself (rounded down to even numbers, as
 /// NV12 needs), then the same picture scaled down to fit common encoder limits (4096, 4K, 1440p, 1080p,

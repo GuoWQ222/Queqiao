@@ -57,7 +57,11 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
    is patent-licensed: the hardware encoders and decoders that come with Windows or the GPU driver carry their own
    licence, but an OpenH264 compiled into Queqiao makes the H.264 patent licence the publisher's (the patent pool
    has a free tier for small volumes). The alternative is Cisco's prebuilt OpenH264, which Cisco's licence covers
-   when each PC downloads it from Cisco; the `openh264` crate can load it at runtime. Decide before release.
+   when each PC downloads it from Cisco. **Decided by the user (2026-11-20): OpenH264 is built in, as UU
+   Remote does; the publisher takes the H.264 patent licence.**
+10. **Encoders: Media Foundation and direct vendor SDKs, compared** (user decision 2026-11-20): direct NVENC,
+   AMF and oneVPL paths are built beside Media Foundation and measured against it on the same machines; AMD
+   cannot be tested on the current machines.
 9. **Build requirements:** Rust, Visual Studio Build Tools (C++), and NASM on the PATH: without NASM, OpenH264
    builds silently without its assembly and runs about 5x slower (measured 35 ms instead of 6.6 ms per 1080p
    frame); `scripts\check.ps1` warns when NASM is missing.
@@ -145,7 +149,7 @@ congestion control and FEC, but a large prebuilt C++ dependency and hard to feed
 |---|---|---|
 | M0 | Toolchain, Cargo workspace, empty crates build | `cargo build` passes |
 | M1 | Local loop on one PC: capture -> encode -> decode -> window, with the software fallbacks | latency and fps measured; every fallback forced and tested. **Done 2026-11-20**: RTX 5080 PC 4/4 paths pass (hardware: 12 ms median screen change -> shown); Intel Iris Xe laptop 3/4 (hardware 20 ms; no-GPU path 55 ms, needs adaptive size) |
-| M2 | LAN: agent + viewer by IP, video + mouse/keyboard | control the PC from a second process / PC |
+| M2 | LAN: agent + viewer by IP, video + mouse/keyboard | control the PC from a second process / PC. **Done 2026-11-20**: one PC (611/611 frames, input 7/7) and PC viewer -> Intel laptop agent over Tailscale (direct, 5 ms ping): 17 ms median / 29 ms p95 screen change -> shown, input checked 7/7, 2 frames lost in 20 s and recovered by keyframe requests |
 | M3 | `queqiao-server`: accounts, devices, presence; device list in the viewer | log in, see devices, connect by click |
 | M4 | NAT traversal + relay | connect across networks, forced-relay test |
 | M5 | `queqiao-service`: login screen, UAC, Ctrl+Alt+Del, restart | control at the lock screen |

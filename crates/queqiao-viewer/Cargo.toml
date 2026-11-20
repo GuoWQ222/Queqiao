@@ -1,9 +1,18 @@
 [package]
 name = "queqiao-viewer"
-description = "Controlling side: login, device list, viewer window, input capture"
+description = "Controlling side: shows the remote screen and sends mouse and keyboard input"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+queqiao-codec.workspace = true
 queqiao-core.workspace = true
+queqiao-display.workspace = true
+queqiao-transport.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+] }
