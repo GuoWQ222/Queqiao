@@ -7,4 +7,4 @@ publish.workspace = true
 
 [dependencies]
 sha2.workspace = true
-windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell"] }
+windows = { workspace = true, features = ["Win32_Storage_Compression", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell"] }

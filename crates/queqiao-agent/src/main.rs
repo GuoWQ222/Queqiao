@@ -33,9 +33,10 @@ use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{Command, InputEvent, Message};
 use queqiao_core::text::trf;
 use queqiao_display::{PresenceEvent, normalize_code};
+use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{
-    Clipboard, Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position,
+    ClipContent, Clipboard, Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position,
 };
 use queqiao_terminal::{TerminalMessage, Terminals};
 use queqiao_transport::{
@@ -983,6 +984,11 @@ fn session(
     let mut channel_open_at: Option<Instant> = None;
     // Files both ways: from the viewer into Downloads\Queqiao (while the person at this PC allows it).
     let mut transfers = Transfers::new(downloads_folder(), receive_files);
+    // Clipboard images both ways, on their own stream.
+    let (mut images, mut image_in) = (ImageSender::default(), ImageReceiver::default());
+    let (mut images_received, mut images_sent, mut image_test_received) = (0u32, 0u32, false);
+    // The image last received: not put on the clipboard again, nor sent back (as for text).
+    let mut last_image_in: Option<u64> = None;
     // Remote command lines (while the person at this PC allows them).
     let mut terminals = Terminals::new(allow_terminal);
     for path in &options.send_files {
@@ -1198,6 +1204,25 @@ fn session(
                 }
                 PeerEvent::ChannelOpen => channel_open_at = Some(Instant::now()),
                 PeerEvent::StreamOpen(Stream::Files) => report_files(transfers.opened(), lines),
+                PeerEvent::StreamOpen(Stream::Clipboard) => {}
+                PeerEvent::StreamData(Stream::Clipboard, bytes) => {
+                    if let Some(result) = image_in.handle(&bytes) {
+                        match result {
+                            Ok(image) => {
+                                images_received += 1;
+                                image_test_received |= image == test_picture(1);
+                                let print = image_fingerprint(&image);
+                                if last_image_in != Some(print) {
+                                    last_image_in = Some(print);
+                                    if let Some(clipboard) = &clipboard {
+                                        clipboard.set(ClipContent::Image(image));
+                                    }
+                                }
+                            }
+                            Err(error) => lines.push(format!("clipboard image dropped: {error}")),
+                        }
+                    }
+                }
                 PeerEvent::StreamOpen(Stream::Terminal) => {}
                 PeerEvent::StreamData(Stream::Terminal, bytes) => {
                     if let Some(message) = TerminalMessage::decode(&bytes) {
@@ -1227,6 +1252,9 @@ fn session(
         for message in transfers.take(peer.room(Stream::Files)) {
             peer.send_stream(Stream::Files, message);
         }
+        for message in images.take(peer.room(Stream::Clipboard)) {
+            peer.send_stream(Stream::Clipboard, message);
+        }
         for message in terminals.poll(peer.room(Stream::Terminal)) {
             if let TerminalMessage::Exited { id, code } = &message {
                 lines.push(format!("command line {id} ended with exit code {code}"));
@@ -1244,13 +1272,22 @@ fn session(
             }
         }
         if let Some(opened) = channel_open_at {
-            if let Some(clipboard) = &clipboard
-                && let Some(text) = clipboard.changed()
-                && clipboard_stats.last_in.as_ref() != Some(&text)
-                && text.len() <= MAX_CLIPBOARD_TEXT
-            {
-                peer.send_data(Message::ClipboardText(text).encode());
-                clipboard_stats.sent += 1;
+            match clipboard.as_ref().and_then(Clipboard::changed) {
+                Some(ClipContent::Text(text))
+                    if clipboard_stats.last_in.as_ref() != Some(&text)
+                        && text.len() <= MAX_CLIPBOARD_TEXT =>
+                {
+                    peer.send_data(Message::ClipboardText(text).encode());
+                    clipboard_stats.sent += 1;
+                }
+                // Queued (compressed) to go on the clipboard stream.
+                Some(ClipContent::Image(image))
+                    if last_image_in != Some(image_fingerprint(&image))
+                        && images.send(&image).is_ok() =>
+                {
+                    images_sent += 1
+                }
+                _ => {}
             }
             if options.clipboard_test
                 && !clipboard_stats.test_sent
@@ -1259,6 +1296,9 @@ fn session(
                 let text = format!("{CLIPBOARD_TEST_TEXT} (from the agent)");
                 peer.send_data(Message::ClipboardText(text).encode());
                 clipboard_stats.sent += 1;
+                if images.send(&test_picture(2)).is_ok() {
+                    images_sent += 1;
+                }
                 clipboard_stats.test_sent = true;
             }
         }
@@ -1349,6 +1389,10 @@ fn session(
         summary(&mut stats.agent_ms)
     ));
     lines.push(clipboard_stats.line());
+    lines.push(format!(
+        "clipboard images: {images_received} received, {images_sent} sent; test image from the other side received: {}",
+        if image_test_received { "yes" } else { "no" }
+    ));
     // The speakers go back to how the person left them, however the session ended.
     if let Some(before) = speakers_before.take() {
         let restored = queqiao_audio::set_mute(options.sound_device.as_deref(), before);

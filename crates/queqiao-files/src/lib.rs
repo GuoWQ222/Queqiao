@@ -13,6 +13,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
+mod clip;
+
+pub use clip::{
+    ClipMessage, ImageReceiver, ImageSender, MAX_IMAGE, image_fingerprint, test_picture,
+};
+
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};

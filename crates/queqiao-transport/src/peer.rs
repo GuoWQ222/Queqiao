@@ -109,17 +109,20 @@ pub enum Stream {
     Files,
     /// Remote command lines.
     Terminal,
+    /// Clipboard images.
+    Clipboard,
 }
 
-const STREAMS: usize = 2;
+const STREAMS: usize = 3;
 
 impl Stream {
-    pub const ALL: [Stream; STREAMS] = [Stream::Files, Stream::Terminal];
+    pub const ALL: [Stream; STREAMS] = [Stream::Files, Stream::Terminal, Stream::Clipboard];
 
     fn label(self) -> &'static str {
         match self {
             Stream::Files => "files",
             Stream::Terminal => "terminal",
+            Stream::Clipboard => "clipboard",
         }
     }
 

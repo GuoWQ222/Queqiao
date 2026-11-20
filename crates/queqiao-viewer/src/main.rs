@@ -70,8 +70,9 @@ const KEY_ENTER: u16 = 0x1C;
 const KEY_CTRL: u16 = 0x1D;
 const KEY_ALT: u16 = 0x38;
 use queqiao_audio::{Player, TEST_TONE_HZ};
+use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
-use queqiao_input::Clipboard;
+use queqiao_input::{ClipContent, Clipboard};
 
 /// The start of the clipboard text the tests send (each side checks it got the other's).
 const CLIPBOARD_TEST_TEXT: &str = "Queqiao clipboard test";
@@ -880,6 +881,11 @@ fn session(
     let mut decoded: Vec<DecodedFrame> = Vec::new();
     // Files both ways: dropped on the window, or from the agent into Downloads\Queqiao.
     let mut transfers = Transfers::new(downloads_folder(), true);
+    // Clipboard images both ways, on their own stream.
+    let (mut images, mut image_in) = (ImageSender::default(), ImageReceiver::default());
+    let (mut images_received, mut images_sent, mut image_test_received) = (0u32, 0u32, false);
+    // The image last received: not put on the clipboard again, nor sent back (as for text).
+    let mut last_image_in: Option<u64> = None;
     for path in &options.send_files {
         let _ = transfers.send(path);
     }
@@ -1105,19 +1111,31 @@ fn session(
             }
         }
         if channel_open {
-            if let Some(clipboard) = &clipboard
-                && let Some(text) = clipboard.changed()
-                && clipboard_last_in.as_ref() != Some(&text)
-                && text.len() <= MAX_CLIPBOARD_TEXT
-            {
-                peer.send_data(Message::ClipboardText(text).encode());
-                clipboard_out += 1;
+            match clipboard.as_ref().and_then(Clipboard::changed) {
+                Some(ClipContent::Text(text))
+                    if clipboard_last_in.as_ref() != Some(&text)
+                        && text.len() <= MAX_CLIPBOARD_TEXT =>
+                {
+                    peer.send_data(Message::ClipboardText(text).encode());
+                    clipboard_out += 1;
+                }
+                // Queued (compressed) to go on the clipboard stream.
+                Some(ClipContent::Image(image))
+                    if last_image_in != Some(image_fingerprint(&image))
+                        && images.send(&image).is_ok() =>
+                {
+                    images_sent += 1
+                }
+                _ => {}
             }
             let due = *clipboard_test_at.get_or_insert(Instant::now() + Duration::from_secs(1));
             if options.clipboard_test && clipboard_test_at.is_some() && Instant::now() >= due {
                 let text = format!("{CLIPBOARD_TEST_TEXT} (from the viewer)");
                 peer.send_data(Message::ClipboardText(text).encode());
                 clipboard_out += 1;
+                if images.send(&test_picture(1)).is_ok() {
+                    images_sent += 1;
+                }
                 // Sent once: far in the future from now on.
                 clipboard_test_at = Some(Instant::now() + Duration::from_secs(1 << 30));
             }
@@ -1137,6 +1155,9 @@ fn session(
 
         for message in transfers.take(peer.room(Stream::Files)) {
             peer.send_stream(Stream::Files, message);
+        }
+        for message in images.take(peer.room(Stream::Clipboard)) {
+            peer.send_stream(Stream::Clipboard, message);
         }
         terminals.poll(&peer, lines);
         report_files(transfers.outcomes(), lines);
@@ -1171,6 +1192,25 @@ fn session(
                     }
                 }
                 PeerEvent::StreamOpen(Stream::Files) => report_files(transfers.opened(), lines),
+                PeerEvent::StreamOpen(Stream::Clipboard) => {}
+                PeerEvent::StreamData(Stream::Clipboard, bytes) => {
+                    if let Some(result) = image_in.handle(&bytes) {
+                        match result {
+                            Ok(image) => {
+                                images_received += 1;
+                                image_test_received |= image == test_picture(2);
+                                let print = image_fingerprint(&image);
+                                if last_image_in != Some(print) {
+                                    last_image_in = Some(print);
+                                    if let Some(clipboard) = &clipboard {
+                                        clipboard.set(ClipContent::Image(image));
+                                    }
+                                }
+                            }
+                            Err(error) => lines.push(format!("clipboard image dropped: {error}")),
+                        }
+                    }
+                }
                 PeerEvent::StreamOpen(Stream::Terminal) => {
                     if options.terminal_test {
                         terminals.open(&peer, agent, true, lines);
@@ -1378,6 +1418,10 @@ fn session(
     lines.push(format!(
         "clipboard: {clipboard_in} received, {clipboard_out} sent; test text from the other side received: {}",
         if clipboard_test_received { "yes" } else { "no" }
+    ));
+    lines.push(format!(
+        "clipboard images: {images_received} received, {images_sent} sent; test image from the other side received: {}",
+        if image_test_received { "yes" } else { "no" }
     ));
     for (stage, values) in [
         ("window messages", &mut stats.pump_ms),

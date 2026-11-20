@@ -185,6 +185,14 @@ try {
                 $titlePattern = "^window title: Queqiao - .+ \| \d+ ms \| \d+ fps \| \d+(\.\d)? [kM]bit/s \| $pathWord"
                 if (-not ($text | Where-Object { $_ -match $titlePattern })) { $failed += "$label viewer (expected '$titlePattern')" }
             }
+            if ($extra -like '*--clipboard-test*' -and -not ($text | Where-Object { $_ -match 'test image from the other side received: yes' })) {
+                $failed += "$label $program (expected the other side's test image)"
+            }
+            # No echo: on one PC both sides share the clipboard, so an image may come back once, not over and over.
+            $imageLine = $text | Where-Object { $_ -match '^clipboard images: (\d+) received' } | Select-Object -First 1
+            if ($imageLine -and $imageLine -match '^clipboard images: (\d+) received' -and [int]$Matches[1] -gt 3) {
+                $failed += "$label $program (clipboard images echo: $imageLine)"
+            }
             # Muted speakers: the tone must still come through (the sound test), and the mute is put back.
             if ($extra -like '*--clipboard-test*' -and $soundTest -and $program -eq 'agent') {
                 foreach ($pattern in @("^command from the viewer: that PC's speakers are muted", '^speakers: put back \(muted: False\)$')) {

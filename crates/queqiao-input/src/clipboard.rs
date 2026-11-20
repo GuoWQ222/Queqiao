@@ -1,7 +1,7 @@
-//! The clipboard, shared between the viewer and the agent (text for now). A watcher thread
-//! ("queqiao-clipboard") owns a hidden message-only window registered for clipboard updates: it reports text
-//! copied on this PC and puts text from the other side on the clipboard, remembering what it put there so
-//! that text is not sent back.
+//! The clipboard, shared between the viewer and the agent: text and images (CF_DIB). A watcher thread
+//! ("queqiao-clipboard") owns a hidden message-only window registered for clipboard updates: it reports what is
+//! copied on this PC and puts what comes from the other side on the clipboard, remembering (by fingerprint) what
+//! it put there so that it is not sent back.
 
 use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -17,18 +17,45 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
-/// Wakes the watcher thread to put text on the clipboard.
+/// Wakes the watcher thread to put something on the clipboard.
 const SET_TEXT: u32 = WM_APP + 2;
+/// Images larger than this are left alone (64 MB).
+const MAX_IMAGE: usize = 64 << 20;
+
+/// What the clipboard holds: text, or an image as a device-independent bitmap (CF_DIB bytes).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipContent {
+    Text(String),
+    Image(Vec<u8>),
+}
+
+impl ClipContent {
+    fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+impl std::hash::Hash for ClipContent {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            ClipContent::Text(text) => (0u8, text).hash(state),
+            ClipContent::Image(bytes) => (1u8, bytes).hash(state),
+        }
+    }
+}
 
 struct State {
-    changes: Sender<String>,
-    pending: Receiver<String>,
-    /// The last text this watcher put on the clipboard (its own update is not reported).
-    last_set: Option<String>,
+    changes: Sender<ClipContent>,
+    pending: Receiver<ClipContent>,
+    /// What this watcher last put on the clipboard (its own update is not reported).
+    last_set: Option<u64>,
 }
 
 thread_local! {
@@ -37,8 +64,8 @@ thread_local! {
 
 pub struct Clipboard {
     window: usize,
-    texts: Sender<String>,
-    changes: Receiver<String>,
+    texts: Sender<ClipContent>,
+    changes: Receiver<ClipContent>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -64,7 +91,12 @@ impl Clipboard {
 
     /// Puts `text` on this PC's clipboard (from the other side).
     pub fn set_text(&self, text: String) {
-        if self.texts.send(text).is_ok() {
+        self.set(ClipContent::Text(text));
+    }
+
+    /// Puts text or an image on this PC's clipboard (from the other side).
+    pub fn set(&self, content: ClipContent) {
+        if self.texts.send(content).is_ok() {
             let _ = unsafe {
                 PostMessageW(
                     Some(HWND(self.window as *mut _)),
@@ -76,8 +108,8 @@ impl Clipboard {
         }
     }
 
-    /// Text copied on this PC since the last call, if any (the latest only).
-    pub fn changed(&self) -> Option<String> {
+    /// What was copied on this PC since the last call, if anything (the latest only).
+    pub fn changed(&self) -> Option<ClipContent> {
         self.changes.try_iter().last()
     }
 }
@@ -99,8 +131,8 @@ impl Drop for Clipboard {
 }
 
 fn watch(
-    changes: Sender<String>,
-    pending: Receiver<String>,
+    changes: Sender<ClipContent>,
+    pending: Receiver<ClipContent>,
     ready: &Sender<Result<usize, String>>,
 ) {
     let window = match create_window() {
@@ -171,31 +203,40 @@ extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_CLIPBOARDUPDATE => {
-            if let Some(text) = read_text(Some(hwnd)) {
+            let content = read_text(Some(hwnd))
+                .map(ClipContent::Text)
+                .or_else(|| read_image(Some(hwnd)).map(ClipContent::Image));
+            if let Some(content) = content {
+                let print = content.fingerprint();
                 STATE.with_borrow(|state| {
                     if let Some(state) = state
-                        && state.last_set.as_ref() != Some(&text)
+                        && state.last_set != Some(print)
                     {
-                        let _ = state.changes.send(text);
+                        let _ = state.changes.send(content);
                     }
                 });
             }
             LRESULT(0)
         }
         SET_TEXT => {
-            let texts: Vec<String> = STATE.with_borrow(|state| {
+            let contents: Vec<ClipContent> = STATE.with_borrow(|state| {
                 state
                     .as_ref()
                     .map_or_else(Vec::new, |state| state.pending.try_iter().collect())
             });
-            if let Some(text) = texts.into_iter().last()
-                && write_text(hwnd, &text)
-            {
-                STATE.with_borrow_mut(|state| {
-                    if let Some(state) = state {
-                        state.last_set = Some(text);
-                    }
-                });
+            if let Some(content) = contents.into_iter().last() {
+                let print = content.fingerprint();
+                let placed = match &content {
+                    ClipContent::Text(text) => write_text(hwnd, text),
+                    ClipContent::Image(bytes) => write_global(hwnd, u32::from(CF_DIB.0), bytes),
+                };
+                if placed {
+                    STATE.with_borrow_mut(|state| {
+                        if let Some(state) = state {
+                            state.last_set = Some(print);
+                        }
+                    });
+                }
             }
             LRESULT(0)
         }
@@ -248,18 +289,48 @@ pub fn read_text(owner: Option<HWND>) -> Option<String> {
     text
 }
 
+/// The clipboard's image as a device-independent bitmap (CF_DIB: header and pixels), if it holds one.
+pub fn read_image(owner: Option<HWND>) -> Option<Vec<u8>> {
+    if unsafe { IsClipboardFormatAvailable(u32::from(CF_DIB.0)) }.is_err() || !open(owner) {
+        return None;
+    }
+    let image = (|| {
+        let handle = unsafe { GetClipboardData(u32::from(CF_DIB.0)) }.ok()?;
+        let memory = HGLOBAL(handle.0);
+        let size = unsafe { GlobalSize(memory) };
+        if size == 0 || size > MAX_IMAGE {
+            return None;
+        }
+        let pointer = unsafe { GlobalLock(memory) } as *const u8;
+        if pointer.is_null() {
+            return None;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(pointer, size) }.to_vec();
+        let _ = unsafe { GlobalUnlock(memory) };
+        Some(bytes)
+    })();
+    let _ = unsafe { CloseClipboard() };
+    image
+}
+
 fn write_text(owner: HWND, text: &str) -> bool {
     let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-    let Ok(memory) = (unsafe { GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2) }) else {
+    let bytes = unsafe { std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2) };
+    write_global(owner, u32::from(CF_UNICODETEXT.0), bytes)
+}
+
+/// Puts `bytes` on the clipboard as `format` (replacing what was there).
+fn write_global(owner: HWND, format: u32, bytes: &[u8]) -> bool {
+    let Ok(memory) = (unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) }) else {
         return false;
     };
-    let pointer = unsafe { GlobalLock(memory) } as *mut u16;
+    let pointer = unsafe { GlobalLock(memory) } as *mut u8;
     if pointer.is_null() {
         let _ = unsafe { GlobalFree(Some(memory)) };
         return false;
     }
     unsafe {
-        std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer, wide.len());
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer, bytes.len());
         let _ = GlobalUnlock(memory);
     }
     if !open(Some(owner)) {
@@ -268,7 +339,7 @@ fn write_text(owner: HWND, text: &str) -> bool {
     }
     let placed = unsafe {
         let _ = EmptyClipboard();
-        SetClipboardData(u32::from(CF_UNICODETEXT.0), Some(HANDLE(memory.0)))
+        SetClipboardData(format, Some(HANDLE(memory.0)))
     };
     let _ = unsafe { CloseClipboard() };
     if placed.is_err() {
