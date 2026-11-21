@@ -216,17 +216,51 @@ pub struct Outbox {
 impl Outbox {
     /// Queues `path` (a file) and offers it.
     pub fn add(&mut self, path: &Path) -> Result<(), String> {
-        let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let meta = file.metadata().map_err(|e| e.to_string())?;
-        if !meta.is_file() {
-            return Err(format!(
-                "{}: not a file (folders are not sent yet)",
-                path.display()
-            ));
-        }
         let name = path
             .file_name()
             .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+        if path.is_dir() {
+            return self.add_folder(path, &name);
+        }
+        self.add_named(path, name)
+    }
+
+    /// Every file in `folder` (and below), offered as "<folder name>/<path inside>"; links are not followed.
+    fn add_folder(&mut self, folder: &Path, name: &str) -> Result<(), String> {
+        let mut pending = vec![(folder.to_path_buf(), name.to_string())];
+        let mut count = 0usize;
+        while let Some((dir, prefix)) = pending.pop() {
+            let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                let inside = format!("{prefix}/{}", entry.file_name().to_string_lossy());
+                if kind.is_symlink() {
+                    continue;
+                } else if kind.is_dir() {
+                    pending.push((entry.path(), inside));
+                } else if kind.is_file() {
+                    count += 1;
+                    if count > MAX_FOLDER_FILES {
+                        return Err(format!(
+                            "{}: more than {MAX_FOLDER_FILES} files",
+                            folder.display()
+                        ));
+                    }
+                    self.add_named(&entry.path(), inside)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_named(&mut self, path: &Path, name: String) -> Result<(), String> {
+        let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta = file.metadata().map_err(|e| e.to_string())?;
+        if !meta.is_file() {
+            return Err(format!("{}: not a file", path.display()));
+        }
         self.next_id += 1;
         let id = self.next_id;
         self.messages.push(FileMessage::Offer {
@@ -475,7 +509,14 @@ impl Inbox {
         {
             return Err("there is not enough free disk space on that PC".into());
         }
-        let target = self.folder.join(safe_name(name));
+        // A name may be a path inside a sent folder: each part made safe, never leaving the folder.
+        let target = self.folder.join(safe_relative_path(name));
+        if !target.starts_with(&self.folder) {
+            return Err("a name that leaves the folder".into());
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
         let part = unique(&target.with_file_name(format!(
             "{}.queqiao-part",
             target.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
@@ -624,6 +665,28 @@ impl Transfers {
 
 /// A file name that is safe on Windows: the last component only, no forbidden or control characters, no
 /// trailing dots or spaces, not a reserved device name, at most 200 characters.
+/// Files sent from one folder, at most.
+const MAX_FOLDER_FILES: usize = 10_000;
+
+/// A path inside a sent folder ("folder/sub/file.txt", either slash), made safe part by part: no empty, "." or
+/// ".." parts, no drive letters, each part a safe file name, at most 16 parts deep. Never leaves the folder it
+/// is joined to.
+pub fn safe_relative_path(name: &str) -> PathBuf {
+    let parts: Vec<String> = name
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .map(safe_name)
+        .collect();
+    let keep = parts.len().saturating_sub(16);
+    let path: PathBuf = parts[keep..].iter().collect();
+    if path.as_os_str().is_empty() {
+        PathBuf::from("file")
+    } else {
+        path
+    }
+}
+
 pub fn safe_name(name: &str) -> String {
     let last = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let mut clean: String = last
@@ -977,6 +1040,78 @@ mod robustness {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// Messages between an outbox and an inbox until nothing more moves.
+    fn pump(outbox: &mut Outbox, inbox: &mut Inbox) {
+        for _ in 0..10_000 {
+            let messages = outbox.take(usize::MAX);
+            if messages.is_empty() {
+                return;
+            }
+            for message in messages {
+                for reply in inbox.handle(message) {
+                    outbox.handle(&reply);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_folder_arrives_with_its_inside() {
+        let root =
+            std::env::temp_dir().join(format!("queqiao-files-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("photos");
+        std::fs::create_dir_all(source.join("2026").join("may")).unwrap();
+        std::fs::write(source.join("top.txt"), b"top").unwrap();
+        std::fs::write(
+            source.join("2026").join("may").join("deep.bin"),
+            vec![7u8; 40_000],
+        )
+        .unwrap();
+        let target = root.join("inbox");
+        let mut outbox = Outbox::default();
+        outbox.add(&source).unwrap();
+        let mut inbox = Inbox::new(target.clone(), true);
+        pump(&mut outbox, &mut inbox);
+        assert_eq!(
+            std::fs::read(target.join("photos").join("top.txt")).unwrap(),
+            b"top"
+        );
+        assert_eq!(
+            std::fs::read(
+                target
+                    .join("photos")
+                    .join("2026")
+                    .join("may")
+                    .join("deep.bin")
+            )
+            .unwrap(),
+            vec![7u8; 40_000]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn paths_from_the_other_side_stay_inside() {
+        for (name, expected) in [
+            ("../../evil.txt", "evil.txt"),
+            ("a/../../b.txt", "a/b.txt"),
+            (r"C:\Windows\system32\x.dll", "C_/Windows/system32/x.dll"),
+            ("folder/CON/nul.txt", "folder/_CON/_nul.txt"),
+            ("/./", "file"),
+        ] {
+            let path = safe_relative_path(name);
+            let joined: Vec<String> = path
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(joined.join("/"), expected, "{name}");
+            assert!(path.is_relative(), "{name}");
+        }
+        let deep: String = (0..40).map(|i| format!("d{i}/")).collect::<String>() + "f.txt";
+        assert_eq!(safe_relative_path(&deep).components().count(), 16);
+    }
+
     #[test]
     fn random_streams_stay_in_the_folder() {
         let parent =
@@ -997,11 +1132,21 @@ mod robustness {
                 .map(|e| e.file_name())
                 .collect();
             assert!(beside.iter().all(|name| name == "inbox"), "{beside:?}");
-            if let Ok(entries) = std::fs::read_dir(&folder) {
+            // Everything below the folder (names may be paths now): files and folders, no part files.
+            let mut pending = vec![folder.clone()];
+            while let Some(dir) = pending.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     assert!(!name.ends_with(".queqiao-part"), "left behind: {name}");
-                    assert!(entry.path().is_file(), "not a plain file: {name}");
+                    assert!(entry.path().starts_with(&folder));
+                    if entry.path().is_dir() {
+                        pending.push(entry.path());
+                    } else {
+                        assert!(entry.path().is_file(), "not a plain file: {name}");
+                    }
                 }
             }
         }

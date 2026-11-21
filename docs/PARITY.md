@@ -71,7 +71,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Clipboard both ways: images (compressed, checked with SHA-256, up to 64 MB) | done (2026-11-21) |
 | Clipboard both ways: files (copy here, paste there) | planned |
 | File transfer both ways: drop files on the session window; into Downloads\Queqiao, checked with SHA-256 | done (2026-11-21; receiving can be turned off in the tray) |
-| File transfer by copy and paste, folders, a transfer list with pause, resume and cancel | planned (M6) |
+| File transfer of whole folders (inside kept, every path part made safe) | done (2026-11-21) |
+| File transfer by copy and paste, a transfer list with pause, resume and cancel | planned |
 | Helpers from other accounts get no file transfer, command lines, privacy screen or restart | done (2026-11-21); a setting to allow file transfer for helpers: planned |
 
 ## The controlled PC

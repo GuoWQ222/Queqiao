@@ -98,6 +98,14 @@ try {
         $random.GetBytes($bytes)
         [IO.File]::WriteAllBytes($testFile, $bytes)
     }
+    # A folder with a file inside a subfolder, for the allowed session (sent as a whole, inside kept).
+    $folderToAgent = Join-Path $Out 'queqiao-test-folder'
+    Remove-Item -LiteralPath $folderToAgent -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force (Join-Path $folderToAgent 'inner') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $folderToAgent 'top.txt'), 'queqiao folder test')
+    $bytes = New-Object byte[] 300000
+    $random.GetBytes($bytes)
+    [IO.File]::WriteAllBytes((Join-Path $folderToAgent 'inner\deep.bin'), $bytes)
     # label, QUEQIAO_FORCE, extra agent options, what the agent's report must say, what the viewer's must say,
     # whether both runs must pass (a declined session passes neither). Later options win, so an extra --seconds shortens the agent's run.
     $runs = @(
@@ -120,7 +128,7 @@ try {
         # A command line on that PC, in a window of its own that closes by itself.
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
-        if ($extra -like '*--privacy-test*') { $viewerArgs += ' --privacy --max-bitrate 3000' }
+        if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`"" }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
         if ($soundTest) {
             $agentArgs += " --sound-device `"$AgentSoundDevice`""
@@ -176,6 +184,16 @@ try {
                 $wanted = if ($program -eq 'agent') { @('^privacy test: PASS', '^privacy: the session banner is above the dark screen: yes', '^command from the viewer: bitrate: up to 3\.0 Mbit/s', 'highest allowed 3\.0 Mbit/s') } else { @("^notice from that PC: that PC's screen is dark") }
                 foreach ($pattern in $wanted) {
                     if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "$label $program (expected '$pattern')" }
+                }
+                # The folder: both files arrive inside it (the subfolder too) and match; then they are removed.
+                if ($program -eq 'agent') {
+                    $received = @($text | Where-Object { $_ -match '^file received: (.+queqiao-test-folder.+) \(\d+ bytes' } | ForEach-Object { if ($_ -match '^file received: (.+) \(\d+ bytes') { $Matches[1] } })
+                    $deep = $received | Where-Object { $_ -match 'queqiao-test-folder\\inner\\deep\.bin$' }
+                    $same = $deep -and ((Get-FileHash -LiteralPath $deep).Hash -eq (Get-FileHash -LiteralPath (Join-Path $folderToAgent 'inner\deep.bin')).Hash)
+                    "folder check: $($received.Count) files received, inner file identical: $same"
+                    if ($received.Count -ne 2 -or -not $same) { $failed += "$label agent (the folder did not arrive whole)" }
+                    $receivedFolder = $received | ForEach-Object { $_ -replace '\\(top\.txt|inner\\deep\.bin)$', '' } | Select-Object -First 1
+                    if ($receivedFolder -and $receivedFolder -like '*queqiao-test-folder*') { Remove-Item -LiteralPath $receivedFolder -Recurse -Force -ErrorAction SilentlyContinue }
                 }
             }
             if ($label -eq 'relay' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^terminal test: PASS' })) {
