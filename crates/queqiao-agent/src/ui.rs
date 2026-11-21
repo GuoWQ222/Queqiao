@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use queqiao_display::{Presence, PresenceEvent, PrivacyScreen};
+use queqiao_display::{AccountState, Presence, PresenceEvent, PrivacyScreen};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::RECT;
 
@@ -34,6 +34,8 @@ enum Command {
     Privacy(Option<PrivacyLook>, Sender<Result<bool, String>>),
     /// Tests: the privacy screen hidden from capture or not.
     PrivacyExcluded(bool, Sender<Result<(), String>>),
+    /// Online, offline (trying again) or not logged in.
+    Account(AccountState),
 }
 
 /// The privacy screen over all monitors (`area` None), or for tests a square of `color` (0x00BBGGRR).
@@ -187,6 +189,11 @@ impl Ui {
         self.send(Command::PasswordHash(hash));
     }
 
+    /// How this PC stands with the account server (the tray menu shows it; "Log in..." while not online).
+    pub fn set_account_state(&self, state: AccountState) {
+        self.send(Command::Account(state));
+    }
+
     pub fn try_event(&self) -> Option<PresenceEvent> {
         self.events.try_recv().ok()
     }
@@ -309,6 +316,7 @@ fn run(
                     }
                 }
                 Ok(Command::LockSettings(locked)) => presence.set_settings_locked(locked),
+                Ok(Command::Account(state)) => presence.set_account_state(state),
                 Ok(Command::PasswordHash(hash)) => {
                     presence.set_password_check(password_check(hash))
                 }

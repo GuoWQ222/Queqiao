@@ -33,7 +33,9 @@ use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{Command, InputEvent, Message};
 use queqiao_core::text::trf;
-use queqiao_display::{PresenceEvent, normalize_code};
+use queqiao_display::{
+    AccountState, LoginAction, LoginFields, LoginForm, PresenceEvent, normalize_code,
+};
 use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{
@@ -105,6 +107,9 @@ struct Options {
     lock_after_session: bool,
     /// In a helper's session, choose a tray setting as a click would (tests: it must be refused).
     test_press_setting: bool,
+    /// Start not logged in and log in through the tray's "Log in..." and its form, filled with --server, --pin,
+    /// --user and --password (tests).
+    test_tray_login: bool,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -219,6 +224,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--test-device" => options.test_device = Some(args.next()?),
             "--lock-after-session" => options.lock_after_session = true,
             "--test-press-setting" => options.test_press_setting = true,
+            "--test-tray-login" => options.test_tray_login = true,
             "--service-channel" => options.service_channel = Some(args.next()?),
             "--logon" => options.logon = true,
             "--desktop-channel" => options.desktop_channel = Some(args.next()?),
@@ -384,45 +390,77 @@ fn run_account(
     if let Some(pin) = &options.pin {
         login.pin = pin.clone();
     }
-    if login.server.is_empty() {
-        return Err("not logged in: start once with --server <host:port> --pin <fingerprint> --user <name> --password <password>".into());
-    }
-    let password = options.user.as_deref().zip(options.password.as_deref());
-    let mut account = Account::connect(&mut login, &identity, AccountRole::Agent, password)
-        .map_err(|e| e.to_string())?;
-    if handed.is_none() {
-        login.save(AccountRole::Agent).map_err(|e| e.to_string())?;
-    }
-    if let Some(device) = &options.trust_new_key {
-        account.trust_new_key(device).map_err(|e| e.to_string())?;
-        lines.push(format!("the key of device {device} will be pinned anew"));
-    }
-    lines.push(format!(
-        "logged in as {} at {}; this device: {} ({}); {} devices on the account",
-        account.user,
-        login.server,
-        identity.name,
-        identity.id,
-        account.devices.len()
-    ));
+    // The person's own agent (started at sign-in, by the installer or from the Start menu) stays in the tray when
+    // it cannot go online: not logged in (the tray offers "Log in..."), or the server out of reach (it tries again
+    // after 1 s, 2 s, ... 30 s, in the background). Started for a test or for the sign-in screen, it ends with the
+    // error instead.
+    let tolerant = handed.is_none()
+        && (options.test_tray_login
+            || (options.test_device.is_none()
+                && options.server.is_none()
+                && options.user.is_none()
+                && options.password.is_none()
+                && options.trust_new_key.is_none()));
+    // A login is kept for this PC's own device only (not for a throwaway test device, nor the sign-in screen's).
+    let keeps_login = handed.is_none() && options.test_device.is_none();
+    let mut state = AccountState::Online;
+    let mut account = if options.test_tray_login || login.server.is_empty() {
+        if !tolerant {
+            return Err("not logged in: start once with --server <host:port> --pin <fingerprint> --user <name> --password <password>".into());
+        }
+        state = AccountState::LoggedOut;
+        lines.push("not logged in: Log in... in the tray".into());
+        None
+    } else {
+        let password = options.user.as_deref().zip(options.password.as_deref());
+        match Account::connect(&mut login, &identity, AccountRole::Agent, password) {
+            Ok(account) => Some(account),
+            Err(error) if !tolerant => return Err(error.0),
+            Err(error) => {
+                state = if needs_new_login(&error.0) {
+                    AccountState::LoggedOut
+                } else {
+                    AccountState::Offline
+                };
+                lines.push(format!("not online: {error}"));
+                None
+            }
+        }
+    };
+    ui.set_account_state(state);
 
     // With the service: this device for its agent at the sign-in screen while the person lets the account's devices
-    // in without asking (otherwise the service forgets it).
-    let mut offer_logon = handed.is_none() && options.test_device.is_none();
+    // in without asking (otherwise the service forgets it). Offered once online.
+    let mut offer_logon = false;
     let (mut sessions, mut passed) = (0u32, true);
     let mut retry = Duration::from_secs(1);
+    let mut next_try = Instant::now() + retry;
+    // A connection attempt in the background while offline: (the result, the login as the attempt left it).
+    type Attempt = std::thread::JoinHandle<(Result<Account, String>, SavedLogin)>;
+    let mut attempt: Option<Attempt> = None;
     let mut deferred: Vec<PresenceEvent> = Vec::new();
     // This PC's network cards, so another device of the account can wake it later.
     let macs = wake::macs();
-    if !macs.is_empty() {
-        account.send(ClientMessage::DeviceInfo { macs });
-    }
     // Help for someone of another account: the code shown while help requests are open.
     let mut help_code: Option<String> = options.help_code.clone();
     // A helper the person allowed when it asked without a code (its next session request needs no prompt).
     let mut helper_allowed: Option<String> = None;
-    if let Some(code) = &help_code {
-        account.open_help(code);
+    let mut trust_new_key = options.trust_new_key.as_deref();
+    if let Some(online) = account.as_mut() {
+        went_online(
+            online,
+            &login,
+            &identity,
+            keeps_login,
+            trust_new_key.take(),
+            &macs,
+            help_code.as_deref(),
+            lines,
+        )?;
+        offer_logon = keeps_login;
+    }
+    if options.test_tray_login {
+        ui.press_menu(queqiao_display::TEST_MENU_LOGIN);
     }
     loop {
         if end.is_some_and(|end| Instant::now() > end)
@@ -486,16 +524,45 @@ fn run_account(
                         "the person at this PC set: ask before each session: {on}"
                     ));
                 }
-                PresenceEvent::OpenHelp | PresenceEvent::HelpNewCode => {
-                    let code = new_help_code();
-                    account.open_help(&code);
-                    help_code = Some(code);
-                }
+                PresenceEvent::OpenHelp | PresenceEvent::HelpNewCode => match account.as_mut() {
+                    Some(online) => {
+                        let code = new_help_code();
+                        online.open_help(&code);
+                        help_code = Some(code);
+                    }
+                    None => {
+                        lines.push("help: not online".into());
+                        // Not on this thread: it keeps trying to go online meanwhile.
+                        std::thread::spawn(|| {
+                            queqiao_display::show_error(
+                                queqiao_core::text::tr("Queqiao"),
+                                queqiao_core::text::tr("This PC is not online, so nobody can be let in to help. Log in from the tray icon, or check the network."),
+                            )
+                        });
+                    }
+                },
                 PresenceEvent::HelpClose => {
-                    account.close_help();
+                    if let Some(online) = account.as_mut() {
+                        online.close_help();
+                    }
                     help_code = None;
                     lines.push("help: closed by the person at this PC".into());
                 }
+                PresenceEvent::LogIn if account.is_none() && tolerant => {
+                    if let Some((mut new, tried)) = tray_log_in(options, &login, &identity, lines) {
+                        login = tried;
+                        went_online(&mut new, &login, &identity, keeps_login, trust_new_key.take(), &macs, help_code.as_deref(), lines)?;
+                        lines.push("logged in from the tray".into());
+                        account = Some(new);
+                        // An attempt with the old login still running is let go (its connection closes when it ends).
+                        attempt = None;
+                        retry = Duration::from_secs(1);
+                        state = AccountState::Online;
+                        ui.set_account_state(state);
+                        offer_logon = keeps_login;
+                    }
+                }
+                PresenceEvent::LogIn => {}
                 PresenceEvent::SettingsLocked => {
                     lines.push("a setting was chosen while someone of another account controls this PC: refused".into())
                 }
@@ -516,11 +583,68 @@ fn run_account(
             lines.push("quit from the tray icon".into());
             break;
         }
+        // Offline or not logged in: the tray, and while offline an attempt in the background now and then.
+        let Some(online) = account.as_mut() else {
+            if let Some(worker) = attempt.take_if(|worker| worker.is_finished()) {
+                let outcome = worker
+                    .join()
+                    .map_err(|_| "the connection attempt failed".to_string());
+                match outcome {
+                    Ok((Ok(mut new), tried)) => {
+                        login = tried;
+                        went_online(
+                            &mut new,
+                            &login,
+                            &identity,
+                            keeps_login,
+                            trust_new_key.take(),
+                            &macs,
+                            help_code.as_deref(),
+                            lines,
+                        )?;
+                        lines.push("reconnected".into());
+                        account = Some(new);
+                        retry = Duration::from_secs(1);
+                        state = AccountState::Online;
+                        ui.set_account_state(state);
+                        offer_logon = keeps_login;
+                    }
+                    Ok((Err(error), _)) if needs_new_login(&error) => {
+                        if !tolerant {
+                            return Err(error);
+                        }
+                        lines.push(format!("not online: {error}"));
+                        state = AccountState::LoggedOut;
+                        ui.set_account_state(state);
+                    }
+                    Ok((Err(_), _)) | Err(_) => {
+                        retry = (retry * 2).min(Duration::from_secs(30));
+                        next_try = Instant::now() + retry;
+                    }
+                }
+            } else if attempt.is_none()
+                && state == AccountState::Offline
+                && Instant::now() >= next_try
+            {
+                if !tolerant && end.is_some_and(|end| next_try + retry > end) {
+                    return Err("the server connection was lost".into());
+                }
+                let (mut tried, identity) = (login.clone(), identity.clone());
+                attempt = Some(std::thread::spawn(move || {
+                    let result = Account::connect(&mut tried, &identity, AccountRole::Agent, None);
+                    (result.map_err(|error| error.0), tried)
+                }));
+            }
+            if let Some(event) = ui.wait_event(Duration::from_millis(100)) {
+                deferred.push(event);
+            }
+            continue;
+        };
         if offer_logon && let Some(service) = links.service.as_mut() {
             offer_logon = false;
             let allowed = settings.allow_account_control && !settings.ask_before_session;
             let offer = allowed
-                .then(|| logon_identity(&identity, &login, &account))
+                .then(|| logon_identity(&identity, &login, online))
                 .flatten();
             let handing = offer.is_some();
             match service.offer_logon(offer) {
@@ -533,7 +657,7 @@ fn run_account(
                 Err(error) => lines.push(format!("the sign-in screen: {error}")),
             }
         }
-        match account.next_event(Duration::from_millis(200)) {
+        match online.next_event(Duration::from_millis(200)) {
             Some(AccountEvent::Signal {
                 from,
                 from_name,
@@ -545,13 +669,13 @@ fn run_account(
             }) if kind == "hello" => {
                 // Only a device of this account whose key matches its pin, signing what it sends.
                 if let Err(error) =
-                    account.check_signal(&from, AccountRole::Viewer, &id, &kind, &body, &signature)
+                    online.check_signal(&from, AccountRole::Viewer, &id, &kind, &body, &signature)
                 {
                     lines.push(format!("refused a session request: {error}"));
                     continue;
                 }
                 // A device of another account, joined by this PC's help code.
-                let helper = account.helper_account(&from).map(str::to_string);
+                let helper = online.helper_account(&from).map(str::to_string);
                 let shown_name = match &helper {
                     Some(user) => trf(
                         "{viewer} (account {user}) is helping on this PC",
@@ -559,7 +683,7 @@ fn run_account(
                     ),
                     None => from_name.clone(),
                 };
-                let mut signal = account.session(&from, AccountRole::Viewer, &id);
+                let mut signal = online.session(&from, AccountRole::Viewer, &id);
                 if let Err(error) = check_hello(&body, "agent") {
                     let _ = signal.send("error", &error.0);
                     lines.push(format!("refused viewer {from_name}: {error}"));
@@ -665,22 +789,15 @@ fn run_account(
             }
             Some(AccountEvent::Closed(reason)) => {
                 lines.push(format!("server connection lost: {reason}"));
-                loop {
-                    if end.is_some_and(|end| Instant::now() + retry > end) {
-                        return Err("the server connection was lost".into());
-                    }
-                    std::thread::sleep(retry);
-                    match Account::connect(&mut login, &identity, AccountRole::Agent, None) {
-                        Ok(new) => {
-                            account = new;
-                            retry = Duration::from_secs(1);
-                            lines.push("reconnected".into());
-                            break;
-                        }
-                        Err(error) if error.0.contains("log in again") => return Err(error.0),
-                        Err(_) => retry = (retry * 2).min(Duration::from_secs(30)),
-                    }
+                if !tolerant && end.is_some_and(|end| Instant::now() + retry > end) {
+                    return Err("the server connection was lost".into());
                 }
+                // Tried again in the background (above), the tray responding meanwhile.
+                account = None;
+                retry = Duration::from_secs(1);
+                next_try = Instant::now() + retry;
+                state = AccountState::Offline;
+                ui.set_account_state(state);
             }
             Some(AccountEvent::Error(message)) => lines.push(format!("server: {message}")),
             Some(AccountEvent::Notice(message)) => lines.push(format!("notice: {message}")),
@@ -710,7 +827,7 @@ fn run_account(
                     );
                     matches!(ask_consent(ui, &question, options.answer), Ok(true))
                 };
-                account.answer_help(request, allowed);
+                online.answer_help(request, allowed);
                 lines.push(format!(
                     "help: {} of account {user} asked without a code: {}",
                     device.name,
@@ -735,7 +852,7 @@ fn run_account(
                 // The code is used up: a new one, while the window is open.
                 if help_code.is_some() {
                     let code = new_help_code();
-                    account.open_help(&code);
+                    online.open_help(&code);
                     help_code = Some(code);
                 }
             }
@@ -751,6 +868,145 @@ fn run_account(
     }
     lines.push(format!("{sessions} sessions"));
     Ok(passed && options.sessions.is_none_or(|n| sessions >= n))
+}
+
+/// Whether the server wants the password again (the saved login expired, was revoked, or the password changed).
+fn needs_new_login(error: &str) -> bool {
+    error.contains("log in again")
+}
+
+/// Just online: the login kept (for this PC's own device), a new key pinned if asked, this PC's network cards sent
+/// (so another device of the account can wake it), and help requests open again if they were.
+#[allow(clippy::too_many_arguments)]
+fn went_online(
+    account: &mut Account,
+    login: &SavedLogin,
+    identity: &DeviceIdentity,
+    keep_login: bool,
+    trust_new_key: Option<&str>,
+    macs: &[String],
+    help_code: Option<&str>,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    if keep_login {
+        login.save(AccountRole::Agent).map_err(|e| e.to_string())?;
+    }
+    if let Some(device) = trust_new_key {
+        account.trust_new_key(device).map_err(|e| e.to_string())?;
+        lines.push(format!("the key of device {device} will be pinned anew"));
+    }
+    lines.push(format!(
+        "logged in as {} at {}; this device: {} ({}); {} devices on the account",
+        account.user,
+        login.server,
+        identity.name,
+        identity.id,
+        account.devices.len()
+    ));
+    if !macs.is_empty() {
+        account.send(ClientMessage::DeviceInfo {
+            macs: macs.to_vec(),
+        });
+    }
+    if let Some(code) = help_code {
+        account.open_help(code);
+    }
+    Ok(())
+}
+
+/// "Log in..." in the tray: the login form (the server, its certificate fingerprint, the user name and the
+/// password), the login itself in the background so the form keeps responding. The account and the login as it
+/// now is, or None when the person closed the form.
+fn tray_log_in(
+    options: &Options,
+    login: &SavedLogin,
+    identity: &DeviceIdentity,
+    lines: &mut Vec<String>,
+) -> Option<(Account, SavedLogin)> {
+    let defaults = LoginFields {
+        server: login.server.clone(),
+        pin: login.pin.clone(),
+        user: String::new(),
+        password: String::new(),
+    };
+    let mut form = match LoginForm::new(
+        queqiao_core::text::tr("Queqiao - log in this PC"),
+        &defaults,
+    ) {
+        Ok(form) => form,
+        Err(error) => {
+            lines.push(format!("login form: {}", error.message()));
+            return None;
+        }
+    };
+    if options.test_tray_login {
+        form.set_fields(&LoginFields {
+            server: options.server.clone().unwrap_or_default(),
+            pin: options.pin.clone().unwrap_or_default(),
+            user: options.user.clone().unwrap_or_default(),
+            password: options.password.clone().unwrap_or_default(),
+        });
+        let drawn = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < drawn {
+            let _ = form.next(20);
+        }
+        if let Some(folder) = &options.ui_pictures {
+            let _ = form.save_picture(&folder.join("agent_login.bmp"));
+        }
+        form.submit();
+    }
+    loop {
+        match form.next(15) {
+            Some(LoginAction::Cancel) => {
+                lines.push("login: the form was closed".into());
+                return None;
+            }
+            Some(LoginAction::Submit(fields)) => {
+                if [&fields.server, &fields.pin, &fields.user, &fields.password]
+                    .iter()
+                    .any(|value| value.is_empty())
+                {
+                    form.set_status(queqiao_core::text::tr("Please fill in all four fields."));
+                    continue;
+                }
+                let mut tried = login.clone();
+                if tried.server != fields.server {
+                    tried.refresh_token = None;
+                }
+                tried.server = fields.server.clone();
+                tried.pin = fields.pin.clone();
+                form.set_busy(true, queqiao_core::text::tr("Logging in..."));
+                let identity = identity.clone();
+                let worker = std::thread::spawn(move || {
+                    let result = Account::connect(
+                        &mut tried,
+                        &identity,
+                        AccountRole::Agent,
+                        Some((&fields.user, &fields.password)),
+                    );
+                    (result.map_err(|error| error.0), tried)
+                });
+                while !worker.is_finished() {
+                    if let Some(LoginAction::Cancel) = form.next(15) {
+                        lines.push("login: the form was closed".into());
+                        return None;
+                    }
+                }
+                match worker.join() {
+                    Ok((Ok(account), tried)) => return Some((account, tried)),
+                    Ok((Err(error), _)) => {
+                        lines.push(format!("login: {error}"));
+                        if options.test_tray_login {
+                            return None;
+                        }
+                        form.set_busy(false, &error);
+                    }
+                    Err(_) => return None,
+                }
+            }
+            None => {}
+        }
+    }
 }
 
 /// Asks the person at the PC whether `viewer` may control it; false when denied or unanswered.

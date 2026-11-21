@@ -36,6 +36,10 @@ const LBS_NOTIFY: u32 = 0x1;
 const LBS_USETABSTOPS: u32 = 0x80;
 const LBS_NOINTEGRALHEIGHT: u32 = 0x100;
 const BS_DEFPUSHBUTTON: u32 = 0x1;
+const BS_AUTOCHECKBOX: u32 = 0x3;
+const BM_GETCHECK: u32 = 0x00F0;
+const BM_SETCHECK: u32 = 0x00F1;
+const BST_CHECKED: usize = 1;
 const SS_NOPREFIX: u32 = 0x80;
 const SS_ENDELLIPSIS: u32 = 0x4000;
 const LBN_DBLCLK: u16 = 2;
@@ -50,6 +54,8 @@ const ID_LOGOUT: u16 = 101;
 const ID_HELP: u16 = 102;
 const ID_WAKE: u16 = 103;
 const ID_MORE: u16 = 104;
+const ID_AUTOSTART: u16 = 105;
+const ID_SERVICE: u16 = 106;
 /// The window was closed (not a control id).
 pub(crate) const CLOSED: u16 = 0xFFFF;
 
@@ -996,4 +1002,97 @@ pub fn show_error(title: &str, text: &str) {
             MB_ICONERROR | MB_OK,
         )
     };
+}
+
+/// A message box with an information icon.
+pub fn show_info(title: &str, text: &str) {
+    let (title, text) = (wide(title), wide(text));
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_ICONINFORMATION | MB_OK,
+        )
+    };
+}
+
+/// What the person chose in the installer.
+pub enum SetupAction {
+    Install { autostart: bool, service: bool },
+    Cancel,
+}
+
+/// The installer's window: what is installed where, two choices (start with Windows; the service for the
+/// sign-in, lock and UAC screens), Install and Cancel, and a status line.
+pub struct SetupForm {
+    form: Form,
+    autostart: HWND,
+    service: HWND,
+    status: HWND,
+}
+
+impl SetupForm {
+    pub fn new(text: &str, autostart: bool, service: bool) -> Result<SetupForm> {
+        let form = Form::new(tr("Install Queqiao"), 420, 250)?;
+        form.text(text, [20, 14, 380, 62])?;
+        let check = |label: &str, id: u16, top: i32, on: bool| -> Result<HWND> {
+            let hwnd = form.control(
+                w!("BUTTON"),
+                label,
+                WS_TABSTOP.0 | BS_AUTOCHECKBOX,
+                WINDOW_EX_STYLE::default(),
+                id,
+                [20, top, 380, 36],
+            )?;
+            unsafe { SendMessageW(hwnd, BM_SETCHECK, Some(WPARAM(usize::from(on))), None) };
+            Ok(hwnd)
+        };
+        let autostart = check(tr("Start with Windows"), ID_AUTOSTART, 82, autostart)?;
+        let service = check(
+            tr(
+                "Also at the sign-in, lock and UAC screens (installs the Queqiao service; needs an administrator)",
+            ),
+            ID_SERVICE,
+            118,
+            service,
+        )?;
+        let status = form.label("", [20, 162, 380, 20])?;
+        form.button(tr("Cancel"), ID_CANCEL, false, [190, 200, 100, 30])?;
+        form.button(tr("Install"), ID_OK, true, [300, 200, 100, 30])?;
+        form.show();
+        Ok(SetupForm {
+            form,
+            autostart,
+            service,
+            status,
+        })
+    }
+
+    pub fn hwnd(&self) -> HWND {
+        self.form.hwnd
+    }
+
+    pub fn set_status(&self, text: &str) {
+        set_text(self.status, text);
+    }
+
+    /// While installing: nothing to press.
+    pub fn set_busy(&self, busy: bool) {
+        self.form.set_enabled(!busy);
+    }
+
+    pub fn next(&mut self, wait_ms: u32) -> Option<SetupAction> {
+        let checked = |hwnd: HWND| {
+            unsafe { SendMessageW(hwnd, BM_GETCHECK, None, None) }.0 as usize == BST_CHECKED
+        };
+        match self.form.next_command(wait_ms)? {
+            ID_OK => Some(SetupAction::Install {
+                autostart: checked(self.autostart),
+                service: checked(self.service),
+            }),
+            ID_CANCEL | CLOSED => Some(SetupAction::Cancel),
+            _ => None,
+        }
+    }
 }

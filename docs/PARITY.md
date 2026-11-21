@@ -13,6 +13,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 |---|---|
 | Account, devices on the account, presence, connect by double-click | done (M3) |
 | Saved login, log out, remove (unbind) a device from the account | done (removing: "More..." in the device list, 2026-11-21) |
+| The controlled PC logs in from its tray ("Log in..."), and stays in the tray while it is offline: it tries again by itself (1 s, 2 s, ... 30 s) | done (2026-11-21, `scripts\run_m7_agent_login.ps1`: logged in through the form, the server stopped and started again, back online by itself); found by the installer test: before, an agent that could not reach its server, or had no login, ended at once |
 | Device remarks (a name of your own) and favourites (listed first), kept on this PC | done (2026-11-21, "More..." in the device list) |
 | Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); past a VPN or proxy tunnel holding the default route (Clash/Mihomo): a socket and candidates on every uplink, the server's UDP on its own address (2026-11-21); tested over the internet 2026-11-21 between the PC (public address) and the laptop behind its campus network and proxy: direct 20 ms median screen change -> shown, relayed 238 ms, input 7/7 both; manual "switch to relay" while connected: planned |
 | Help someone else: connect to a device of another account with its help ID (9 digits) and a one-use code (8 characters, 40 bits) that the person there reads out from "Let someone help me..."; "Help someone..." in the device list | done (2026-11-21) |
@@ -96,6 +97,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Feature | Status |
 |---|---|
 | Crash reports kept on the PC (what panicked, where, the call stack; newest 20 in %APPDATA%\Queqiao\crashes) | done (2026-11-21); sending them anywhere: not without the user's say |
-| Installer, self-update with rollback | planned (M7) |
+| Installer | done (2026-11-21, M7 part 1): `queqiao-setup-<version>.exe`, one signed file (`scripts\package.ps1`; a test certificate for now) carrying the signed programs, each checked against its SHA-256 before it is written; installs for the person without an administrator (`%LOCALAPPDATA%\Programs\Queqiao`, Start menu, Settings > Apps entry to uninstall, "Start with Windows" if chosen), and if chosen the service for the sign-in, lock and UAC screens (one UAC prompt); an earlier installation is replaced (its programs ended first) or put back if anything fails; `--quiet` and `--uninstall`. Tested on the PC with `scripts\run_m7_setup.ps1` (the window, install, update, uninstall, with and without the service) |
+| Self-update with rollback | planned (M7 part 2) |
 | Languages: Simplified Chinese and English, from Windows' display language (QUEQIAO_LANG=en/zh decides instead) | done (2026-11-21) for everything people click and read; the controlled PC's short notices to the viewer are still English |
 | Mobile and macOS clients, phone as an extra screen | later (the first version is Windows only) |

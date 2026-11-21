@@ -140,6 +140,18 @@ const CHINESE: &[(&str, &str)] = &[
         "鹊桥：已就绪，等待你的设备连接",
     ),
     ("Queqiao: ready", "鹊桥：已就绪"),
+    (
+        "Queqiao: cannot reach the server, trying again",
+        "鹊桥：连不上服务器，正在重试",
+    ),
+    ("Queqiao: not logged in", "鹊桥：未登录"),
+    ("Log in...", "登录……"),
+    ("Queqiao - log in this PC", "鹊桥 - 登录这台电脑"),
+    ("Logging in...", "正在登录……"),
+    (
+        "This PC is not online, so nobody can be let in to help. Log in from the tray icon, or check the network.",
+        "这台电脑未联网，暂时无法让别人来协助。请从托盘图标登录，或检查网络。",
+    ),
     ("End the session", "结束会话"),
     (
         "Let my account's devices control this PC",
@@ -184,6 +196,26 @@ const CHINESE: &[(&str, &str)] = &[
     ),
     ("Pause / resume", "暂停 / 继续"),
     ("Cancel", "取消"),
+    ("Install Queqiao", "安装鹊桥"),
+    ("Install", "安装"),
+    (
+        "Also at the sign-in, lock and UAC screens (installs the Queqiao service; needs an administrator)",
+        "在登录、锁屏和 UAC 界面也可控制（安装鹊桥服务，需要管理员）",
+    ),
+    (
+        "Queqiao will be installed for you on this PC, in {folder}. No administrator is needed for that.",
+        "鹊桥将为你安装在这台电脑的 {folder}，这一步不需要管理员。",
+    ),
+    ("Installing...", "正在安装……"),
+    (
+        "Queqiao is installed. Find it in the Start menu.",
+        "鹊桥已安装，可在开始菜单中找到。",
+    ),
+    ("Remove Queqiao from this PC?", "要从这台电脑上卸载鹊桥吗？"),
+    (
+        "Queqiao has been removed from this PC.",
+        "鹊桥已从这台电脑上卸载。",
+    ),
     ("sending", "发送"),
     ("receiving", "接收"),
     ("paused", "已暂停"),

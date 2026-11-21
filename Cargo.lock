@@ -901,6 +901,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "queqiao-setup"
+version = "0.1.0"
+dependencies = [
+ "queqiao-core",
+ "queqiao-display",
+ "sha2",
+ "windows",
+]
+
+[[package]]
 name = "queqiao-terminal"
 version = "0.1.0"
 dependencies = [

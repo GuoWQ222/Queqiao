@@ -57,6 +57,18 @@ pub enum PresenceEvent {
     HelpClose,
     /// The answer to the prompt: allowed, or denied (also when the time ran out or it was closed).
     Consent(bool),
+    /// "Log in...": the person wants to log this PC in to their account (offered while it is not online).
+    LogIn,
+}
+
+/// How this PC stands with the account server (the tray menu's first line).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountState {
+    Online,
+    /// Logged in, but the server cannot be reached at the moment: Queqiao tries again.
+    Offline,
+    /// No login, or the server wants a new one: the menu offers "Log in...".
+    LoggedOut,
 }
 
 const TRAY_CALLBACK: u32 = WM_APP + 1;
@@ -75,9 +87,11 @@ const ID_NEW_CODE: u16 = 213;
 const ID_HELP_CLOSE: u16 = 214;
 const MENU_HELP: u16 = 208;
 const MENU_LOCK_AFTER: u16 = 209;
+const MENU_LOGIN: u16 = 215;
 const MENU_PASSWORD: u16 = 220;
 /// Menu items tests can choose (the same path as a click).
 pub const TEST_MENU_TERMINAL: u16 = MENU_TERMINAL;
+pub const TEST_MENU_LOGIN: u16 = MENU_LOGIN;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
 /// The tray window asks for its menu (not a control id).
@@ -116,6 +130,7 @@ pub struct Presence {
     /// Checks the settings password, when one is set: settings and Quit ask for it.
     password_check: Option<PasswordCheck>,
     viewer: Option<String>,
+    account: AccountState,
 }
 
 impl Presence {
@@ -177,6 +192,7 @@ impl Presence {
             settings_locked: false,
             password_check: None,
             viewer: None,
+            account: AccountState::Online,
         };
         presence.update_tray();
         Ok(presence)
@@ -434,13 +450,18 @@ impl Presence {
             };
             if locked { flags | MF_GRAYED } else { flags }
         };
-        let status = wide(&match &self.viewer {
-            Some(viewer) => trf(
+        let status = wide(&match (&self.viewer, self.account) {
+            (Some(viewer), _) => trf(
                 "Queqiao: {viewer} is controlling this PC",
                 &[("viewer", viewer)],
             ),
-            None => tr("Queqiao: ready").into(),
+            (None, AccountState::Online) => tr("Queqiao: ready").into(),
+            (None, AccountState::Offline) => {
+                tr("Queqiao: cannot reach the server, trying again").into()
+            }
+            (None, AccountState::LoggedOut) => tr("Queqiao: not logged in").into(),
         });
+        let login = wide(tr("Log in..."));
         let end = wide(tr("End the session"));
         let allow = wide(tr("Let my account's devices control this PC"));
         let ask = wide(tr("Ask me before each session"));
@@ -461,6 +482,14 @@ impl Presence {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             if self.viewer.is_some() {
                 let _ = AppendMenuW(menu, MF_STRING, usize::from(MENU_END), PCWSTR(end.as_ptr()));
+            }
+            if self.account != AccountState::Online {
+                let _ = AppendMenuW(
+                    menu,
+                    checked(false),
+                    usize::from(MENU_LOGIN),
+                    PCWSTR(login.as_ptr()),
+                );
             }
             let _ = AppendMenuW(
                 menu,
@@ -548,6 +577,11 @@ impl Presence {
         self.password_check = check;
     }
 
+    /// How this PC stands with the account server (shown in the menu; "Log in..." while not online).
+    pub fn set_account_state(&mut self, state: AccountState) {
+        self.account = state;
+    }
+
     /// Locks the settings (true while someone of another account controls the PC) or unlocks them.
     pub fn set_settings_locked(&mut self, locked: bool) {
         self.settings_locked = locked;
@@ -566,7 +600,7 @@ impl Presence {
                 | MENU_LOCK_AFTER
                 | MENU_QUIT
         );
-        let protected = setting || item == MENU_PASSWORD;
+        let protected = setting || item == MENU_PASSWORD || item == MENU_LOGIN;
         if self.settings_locked && protected {
             return Some(PresenceEvent::SettingsLocked);
         }
@@ -589,6 +623,7 @@ impl Presence {
         {
             match item {
                 MENU_END => Some(PresenceEvent::EndSession),
+                MENU_LOGIN => Some(PresenceEvent::LogIn),
                 MENU_HELP => Some(PresenceEvent::OpenHelp),
                 MENU_ALLOW => {
                     self.allow = !self.allow;

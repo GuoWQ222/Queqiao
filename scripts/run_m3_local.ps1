@@ -59,20 +59,31 @@ $password1 = [guid]::NewGuid().ToString('N')
 $password2 = [guid]::NewGuid().ToString('N')
 & $server add-user alice $password1 --data $data
 & $server add-user bob $password2 --data $data
-$serverProcess = Start-Process -FilePath $server -ArgumentList @('serve', '--listen', $Listen, '--data', "`"$data`"", '--public-ip', $Listen.Split(':')[0], '--relay-private') -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
-try {
-    $hostName, $port = $Listen.Split(':')
+$serveArgs = @('serve', '--listen', $Listen, '--data', "`"$data`"", '--public-ip', $Listen.Split(':')[0], '--relay-private')
+$hostName, $port = $Listen.Split(':')
+function Start-TestServer([string]$Log) {
+    $process = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\$Log" -RedirectStandardError "$Out\server_err.txt"
     $deadline = (Get-Date).AddSeconds(10)
     do {
         Start-Sleep -Milliseconds 200
         $client = New-Object Net.Sockets.TcpClient
         try { $client.Connect($hostName, [int]$port); $up = $true } catch { $up = $false } finally { $client.Dispose() }
     } while (-not $up -and (Get-Date) -lt $deadline)
-    if (-not $up) { 'RUN_FAIL the server did not start'; return }
+    if ($up) { $process } else { $null }
+}
+$serverProcess = Start-TestServer 'server_out.txt'
+try {
+    if (-not $serverProcess) { 'RUN_FAIL the server did not start'; return }
     "server up, certificate $pin"
 
     '=== account probe'
     & (Join-Path $Bin 'examples\account_probe.exe') $Listen $pin alice $password1 bob $password2
+    # The probe fails logins on purpose (lockout checks, counted for 127.0.0.1 too): the server starts again so its
+    # in-memory failure counts do not lock the sessions out (as in run_m4_local.ps1). Accounts stay in its database.
+    Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    $serverProcess = Start-TestServer 'server_out2.txt'
+    if (-not $serverProcess) { 'RUN_FAIL the server did not start again'; return }
 
     $device = $env:COMPUTERNAME
     $agentArgs = "--server $Listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent.txt`""
@@ -96,5 +107,5 @@ try {
 } finally {
     Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
     '=== server log'
-    Get-Content -LiteralPath "$Out\server_out.txt", "$Out\server_err.txt" -ErrorAction SilentlyContinue
+    Get-Content -LiteralPath "$Out\server_out.txt", "$Out\server_out2.txt", "$Out\server_err.txt" -ErrorAction SilentlyContinue
 }
