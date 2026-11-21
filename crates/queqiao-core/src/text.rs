@@ -300,6 +300,20 @@ const CHINESE: &[(&str, &str)] = &[
         "请用鹊桥远程帮我看看电脑：在鹊桥中选择“帮助别人……”（或打开链接）。",
     ),
     ("Copy invitation", "复制邀请"),
+    ("Command lines...", "命令行……"),
+    (
+        "{name}: detach (it keeps running)",
+        "{name}：分离（继续运行）",
+    ),
+    ("{name}: show", "{name}：显示"),
+    ("{name}: rename...", "{name}：重命名……"),
+    ("{name}: end", "{name}：结束"),
+    ("No command lines are open.", "没有打开的命令行。"),
+    ("A name for this command line:", "这个命令行的名称："),
+    (
+        "Detached: the command line keeps running on that PC (Command lines... in the session menu shows it again).",
+        "已分离：命令行仍在那台电脑上运行（会话菜单中的“命令行……”可再次显示）。",
+    ),
     (
         "A fixed help code for this PC...",
         "为这台电脑设置固定验证码……",

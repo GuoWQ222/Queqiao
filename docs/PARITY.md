@@ -90,7 +90,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Wake-on-LAN through another Queqiao device of the account on the same network ("Wake up" in the device list) | done (2026-11-21) |
 | Wake-on-LAN set-up check (network card and BIOS settings) | planned |
 | Remote command line: several at once (ConPTY: PowerShell, or cmd), each in a console window; the person at the PC can forbid them in the tray | done (2026-11-21) |
-| Command lines: detach and resume, rename | planned |
+| Command lines: detach and resume, rename | done (2026-11-22): "Command lines..." in the session menu: detach (the window closes, the command line keeps running there, its output kept up to 256 KB), show again (the kept output first), rename (the window title), end. None outlives the session, so nothing keeps running unseen afterwards. Tested in `run_m4_local.ps1` (the terminal test detaches first, types while detached, shows the window again) |
 
 ## The program
 

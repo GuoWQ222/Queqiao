@@ -37,6 +37,8 @@ pub(crate) const FRAME_INPUT: u8 = 1;
 pub(crate) const FRAME_RESIZE: u8 = 2;
 pub(crate) const FRAME_OUTPUT: u8 = 3;
 pub(crate) const FRAME_END: u8 = 4;
+pub(crate) const FRAME_TITLE: u8 = 5;
+pub(crate) const FRAME_DETACH: u8 = 6;
 /// The helper must connect within this time.
 const CONNECT_LIMIT: Duration = Duration::from_secs(15);
 
@@ -166,6 +168,17 @@ impl TerminalWindow {
     /// Output of the command line, to show.
     pub fn output(&self, data: &[u8]) {
         self.send(FRAME_OUTPUT, data);
+    }
+
+    /// A new title for the window.
+    pub fn set_title(&self, title: &str) {
+        self.send(FRAME_TITLE, title.as_bytes());
+    }
+
+    /// Closes the window without ending the command line (the viewer keeps its output until it is shown again).
+    pub fn detach(mut self) {
+        self.send(FRAME_DETACH, &[]);
+        self.frames = None;
     }
 
     /// The command line ended (or the session did): the window shows `text` and closes by itself.

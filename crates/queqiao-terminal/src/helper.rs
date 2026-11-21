@@ -19,7 +19,8 @@ use windows::core::{PCWSTR, w};
 use queqiao_core::text::tr;
 
 use crate::window::{
-    FRAME_END, FRAME_INPUT, FRAME_OUTPUT, FRAME_RESIZE, frame, open_pipe, read_frame, write_all,
+    FRAME_DETACH, FRAME_END, FRAME_INPUT, FRAME_OUTPUT, FRAME_RESIZE, FRAME_TITLE, frame,
+    open_pipe, read_frame, write_all,
 };
 
 const UTF8: u32 = 65001;
@@ -138,6 +139,30 @@ pub fn run_helper(pipe: &str, title: &str, test: bool) -> i32 {
                 pending.extend_from_slice(&body);
                 let text = take_utf8(&mut pending);
                 write_text(output, &text);
+            }
+            Ok((FRAME_TITLE, body)) => {
+                let title: Vec<u16> =
+                    format!("{} - {}", tr("Queqiao"), String::from_utf8_lossy(&body))
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .collect();
+                let _ = unsafe { SetConsoleTitleW(PCWSTR(title.as_ptr())) };
+            }
+            // Detached: the command line keeps running there; the viewer shows it again on request.
+            Ok((FRAME_DETACH, _)) => {
+                write_text(
+                    output,
+                    &format!(
+                        "\r\n\x1b[0m[{}]\r\n",
+                        tr(
+                            "Detached: the command line keeps running on that PC (Command lines... in the session menu shows it again)."
+                        )
+                    ),
+                );
+                if !test {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                return 0;
             }
             Ok((FRAME_END, body)) => {
                 write_text(

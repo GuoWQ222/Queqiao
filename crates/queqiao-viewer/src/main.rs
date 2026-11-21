@@ -18,7 +18,7 @@
 
 #![windows_subsystem = "windows"]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,7 @@ const MENU_ON_TOP: u16 = 0x10A0;
 const MENU_CUSTOM_BITRATE: u16 = 0x10B0;
 const MENU_TRANSFERS: u16 = 0x10C0;
 const MENU_RESTART_QUEQIAO: u16 = 0x10D0;
+const MENU_COMMAND_LINES: u16 = 0x10E0;
 /// The transfer list's buttons.
 const TRANSFER_PAUSE: u16 = 301;
 const TRANSFER_CANCEL: u16 = 302;
@@ -1126,6 +1127,7 @@ fn session(
         (MENU_MUTE_SPEAKERS, tr("Mute that PC's speakers")),
         (MENU_PRIVACY, tr("Darken that PC's screen")),
         (MENU_TERMINAL, tr("Open a command line on that PC")),
+        (MENU_COMMAND_LINES, tr("Command lines...")),
         (MENU_FULL_SCREEN, tr("Full screen (Ctrl+Alt+Enter)")),
         (MENU_ON_TOP, tr("Always on top")),
         (MENU_TRANSFERS, tr("Transfers...")),
@@ -1246,6 +1248,45 @@ fn session(
                     }
                     MENU_TERMINAL => {
                         terminals.open(&peer, agent, false, lines);
+                        None
+                    }
+                    MENU_COMMAND_LINES => {
+                        // Each command line: show (or detach), rename, end.
+                        let open = terminals.list();
+                        let labels: Vec<(u16, String)> = open
+                            .iter()
+                            .enumerate()
+                            .flat_map(|(at, (_, name, shown))| {
+                                let base = 0x2000 + (at as u16) * 4;
+                                [
+                                    if *shown {
+                                        (base + 1, trf("{name}: detach (it keeps running)", &[("name", name)]))
+                                    } else {
+                                        (base, trf("{name}: show", &[("name", name)]))
+                                    },
+                                    (base + 2, trf("{name}: rename...", &[("name", name)])),
+                                    (base + 3, trf("{name}: end", &[("name", name)])),
+                                ]
+                            })
+                            .collect();
+                        let items: Vec<(u16, &str, bool)> =
+                            labels.iter().map(|(id, label)| (*id, label.as_str(), false)).collect();
+                        if items.is_empty() {
+                            std::thread::spawn(|| {
+                                queqiao_display::show_info(tr("Queqiao"), tr("No command lines are open."))
+                            });
+                        } else if let Some(chosen) = popup_menu(window.hwnd(), &items) {
+                            let at = usize::from((chosen - 0x2000) / 4);
+                            let action = match (chosen - 0x2000) % 4 {
+                                0 => LineAction::Show,
+                                1 => LineAction::Detach,
+                                2 => LineAction::Rename,
+                                _ => LineAction::End,
+                            };
+                            if let Some((id, _, _)) = open.get(at) {
+                                terminals.act(*id, action, &peer, lines);
+                            }
+                        }
                         None
                     }
                     MENU_PRIVACY => {
@@ -1997,13 +2038,36 @@ fn translate(
     vec![Message::Input(input)]
 }
 
-/// The command lines open on that PC, each in a console window here.
+/// The command lines open on that PC, each in a console window here, or detached: its window closed, the command
+/// line still running there, its output kept (the newest [`BACKLOG`] bytes) until it is shown again. None outlives
+/// the session.
 #[derive(Default)]
 struct TerminalWindows {
-    windows: HashMap<u32, TerminalWindow>,
+    lines: BTreeMap<u32, CommandLine>,
     next_id: u32,
     /// Test: (the shell, its output so far, the test text seen, the exit code, the window size).
     test: Option<TerminalTest>,
+}
+
+struct CommandLine {
+    name: String,
+    window: Option<TerminalWindow>,
+    /// Output that came while detached.
+    backlog: Vec<u8>,
+    /// How it ended, while detached.
+    ended: Option<String>,
+}
+
+/// The most output kept for a detached command line.
+const BACKLOG: usize = 256 * 1024;
+
+/// What can be done with a command line from the session menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineAction {
+    Show,
+    Detach,
+    Rename,
+    End,
 }
 
 #[derive(Default)]
@@ -2013,6 +2077,9 @@ struct TerminalTest {
     seen: bool,
     exit_code: Option<u32>,
     size: Option<(u16, u16)>,
+    /// The test detaches the window right after the start and shows it again once the test output came.
+    detached: bool,
+    shown_again: bool,
 }
 
 /// What the terminal test types, by shell; its output differs from what is typed, so seeing it means the
@@ -2029,16 +2096,18 @@ impl TerminalWindows {
     fn open(&mut self, peer: &Peer, agent: &str, test: bool, lines: &mut Vec<String>) {
         self.next_id += 1;
         let id = self.next_id;
-        let program = match std::env::current_exe() {
-            Ok(program) => program,
-            Err(error) => {
-                lines.push(format!("command line: no window ({error})"));
-                return;
-            }
-        };
-        match TerminalWindow::open(&program, agent, test) {
+        let name = format!("{agent} #{id}");
+        match open_terminal_window(&name, test) {
             Ok(window) => {
-                self.windows.insert(id, window);
+                self.lines.insert(
+                    id,
+                    CommandLine {
+                        name,
+                        window: Some(window),
+                        backlog: Vec::new(),
+                        ended: None,
+                    },
+                );
                 if test {
                     self.test = Some(TerminalTest::default());
                 }
@@ -2050,12 +2119,80 @@ impl TerminalWindows {
         }
     }
 
+    /// The command lines for the session menu: (id, name, shown).
+    fn list(&self) -> Vec<(u32, String, bool)> {
+        self.lines
+            .iter()
+            .map(|(&id, line)| (id, line.name.clone(), line.window.is_some()))
+            .collect()
+    }
+
+    fn act(&mut self, id: u32, action: LineAction, peer: &Peer, lines: &mut Vec<String>) {
+        let Some(line) = self.lines.get_mut(&id) else {
+            return;
+        };
+        match action {
+            LineAction::Detach => {
+                if let Some(window) = line.window.take() {
+                    window.detach();
+                    lines.push(format!(
+                        "command line {id}: detached (it keeps running there)"
+                    ));
+                }
+            }
+            LineAction::Show => {
+                if line.window.is_some() {
+                    return;
+                }
+                match open_terminal_window(&line.name, self.test.is_some()) {
+                    Ok(mut window) => {
+                        window.output(&line.backlog);
+                        lines.push(format!(
+                            "command line {id}: shown again ({} bytes kept meanwhile)",
+                            line.backlog.len()
+                        ));
+                        line.backlog.clear();
+                        if let Some(ended) = line.ended.take() {
+                            window.end(&ended);
+                        }
+                        line.window = Some(window);
+                    }
+                    Err(error) => lines.push(format!("command line {id}: no window ({error})")),
+                }
+            }
+            LineAction::Rename => {
+                if let Some(name) = ask_text(
+                    tr("Queqiao"),
+                    tr("A name for this command line:"),
+                    &line.name,
+                )
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty())
+                {
+                    if let Some(window) = &line.window {
+                        window.set_title(&name);
+                    }
+                    lines.push(format!("command line {id}: renamed"));
+                    line.name = name;
+                }
+            }
+            LineAction::End => {
+                peer.send_stream(Stream::Terminal, TerminalMessage::Close { id }.encode());
+                self.lines.remove(&id);
+                lines.push(format!("command line {id}: ended from the session menu"));
+            }
+        }
+    }
+
     fn on_message(&mut self, message: TerminalMessage, peer: &Peer, lines: &mut Vec<String>) {
         match message {
             TerminalMessage::Opened { id, shell } => {
                 lines.push(format!("command line {id} opened ({shell})"));
                 if let Some(test) = &mut self.test {
                     test.shell = shell.clone();
+                    // Detached before anything is typed: the output must wait for the window.
+                    test.detached = true;
+                    self.act(id, LineAction::Detach, peer, lines);
                     let input = terminal_test_input(&shell).as_bytes().to_vec();
                     peer.send_stream(
                         Stream::Terminal,
@@ -2064,15 +2201,24 @@ impl TerminalWindows {
                 }
             }
             TerminalMessage::Output { id, data } => {
-                if let Some(window) = self.windows.get(&id) {
-                    window.output(&data);
+                if let Some(line) = self.lines.get_mut(&id) {
+                    match &line.window {
+                        Some(window) => window.output(&data),
+                        None => {
+                            line.backlog.extend_from_slice(&data);
+                            let over = line.backlog.len().saturating_sub(BACKLOG);
+                            line.backlog.drain(..over);
+                        }
+                    }
                 }
+                let mut show_again = false;
                 if let Some(test) = &mut self.test {
                     test.output.extend_from_slice(&data);
                     if !test.seen
                         && String::from_utf8_lossy(&test.output).contains("queqiao-terminal-ok")
                     {
                         test.seen = true;
+                        show_again = test.detached;
                         let exit = TerminalMessage::Input {
                             id,
                             data: b"exit\r".to_vec(),
@@ -2080,33 +2226,51 @@ impl TerminalWindows {
                         peer.send_stream(Stream::Terminal, exit.encode());
                     }
                 }
+                if show_again {
+                    self.act(id, LineAction::Show, peer, lines);
+                    if let Some(test) = &mut self.test {
+                        test.shown_again = self
+                            .lines
+                            .get(&id)
+                            .is_some_and(|line| line.window.is_some());
+                    }
+                }
             }
             TerminalMessage::Exited { id, code } => {
                 lines.push(format!("command line {id} ended with exit code {code}"));
-                if let Some(window) = self.windows.get_mut(&id) {
-                    window.end(&trf(
-                        "The command line ended (exit code {code}).",
-                        &[("code", &code.to_string())],
-                    ));
-                }
+                let ended = trf(
+                    "The command line ended (exit code {code}).",
+                    &[("code", &code.to_string())],
+                );
+                self.ended(id, ended);
                 if let Some(test) = &mut self.test {
                     test.exit_code = Some(code);
                 }
             }
             TerminalMessage::Failed { id, reason } => {
                 lines.push(format!("command line {id} failed: {reason}"));
-                if let Some(window) = self.windows.get_mut(&id) {
-                    window.end(&reason);
-                }
+                self.ended(id, reason);
             }
             _ => {}
+        }
+    }
+
+    fn ended(&mut self, id: u32, text: String) {
+        if let Some(line) = self.lines.get_mut(&id) {
+            match line.window.as_mut() {
+                Some(window) => window.end(&text),
+                None => line.ended = Some(text),
+            }
         }
     }
 
     /// Keys and size changes from the windows; a closed window ends its command line.
     fn poll(&mut self, peer: &Peer, lines: &mut Vec<String>) {
         let mut closed = Vec::new();
-        for (&id, window) in &self.windows {
+        for (&id, line) in &self.lines {
+            let Some(window) = &line.window else {
+                continue;
+            };
             while let Some(event) = window.try_event() {
                 let message = match event {
                     TerminalEvent::Input(data) => TerminalMessage::Input { id, data },
@@ -2127,42 +2291,57 @@ impl TerminalWindows {
         for id in closed {
             // In the test the window stays known, to read its helper's exit code at the end.
             if self.test.is_none() {
-                self.windows.remove(&id);
+                self.lines.remove(&id);
                 lines.push(format!("command line {id}: window closed"));
             }
         }
     }
 
-    /// "terminal test: PASS (...)": the command ran, ended with 0, and the window process came up, got the
-    /// output and closed by itself with 0.
+    /// "terminal test: PASS (...)": the command ran while the window was detached, the window came back with the
+    /// output kept meanwhile, the command line ended with 0, and the window process closed by itself with 0.
     fn test_result(&self) -> String {
         let Some(test) = &self.test else {
             return "terminal test: FAIL (no command line was opened)".into();
         };
-        let helper = self.windows.values().next().and_then(|window| {
-            let until = Instant::now() + Duration::from_secs(5);
-            loop {
-                if let Some(code) = window.helper_exit_code() {
-                    return Some(code);
+        let helper = self
+            .lines
+            .values()
+            .next()
+            .and_then(|line| line.window.as_ref())
+            .and_then(|window| {
+                let until = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if let Some(code) = window.helper_exit_code() {
+                        return Some(code);
+                    }
+                    if Instant::now() > until {
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
                 }
-                if Instant::now() > until {
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        });
-        let passed =
-            test.seen && test.exit_code == Some(0) && test.size.is_some() && helper == Some(0);
+            });
+        let passed = test.seen
+            && test.exit_code == Some(0)
+            && test.size.is_some()
+            && test.detached
+            && test.shown_again
+            && helper == Some(0);
         format!(
-            "terminal test: {} (shell {}, test output seen: {}, exit code {:?}, window size {:?}, window process exit code {:?})",
+            "terminal test: {} (shell {}, test output seen: {}, detached and shown again: {}, exit code {:?}, window size {:?}, window process exit code {:?})",
             if passed { "PASS" } else { "FAIL" },
             test.shell,
             test.seen,
+            test.detached && test.shown_again,
             test.exit_code,
             test.size,
             helper
         )
     }
+}
+
+fn open_terminal_window(title: &str, test: bool) -> Result<TerminalWindow, String> {
+    let program = std::env::current_exe().map_err(|e| e.to_string())?;
+    TerminalWindow::open(&program, title, test)
 }
 
 /// Files copied to the clipboard go over at once up to this many bytes in all.
