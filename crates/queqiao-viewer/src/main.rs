@@ -290,6 +290,10 @@ impl TitleStatus {
 }
 
 fn main() {
+    queqiao_core::platform::install_crash_log("queqiao-viewer");
+    if std::env::args().any(|arg| arg == "--crash-test") {
+        panic!("crash test (asked for with --crash-test)");
+    }
     // A terminal window (started by a session of this viewer): it runs until its command line ends.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--terminal-pipe")

@@ -135,6 +135,11 @@ struct Stats {
 }
 
 fn main() {
+    queqiao_core::platform::install_crash_log("queqiao-agent");
+    // Tests: a crash on purpose, to see the report written.
+    if std::env::args().any(|arg| arg == "--crash-test") {
+        panic!("crash test (asked for with --crash-test)");
+    }
     let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
     let Some(options) = parse(std::env::args().skip(1)) else {
         println!("{banner}");

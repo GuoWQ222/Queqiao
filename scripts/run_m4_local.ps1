@@ -88,6 +88,18 @@ try {
         if ($probe[-1] -ne 'PROBE_PASS') { $failed += 'probe' }
     }
 
+    # Crash reports: a crash on purpose must leave a report with what panicked.
+    $crashFolder = Join-Path $env:APPDATA 'Queqiao\crashes'
+    foreach ($program in @($agent, $viewer)) {
+        $programName = [IO.Path]::GetFileNameWithoutExtension($program)
+        $started = Get-Date
+        Start-Process -FilePath $program -ArgumentList '--crash-test' -Wait -WindowStyle Hidden
+        $report = Get-ChildItem -LiteralPath $crashFolder -Filter "$programName-*.txt" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $started.AddSeconds(-1) } | Select-Object -First 1
+        $written = $report -and ((Get-Content -LiteralPath $report.FullName -Raw) -match 'crash test \(asked for with --crash-test\)')
+        "crash report ($programName): $(if ($written) { $report.Name } else { 'missing' })"
+        if (-not $written) { $failed += "$programName crash report" }
+        if ($report) { Remove-Item -LiteralPath $report.FullName -Force }
+    }
     $device = $env:COMPUTERNAME
     # Files for the direct session, one each way (random content, so a mix-up cannot pass).
     $fileToAgent = Join-Path $Out 'queqiao-test-to-agent.bin'

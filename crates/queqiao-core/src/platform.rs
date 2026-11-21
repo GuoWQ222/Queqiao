@@ -35,3 +35,49 @@ pub fn prepare_process() -> Vec<String> {
     }
     notes
 }
+
+/// When the program panics, a crash report (what panicked, where, and the call stack) goes into
+/// %APPDATA%\Queqiao\crashes\<program>-<Unix time>.txt; the newest 20 are kept. Nothing leaves the PC.
+pub fn install_crash_log(program: &'static str) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        if let Some(folder) = crash_folder() {
+            let _ = std::fs::create_dir_all(&folder);
+            let report = format!(
+                "{program} {} crashed (Unix time {stamp})\n{info}\n\n{backtrace}\n",
+                env!("CARGO_PKG_VERSION")
+            );
+            let _ = std::fs::write(folder.join(format!("{program}-{stamp}.txt")), report);
+            keep_newest(&folder, 20);
+        }
+        previous(info);
+    }));
+}
+
+/// Where crash reports go: %APPDATA%\Queqiao\crashes.
+pub fn crash_folder() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA").map(|folder| {
+        std::path::PathBuf::from(folder)
+            .join("Queqiao")
+            .join("crashes")
+    })
+}
+
+fn keep_newest(folder: &std::path::Path, count: usize) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    let mut reports: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    reports.sort();
+    let extra = reports.len().saturating_sub(count);
+    for (_, path) in reports.into_iter().take(extra) {
+        let _ = std::fs::remove_file(path);
+    }
+}
