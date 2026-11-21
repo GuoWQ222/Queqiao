@@ -301,6 +301,19 @@ const CHINESE: &[(&str, &str)] = &[
     ),
     ("Copy invitation", "复制邀请"),
     (
+        "A fixed help code for this PC...",
+        "为这台电脑设置固定验证码……",
+    ),
+    ("Remove the fixed help code", "取消固定验证码"),
+    (
+        "A fixed help code (8 or more letters or digits):",
+        "固定验证码（8 位以上字母或数字）：",
+    ),
+    (
+        "A fixed help code needs 8 or more letters or digits.",
+        "固定验证码至少需要 8 位字母或数字。",
+    ),
+    (
         "Copied: send it to the person who helps you.",
         "已复制，请发给帮助你的人。",
     ),

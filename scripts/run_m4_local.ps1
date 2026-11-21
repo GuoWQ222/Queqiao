@@ -370,6 +370,37 @@ try {
         }
         if (-not (Test-Path -LiteralPath (Join-Path $Out 'help_form.bmp'))) { $failed += 'help-link (no picture of the help form)' }
     }
+    # A fixed help code: the agent keeps help open with it; two helpers in turn use the same help ID and code (the code
+    # takes requests again after the first one).
+    if ($Sessions -contains 'help-fixed' -or $Sessions -contains 'all') {
+        $idFile = Join-Path $Out 'help_fixed_id.txt'
+        Remove-Item -LiteralPath $idFile -ErrorAction SilentlyContinue
+        $fixedCode = 'M4FIXEDCODE'
+        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 2 --seconds $(2 * $Seconds + 150) --verify-input --answer allow --fixed-help-code $fixedCode --help-id-file `"$idFile`" --report `"$Out\agent_help_fixed.txt`""
+        Start-SessionTask 'Queqiao-M4-Agent-help-fixed' $agent $agentArgs ''
+        $until = (Get-Date).AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $idFile) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
+        $helpId = if (Test-Path -LiteralPath $idFile) { (Get-Content -LiteralPath $idFile -Raw).Trim() } else { '' }
+        if (-not $helpId) { $failed += 'help-fixed agent (no help ID within 30 s)' }
+        foreach ($turn in 1, 2) {
+            $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --seconds $Seconds --input-test --width 960 --mute --help-id $helpId --help-code $fixedCode --report `"$Out\viewer_help_fixed_$turn.txt`""
+            Start-SessionTask "Queqiao-M4-Viewer-help-fixed-$turn" $viewer $viewerArgs ''
+            $viewerResult = Wait-SessionTask "Queqiao-M4-Viewer-help-fixed-$turn" ($Seconds + 120)
+            "=== session 'help-fixed' turn $turn (help ID $helpId): viewer exit $viewerResult"
+            $report = Join-Path $Out "viewer_help_fixed_$turn.txt"
+            $text = if (Test-Path -LiteralPath $report) { @(Get-Content -LiteralPath $report -Encoding UTF8) } else { @("no report at $report") }
+            $text | Where-Object { $_ -match '^(help|RESULT|ERROR)' }
+            if ($text[-1] -ne 'RESULT PASS' -or -not ($text | Where-Object { $_ -match '^help granted: ' })) { $failed += "help-fixed viewer $turn" }
+        }
+        $agentResult = Wait-SessionTask 'Queqiao-M4-Agent-help-fixed' 60
+        $report = Join-Path $Out 'agent_help_fixed.txt'
+        $text = if (Test-Path -LiteralPath $report) { @(Get-Content -LiteralPath $report -Encoding UTF8) } else { @("no report at $report") }
+        "--- agent (exit $agentResult)"
+        $text | Where-Object { $_ -match '^(help|session|RESULT|ERROR)' }
+        if ($text[-1] -ne 'RESULT PASS') { $failed += 'help-fixed agent' }
+        if (@($text | Where-Object { $_ -match 'of account alice was let in \(code given or ask allowed\)$' }).Count -ne 2) { $failed += 'help-fixed agent (expected two helpers let in)' }
+        if (-not ($text | Where-Object { $_ -eq 'help: open again with the fixed code' })) { $failed += 'help-fixed agent (the fixed code did not take requests again)' }
+    }
 } finally {
     Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
     '=== server log'

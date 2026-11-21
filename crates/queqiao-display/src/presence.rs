@@ -63,6 +63,8 @@ pub enum PresenceEvent {
     CheckUpdates,
     /// Install updates by itself (true) or only when asked.
     SetAutoUpdate(bool),
+    /// A fixed help code for this PC (normalized: upper-case letters and digits), or none any more.
+    SetFixedHelpCode(Option<String>),
 }
 
 /// How this PC stands with the account server (the tray menu's first line).
@@ -95,6 +97,9 @@ const MENU_LOCK_AFTER: u16 = 209;
 const MENU_LOGIN: u16 = 215;
 const MENU_UPDATE_CHECK: u16 = 216;
 const MENU_AUTO_UPDATE: u16 = 217;
+const MENU_FIXED_CODE: u16 = 219;
+/// The shortest fixed help code (letters and digits).
+pub const MIN_FIXED_CODE: usize = 8;
 const MENU_PASSWORD: u16 = 220;
 /// Menu items tests can choose (the same path as a click).
 pub const TEST_MENU_TERMINAL: u16 = MENU_TERMINAL;
@@ -143,6 +148,7 @@ pub struct Presence {
     viewer: Option<String>,
     account: AccountState,
     auto_update: bool,
+    fixed_code: bool,
 }
 
 impl Presence {
@@ -208,6 +214,7 @@ impl Presence {
             viewer: None,
             account: AccountState::Online,
             auto_update: true,
+            fixed_code: false,
         };
         presence.update_tray();
         Ok(presence)
@@ -500,6 +507,11 @@ impl Presence {
             tr("Lock these settings with a password...")
         });
         let help = wide(tr("Let someone help me..."));
+        let fixed_code = wide(if self.fixed_code {
+            tr("Remove the fixed help code")
+        } else {
+            tr("A fixed help code for this PC...")
+        });
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -519,6 +531,12 @@ impl Presence {
                 MF_STRING,
                 usize::from(MENU_HELP),
                 PCWSTR(help.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                checked(false),
+                usize::from(MENU_FIXED_CODE),
+                PCWSTR(fixed_code.as_ptr()),
             );
             let _ = AppendMenuW(
                 menu,
@@ -613,6 +631,11 @@ impl Presence {
         self.password_check = check;
     }
 
+    /// Whether a fixed help code is set (the menu offers to remove it).
+    pub fn set_fixed_code(&mut self, set: bool) {
+        self.fixed_code = set;
+    }
+
     /// Whether updates are installed by themselves (the menu's check mark).
     pub fn set_auto_update(&mut self, on: bool) {
         self.auto_update = on;
@@ -642,7 +665,8 @@ impl Presence {
                 | MENU_AUTO_UPDATE
                 | MENU_QUIT
         );
-        let protected = setting || item == MENU_PASSWORD || item == MENU_LOGIN;
+        let protected =
+            setting || item == MENU_PASSWORD || item == MENU_LOGIN || item == MENU_FIXED_CODE;
         if self.settings_locked && protected {
             return Some(PresenceEvent::SettingsLocked);
         }
@@ -651,6 +675,25 @@ impl Presence {
             if !typed.is_some_and(|typed| check(&typed)) {
                 return Some(PresenceEvent::SettingsLocked);
             }
+        }
+        if item == MENU_FIXED_CODE {
+            if self.fixed_code {
+                return Some(PresenceEvent::SetFixedHelpCode(None));
+            }
+            let typed = crate::forms::ask_text(
+                tr("Queqiao"),
+                tr("A fixed help code (8 or more letters or digits):"),
+                "",
+            )?;
+            let code = crate::forms::normalize_code(&typed);
+            if code.len() < MIN_FIXED_CODE {
+                crate::forms::show_error(
+                    tr("Queqiao"),
+                    tr("A fixed help code needs 8 or more letters or digits."),
+                );
+                return None;
+            }
+            return Some(PresenceEvent::SetFixedHelpCode(Some(code)));
         }
         if item == MENU_PASSWORD {
             if self.password_check.is_some() {

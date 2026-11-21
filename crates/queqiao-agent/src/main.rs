@@ -102,6 +102,8 @@ struct Options {
     help_code: Option<String>,
     /// Write the help ID into this file once the server gave it (tests).
     help_id_file: Option<PathBuf>,
+    /// A fixed help code for this run (tests; people set it in the tray).
+    fixed_help_code: Option<String>,
     /// A throwaway device with this name instead of this PC's own (tests with two accounts on one PC).
     test_device: Option<String>,
     /// Lock this PC when a session ends, for this run only (tests: with --dry-run-commands it is only reported).
@@ -227,6 +229,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--privacy-test" => options.privacy_test = true,
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--help-id-file" => options.help_id_file = Some(PathBuf::from(args.next()?)),
+            "--fixed-help-code" => options.fixed_help_code = Some(normalize_code(&args.next()?)),
             "--test-device" => options.test_device = Some(args.next()?),
             "--lock-after-session" => options.lock_after_session = true,
             "--test-press-setting" => options.test_press_setting = true,
@@ -447,8 +450,16 @@ fn run_account(
     let mut deferred: Vec<PresenceEvent> = Vec::new();
     // This PC's network cards, so another device of the account can wake it later.
     let macs = wake::macs();
-    // Help for someone of another account: the code shown while help requests are open.
-    let mut help_code: Option<String> = options.help_code.clone();
+    // Help for someone of another account: the code while help requests are open (a fixed one keeps them open), and
+    // whether the help window shows it (only when the person asked, or a test gave a code).
+    let mut fixed_code: Option<String> = options
+        .fixed_help_code
+        .clone()
+        .or_else(|| settings.fixed_help_code());
+    let mut help_code: Option<String> = options.help_code.clone().or_else(|| fixed_code.clone());
+    let mut help_window = options.help_code.is_some();
+    // After five wrong codes the server closes help: a fixed code opens it again after a while (guessing stays slow).
+    let mut fixed_reopen_at: Option<Instant> = None;
     // A helper the person allowed when it asked without a code (its next session request needs no prompt).
     let mut helper_allowed: Option<String> = None;
     let mut trust_new_key = options.trust_new_key.as_deref();
@@ -536,11 +547,16 @@ fn run_account(
                         "the person at this PC set: ask before each session: {on}"
                     ));
                 }
-                PresenceEvent::OpenHelp | PresenceEvent::HelpNewCode => match account.as_mut() {
+                wanted @ (PresenceEvent::OpenHelp | PresenceEvent::HelpNewCode) => match account.as_mut() {
+                    // The window shows the fixed code when there is one; New code: a one-time code instead.
                     Some(online) => {
-                        let code = new_help_code();
+                        let code = match (&fixed_code, matches!(wanted, PresenceEvent::OpenHelp)) {
+                            (Some(fixed), true) => fixed.clone(),
+                            _ => new_help_code(),
+                        };
                         online.open_help(&code);
                         help_code = Some(code);
+                        help_window = true;
                     }
                     None => {
                         lines.push("help: not online".into());
@@ -554,11 +570,45 @@ fn run_account(
                     }
                 },
                 PresenceEvent::HelpClose => {
-                    if let Some(online) = account.as_mut() {
-                        online.close_help();
+                    help_window = false;
+                    match (account.as_mut(), &fixed_code) {
+                        // Back to the fixed code, without the window.
+                        (Some(online), Some(fixed)) => {
+                            online.open_help(fixed);
+                            help_code = Some(fixed.clone());
+                            lines.push("help: the window closed; open again with the fixed code".into());
+                        }
+                        (online, _) => {
+                            if let Some(online) = online {
+                                online.close_help();
+                            }
+                            help_code = None;
+                            lines.push("help: closed by the person at this PC".into());
+                        }
                     }
-                    help_code = None;
-                    lines.push("help: closed by the person at this PC".into());
+                }
+                PresenceEvent::SetFixedHelpCode(code) => {
+                    match settings.set_fixed_help_code(code.as_deref()) {
+                        Ok(()) => lines.push(format!(
+                            "the person at this PC {} a fixed help code",
+                            if code.is_some() { "set" } else { "removed" }
+                        )),
+                        Err(error) => lines.push(format!("the fixed help code was not kept: {error}")),
+                    }
+                    fixed_code = code;
+                    ui.set_fixed_code(fixed_code.is_some());
+                    if !help_window && let Some(online) = account.as_mut() {
+                        match &fixed_code {
+                            Some(fixed) => {
+                                online.open_help(fixed);
+                                help_code = Some(fixed.clone());
+                            }
+                            None => {
+                                online.close_help();
+                                help_code = None;
+                            }
+                        }
+                    }
                 }
                 PresenceEvent::LogIn if account.is_none() && tolerant => {
                     if let Some((mut new, tried)) = tray_log_in(options, &login, &identity, lines) {
@@ -756,6 +806,14 @@ fn run_account(
             }
             continue;
         };
+        if fixed_reopen_at.is_some_and(|at| Instant::now() >= at)
+            && let Some(fixed) = &fixed_code
+        {
+            fixed_reopen_at = None;
+            online.open_help(fixed);
+            help_code = Some(fixed.clone());
+            lines.push("help: open again with the fixed code".into());
+        }
         if offer_logon && let Some(service) = links.service.as_mut() {
             offer_logon = false;
             let allowed = settings.allow_account_control && !settings.ask_before_session;
@@ -922,7 +980,7 @@ fn run_account(
                 if let Some(path) = &options.help_id_file {
                     let _ = std::fs::write(path, &help_id);
                 }
-                if let Some(code) = &help_code {
+                if help_window && let Some(code) = &help_code {
                     ui.show_help(Some((&help_id, code)));
                 }
             }
@@ -958,17 +1016,31 @@ fn run_account(
             Some(AccountEvent::HelpClosed(reason)) => {
                 lines.push(format!("help: closed: {reason}"));
                 help_code = None;
+                help_window = false;
                 ui.show_help(None);
+                if fixed_code.is_some() {
+                    fixed_reopen_at = Some(Instant::now() + FIXED_CODE_PAUSE);
+                    lines.push(format!(
+                        "help: the fixed code takes requests again in {} minutes",
+                        FIXED_CODE_PAUSE.as_secs() / 60
+                    ));
+                }
             }
             Some(AccountEvent::HelpRequested { device, user }) => {
                 lines.push(format!(
                     "help: {} of account {user} was let in (code given or ask allowed)",
                     device.name
                 ));
-                // The code is used up: a new one, while the window is open.
+                // The code is used up: the fixed one again, or a new one while the window is open.
                 if help_code.is_some() {
-                    let code = new_help_code();
+                    let code = match &fixed_code {
+                        Some(fixed) if !help_window => fixed.clone(),
+                        _ => new_help_code(),
+                    };
                     online.open_help(&code);
+                    if fixed_code.as_ref() == Some(&code) {
+                        lines.push("help: open again with the fixed code".into());
+                    }
                     help_code = Some(code);
                 }
             }
@@ -1405,6 +1477,9 @@ struct Permissions {
 }
 
 /// A help code: 8 of 32 letters and digits without look-alikes (no 0, O, 1 or I), 40 bits.
+/// How long help stays closed after five wrong codes before a fixed code takes requests again.
+const FIXED_CODE_PAUSE: Duration = Duration::from_secs(15 * 60);
+
 fn new_help_code() -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let random = queqiao_account::new_session_id();

@@ -36,6 +36,8 @@ enum Command {
     PrivacyExcluded(bool, Sender<Result<(), String>>),
     /// Online, offline (trying again) or not logged in.
     Account(AccountState),
+    /// A fixed help code is set or not.
+    FixedCode(bool),
 }
 
 /// The privacy screen over all monitors (`area` None), or for tests a square of `color` (0x00BBGGRR).
@@ -193,6 +195,10 @@ impl Ui {
         self.send(Command::Account(state));
     }
 
+    pub fn set_fixed_code(&self, set: bool) {
+        self.send(Command::FixedCode(set));
+    }
+
     pub fn try_event(&self) -> Option<PresenceEvent> {
         self.events.try_recv().ok()
     }
@@ -243,6 +249,7 @@ fn run(
     };
     presence.set_password_check(password_check(password));
     presence.set_auto_update(settings.auto_update);
+    presence.set_fixed_code(!settings.fixed_help_code.is_empty());
     let _ = ready.send(Ok(presence.tray_shown()));
     // (when, file name) of a picture to take once the window has drawn itself.
     let mut picture: Option<(Instant, &str)> = None;
@@ -317,6 +324,7 @@ fn run(
                 }
                 Ok(Command::LockSettings(locked)) => presence.set_settings_locked(locked),
                 Ok(Command::Account(state)) => presence.set_account_state(state),
+                Ok(Command::FixedCode(set)) => presence.set_fixed_code(set),
                 Ok(Command::PasswordHash(hash)) => {
                     presence.set_password_check(password_check(hash))
                 }
@@ -370,6 +378,10 @@ pub struct Settings {
     /// Install updates by themselves (signed by the release key; never during a session).
     #[serde(default = "yes")]
     pub auto_update: bool,
+    /// A fixed help code (DPAPI-encrypted for this person, hex); empty: none. Whoever has this PC's help ID and the
+    /// code may ask to help; the person here is asked every time all the same.
+    #[serde(default)]
+    pub fixed_help_code: String,
 }
 
 /// The check for the settings password's stored form.
@@ -382,6 +394,38 @@ fn password_check(hash: Option<String>) -> Option<queqiao_display::PasswordCheck
 
 fn yes() -> bool {
     true
+}
+
+impl Settings {
+    /// The fixed help code, decrypted (None: none, or it cannot be read).
+    pub fn fixed_help_code(&self) -> Option<String> {
+        let sealed = unhex(&self.fixed_help_code)?;
+        let plain = queqiao_update::release::unprotect(&sealed).ok()?;
+        String::from_utf8(plain)
+            .ok()
+            .filter(|code| !code.is_empty())
+    }
+
+    pub fn set_fixed_help_code(&mut self, code: Option<&str>) -> Result<(), String> {
+        self.fixed_help_code = match code {
+            Some(code) => queqiao_update::release::protect(code.as_bytes())?
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+            None => String::new(),
+        };
+        self.save()
+    }
+}
+
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    if text.is_empty() || !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(text.get(at..at + 2)?, 16).ok())
+        .collect()
 }
 
 impl Default for Settings {
@@ -397,6 +441,7 @@ impl Default for Settings {
             lock_after_session: false,
             settings_password: String::new(),
             auto_update: true,
+            fixed_help_code: String::new(),
         }
     }
 }
