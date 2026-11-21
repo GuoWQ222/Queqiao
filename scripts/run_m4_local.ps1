@@ -124,7 +124,7 @@ try {
         if ($extra -like '*--clipboard-test*') { $viewerArgs += " --clipboard-test --mute-speakers --send-file `"$fileToAgent`"" }
         if ($extra -like '*--dry-run-commands*') { $viewerArgs += ' --command ctrl-alt-del --command lock --command restart' }
         # Full screen: the drawing area must cover the monitor (the input test maps to it too).
-        if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen --picture 30,sharp --resolution 720' }
+        if ($label -eq 'ended-here') { $viewerArgs += " --full-screen --picture 30,sharp --resolution 720 --send-file `"$fileToAgent`" --cancel-test" }
         # A command line on that PC, in a window of its own that closes by itself.
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
@@ -159,6 +159,13 @@ try {
             }
             if ($label -eq 'ended-here' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^window: full screen, drawing area (\d+x\d+), monitor \1$' })) {
                 $failed += "$label viewer (expected the full-screen window to cover the monitor)"
+            }
+            # A cancelled transfer: the sender reports it, the receiver drops it and keeps nothing.
+            if ($label -eq 'ended-here') {
+                $wanted = if ($program -eq 'agent') { '^file failed: queqiao-test-to-agent\.bin: cancelled by the sender' } else { '^cancelled queqiao-test-to-agent\.bin after \d+ bytes' }
+                if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label $program (expected '$wanted')" }
+                if ($program -eq 'agent' -and ($text | Where-Object { $_ -match '^file received: .*queqiao-test-to-agent' })) { $failed += "$label agent (a cancelled file arrived)" }
+                if (Get-ChildItem -LiteralPath "$env:USERPROFILE\Downloads\Queqiao" -Filter '*.queqiao-part' -ErrorAction SilentlyContinue) { $failed += "$label (a part file was left behind)" }
             }
             # Resolution: the picture changes size during the session (a new encoder; the decoder follows).
             if ($label -eq 'ended-here') {

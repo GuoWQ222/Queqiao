@@ -12,7 +12,8 @@ mod yuv;
 
 pub use forms::{
     DeviceList, DeviceRow, HelpAction, HelpForm, ListAction, LoginAction, LoginFields, LoginForm,
-    ask_text, confirm, normalize_code, popup_menu, save_window_picture, show_error,
+    PICK_CLOSED, PickList, ask_text, confirm, normalize_code, popup_menu, save_window_picture,
+    show_error,
 };
 pub use presence::{PasswordCheck, Presence, PresenceEvent, TEST_MENU_TERMINAL};
 pub use present::{Presenter, fit};

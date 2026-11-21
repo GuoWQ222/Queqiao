@@ -487,6 +487,86 @@ pub fn confirm(owner: HWND, title: &str, text: &str) -> bool {
     answer == IDYES
 }
 
+/// A small window with a list and buttons (the transfer list); each press comes with the selected row.
+pub struct PickList {
+    form: Form,
+    list: HWND,
+    items: Vec<String>,
+}
+
+impl PickList {
+    pub fn new(title: &str, heading: &str, buttons: &[(u16, &str)]) -> Result<PickList> {
+        let form = Form::new(title, 520, 320)?;
+        form.label(heading, [20, 16, 480, 20])?;
+        let list = form.control(
+            w!("LISTBOX"),
+            "",
+            WS_TABSTOP.0 | WS_VSCROLL.0 | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+            WS_EX_CLIENTEDGE,
+            ID_LIST,
+            [20, 44, 480, 180],
+        )?;
+        let mut left = 20;
+        for (id, text) in buttons {
+            form.button(text, *id, false, [left, 240, 140, 30])?;
+            left += 150;
+        }
+        form.show();
+        Ok(PickList {
+            form,
+            list,
+            items: Vec::new(),
+        })
+    }
+
+    /// Shows `items`, keeping the selected row where it was.
+    pub fn set_items(&mut self, items: Vec<String>) {
+        if items == self.items {
+            return;
+        }
+        let selected = self.selected();
+        unsafe { SendMessageW(self.list, LB_RESETCONTENT, None, None) };
+        for item in &items {
+            let text = wide(item);
+            unsafe {
+                SendMessageW(
+                    self.list,
+                    LB_ADDSTRING,
+                    None,
+                    Some(LPARAM(text.as_ptr() as isize)),
+                )
+            };
+        }
+        self.items = items;
+        if let Some(index) = selected.filter(|index| *index < self.items.len()) {
+            unsafe { SendMessageW(self.list, LB_SETCURSEL, Some(WPARAM(index)), None) };
+        }
+    }
+
+    pub fn selected(&self) -> Option<usize> {
+        let index = unsafe { SendMessageW(self.list, LB_GETCURSEL, None, None) }.0;
+        usize::try_from(index)
+            .ok()
+            .filter(|index| *index < self.items.len())
+    }
+
+    /// A button pressed (with the selected row), or None; Some((CLOSED, _)) when the window was closed.
+    pub fn next(&mut self, wait_ms: u32) -> Option<(u16, Option<usize>)> {
+        let command = self.form.next_command(wait_ms)?;
+        Some((
+            if command == ID_CANCEL {
+                CLOSED
+            } else {
+                command
+            },
+            self.selected(),
+        ))
+    }
+}
+
+/// What a closed PickList reports.
+pub const PICK_CLOSED: u16 = CLOSED;
+
 pub enum HelpAction {
     /// The help ID (digits only) and the code (letters and digits, upper case).
     Submit {

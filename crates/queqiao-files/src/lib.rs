@@ -202,6 +202,20 @@ struct Outgoing {
     sent: u64,
     hasher: Sha256,
     stage: Stage,
+    /// Paused by the person: no chunks until resumed.
+    paused: bool,
+}
+
+/// One transfer, for a list of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferRow {
+    pub id: u32,
+    /// This side sends it (false: receives it).
+    pub sending: bool,
+    pub name: String,
+    pub done: u64,
+    pub size: u64,
+    pub paused: bool,
 }
 
 /// Files this side sends.
@@ -276,6 +290,7 @@ impl Outbox {
             sent: 0,
             hasher: Sha256::new(),
             stage: Stage::Offered,
+            paused: false,
         });
         Ok(())
     }
@@ -317,7 +332,11 @@ impl Outbox {
     pub fn take(&mut self, room: usize) -> Vec<FileMessage> {
         let mut out = std::mem::take(&mut self.messages);
         let mut budget = room;
-        if let Some(file) = self.files.iter_mut().find(|f| f.stage == Stage::Sending) {
+        if let Some(file) = self
+            .files
+            .iter_mut()
+            .find(|f| f.stage == Stage::Sending && !f.paused)
+        {
             let mut buffer = vec![0u8; CHUNK];
             while budget >= CHUNK && file.sent < file.size {
                 let want = CHUNK.min((file.size - file.sent) as usize);
@@ -347,6 +366,49 @@ impl Outbox {
             }
         }
         out
+    }
+
+    /// Pauses or resumes sending file `id`; false if there is no such file.
+    pub fn pause(&mut self, id: u32, paused: bool) -> bool {
+        match self.files.iter_mut().find(|f| f.id == id) {
+            Some(file) => {
+                file.paused = paused;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Stops sending file `id` and tells the receiver (who removes what arrived).
+    pub fn cancel(&mut self, id: u32) -> bool {
+        let Some(index) = self.files.iter().position(|f| f.id == id) else {
+            return false;
+        };
+        if let Some(file) = self.files.remove(index) {
+            self.messages.push(FileMessage::Cancel {
+                id,
+                reason: "cancelled by the sender".into(),
+            });
+            self.outcomes.push(Outcome::Failed {
+                name: file.name,
+                reason: "cancelled".into(),
+            });
+        }
+        true
+    }
+
+    pub fn rows(&self) -> Vec<TransferRow> {
+        self.files
+            .iter()
+            .map(|f| TransferRow {
+                id: f.id,
+                sending: true,
+                name: f.name.clone(),
+                done: f.sent,
+                size: f.size,
+                paused: f.paused,
+            })
+            .collect()
     }
 
     /// (name, bytes sent, size) of each file not yet confirmed.
@@ -552,6 +614,32 @@ impl Inbox {
         }]
     }
 
+    /// Stops receiving file `id` (what arrived is removed) and tells the sender.
+    pub fn cancel(&mut self, id: u32) -> Vec<FileMessage> {
+        if self.files.contains_key(&id) {
+            self.fail(id, "cancelled by the receiver")
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn rows(&self) -> Vec<TransferRow> {
+        let mut rows: Vec<TransferRow> = self
+            .files
+            .iter()
+            .map(|(id, f)| TransferRow {
+                id: *id,
+                sending: false,
+                name: f.name.clone(),
+                done: f.received,
+                size: f.size,
+                paused: false,
+            })
+            .collect();
+        rows.sort_by_key(|row| row.id);
+        rows
+    }
+
     /// (name, bytes received, size) of each file still coming.
     pub fn progress(&self) -> Vec<(String, u64, u64)> {
         self.files
@@ -653,6 +741,33 @@ impl Transfers {
         let mut all = self.outbox.take_outcomes();
         all.extend(self.inbox.take_outcomes());
         all
+    }
+
+    /// Every transfer on its way: sent ones first.
+    pub fn rows(&self) -> Vec<TransferRow> {
+        let mut rows = self.outbox.rows();
+        rows.extend(self.inbox.rows());
+        rows
+    }
+
+    /// Pauses or resumes a file this side sends (the receiving side cannot pause).
+    pub fn pause(&mut self, id: u32, paused: bool) -> bool {
+        self.outbox.pause(id, paused)
+    }
+
+    /// Cancels a transfer; returns the messages to send (encoded).
+    pub fn cancel(&mut self, sending: bool, id: u32) -> Vec<Vec<u8>> {
+        if sending {
+            self.outbox.cancel(id);
+            // The Cancel message goes with the next take.
+            Vec::new()
+        } else {
+            self.inbox
+                .cancel(id)
+                .iter()
+                .map(FileMessage::encode)
+                .collect()
+        }
     }
 
     /// Files still on their way (either direction).
@@ -1053,6 +1168,44 @@ mod robustness {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_paused_file_waits_and_a_cancelled_one_leaves_nothing() {
+        let root = std::env::temp_dir().join(format!("queqiao-files-pause-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("big.bin");
+        std::fs::write(&source, vec![3u8; 5 * CHUNK]).unwrap();
+        let mut outbox = Outbox::default();
+        outbox.add(&source).unwrap();
+        let mut inbox = Inbox::new(root.join("inbox"), true);
+        // The offer and its acceptance.
+        for message in outbox.take(usize::MAX) {
+            for reply in inbox.handle(message) {
+                outbox.handle(&reply);
+            }
+        }
+        let id = outbox.rows()[0].id;
+        assert!(outbox.pause(id, true));
+        assert!(outbox.take(usize::MAX).is_empty(), "nothing while paused");
+        outbox.pause(id, false);
+        let pieces = outbox.take(2 * CHUNK);
+        assert!(!pieces.is_empty(), "pieces again once resumed");
+        for message in pieces {
+            inbox.handle(message);
+        }
+        assert!(outbox.cancel(id));
+        for message in outbox.take(usize::MAX) {
+            inbox.handle(message);
+        }
+        assert!(inbox.rows().is_empty());
+        let left: Vec<_> = std::fs::read_dir(root.join("inbox"))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert!(left.is_empty(), "nothing kept of a cancelled file");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

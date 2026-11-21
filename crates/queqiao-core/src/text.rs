@@ -175,6 +175,17 @@ const CHINESE: &[(&str, &str)] = &[
     ("Full screen (Ctrl+Alt+Enter)", "全屏（Ctrl+Alt+Enter）"),
     ("Game mouse (Ctrl+Alt+M)", "游戏鼠标（Ctrl+Alt+M）"),
     ("Always on top", "窗口置顶"),
+    ("Transfers...", "传输列表……"),
+    ("Queqiao - transfers", "鹊桥 - 传输列表"),
+    (
+        "Files on their way (sent and received):",
+        "正在传输的文件（发送与接收）：",
+    ),
+    ("Pause / resume", "暂停 / 继续"),
+    ("Cancel", "取消"),
+    ("sending", "发送"),
+    ("receiving", "接收"),
+    ("paused", "已暂停"),
     ("Custom bitrate...", "自定义码率……"),
     (
         "Highest bitrate in Mbit/s (0: as the quality setting says):",

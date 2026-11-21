@@ -31,7 +31,9 @@ use queqiao_core::protocol::{
     Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton, Quality,
 };
 use queqiao_core::text::{tr, trf};
-use queqiao_display::{HelpAction, HelpForm, ask_text, confirm, normalize_code, popup_menu};
+use queqiao_display::{
+    HelpAction, HelpForm, PICK_CLOSED, PickList, ask_text, confirm, normalize_code, popup_menu,
+};
 
 /// The session window's menu items for the controlled PC (system-menu ids: multiples of 16).
 const MENU_CTRL_ALT_DEL: u16 = 0x1000;
@@ -46,6 +48,10 @@ const MENU_MUTE_SPEAKERS: u16 = 0x1080;
 const MENU_SHORTCUTS: u16 = 0x1090;
 const MENU_ON_TOP: u16 = 0x10A0;
 const MENU_CUSTOM_BITRATE: u16 = 0x10B0;
+const MENU_TRANSFERS: u16 = 0x10C0;
+/// The transfer list's buttons.
+const TRANSFER_PAUSE: u16 = 301;
+const TRANSFER_CANCEL: u16 = 302;
 /// The other PC's screens: menu ids from here, 16 apart.
 const MENU_SCREENS: u16 = 0x1400;
 /// Resolution: that screen's own, or its short side at most 1080 or 720 pixels.
@@ -82,7 +88,7 @@ const KEY_CTRL: u16 = 0x1D;
 const KEY_ALT: u16 = 0x38;
 use queqiao_audio::{Player, TEST_TONE_HZ};
 use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
-use queqiao_files::{Outcome, Transfers, downloads_folder};
+use queqiao_files::{Outcome, TransferRow, Transfers, downloads_folder};
 use queqiao_input::{ClipContent, Clipboard};
 
 /// The start of the clipboard text the tests send (each side checks it got the other's).
@@ -153,6 +159,8 @@ struct Options {
     game_mouse_test: bool,
     /// Mute that PC's speakers from the start.
     mute_speakers: bool,
+    /// Cancel a file this side sends once its first piece went out (tests).
+    cancel_test: bool,
     /// The picture's short side at most this (720, 1080) from the start; 0 or none: the screen's own.
     resolution: Option<u16>,
     /// Show that PC's screen n (from 0) from the start.
@@ -358,6 +366,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--terminal-test" => options.terminal_test = true,
             "--game-mouse-test" => options.game_mouse_test = true,
             "--mute-speakers" => options.mute_speakers = true,
+            "--cancel-test" => options.cancel_test = true,
             "--resolution" => options.resolution = Some(args.next()?.parse().ok()?),
             "--screen" => options.screen = Some(args.next()?.parse().ok()?),
             "--max-bitrate" => options.max_bitrate = Some(args.next()?.parse().ok()?),
@@ -972,6 +981,7 @@ fn session(
         (MENU_TERMINAL, tr("Open a command line on that PC")),
         (MENU_FULL_SCREEN, tr("Full screen (Ctrl+Alt+Enter)")),
         (MENU_ON_TOP, tr("Always on top")),
+        (MENU_TRANSFERS, tr("Transfers...")),
         (MENU_CUSTOM_BITRATE, tr("Custom bitrate...")),
         (MENU_GAME_MOUSE, tr("Game mouse (Ctrl+Alt+M)")),
         (
@@ -984,6 +994,9 @@ fn session(
     window.set_send_shortcuts(true);
     window.check_menu_item(MENU_SHORTCUTS, window.is_sending_shortcuts());
     let mut on_top = false;
+    // The transfer list window, while open.
+    let mut transfer_list: Option<PickList> = None;
+    let mut cancel_test_done = false;
     let mut speakers_muted = options.mute_speakers;
     window.check_menu_item(MENU_MUTE_SPEAKERS, speakers_muted);
     let fps_items: Vec<(u16, &str)> = MENU_FPS
@@ -1089,6 +1102,17 @@ fn session(
                         privacy_on = !privacy_on;
                         window.check_menu_item(MENU_PRIVACY, privacy_on);
                         Some(if privacy_on { Command::PrivacyOn } else { Command::PrivacyOff })
+                    }
+                    MENU_TRANSFERS => {
+                        if transfer_list.is_none() {
+                            transfer_list = PickList::new(
+                                tr("Queqiao - transfers"),
+                                tr("Files on their way (sent and received):"),
+                                &[(TRANSFER_PAUSE, tr("Pause / resume")), (TRANSFER_CANCEL, tr("Cancel"))],
+                            )
+                            .ok();
+                        }
+                        None
                     }
                     MENU_ON_TOP => {
                         on_top = !on_top;
@@ -1276,6 +1300,60 @@ fn session(
             next_ping = Instant::now() + Duration::from_millis(500);
         }
 
+        // Test: a file this side sends is cancelled once its first piece went out.
+        if options.cancel_test
+            && !cancel_test_done
+            && let Some(row) = transfers
+                .rows()
+                .into_iter()
+                .find(|row| row.sending && row.done > 0)
+        {
+            transfers.cancel(true, row.id);
+            lines.push(format!("cancelled {} after {} bytes", row.name, row.done));
+            cancel_test_done = true;
+        }
+        // The transfer list: progress, and what the person pressed.
+        if let Some(list) = &mut transfer_list {
+            let transfer_rows: Vec<TransferRow> = transfers.rows();
+            let items: Vec<String> = transfer_rows
+                .iter()
+                .map(|row| {
+                    let percent = row
+                        .done
+                        .saturating_mul(100)
+                        .checked_div(row.size)
+                        .unwrap_or(100);
+                    let way = if row.sending {
+                        tr("sending")
+                    } else {
+                        tr("receiving")
+                    };
+                    let state = if row.paused {
+                        format!(" ({})", tr("paused"))
+                    } else {
+                        String::new()
+                    };
+                    format!("{way}  {}  {percent}%{state}", row.name)
+                })
+                .collect();
+            list.set_items(items);
+            match list.next(0) {
+                Some((PICK_CLOSED, _)) => transfer_list = None,
+                Some((TRANSFER_PAUSE, Some(index))) => {
+                    if let Some(row) = transfer_rows.get(index) {
+                        transfers.pause(row.id, !row.paused);
+                    }
+                }
+                Some((TRANSFER_CANCEL, Some(index))) => {
+                    if let Some(row) = transfer_rows.get(index).cloned() {
+                        for message in transfers.cancel(row.sending, row.id) {
+                            peer.send_stream(Stream::Files, message);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         for message in transfers.take(peer.room(Stream::Files)) {
             peer.send_stream(Stream::Files, message);
         }
