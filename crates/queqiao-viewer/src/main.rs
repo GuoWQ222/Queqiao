@@ -51,6 +51,14 @@ const MENU_CUSTOM_BITRATE: u16 = 0x10B0;
 const MENU_TRANSFERS: u16 = 0x10C0;
 const MENU_RESTART_QUEQIAO: u16 = 0x10D0;
 const MENU_COMMAND_LINES: u16 = 0x10E0;
+const MENU_ACTUAL_SIZE: u16 = 0x10E1;
+/// The window's opacity: (menu id, percent, label).
+const MENU_OPACITY: [(u16, u8, &str); 4] = [
+    (0x10F0, 100, "Opaque"),
+    (0x10F1, 80, "80 %"),
+    (0x10F2, 60, "60 %"),
+    (0x10F3, 40, "40 %"),
+];
 /// The transfer list's buttons.
 const TRANSFER_PAUSE: u16 = 301;
 const TRANSFER_CANCEL: u16 = 302;
@@ -183,6 +191,8 @@ struct Options {
     invite: Option<String>,
     /// Press Connect in the help form once it is drawn (tests).
     test_submit_help: bool,
+    /// The session window's opacity in percent (as the Opacity menu sets it).
+    opacity: Option<u8>,
 }
 
 impl Options {
@@ -395,6 +405,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--invite" => options.invite = Some(args.next()?),
             "--test-submit-help" => options.test_submit_help = true,
+            "--opacity" => options.opacity = args.next().and_then(|v| v.parse().ok()),
             "--picture" => {
                 let value = args.next()?;
                 let (fps, quality) = value.split_once(',')?;
@@ -1165,6 +1176,26 @@ fn session(
         .map(|(id, _, text)| (*id, tr(text)))
         .collect();
     window.add_submenu(tr("Resolution"), &resolution_items);
+    let opacity_items: Vec<(u16, &str)> = MENU_OPACITY
+        .iter()
+        .map(|(id, _, text)| (*id, tr(text)))
+        .collect();
+    window.add_submenu(tr("Opacity"), &opacity_items);
+    window.add_menu_items(&[(MENU_ACTUAL_SIZE, tr("Actual size (1:1)"))]);
+    let show_opacity = |window: &Window, percent: u8| {
+        for (id, value, _) in MENU_OPACITY {
+            window.check_menu_item(id, value == percent);
+        }
+    };
+    let opacity = options.opacity.unwrap_or(100).clamp(20, 100);
+    window.set_opacity(opacity);
+    show_opacity(&window, opacity);
+    if options.opacity.is_some() {
+        lines.push(format!(
+            "window: opacity {opacity} % asked, {} % as Windows has it",
+            window.opacity()
+        ));
+    }
     let mut resolution = options.resolution.unwrap_or(0);
     let show_resolution = |window: &Window, resolution: u16| {
         for (id, short, _) in MENU_RESOLUTION {
@@ -1303,6 +1334,16 @@ fn session(
                             )
                             .ok();
                         }
+                        None
+                    }
+                    id if MENU_OPACITY.iter().any(|(item, _, _)| *item == id) => {
+                        let percent = MENU_OPACITY.iter().find(|(item, _, _)| *item == id).map_or(100, |(_, percent, _)| *percent);
+                        window.set_opacity(percent);
+                        show_opacity(&window, percent);
+                        None
+                    }
+                    MENU_ACTUAL_SIZE => {
+                        window.set_client_size(picture_size.0, picture_size.1);
                         None
                     }
                     MENU_ON_TOP => {

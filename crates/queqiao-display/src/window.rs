@@ -223,6 +223,96 @@ impl Window {
         self.restore.is_some()
     }
 
+    /// The window's opacity in percent (20 to 100; 100: opaque, no longer layered).
+    pub fn set_opacity(&self, percent: u8) {
+        let percent = percent.clamp(20, 100);
+        let layered = WS_EX_LAYERED.0 as isize;
+        unsafe {
+            let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            if percent >= 100 {
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style & !layered);
+            } else {
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style | layered);
+                let alpha = (u32::from(percent) * 255 / 100) as u8;
+                let _ = SetLayeredWindowAttributes(
+                    self.hwnd,
+                    windows::Win32::Foundation::COLORREF(0),
+                    alpha,
+                    LWA_ALPHA,
+                );
+            }
+        }
+    }
+
+    /// The opacity in percent as Windows has it (100 when the window is not layered).
+    pub fn opacity(&self) -> u8 {
+        let mut alpha = 255u8;
+        let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS::default();
+        let layered =
+            unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } & WS_EX_LAYERED.0 as isize != 0;
+        if layered
+            && unsafe {
+                GetLayeredWindowAttributes(self.hwnd, None, Some(&mut alpha), Some(&mut flags))
+            }
+            .is_ok()
+            && flags.0 & LWA_ALPHA.0 != 0
+        {
+            (u32::from(alpha) * 100).div_ceil(255) as u8
+        } else {
+            100
+        }
+    }
+
+    /// The picture at its own size: the client area `width` x `height`, at most the monitor's work area (not in full
+    /// screen).
+    pub fn set_client_size(&self, width: u32, height: u32) {
+        if self.restore.is_some() || width == 0 || height == 0 {
+            return;
+        }
+        unsafe {
+            let style = WINDOW_STYLE(GetWindowLongPtrW(self.hwnd, GWL_STYLE) as u32);
+            let ex = WINDOW_EX_STYLE(GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) as u32);
+            let mut outer = RECT {
+                left: 0,
+                top: 0,
+                right: width as i32,
+                bottom: height as i32,
+            };
+            let has_menu = !GetMenu(self.hwnd).0.is_null();
+            if AdjustWindowRectEx(&mut outer, style, has_menu, ex).is_err() {
+                return;
+            }
+            let (mut w, mut h) = (outer.right - outer.left, outer.bottom - outer.top);
+            let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let mut at = (0, 0);
+            if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                let work = info.rcWork;
+                w = w.min(work.right - work.left);
+                h = h.min(work.bottom - work.top);
+                let mut current = RECT::default();
+                let _ = GetWindowRect(self.hwnd, &mut current);
+                // Kept on the monitor.
+                at = (
+                    current.left.clamp(work.left, work.right - w),
+                    current.top.clamp(work.top, work.bottom - h),
+                );
+            }
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                at.0,
+                at.1,
+                w,
+                h,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
     /// Full screen on the window's monitor (no frame), or back to the window it was.
     pub fn set_full_screen(&mut self, on: bool) {
         if on == self.restore.is_some() {

@@ -301,6 +301,9 @@ const CHINESE: &[(&str, &str)] = &[
     ),
     ("Copy invitation", "复制邀请"),
     ("Command lines...", "命令行……"),
+    ("Opacity", "透明度"),
+    ("Opaque", "不透明"),
+    ("Actual size (1:1)", "原始大小（1:1）"),
     (
         "{name}: detach (it keeps running)",
         "{name}：分离（继续运行）",
