@@ -19,6 +19,8 @@ use crate::tls::err;
 #[derive(Clone)]
 pub struct DeviceKey {
     pair: Arc<Ed25519KeyPair>,
+    /// The private key as stored (PKCS#8), for the service's agent at the sign-in screen.
+    pkcs8: Arc<Vec<u8>>,
     public_hex: String,
 }
 
@@ -65,14 +67,21 @@ impl DeviceKey {
         DeviceKey::from_pkcs8(&generate_pkcs8()?)
     }
 
-    fn from_pkcs8(pkcs8: &[u8]) -> Result<DeviceKey, Error> {
+    /// A key from its PKCS#8 bytes (the agent at the sign-in screen gets them from the service).
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<DeviceKey, Error> {
         let pair =
             Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|e| Error(format!("device key: {e}")))?;
         let public_hex = hex(pair.public_key().as_ref());
         Ok(DeviceKey {
             pair: Arc::new(pair),
+            pkcs8: Arc::new(pkcs8.to_vec()),
             public_hex,
         })
+    }
+
+    /// The private key (PKCS#8): only for handing this device to the Queqiao service.
+    pub fn pkcs8(&self) -> &[u8] {
+        &self.pkcs8
     }
 
     /// The public key, hex (what the server and the other devices see).
@@ -132,10 +141,26 @@ impl KnownDevices {
     }
 
     pub fn in_memory() -> KnownDevices {
+        KnownDevices::with_pins(Vec::new())
+    }
+
+    /// In memory, starting from these pins (device id, public key hex).
+    pub fn with_pins(pins: Vec<(String, String)>) -> KnownDevices {
         KnownDevices {
-            keys: BTreeMap::new(),
+            keys: pins
+                .into_iter()
+                .map(|(device, key)| (device, key.to_ascii_lowercase()))
+                .collect(),
             path: None,
         }
+    }
+
+    /// All pins (device id, public key hex).
+    pub fn pins(&self) -> Vec<(String, String)> {
+        self.keys
+            .iter()
+            .map(|(device, key)| (device.clone(), key.clone()))
+            .collect()
     }
 
     /// Compares `public_key` with the pin for `device`, pinning it the first time.

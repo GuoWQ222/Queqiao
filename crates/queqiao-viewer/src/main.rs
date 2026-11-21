@@ -99,7 +99,7 @@ use queqiao_display::{
     WindowEvent, fit, show_error,
 };
 use queqiao_terminal::{TerminalMessage, TerminalWindow, WindowEvent as TerminalEvent};
-use queqiao_transport::{Peer, PeerEvent, Role, Signal, Signaling, Stream};
+use queqiao_transport::{Addresses, Peer, PeerEvent, Role, Signal, Signaling, Stream};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -433,6 +433,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         &context,
         &mut signal,
         &agent.to_string(),
+        Addresses::All,
         lines,
     )
 }
@@ -500,7 +501,15 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
     lines.push(format!("device: {gpu}"));
     if let Some(key) = &options.device {
         let target = wait_for_device(&mut account, key, Duration::from_secs(30))?;
-        return connect_to(&mut account, &target, options, &device, &context, lines);
+        return connect_to(
+            &mut account,
+            &target,
+            options,
+            &device,
+            &context,
+            Addresses::All,
+            lines,
+        );
     }
     if let Some(help_id) = &options.help_id {
         // Without --help-code: ask the person there to allow it.
@@ -509,7 +518,16 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
             .request_help(help_id, &code)
             .map_err(|e| e.to_string())?;
         lines.push(format!("help granted: {} ({})", target.name, target.id));
-        return connect_to(&mut account, &target, options, &device, &context, lines);
+        // A PC of another account: this PC's other addresses stay unknown to it.
+        return connect_to(
+            &mut account,
+            &target,
+            options,
+            &device,
+            &context,
+            Addresses::RouteOnly,
+            lines,
+        );
     }
     device_list(
         options,
@@ -698,7 +716,15 @@ fn device_list(
                 list.set_enabled(false);
                 if let Some(target) = ask_for_help_target(account, lines) {
                     sessions += 1;
-                    match connect_to(account, &target, options, device, context, lines) {
+                    match connect_to(
+                        account,
+                        &target,
+                        options,
+                        device,
+                        context,
+                        Addresses::RouteOnly,
+                        lines,
+                    ) {
                         Ok(ok) => {
                             passed &= ok;
                             list.set_status(&trf(
@@ -729,7 +755,15 @@ fn device_list(
                     Some(target) if target.controllable => {
                         list.set_enabled(false);
                         list.set_status(&trf("Connected to {name}.", &[("name", &target.name)]));
-                        let result = connect_to(account, &target, options, device, context, lines);
+                        let result = connect_to(
+                            account,
+                            &target,
+                            options,
+                            device,
+                            context,
+                            Addresses::All,
+                            lines,
+                        );
                         list.set_enabled(true);
                         sessions += 1;
                         match result {
@@ -925,12 +959,21 @@ fn connect_to(
     options: &Options,
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
+    addresses: Addresses,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
     let id = new_session_id();
     let mut signal = account.session(&target.id, AccountRole::Agent, &id);
     signal.hello("viewer").map_err(|e| e.to_string())?;
-    session(options, device, context, &mut signal, &target.name, lines)
+    session(
+        options,
+        device,
+        context,
+        &mut signal,
+        &target.name,
+        addresses,
+        lines,
+    )
 }
 
 /// One session: the agent's screen in a window, this window's input to the agent.
@@ -940,6 +983,7 @@ fn session(
     context: &ID3D11DeviceContext,
     signal: &mut dyn Signaling,
     agent: &str,
+    addresses: Addresses,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
     lines.push(format!("agent: {agent}"));
@@ -953,7 +997,7 @@ fn session(
     lines.push(format!("decoder: {}", decoder.name()));
 
     let started = Instant::now();
-    let peer = Peer::start(Role::Viewer, signal).map_err(|e| e.to_string())?;
+    let peer = Peer::start_with(Role::Viewer, signal, addresses).map_err(|e| e.to_string())?;
     lines.extend(peer.candidates().iter().cloned());
     let end = options.seconds.map(|s| started + Duration::from_secs(s));
     let mut stats = Stats::default();

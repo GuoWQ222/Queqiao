@@ -27,6 +27,9 @@ pub struct DeviceIdentity {
     /// Made for a test or probe: its key and its pins of other devices live in memory only.
     #[serde(skip)]
     pub in_memory: bool,
+    /// For a device in memory: the pins it starts with (the agent at the sign-in screen gets the person's).
+    #[serde(skip)]
+    pub preset_pins: Option<Vec<(String, String)>>,
 }
 
 impl DeviceIdentity {
@@ -37,6 +40,23 @@ impl DeviceIdentity {
             name: label.to_string(),
             key: Some(DeviceKey::generate()?),
             in_memory: true,
+            preset_pins: None,
+        })
+    }
+
+    /// This device as handed over by the Queqiao service (the agent at the sign-in screen): all in memory.
+    pub fn handed_over(
+        id: &str,
+        name: &str,
+        pkcs8: &[u8],
+        pins: Vec<(String, String)>,
+    ) -> Result<DeviceIdentity, Error> {
+        Ok(DeviceIdentity {
+            id: id.to_string(),
+            name: name.to_string(),
+            key: Some(DeviceKey::from_pkcs8(pkcs8)?),
+            in_memory: true,
+            preset_pins: Some(pins),
         })
     }
 
@@ -59,6 +79,7 @@ impl DeviceIdentity {
             name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into()),
             key: None,
             in_memory: false,
+            preset_pins: None,
         };
         // The agent and the viewer may start at the same moment: the first file written wins.
         let created = std::fs::OpenOptions::new()

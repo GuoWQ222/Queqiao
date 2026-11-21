@@ -109,7 +109,7 @@ impl Account {
             .clone()
             .ok_or_else(|| Error("the device has no key".into()))?;
         let known = if device.in_memory {
-            KnownDevices::in_memory()
+            KnownDevices::with_pins(device.preset_pins.clone().unwrap_or_default())
         } else {
             KnownDevices::load()?
         };
@@ -357,6 +357,11 @@ impl Account {
         self.send(ClientMessage::OpenHelp {
             code: code.to_string(),
         });
+    }
+
+    /// The keys of the account's devices as this device pinned them (handed to the agent at the sign-in screen).
+    pub fn pins(&self) -> Vec<(String, String)> {
+        self.known.pins()
     }
 
     pub fn close_help(&self) {

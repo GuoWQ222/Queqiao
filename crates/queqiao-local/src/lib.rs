@@ -9,7 +9,9 @@
 
 mod messages;
 
-pub use messages::{FromHelper, FromService, MAX_MESSAGE, MAX_TEXT, ToHelper, ToService};
+pub use messages::{
+    FromHelper, FromService, LogonIdentity, MAX_MESSAGE, MAX_TEXT, ToHelper, ToService,
+};
 
 use windows::Win32::Foundation::{
     CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,

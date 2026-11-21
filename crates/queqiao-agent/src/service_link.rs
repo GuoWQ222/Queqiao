@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use queqiao_core::protocol::InputEvent;
 use queqiao_input::ScreenRect;
-use queqiao_local::{Ends, FromHelper, FromService, ToHelper, ToService, Writer};
+use queqiao_local::{Ends, FromHelper, FromService, LogonIdentity, ToHelper, ToService, Writer};
 
 /// The person's own desktop, as the helper names it.
 pub const OWN_DESKTOP: &str = "Default";
@@ -55,6 +55,25 @@ impl ServiceLink {
         Ok(ServiceLink { writer, replies })
     }
 
+    /// The agent at the sign-in screen: who to be, as the service hands it over right after the start.
+    pub fn identity(&mut self, wait: Duration) -> Result<LogonIdentity, String> {
+        match self.replies.recv_timeout(wait) {
+            Ok(FromService::Identity(identity)) => Ok(identity),
+            Ok(_) => Err("the service sent something else first".into()),
+            Err(_) => Err("the service did not hand over this device".into()),
+        }
+    }
+
+    /// Hands this device to the service for its agent at the sign-in screen (None: the person does not allow
+    /// control there; the service forgets it).
+    pub fn offer_logon(&mut self, identity: Option<LogonIdentity>) -> Result<(), String> {
+        let message = match identity {
+            Some(identity) => ToService::LogonIdentity(identity),
+            None => ToService::ForgetLogon,
+        };
+        self.writer.write(&message.encode())
+    }
+
     /// Ctrl+Alt+Del on this PC's screen; the service's answer.
     pub fn send_sas(&mut self) -> String {
         while self.replies.try_recv().is_ok() {}
@@ -63,6 +82,7 @@ impl ServiceLink {
         }
         match self.replies.recv_timeout(Duration::from_secs(3)) {
             Ok(FromService::Reply(reply)) => reply,
+            Ok(FromService::Identity(_)) => "the Queqiao service answered something else".into(),
             Err(_) => "the Queqiao service did not answer".into(),
         }
     }
@@ -82,6 +102,10 @@ pub struct DesktopLink {
     pub capturing: bool,
     /// The helper's channel is gone.
     pub closed: bool,
+    /// The person pressed End on the helper's banner (taken by the session).
+    pub end_pressed: bool,
+    /// The captured screen's place, as the helper last said.
+    pub screen: Option<ScreenRect>,
 }
 
 impl DesktopLink {
@@ -104,6 +128,8 @@ impl DesktopLink {
             desktop: String::new(),
             capturing: false,
             closed: false,
+            end_pressed: false,
+            screen: None,
         })
     }
 
@@ -118,6 +144,11 @@ impl DesktopLink {
         if !on && self.capturing {
             self.stop_capture();
         }
+    }
+
+    /// The session banner the helper shows off the person's own desktop (None: none).
+    pub fn banner(&mut self, viewer: Option<&str>) {
+        self.send(ToHelper::Banner(viewer.map(str::to_string)));
     }
 
     pub fn capture(&mut self, screen: usize) {
@@ -160,6 +191,29 @@ impl DesktopLink {
             Ok(FromHelper::Desktop(name)) => {
                 self.desktop = name.clone();
                 Some(FromHelper::Desktop(name))
+            }
+            Ok(FromHelper::EndPressed) => {
+                self.end_pressed = true;
+                Some(FromHelper::EndPressed)
+            }
+            Ok(FromHelper::Screen {
+                left,
+                top,
+                width,
+                height,
+            }) => {
+                self.screen = Some(ScreenRect {
+                    left,
+                    top,
+                    width,
+                    height,
+                });
+                Some(FromHelper::Screen {
+                    left,
+                    top,
+                    width,
+                    height,
+                })
             }
             Ok(other) => Some(other),
             Err(RecvTimeoutError::Timeout) => None,

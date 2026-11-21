@@ -4,7 +4,9 @@
 //! - tells the agent which desktop takes input, whenever that changes;
 //! - while asked to, captures a screen of that desktop and sends its pictures (at most 30 a second);
 //! - during a session, injects the agent's input there, but never on the person's own desktop ("Default"):
-//!   there the agent injects as the person, with the person's rights.
+//!   there the agent injects as the person, with the person's rights;
+//! - during a session, shows the session banner (with End) on any other desktop: the person's own banner is on
+//!   their desktop, out of sight on the sign-in, lock and UAC screens.
 //!
 //! It ends when the agent's channel closes, or at the first message it does not know.
 
@@ -13,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use queqiao_capture::{Duplicator, needs_restart};
+use queqiao_display::SessionBanner;
 use queqiao_input::{Injector, ScreenRect};
 use queqiao_local::{Ends, FromHelper, ToHelper, Writer};
 use windows::Win32::Foundation::{GENERIC_ALL, HANDLE};
@@ -71,6 +74,10 @@ struct Shared {
     /// Changes whenever capture must start again (asked anew, stopped, or the desktop changed).
     generation: AtomicU64,
     session: AtomicBool,
+    /// The viewer the banner names (shown during a session, off the person's own desktop).
+    banner: Mutex<Option<String>>,
+    /// Changes whenever the banner must be shown anew (named, removed, the session or the desktop changed).
+    banner_generation: AtomicU64,
     writer: Mutex<Writer>,
 }
 
@@ -94,6 +101,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         capture: Mutex::new(None),
         generation: AtomicU64::new(0),
         session: AtomicBool::new(false),
+        banner: Mutex::new(None),
+        banner_generation: AtomicU64::new(0),
         writer: Mutex::new(writer),
     });
     log::line("desktop helper: started");
@@ -104,6 +113,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     {
         let shared = shared.clone();
         std::thread::spawn(move || capture_loop(&shared));
+    }
+    {
+        let shared = shared.clone();
+        std::thread::spawn(move || banner_loop(&shared));
     }
     let mut injecting = Injecting::default();
     let ending = loop {
@@ -126,6 +139,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
             Some(ToHelper::Session(on)) => {
                 shared.session.store(on, Ordering::SeqCst);
+                shared.banner_generation.fetch_add(1, Ordering::SeqCst);
                 log::line(&format!(
                     "desktop helper: a session {}",
                     if on { "started" } else { "ended" }
@@ -151,6 +165,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 } else {
                     injecting.refused += 1;
                 }
+            }
+            Some(ToHelper::Banner(viewer)) => {
+                if let Ok(mut banner) = shared.banner.lock() {
+                    *banner = viewer;
+                }
+                shared.banner_generation.fetch_add(1, Ordering::SeqCst);
             }
             None => break "a message it does not know".to_string(),
         }
@@ -229,6 +249,7 @@ fn watch(shared: &Shared) {
             log::line(&format!("desktop helper: input desktop {name}"));
             last = name;
             shared.generation.fetch_add(1, Ordering::SeqCst);
+            shared.banner_generation.fetch_add(1, Ordering::SeqCst);
         }
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -282,6 +303,16 @@ fn capture_round(
     *attached = Some(desktop);
     let mut duplicator =
         Duplicator::new(usize::from(screen)).map_err(|e| format!("capture on {name}: {e}"))?;
+    // Where the screen is, before its first picture (the agent for the sign-in screen cannot see the screens).
+    let info = duplicator.info().clone();
+    if !shared.send(&FromHelper::Screen {
+        left: info.left,
+        top: info.top,
+        width: info.width,
+        height: info.height,
+    }) {
+        return Ok(());
+    }
     let send = |width: u32, height: u32, pixels: Vec<u8>| {
         shared.send(&FromHelper::Frame {
             width,
@@ -315,5 +346,75 @@ fn capture_round(
             Err(error) => return Err(format!("capture on {name}: {error}")),
         }
     }
+    Ok(())
+}
+
+/// Shows the session banner while a session runs and a desktop other than the person's own takes input; each
+/// round on a fresh thread attached to that desktop (a thread with a window cannot change desktops).
+fn banner_loop(shared: &Arc<Shared>) {
+    let mut last_error = String::new();
+    loop {
+        let generation = shared.banner_generation.load(Ordering::SeqCst);
+        let viewer = shared
+            .banner
+            .lock()
+            .ok()
+            .and_then(|banner| banner.clone())
+            .filter(|_| shared.session.load(Ordering::SeqCst));
+        let mut retry = false;
+        if let Some(viewer) = viewer {
+            let worker = {
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    let mut attached = None;
+                    let result = banner_round(&shared, &viewer, generation, &mut attached);
+                    (attached, result)
+                })
+            };
+            if let Ok((_, Err(error))) = worker.join() {
+                if error != last_error {
+                    log::line(&format!("desktop helper: banner: {error}"));
+                    last_error = error;
+                }
+                retry = true;
+            }
+        }
+        if retry {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+        while shared.banner_generation.load(Ordering::SeqCst) == generation {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+fn banner_round(
+    shared: &Shared,
+    viewer: &str,
+    generation: u64,
+    attached: &mut Option<Desktop>,
+) -> Result<(), String> {
+    let (desktop, name) = input_desktop()?;
+    // On the person's own desktop their agent's banner shows.
+    if name == OWN_DESKTOP {
+        return Ok(());
+    }
+    unsafe { SetThreadDesktop(desktop.0) }.map_err(|e| format!("SetThreadDesktop: {e}"))?;
+    *attached = Some(desktop);
+    let banner = SessionBanner::show(viewer).map_err(|e| format!("on {name}: {e}"))?;
+    log::line(&format!("desktop helper: banner shown on {name}"));
+    while shared.banner_generation.load(Ordering::SeqCst) == generation {
+        if banner.end_pressed(50) {
+            log::line(&format!(
+                "desktop helper: End pressed on the banner on {name}"
+            ));
+            if !shared.send(&FromHelper::EndPressed) {
+                break;
+            }
+        }
+    }
+    // The window goes on this thread, before it ends.
+    drop(banner);
     Ok(())
 }

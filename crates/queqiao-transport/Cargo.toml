@@ -11,4 +11,9 @@ getrandom.workspace = true
 socket2 = "0.6"
 # Windows' own crypto (CNG) for DTLS: no C toolchain or CMake needed, x64 and ARM64.
 str0m = { version = "0.25", default-features = false, features = ["wincrypto"] }
-windows = { workspace = true, features = ["Win32_Media"] }
+windows = { workspace = true, features = [
+    "Win32_Media",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }

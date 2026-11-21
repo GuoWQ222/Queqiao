@@ -42,7 +42,8 @@ use queqiao_input::{
 use queqiao_local::FromHelper;
 use queqiao_terminal::{TerminalMessage, Terminals};
 use queqiao_transport::{
-    Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, Stream, check_hello, hello_body,
+    Addresses, Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, Stream, check_hello,
+    hello_body,
 };
 use service_link::Links;
 use windows::Win32::Foundation::RECT;
@@ -117,6 +118,9 @@ struct Options {
     verify_input: bool,
     /// The channels the Queqiao service hands over when it starts the agent (`<read>,<write>` handles).
     service_channel: Option<String>,
+    /// The agent for the sign-in screen (the service starts it while nobody is signed in): who it is comes from the
+    /// service, in memory; it shows nothing itself and keeps nothing.
+    logon: bool,
     desktop_channel: Option<String>,
 }
 
@@ -216,6 +220,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--lock-after-session" => options.lock_after_session = true,
             "--test-press-setting" => options.test_press_setting = true,
             "--service-channel" => options.service_channel = Some(args.next()?),
+            "--logon" => options.logon = true,
             "--desktop-channel" => options.desktop_channel = Some(args.next()?),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
@@ -236,8 +241,26 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
                 .into(),
         );
     }
+    let handed = if options.logon {
+        let service = links
+            .service
+            .as_mut()
+            .ok_or("--logon is for the Queqiao service only")?;
+        let identity = service.identity(Duration::from_secs(10))?;
+        lines.push(format!(
+            "the agent for the sign-in screen, as {} ({})",
+            identity.device_name, identity.device_id
+        ));
+        Some(identity)
+    } else {
+        None
+    };
     // Started without options (at sign-in, or by hand): one agent per user session.
-    if options.server.is_none() && options.connect.is_none() && options.listen.is_none() {
+    if !options.logon
+        && options.server.is_none()
+        && options.connect.is_none()
+        && options.listen.is_none()
+    {
         // With the Queqiao service running, Queqiao for the person signed in is the one it starts (the Run key's
         // copy, started at sign-in as well, leaves).
         if options.service_channel.is_none() && autostart::service_runs() {
@@ -250,10 +273,26 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         .seconds
         .map(|s| Instant::now() + Duration::from_secs(s));
     // Nothing happens unseen: the tray icon whenever the agent runs, a banner during every session.
-    let settings = ui::Settings::load();
+    // At the sign-in screen: only what the person allowed (sessions from the account's devices without asking),
+    // nothing that needs someone signed in (clipboard, files, command lines).
+    let settings = match &handed {
+        Some(handed) => ui::Settings {
+            allow_account_control: handed.allow_account_control,
+            ask_before_session: false,
+            share_clipboard: false,
+            receive_files: false,
+            allow_terminal: false,
+            ..ui::Settings::default()
+        },
+        None => ui::Settings::load(),
+    };
     let mut shown = settings.clone();
     shown.ask_before_session |= options.ask;
-    let ui = ui::Ui::start(&shown, options.ui_pictures.clone())?;
+    let ui = if options.logon {
+        ui::Ui::headless()?
+    } else {
+        ui::Ui::start(&shown, options.ui_pictures.clone())?
+    };
     lines.push(format!(
         "tray icon {}; this account's devices may control this PC: {}; ask first: {}",
         if ui.tray_shown {
@@ -273,7 +312,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         }
     ));
     if options.connect.is_none() && options.listen.is_none() {
-        return run_account(options, end, &ui, settings, &mut links, lines);
+        return run_account(options, end, &ui, settings, &mut links, handed, lines);
     }
     let mut signal = match (&options.connect, &options.listen) {
         (Some(address), _) => Signal::connect(address, Duration::from_secs(60)),
@@ -312,15 +351,30 @@ fn run_account(
     ui: &ui::Ui,
     mut settings: ui::Settings,
     links: &mut Links,
+    handed: Option<queqiao_local::LogonIdentity>,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
-    // Tests run two accounts on one PC: a throwaway device (own key, pins in memory) for the second.
-    let identity = match &options.test_device {
-        Some(label) => DeviceIdentity::in_memory(label),
-        None => DeviceIdentity::load_or_create(),
+    // Tests run two accounts on one PC: a throwaway device (own key, pins in memory) for the second. At the sign-in
+    // screen the device and its login are the person's, handed over by the service (in memory only).
+    let identity = match (&handed, &options.test_device) {
+        (Some(handed), _) => DeviceIdentity::handed_over(
+            &handed.device_id,
+            &handed.device_name,
+            &handed.key_pkcs8,
+            handed.pins.clone(),
+        ),
+        (None, Some(label)) => DeviceIdentity::in_memory(label),
+        (None, None) => DeviceIdentity::load_or_create(),
     }
     .map_err(|e| e.to_string())?;
-    let mut login = SavedLogin::load(AccountRole::Agent).unwrap_or_default();
+    let mut login = match &handed {
+        Some(handed) => SavedLogin {
+            server: handed.server.clone(),
+            pin: handed.pin.clone(),
+            refresh_token: Some(handed.refresh_token.clone()),
+        },
+        None => SavedLogin::load(AccountRole::Agent).unwrap_or_default(),
+    };
     if let Some(server) = &options.server {
         if login.server != *server {
             login.refresh_token = None;
@@ -336,7 +390,9 @@ fn run_account(
     let password = options.user.as_deref().zip(options.password.as_deref());
     let mut account = Account::connect(&mut login, &identity, AccountRole::Agent, password)
         .map_err(|e| e.to_string())?;
-    login.save(AccountRole::Agent).map_err(|e| e.to_string())?;
+    if handed.is_none() {
+        login.save(AccountRole::Agent).map_err(|e| e.to_string())?;
+    }
     if let Some(device) = &options.trust_new_key {
         account.trust_new_key(device).map_err(|e| e.to_string())?;
         lines.push(format!("the key of device {device} will be pinned anew"));
@@ -350,6 +406,9 @@ fn run_account(
         account.devices.len()
     ));
 
+    // With the service: this device for its agent at the sign-in screen while the person lets the account's devices
+    // in without asking (otherwise the service forgets it).
+    let mut offer_logon = handed.is_none() && options.test_device.is_none();
     let (mut sessions, mut passed) = (0u32, true);
     let mut retry = Duration::from_secs(1);
     let mut deferred: Vec<PresenceEvent> = Vec::new();
@@ -380,6 +439,7 @@ fn run_account(
                 PresenceEvent::SetAllow(on) => {
                     settings.allow_account_control = on;
                     let _ = settings.save();
+                    offer_logon = handed.is_none() && options.test_device.is_none();
                     lines.push(format!(
                         "the person at this PC set: this account's devices may control it: {on}"
                     ));
@@ -421,6 +481,7 @@ fn run_account(
                 PresenceEvent::SetAsk(on) => {
                     settings.ask_before_session = on;
                     let _ = settings.save();
+                    offer_logon = handed.is_none() && options.test_device.is_none();
                     lines.push(format!(
                         "the person at this PC set: ask before each session: {on}"
                     ));
@@ -454,6 +515,23 @@ fn run_account(
         if quit {
             lines.push("quit from the tray icon".into());
             break;
+        }
+        if offer_logon && let Some(service) = links.service.as_mut() {
+            offer_logon = false;
+            let allowed = settings.allow_account_control && !settings.ask_before_session;
+            let offer = allowed
+                .then(|| logon_identity(&identity, &login, &account))
+                .flatten();
+            let handing = offer.is_some();
+            match service.offer_logon(offer) {
+                Ok(()) if handing => lines.push(
+                    "the sign-in screen: this device handed to the Queqiao service for it".into(),
+                ),
+                Ok(()) => lines.push(
+                    "the sign-in screen: not offered (control without asking is off here)".into(),
+                ),
+                Err(error) => lines.push(format!("the sign-in screen: {error}")),
+            }
         }
         match account.next_event(Duration::from_millis(200)) {
             Some(AccountEvent::Signal {
@@ -797,6 +875,10 @@ fn privacy_other_pixels(image: &BgraImage) -> Option<String> {
 
 /// Starts capturing this PC's sound for the session (None, with a report line, when it cannot).
 fn start_sound(peer: &Peer, options: &Options, lines: &mut Vec<String>) -> Option<Capture> {
+    if options.logon {
+        lines.push("sound: none at the sign-in screen".into());
+        return None;
+    }
     match peer.audio_sender() {
         Ok(sender) => Some(Capture::start(
             options.sound_device.clone(),
@@ -1065,6 +1147,7 @@ fn session(
             lines.push(format!("input desktop: {name}"));
         }
         link.session(true);
+        link.banner(Some(viewer));
     }
     let (mut duplicator, mut info, mut device, mut context, snapshot) = match Duplicator::primary()
     {
@@ -1081,15 +1164,27 @@ fn session(
             let Some(link) = links.desktop.as_mut() else {
                 return Err(describe(error));
             };
-            let opened = queqiao_capture::screen_device(None).map_err(describe)?;
+            // No screens to see from here (the agent at the sign-in screen runs in session 0): a device on the first
+            // GPU, and the screen's place as the helper says.
+            let opened = queqiao_capture::screen_device(None)
+                .or_else(|_| queqiao_capture::first_device())
+                .map_err(describe)?;
             link.capture(opened.index);
             let snapshot = first_helper_picture(link)?;
+            let mut info = opened.info;
+            match link.screen {
+                Some(screen) => {
+                    (info.left, info.top) = (screen.left, screen.top);
+                    (info.width, info.height) = (screen.width, screen.height);
+                }
+                None => (info.width, info.height) = (snapshot.width, snapshot.height),
+            }
             secure_switches += 1;
             lines.push(format!(
                 "this PC's own desktop does not take input now ({}): pictures and input through the desktop helper",
                 describe(error)
             ));
-            (None, opened.info, opened.device, opened.context, snapshot)
+            (None, info, opened.device, opened.context, snapshot)
         }
     };
     let mut latest = upload(&device, &snapshot)?;
@@ -1133,7 +1228,13 @@ fn session(
 
     lines.push(format!("viewer: {viewer}"));
     let started = Instant::now();
-    let peer = Peer::start(Role::Agent, signal).map_err(|e| e.to_string())?;
+    // Someone helping from another account learns only the address the server connection uses.
+    let addresses = if helper {
+        Addresses::RouteOnly
+    } else {
+        Addresses::All
+    };
+    let peer = Peer::start_with(Role::Agent, signal, addresses).map_err(|e| e.to_string())?;
     lines.extend(peer.candidates().iter().cloned());
     // This PC's sound, captured and sent from its own thread (the viewer can turn it off).
     let mut sound = start_sound(&peer, options, lines);
@@ -1265,6 +1366,16 @@ fn session(
                 ),
                 other => deferred.push(other),
             }
+        }
+        // End pressed on the helper's banner (on the sign-in, lock or UAC screen).
+        if links
+            .desktop
+            .as_mut()
+            .is_some_and(|link| std::mem::take(&mut link.end_pressed))
+        {
+            closed = Some("ended by the person at this PC".to_string());
+            ended_here = true;
+            break 'session;
         }
         if connected_after.is_none() && started.elapsed() > CONNECT_LIMIT {
             closed = Some(format!(
@@ -1866,7 +1977,7 @@ fn session(
                             "{} ms: input desktop: {name}",
                             started.elapsed().as_millis()
                         )),
-                        None => {}
+                        Some(FromHelper::EndPressed | FromHelper::Screen { .. }) | None => {}
                     }
                 }
             }
@@ -1919,6 +2030,7 @@ fn session(
         }
     }
     if let Some(link) = links.desktop.as_mut() {
+        link.banner(None);
         link.session(false);
         lines.push(format!(
             "desktop helper: {secure_switches} switches to another desktop, {secure_frames} pictures from it, {secure_inputs} inputs passed to it"
@@ -2070,6 +2182,24 @@ fn verify(injector: &Injector, event: &InputEvent, stats: &mut Stats) {
     }
 }
 
+/// This device as the service's agent at the sign-in screen is to be (None without a key or a saved login).
+fn logon_identity(
+    identity: &DeviceIdentity,
+    login: &SavedLogin,
+    account: &Account,
+) -> Option<queqiao_local::LogonIdentity> {
+    Some(queqiao_local::LogonIdentity {
+        device_id: identity.id.clone(),
+        device_name: identity.name.clone(),
+        key_pkcs8: identity.key.as_ref()?.pkcs8().to_vec(),
+        server: login.server.clone(),
+        pin: login.pin.clone(),
+        refresh_token: login.refresh_token.clone()?,
+        allow_account_control: true,
+        pins: account.pins(),
+    })
+}
+
 /// The desktop helper's first picture (a session that starts while another desktop takes input).
 fn first_helper_picture(link: &mut service_link::DesktopLink) -> Result<BgraImage, String> {
     let until = Instant::now() + Duration::from_secs(3);
@@ -2088,7 +2218,7 @@ fn first_helper_picture(link: &mut service_link::DesktopLink) -> Result<BgraImag
                 });
             }
             Some(FromHelper::Failed(error)) => failure = error,
-            Some(FromHelper::Desktop(_)) => {}
+            Some(FromHelper::Desktop(_) | FromHelper::EndPressed | FromHelper::Screen { .. }) => {}
             None if link.closed => break,
             None => {}
         }

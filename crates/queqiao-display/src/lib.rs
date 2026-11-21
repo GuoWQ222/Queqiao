@@ -15,7 +15,7 @@ pub use forms::{
     PICK_CLOSED, PickList, ask_text, confirm, normalize_code, popup_menu, save_window_picture,
     show_error,
 };
-pub use presence::{PasswordCheck, Presence, PresenceEvent, TEST_MENU_TERMINAL};
+pub use presence::{PasswordCheck, Presence, PresenceEvent, SessionBanner, TEST_MENU_TERMINAL};
 pub use present::{Presenter, fit};
 pub use privacy::PrivacyScreen;
 pub use window::{Window, WindowEvent};

@@ -43,11 +43,18 @@ pub fn candidate_sizes(width: u32, height: u32) -> Vec<(u32, u32)> {
         } else {
             (long, short)
         };
-        let scale_w = f64::from(max_w) / f64::from(width.max(1));
-        let scale_h = f64::from(max_h) / f64::from(height.max(1));
-        let scale = scale_w.min(scale_h).min(1.0);
-        let w = ((f64::from(width) * scale) as u32) & !1;
-        let h = ((f64::from(height) * scale) as u32) & !1;
+        // Whole numbers: the side that meets the box is the box's, the other in proportion. (In floating point
+        // 1400 x 720/1400 came out as 719.99 and the 16:10 laptop got 1152x718 for a 720 picture.)
+        let (width_wide, height_wide) = (u64::from(width.max(1)), u64::from(height.max(1)));
+        let (w, h) = if width <= max_w && height <= max_h {
+            (width, height)
+        } else if u64::from(max_w) * height_wide <= u64::from(max_h) * width_wide {
+            // The width meets the box first.
+            (max_w, (height_wide * u64::from(max_w) / width_wide) as u32)
+        } else {
+            ((width_wide * u64::from(max_h) / height_wide) as u32, max_h)
+        };
+        let (w, h) = (w & !1, h & !1);
         if w >= 2 && h >= 2 && !sizes.contains(&(w, h)) {
             sizes.push((w, h));
         }
@@ -93,5 +100,26 @@ mod tests {
         assert_eq!(candidate_sizes(1440, 2560)[1], (1080, 1920));
         // Small screens are never scaled up.
         assert_eq!(candidate_sizes(800, 600), vec![(800, 600)]);
+        // 16:10 into the 720p box: exactly 720 lines (it was 718), and the same turned.
+        assert!(candidate_sizes(2240, 1400).contains(&(1152, 720)));
+        assert!(candidate_sizes(1920, 1200).contains(&(1152, 720)));
+        assert!(candidate_sizes(1400, 2240).contains(&(720, 1152)));
+        // The aspect ratio is kept: one side is within 2 pixels of the exact value for the other.
+        for (width, height) in [
+            (2240, 1400),
+            (2560, 1600),
+            (3000, 2000),
+            (1366, 768),
+            (3440, 1440),
+        ] {
+            for (w, h) in candidate_sizes(width, height) {
+                let exact_h = f64::from(w) * f64::from(height) / f64::from(width);
+                let exact_w = f64::from(h) * f64::from(width) / f64::from(height);
+                let off = (f64::from(h) - exact_h)
+                    .abs()
+                    .min((f64::from(w) - exact_w).abs());
+                assert!(off <= 2.0, "{width}x{height} -> {w}x{h}");
+            }
+        }
     }
 }

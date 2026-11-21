@@ -94,7 +94,7 @@ try {
 
     '=== 1. install: the service starts the desktop helper and the agent'
     $agentArgs = "--server $listen --pin $pin --user alice --password $password --sessions 1 --seconds 150 --dry-run-commands --report `"$Out\agent_secure.txt`""
-    & $serviceExe install --agent-arguments $agentArgs --no-restart 2>&1 | ForEach-Object { "$_" }
+    & { $ErrorActionPreference = 'Continue'; & $serviceExe install --agent-arguments $agentArgs --no-restart 2>&1 | ForEach-Object { "$_" } }
     if (-not (Wait-ServiceLog 'started the desktop helper \(\d+\) and the agent \(\d+\)' 1 30)) {
         $failed += 'service start'
         Get-ServiceLog
@@ -166,7 +166,7 @@ try {
     '=== 4. Restart Queqiao on that PC: the service starts the agent again'
     $agentArgs2 = "--server $listen --pin $pin --user alice --password $password --sessions 2 --seconds 150 --report `"$Out\agent_restart.txt`""
     $startsBefore = @(Get-ServiceLog | Where-Object { $_ -match 'started the desktop helper' }).Count
-    & $serviceExe install --agent-arguments $agentArgs2 --no-restart 2>&1 | ForEach-Object { "$_" }
+    & { $ErrorActionPreference = 'Continue'; & $serviceExe install --agent-arguments $agentArgs2 --no-restart 2>&1 | ForEach-Object { "$_" } }
     if (-not (Wait-ServiceLog 'started the desktop helper' ($startsBefore + 1) 30)) { $failed += 'service start 2' }
     Start-Sleep -Seconds 3
     Start-SessionTask 'Queqiao-M5-Restart' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds 8 --command restart-queqiao --width 960 --report `"$Out\viewer_restart.txt`""
@@ -182,7 +182,7 @@ try {
     '=== service log (this run)'
     Get-ServiceLog
     if (-not $Keep) {
-        & $serviceExe uninstall 2>&1 | ForEach-Object { "$_" }
+        & { $ErrorActionPreference = 'Continue'; & $serviceExe uninstall 2>&1 | ForEach-Object { "$_" } }
     }
     Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
     if (-not $completed -and -not $failed.Count) { $failed += 'stopped early' }

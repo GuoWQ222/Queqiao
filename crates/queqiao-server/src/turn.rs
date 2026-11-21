@@ -143,8 +143,23 @@ enum Action {
     },
 }
 
+/// A UDP socket on `port`: on the public address itself when it is this machine's (and the listen address is
+/// "any"). A socket on "any" sends each answer out of whichever interface the route picks; on a PC whose default
+/// route is a VPN or a proxy's TUN adapter (Clash/Mihomo and the like) that is the tunnel, so answers left from
+/// the tunnel's address and never matched what the client had asked (found 2026-11-21). Bound to the address,
+/// Windows sends only out of the interface that has it.
+async fn bind_udp(config: &TurnConfig, port: u16) -> std::io::Result<UdpSocket> {
+    if config.listen.ip().is_unspecified()
+        && !config.public_ip.is_unspecified()
+        && let Ok(socket) = UdpSocket::bind(SocketAddr::new(config.public_ip, port)).await
+    {
+        return Ok(socket);
+    }
+    UdpSocket::bind(SocketAddr::new(config.listen.ip(), port)).await
+}
+
 pub async fn serve(config: Arc<TurnConfig>) -> std::io::Result<()> {
-    let socket = Arc::new(UdpSocket::bind(config.listen).await?);
+    let socket = Arc::new(bind_udp(&config, config.listen.port()).await?);
     let state: State = Arc::new(Mutex::new(HashMap::new()));
     let sweeper = state.clone();
     tokio::spawn(async move {
@@ -348,7 +363,7 @@ async fn allocate(
     for _ in 0..count {
         let port = *next_port;
         *next_port = if port >= last { first } else { port + 1 };
-        if let Ok(socket) = UdpSocket::bind(SocketAddr::new(config.listen.ip(), port)).await {
+        if let Ok(socket) = bind_udp(config, port).await {
             relay = Some((Arc::new(socket), port));
             break;
         }

@@ -7,13 +7,16 @@
 //! the thread's wait (a socket timeout would otherwise round up to Windows' 15.6 ms timer tick).
 //!
 //! Before the offer or answer, the candidates are gathered (`gather`): host, server-reflexive and relayed.
+//! The main socket is bound to the address the server connection leaves from; for the account's own devices
+//! every other uplink (`interfaces`) gets a socket of its own too, bound to its address, with a thread that
+//! hands what it receives to this thread (and wakes it). What str0m sends leaves from the socket of its source.
 //! What str0m sends from the relayed address goes through the TURN client, and what the TURN server
 //! forwards is handed to str0m as received on the relayed address.
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Once};
 use std::thread::JoinHandle;
@@ -26,10 +29,31 @@ use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTi
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
-use crate::gather::gather;
+use crate::gather::{ExtraDeadline, gather, gather_extra};
 use crate::signal::Signaling;
 use crate::turn::{Incoming, TurnClient};
 use crate::{Error, err};
+
+/// Which of this PC's addresses a session offers: all its uplinks (the account's own devices), or only the one
+/// the server connection uses (someone helping from another account does not learn the others).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Addresses {
+    All,
+    RouteOnly,
+}
+
+/// A socket on another uplink.
+struct Extra {
+    socket: UdpSocket,
+    local: SocketAddr,
+}
+
+/// A datagram an extra socket received.
+struct Arriving {
+    contents: Vec<u8>,
+    source: SocketAddr,
+    destination: SocketAddr,
+}
 
 /// The agent sends video and receives the data channel; the viewer receives video, makes the offer and
 /// opens the data channel.
@@ -149,20 +173,69 @@ struct InFlight {
 pub const STREAM_IN_FLIGHT: usize = 1024 * 1024;
 
 impl Peer {
-    /// Negotiates over `signal` (the viewer offers, the agent answers) and starts the network thread.
+    /// Negotiates over `signal` (the viewer offers, the agent answers) and starts the network thread, offering
+    /// all of this PC's uplinks.
     pub fn start(role: Role, signal: &mut dyn Signaling) -> Result<Peer, Error> {
+        Peer::start_with(role, signal, Addresses::All)
+    }
+
+    /// As [`Peer::start`], offering the addresses `addresses` says.
+    pub fn start_with(
+        role: Role,
+        signal: &mut dyn Signaling,
+        addresses: Addresses,
+    ) -> Result<Peer, Error> {
         static PROCESS_SETUP: Once = Once::new();
         PROCESS_SETUP.call_once(|| {
             str0m::crypto::from_feature_flags().install_process_default();
             // 1 ms timer resolution for this process: str0m's timers and pacing need it.
             unsafe { windows::Win32::Media::timeBeginPeriod(1) };
         });
-        let socket = bind_socket()?;
+        let local_ip = signal.local_ip()?;
+        // Bound to the address the server connection leaves from: a socket on "any" would send out of whatever
+        // interface the route picks, a VPN's or proxy's tunnel included (see `interfaces`).
+        let bind_ip = match local_ip {
+            IpAddr::V4(ip) if !ip.is_unspecified() => ip,
+            _ => Ipv4Addr::UNSPECIFIED,
+        };
+        let socket = bind_socket(bind_ip)?;
         let port = socket.local_addr()?.port();
-        let local = SocketAddr::new(signal.local_ip()?, port);
+        let local = SocketAddr::new(local_ip, port);
         let servers = signal.ice_servers()?;
         let relay_only = queqiao_core::forced("network").as_deref() == Some("relay");
-        let gathered = gather(&socket, local, &servers, relay_only)?;
+        let extras: Vec<Extra> =
+            if addresses == Addresses::All && !relay_only && !bind_ip.is_unspecified() {
+                crate::interfaces::uplinks()
+                    .into_iter()
+                    .filter(|ip| *ip != bind_ip)
+                    .filter_map(|ip| {
+                        let socket = bind_socket(ip).ok()?;
+                        let local = socket.local_addr().ok()?;
+                        Some(Extra { socket, local })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        let stun = servers
+            .stun
+            .or(servers.turn.as_ref().map(|turn| turn.address));
+        let deadline = ExtraDeadline::new(Instant::now());
+        let (gathered, found) = std::thread::scope(|scope| {
+            let jobs: Vec<_> = extras
+                .iter()
+                .map(|extra| {
+                    let deadline = &deadline;
+                    scope.spawn(move || gather_extra(&extra.socket, extra.local, stun, deadline))
+                })
+                .collect();
+            let gathered = gather(&socket, local, &servers, relay_only);
+            deadline.main_done();
+            let found: Vec<_> = jobs.into_iter().filter_map(|job| job.join().ok()).collect();
+            (gathered, found)
+        });
+        let gathered = gathered?;
+        let mut notes = gathered.notes;
         let mut rtc = tune(
             RtcConfig::new()
                 .clear_codecs()
@@ -173,6 +246,12 @@ impl Peer {
         .build(Instant::now());
         for candidate in gathered.candidates {
             rtc.add_local_candidate(candidate);
+        }
+        for (candidates, extra_notes) in found {
+            for candidate in candidates {
+                rtc.add_local_candidate(candidate);
+            }
+            notes.extend(extra_notes);
         }
 
         let (mut mid, mut audio_mid, mut channel) = (None, None, None);
@@ -204,9 +283,25 @@ impl Peer {
 
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
-        let waker = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
-        let wake_to = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+        // The wake-up goes to the main socket, which listens on its own address only.
+        let wake_ip = if bind_ip.is_unspecified() {
+            Ipv4Addr::LOCALHOST
+        } else {
+            bind_ip
+        };
+        let waker = UdpSocket::bind((wake_ip, 0))?;
+        let wake_to = SocketAddr::new(wake_ip.into(), port);
         let wake_from = waker.local_addr()?;
+        let (arrivals, arrived) = mpsc::channel();
+        let stop_extras = Arc::new(AtomicBool::new(false));
+        for extra in &extras {
+            let socket = extra.socket.try_clone()?;
+            let waker = waker.try_clone()?;
+            let (local, arrivals, stop) = (extra.local, arrivals.clone(), stop_extras.clone());
+            std::thread::Builder::new()
+                .name("queqiao-net-in".into())
+                .spawn(move || receive_extra(socket, local, waker, wake_to, arrivals, stop))?;
+        }
         let in_flight: Arc<[InFlight; STREAMS]> = Arc::new(Default::default());
         let mut network = Network {
             rtc,
@@ -220,6 +315,9 @@ impl Peer {
             commands: command_receiver,
             last_keyframe_request: None,
             turn: gathered.turn,
+            extras,
+            arrived,
+            stop_extras,
             connected: false,
             path: None,
             clock: Instant::now(),
@@ -243,7 +341,7 @@ impl Peer {
             waker,
             wake_to,
             thread: Some(thread),
-            notes: gathered.notes,
+            notes,
             in_flight,
         })
     }
@@ -397,13 +495,47 @@ fn flush_channel(
     }
 }
 
-fn bind_socket() -> Result<UdpSocket, Error> {
+/// Receives on another uplink's socket and hands each datagram to the network thread, waking it.
+fn receive_extra(
+    socket: UdpSocket,
+    local: SocketAddr,
+    waker: UdpSocket,
+    wake_to: SocketAddr,
+    arrivals: Sender<Arriving>,
+    stop: Arc<AtomicBool>,
+) {
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(200)));
+    let mut buffer = vec![0u8; 2048];
+    while !stop.load(Ordering::Relaxed) {
+        match socket.recv_from(&mut buffer) {
+            Ok((length, source)) => {
+                let arriving = Arriving {
+                    contents: buffer[..length].to_vec(),
+                    source,
+                    destination: local,
+                };
+                if arrivals.send(arriving).is_err() {
+                    return;
+                }
+                let _ = waker.send_to(&[0], wake_to);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::ConnectionReset
+                ) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn bind_socket(ip: Ipv4Addr) -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(SocketProtocol::UDP))?;
     // A keyframe is a burst of a few hundred packets: Windows' default 64 KB buffers would drop some.
     let _ = socket.set_send_buffer_size(4 << 20);
     let _ = socket.set_recv_buffer_size(4 << 20);
-    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into())?;
+    socket.bind(&SocketAddr::from((ip, 0)).into())?;
     Ok(socket.into())
 }
 
@@ -424,10 +556,21 @@ struct Network {
     commands: Receiver<Command>,
     last_keyframe_request: Option<Instant>,
     turn: Option<TurnClient>,
+    /// The other uplinks' sockets, what they received, and the flag that ends their threads.
+    extras: Vec<Extra>,
+    arrived: Receiver<Arriving>,
+    stop_extras: Arc<AtomicBool>,
     connected: bool,
     path: Option<String>,
     /// The latest time given to str0m: inputs never go back in time (deadlines are served up to 1 ms early).
     clock: Instant,
+}
+
+impl Drop for Network {
+    fn drop(&mut self) {
+        // The other uplinks' threads end within their 200 ms receive wait.
+        self.stop_extras.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Network {
@@ -482,6 +625,30 @@ impl Network {
                 Err(TryRecvError::Disconnected) => return Ok(()),
                 Err(TryRecvError::Empty) => {}
             }
+            // What the other uplinks' sockets received.
+            let mut took = false;
+            while let Ok(arriving) = self.arrived.try_recv() {
+                took = true;
+                let Ok(contents) = arriving.contents.as_slice().try_into() else {
+                    continue;
+                };
+                let at = self.clock(Instant::now());
+                let input = Input::Receive(
+                    at,
+                    Receive {
+                        proto: Protocol::Udp,
+                        source: arriving.source,
+                        destination: arriving.destination,
+                        contents,
+                    },
+                );
+                if self.rtc.accepts(&input) {
+                    self.rtc.handle_input(input).map_err(err)?;
+                }
+            }
+            if took {
+                continue;
+            }
             let deadline = match self.turn.as_ref().and_then(TurnClient::next_deadline) {
                 Some(turn) => deadline.min(turn),
                 None => deadline,
@@ -498,15 +665,22 @@ impl Network {
                     self.handle_turn_packet(&buffer[..length])?;
                     continue;
                 }
-                Ok((length, source)) => Input::Receive(
-                    self.clock(Instant::now()),
-                    Receive {
-                        proto: Protocol::Udp,
-                        source,
-                        destination: self.local,
-                        contents: buffer[..length].try_into().map_err(err)?,
-                    },
-                ),
+                Ok((length, source)) => {
+                    // Something that is not STUN, DTLS or RTP (anyone can send to this port): left out, the
+                    // session goes on.
+                    let Ok(contents) = buffer[..length].try_into() else {
+                        continue;
+                    };
+                    Input::Receive(
+                        self.clock(Instant::now()),
+                        Receive {
+                            proto: Protocol::Udp,
+                            source,
+                            destination: self.local,
+                            contents,
+                        },
+                    )
+                }
                 Err(error)
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
                 {
@@ -540,7 +714,12 @@ impl Network {
                             Some(turn.server)
                         }
                         _ => {
-                            let _ = self.socket.send_to(&packet.contents, packet.destination);
+                            let socket = self
+                                .extras
+                                .iter()
+                                .find(|extra| extra.local == packet.source)
+                                .map_or(&self.socket, |extra| &extra.socket);
+                            let _ = socket.send_to(&packet.contents, packet.destination);
                             None
                         }
                     };
@@ -551,7 +730,9 @@ impl Network {
                             Some(server) => {
                                 format!("relayed through {server} to {}", packet.destination)
                             }
-                            None => format!("direct to {}", packet.destination),
+                            None => {
+                                format!("direct to {} (from {})", packet.destination, packet.source)
+                            }
                         };
                         if self.path.as_ref() != Some(&path) {
                             self.path = Some(path.clone());

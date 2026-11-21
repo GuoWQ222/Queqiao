@@ -5,7 +5,8 @@
 //!   running, with a private channel between them: the desktop helper (SYSTEM, the only account that may see and
 //!   use the sign-in, lock, Ctrl+Alt+Del and UAC screens) and the agent of the person signed in (as them). It sends
 //!   Ctrl+Alt+Del (SendSAS) and restarts both on the agent's request.
-//! - `queqiao-service install [--agent-arguments "<arguments>"] [--no-restart]`, `uninstall`, `status`: set-up,
+//! - `queqiao-service install [--agent-arguments "<arguments>"] [--logon-arguments "<arguments>"] [--no-restart]`,
+//!   `uninstall`, `status`: set-up,
 //!   by an administrator. The programs must be in a folder only administrators can change.
 //! - `queqiao-service desktop --channel <read>,<write>`: the desktop helper; only the service starts it.
 
@@ -13,6 +14,7 @@ mod helper;
 mod install;
 mod launch;
 mod log;
+mod logon;
 mod service;
 
 /// The service's name, and the registry key under Services that holds its settings.
@@ -20,7 +22,7 @@ pub const NAME: &str = "Queqiao";
 
 fn usage() -> String {
     format!(
-        "{}\nusage: queqiao-service install [--agent-arguments \"<arguments>\"] [--no-restart]\n       queqiao-service uninstall | status\n(Windows starts it as a service; `desktop` is for the service only.)",
+        "{}\nusage: queqiao-service install [--agent-arguments \"<arguments>\"] [--logon-arguments \"<arguments>\"] [--no-restart]\n       queqiao-service uninstall | status\n(Windows starts it as a service; `desktop` is for the service only.)",
         queqiao_core::banner(env!("CARGO_PKG_NAME"))
     )
 }

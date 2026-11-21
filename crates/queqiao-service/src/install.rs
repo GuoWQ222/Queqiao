@@ -314,6 +314,7 @@ fn restore_sas() -> Result<Option<String>, String> {
 
 pub fn install(args: &[String]) -> Result<(), String> {
     let mut agent_arguments = String::new();
+    let mut logon_arguments = String::new();
     let mut restart_agent = true;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -322,6 +323,12 @@ pub fn install(args: &[String]) -> Result<(), String> {
                 agent_arguments = rest
                     .next()
                     .ok_or("--agent-arguments needs a value")?
+                    .clone()
+            }
+            "--logon-arguments" => {
+                logon_arguments = rest
+                    .next()
+                    .ok_or("--logon-arguments needs a value")?
                     .clone()
             }
             "--no-restart" => restart_agent = false,
@@ -419,6 +426,7 @@ pub fn install(args: &[String]) -> Result<(), String> {
     }
     .map_err(|e| format!("failure actions: {}", e.message()))?;
     set_value(PARAMETERS, "AgentArguments", Value::Text(&agent_arguments))?;
+    set_value(PARAMETERS, "LogonArguments", Value::Text(&logon_arguments))?;
     set_value(
         PARAMETERS,
         "RestartAgent",
@@ -448,6 +456,8 @@ pub fn uninstall() -> Result<(), String> {
     };
     stop(&service)?;
     let restored = restore_sas()?;
+    // The device kept for the sign-in screen goes with the service.
+    crate::logon::forget();
     unsafe { DeleteService(service.0) }.map_err(|e| format!("DeleteService: {}", e.message()))?;
     println!("removed: {}", crate::NAME);
     if let Some(restored) = restored {

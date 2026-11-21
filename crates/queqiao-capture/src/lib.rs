@@ -369,6 +369,32 @@ pub fn screen_device(index: Option<usize>) -> Result<ScreenDevice> {
     })
 }
 
+/// A D3D11 device on the first GPU, for a process that sees no screens (the agent at the sign-in screen runs in
+/// session 0, where none is attached): the screen's place and size come from elsewhere (left 0 x 0 here).
+pub fn first_device() -> Result<ScreenDevice> {
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
+    let adapter = unsafe { factory.EnumAdapters1(0) }?;
+    let (device, context) = create_device(&adapter)?;
+    let adapter_desc = unsafe { adapter.GetDesc1() }?;
+    let info = OutputInfo {
+        adapter: wide_to_string(&adapter_desc.Description),
+        output: String::new(),
+        width: 0,
+        height: 0,
+        refresh_hz: 30.0,
+        rotation: 0,
+        method: "none (pictures from the desktop helper)",
+        left: 0,
+        top: 0,
+    };
+    Ok(ScreenDevice {
+        device,
+        context,
+        info,
+        index: 0,
+    })
+}
+
 fn attached_outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput, DXGI_OUTPUT_DESC)>> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
     let mut screens = Vec::new();

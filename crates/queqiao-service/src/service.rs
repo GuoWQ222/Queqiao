@@ -12,6 +12,8 @@ use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use queqiao_local::{FromService, ToService, Writer};
+
+use crate::logon;
 use windows::Win32::Foundation::{
     ERROR_CALL_NOT_IMPLEMENTED, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, HANDLE, NO_ERROR,
     WAIT_OBJECT_0,
@@ -169,6 +171,8 @@ struct Settings {
     agent_arguments: String,
     /// Start the agent again after a failure (tests turn this off, so a test agent runs once).
     restart_agent: bool,
+    /// Added to the command line of the agent for the sign-in screen (tests: how long, a report).
+    logon_arguments: String,
 }
 
 fn read_string(key: &str, value: &str) -> Option<String> {
@@ -219,6 +223,7 @@ impl Settings {
         Settings {
             agent_arguments: read_string(PARAMETERS, "AgentArguments").unwrap_or_default(),
             restart_agent: read_dword(PARAMETERS, "RestartAgent").is_none_or(|v| v != 0),
+            logon_arguments: read_string(PARAMETERS, "LogonArguments").unwrap_or_default(),
         }
     }
 }
@@ -227,6 +232,8 @@ impl Settings {
 struct Pair {
     id: u64,
     session: u32,
+    /// The agent for the sign-in screen (nobody signed in), not the person's.
+    logon: bool,
     job: Job,
     helper: Child,
     agent: Child,
@@ -259,9 +266,31 @@ fn start_pair(
     wake: HANDLE,
 ) -> Result<Pair, String> {
     let folder = folder();
-    // Nobody signed in: nothing to start (the sign-in screen without anyone signed in comes later).
-    let user = launch::user_token(session)?;
-    let sid = launch::user_sid(&user)?;
+    // The person signed in at the screen, as them; nobody signed in: the agent for the sign-in screen as
+    // LocalService in session 0 (on a window station of its own: nothing it shows is seen), when the person allowed
+    // it (the device was handed over).
+    let (token, sid, logon_identity) = match launch::user_token(session) {
+        Ok(user) => {
+            let sid = launch::user_sid(&user)?;
+            (user, sid, None)
+        }
+        Err(nobody) => {
+            if !logon::stored() {
+                return Err(format!(
+                    "{nobody}; control at the sign-in screen is not set up"
+                ));
+            }
+            let identity = logon::load().ok_or(
+                "the device for the sign-in screen cannot be read (made anew at the next sign-in)",
+            )?;
+            (
+                launch::local_service_token()?,
+                "S-1-5-19".to_string(),
+                Some(identity),
+            )
+        }
+    };
+    let logon = logon_identity.is_some();
     let job = Job::new()?;
     let (helper_ends, agent_desktop_ends) = queqiao_local::channel()?;
     let system = launch::system_token(session)?;
@@ -271,24 +300,40 @@ fn start_pair(
         &format!("desktop --channel {}", helper_ends.argument()),
         &helper_ends.for_child()?,
         None,
+        launch::INTERACTIVE,
         &job,
     )?;
     drop(helper_ends);
     let (ours, theirs) = queqiao_local::channel()?;
     let mut inherit = theirs.for_child()?.to_vec();
     inherit.extend(agent_desktop_ends.for_child()?);
-    let arguments = format!(
-        "{} --service-channel {} --desktop-channel {}",
-        settings.agent_arguments,
-        theirs.argument(),
-        agent_desktop_ends.argument()
-    );
+    let arguments = if logon {
+        format!(
+            "--logon {} --service-channel {} --desktop-channel {}",
+            settings.logon_arguments,
+            theirs.argument(),
+            agent_desktop_ends.argument()
+        )
+    } else {
+        format!(
+            "{} --service-channel {} --desktop-channel {}",
+            settings.agent_arguments,
+            theirs.argument(),
+            agent_desktop_ends.argument()
+        )
+    };
+    let desktop = if logon {
+        launch::OWN_WINDOW_STATION
+    } else {
+        launch::INTERACTIVE
+    };
     let agent = match launch::start(
-        &user,
+        &token,
         &folder.join("queqiao-agent.exe"),
         arguments.trim_start(),
         &inherit,
         Some(&sid),
+        desktop,
         &job,
     ) {
         Ok(agent) => agent,
@@ -298,7 +343,14 @@ fn start_pair(
         }
     };
     drop((theirs, agent_desktop_ends));
-    let (mut from_agent, to_agent) = ours.split();
+    let (mut from_agent, mut to_agent) = ours.split();
+    // The agent for the sign-in screen learns who it is first.
+    if let Some(identity) = logon_identity
+        && let Err(error) = to_agent.write(&FromService::Identity(identity).encode())
+    {
+        job.end();
+        return Err(format!("handing over the device: {error}"));
+    }
     let requests = requests.clone();
     let wake = wake.0 as usize;
     std::thread::spawn(move || {
@@ -317,12 +369,19 @@ fn start_pair(
         }
     });
     log::line(&format!(
-        "session {session}: started the desktop helper ({}) and the agent ({}) of {sid}",
-        helper.pid, agent.pid
+        "session {session}: started the desktop helper ({}) and {} ({}) as {sid}",
+        helper.pid,
+        if logon {
+            "the agent for the sign-in screen"
+        } else {
+            "the agent"
+        },
+        agent.pid
     ));
     Ok(Pair {
         id,
         session,
+        logon,
         job,
         helper,
         agent,
@@ -365,6 +424,28 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
                     done_in = None;
                     next_start = Instant::now();
                 }
+                // Only the person's own agent hands the device over (or takes it back).
+                ToService::LogonIdentity(_) | ToService::ForgetLogon if current.logon => {
+                    log::line(
+                        "the agent for the sign-in screen tried to change its device: ignored",
+                    );
+                }
+                ToService::LogonIdentity(identity) => match logon::save(&identity) {
+                    Ok(()) => log::line(&format!(
+                        "session {}: the sign-in screen: device {} kept for it",
+                        current.session, identity.device_id
+                    )),
+                    Err(error) => log::line(&format!("the sign-in screen: not kept: {error}")),
+                },
+                ToService::ForgetLogon => {
+                    if logon::stored() {
+                        logon::forget();
+                        log::line(&format!(
+                            "session {}: the sign-in screen: the device was forgotten (the person does not allow it)",
+                            current.session
+                        ));
+                    }
+                }
             }
         }
 
@@ -372,6 +453,9 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
             let mut verdict: Option<(String, bool)> = None;
             if current.session != console {
                 verdict = Some(("the session at the screen changed".into(), false));
+            } else if current.logon && launch::user_token(console).is_ok() {
+                // The person's own agent takes over.
+                verdict = Some(("someone signed in".into(), false));
             } else if let Some(code) = current.agent.exit_code() {
                 let finished = code == AGENT_QUIT || code == AGENT_NOT_LOGGED_IN;
                 verdict = Some((format!("the agent left with code {code}"), !finished));

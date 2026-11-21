@@ -83,6 +83,42 @@ impl Ui {
         })
     }
 
+    /// No windows at all, for the agent at the sign-in screen: it runs where nothing can be shown, and the service's
+    /// desktop helper shows the session banner on the screen. Sessions start, nobody can be asked (asking fails, so
+    /// a session that needs it is refused), there is no privacy screen.
+    pub fn headless() -> Result<Ui, String> {
+        let (command_sender, commands) = mpsc::channel::<Command>();
+        let (_no_events, events) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("queqiao-ui".into())
+            .spawn(move || {
+                while let Ok(command) = commands.recv() {
+                    match command {
+                        Command::SessionStarted(_, reply) => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        Command::Ask(_, _, reply) => {
+                            let _ = reply.send(Err("nobody is signed in to ask".into()));
+                        }
+                        Command::Privacy(_, reply) => {
+                            let _ = reply.send(Err("not at the sign-in screen".into()));
+                        }
+                        Command::PrivacyExcluded(_, reply) => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(Ui {
+            commands: command_sender,
+            events,
+            thread: Some(thread),
+            tray_shown: false,
+        })
+    }
+
     /// Shows the help window (help ID and code), or closes it (None).
     pub fn show_help(&self, shown: Option<(&str, &str)>) {
         self.send(Command::Help(

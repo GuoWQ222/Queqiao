@@ -3,11 +3,14 @@
 //! sets it up ([`Signaling`]: a direct TCP connection ([`Signal`]) or queqiao-server through queqiao-account).
 
 mod gather;
+mod interfaces;
 mod peer;
 mod signal;
 mod turn;
 
-pub use peer::{AudioSender, Peer, PeerEvent, Role, START_BITRATE, STREAM_IN_FLIGHT, Stream, tune};
+pub use peer::{
+    Addresses, AudioSender, Peer, PeerEvent, Role, START_BITRATE, STREAM_IN_FLIGHT, Stream, tune,
+};
 pub use signal::{Signal, Signaling, check_hello, hello_body};
 pub use turn::{IceServers, TurnServer};
 

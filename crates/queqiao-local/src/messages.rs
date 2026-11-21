@@ -30,6 +30,9 @@ pub enum ToHelper {
     },
     /// A remote session started (true) or ended (false): input is taken only during one.
     Session(bool),
+    /// The session banner for this viewer (None: none): the helper shows it, with End, whenever the desktop that
+    /// takes input is not the person's own (the person's own banner is on their desktop, out of sight there).
+    Banner(Option<String>),
 }
 
 /// From the desktop helper to the agent.
@@ -46,6 +49,15 @@ pub enum FromHelper {
     },
     /// Capture failed (it is tried again).
     Failed(String),
+    /// The person at the PC pressed End on the helper's banner.
+    EndPressed,
+    /// The captured screen's place on the desktop (sent as each capture starts, before its first picture).
+    Screen {
+        left: i32,
+        top: i32,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// From the agent to the service.
@@ -55,6 +67,10 @@ pub enum ToService {
     SendSas,
     /// End this agent and its helper and start both again.
     Restart,
+    /// What the agent for the sign-in screen needs to be this device (the person allows control there).
+    LogonIdentity(LogonIdentity),
+    /// The person does not allow control at the sign-in screen (any more): the service forgets the identity.
+    ForgetLogon,
 }
 
 /// From the service to the agent.
@@ -62,6 +78,112 @@ pub enum ToService {
 pub enum FromService {
     /// The outcome of a request, for the viewer.
     Reply(String),
+    /// To the agent for the sign-in screen, right after it starts: who to be.
+    Identity(LogonIdentity),
+}
+
+/// This device as the agent for the sign-in screen is to be: its id, name and key, the account login, what the
+/// person allows, and the keys of the account's devices as the person's agent pinned them. Kept by the service
+/// (DPAPI for SYSTEM, a file only SYSTEM may read) and handed to that agent in memory only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LogonIdentity {
+    pub device_id: String,
+    pub device_name: String,
+    /// The device's private key (PKCS#8).
+    pub key_pkcs8: Vec<u8>,
+    pub server: String,
+    pub pin: String,
+    pub refresh_token: String,
+    /// The account's own devices may control this PC without asking (the person's setting).
+    pub allow_account_control: bool,
+    /// Device id -> public key (hex).
+    pub pins: Vec<(String, String)>,
+}
+
+// Never printed: it holds the key and the login.
+impl std::fmt::Debug for LogonIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LogonIdentity({} {})", self.device_id, self.device_name)
+    }
+}
+
+/// The most pins a logon identity carries.
+const MAX_PINS: usize = 1000;
+
+impl LogonIdentity {
+    fn encode_into(&self, out: &mut Vec<u8>) {
+        for value in [&self.device_id, &self.device_name] {
+            text(out, value);
+        }
+        out.extend_from_slice(&(self.key_pkcs8.len().min(MAX_TEXT) as u16).to_le_bytes());
+        out.extend_from_slice(&self.key_pkcs8[..self.key_pkcs8.len().min(MAX_TEXT)]);
+        for value in [&self.server, &self.pin, &self.refresh_token] {
+            text(out, value);
+        }
+        out.push(u8::from(self.allow_account_control));
+        let count = self.pins.len().min(MAX_PINS);
+        out.extend_from_slice(&(count as u16).to_le_bytes());
+        for (device, key) in &self.pins[..count] {
+            text(out, device);
+            text(out, key);
+        }
+    }
+
+    fn decode_from(bytes: &[u8]) -> Option<LogonIdentity> {
+        let mut reader = Fields(bytes);
+        let device_id = reader.text()?;
+        let device_name = reader.text()?;
+        let key_pkcs8 = reader.bytes()?;
+        let server = reader.text()?;
+        let pin = reader.text()?;
+        let refresh_token = reader.text()?;
+        let allow_account_control = match reader.take(1)? {
+            [0] => false,
+            [1] => true,
+            _ => return None,
+        };
+        let count = usize::from(u16::from_le_bytes(reader.take(2)?.try_into().ok()?));
+        if count > MAX_PINS {
+            return None;
+        }
+        let mut pins = Vec::with_capacity(count);
+        for _ in 0..count {
+            pins.push((reader.text()?, reader.text()?));
+        }
+        reader.0.is_empty().then_some(LogonIdentity {
+            device_id,
+            device_name,
+            key_pkcs8,
+            server,
+            pin,
+            refresh_token,
+            allow_account_control,
+            pins,
+        })
+    }
+}
+
+/// Length-prefixed fields one after another.
+struct Fields<'a>(&'a [u8]);
+
+impl<'a> Fields<'a> {
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        let (head, rest) = (self.0.get(..count)?, self.0.get(count..)?);
+        self.0 = rest;
+        Some(head)
+    }
+
+    fn bytes(&mut self) -> Option<Vec<u8>> {
+        let length = usize::from(u16::from_le_bytes(self.take(2)?.try_into().ok()?));
+        if length > MAX_TEXT {
+            return None;
+        }
+        Some(self.take(length)?.to_vec())
+    }
+
+    fn text(&mut self) -> Option<String> {
+        String::from_utf8(self.bytes()?).ok()
+    }
 }
 
 fn text(out: &mut Vec<u8>, value: &str) {
@@ -111,6 +233,12 @@ impl ToHelper {
                 out
             }
             ToHelper::Session(on) => vec![4, u8::from(*on)],
+            ToHelper::Banner(None) => vec![5, 0],
+            ToHelper::Banner(Some(viewer)) => {
+                let mut out = vec![5, 1];
+                text(&mut out, viewer);
+                out
+            }
         }
     }
 
@@ -137,6 +265,11 @@ impl ToHelper {
                 }
             }
             4 if rest.len() == 1 && rest[0] <= 1 => Some(ToHelper::Session(rest[0] == 1)),
+            5 => match rest.split_first()? {
+                (0, []) => Some(ToHelper::Banner(None)),
+                (1, viewer) => read_text(viewer).map(|viewer| ToHelper::Banner(Some(viewer))),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -167,6 +300,20 @@ impl FromHelper {
                 text(&mut out, error);
                 out
             }
+            FromHelper::EndPressed => vec![4],
+            FromHelper::Screen {
+                left,
+                top,
+                width,
+                height,
+            } => {
+                let mut out = vec![5];
+                out.extend_from_slice(&left.to_le_bytes());
+                out.extend_from_slice(&top.to_le_bytes());
+                out.extend_from_slice(&width.to_le_bytes());
+                out.extend_from_slice(&height.to_le_bytes());
+                out
+            }
         }
     }
 
@@ -190,6 +337,20 @@ impl FromHelper {
                 })
             }
             3 => read_text(rest).map(FromHelper::Failed),
+            4 if rest.is_empty() => Some(FromHelper::EndPressed),
+            5 if rest.len() == 16 => {
+                let (left, top) = (i32_at(rest, 0)?, i32_at(rest, 4)?);
+                let (width, height) = (u32_at(rest, 8)?, u32_at(rest, 12)?);
+                if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
+                    return None;
+                }
+                Some(FromHelper::Screen {
+                    left,
+                    top,
+                    width,
+                    height,
+                })
+            }
             _ => None,
         }
     }
@@ -200,6 +361,12 @@ impl ToService {
         match self {
             ToService::SendSas => vec![1],
             ToService::Restart => vec![2],
+            ToService::LogonIdentity(identity) => {
+                let mut out = vec![3];
+                identity.encode_into(&mut out);
+                out
+            }
+            ToService::ForgetLogon => vec![4],
         }
     }
 
@@ -207,6 +374,8 @@ impl ToService {
         match bytes {
             [1] => Some(ToService::SendSas),
             [2] => Some(ToService::Restart),
+            [3, rest @ ..] => LogonIdentity::decode_from(rest).map(ToService::LogonIdentity),
+            [4] => Some(ToService::ForgetLogon),
             _ => None,
         }
     }
@@ -220,6 +389,11 @@ impl FromService {
                 text(&mut out, reply);
                 out
             }
+            FromService::Identity(identity) => {
+                let mut out = vec![2];
+                identity.encode_into(&mut out);
+                out
+            }
         }
     }
 
@@ -227,6 +401,7 @@ impl FromService {
         let (&kind, rest) = bytes.split_first()?;
         match kind {
             1 => read_text(rest).map(FromService::Reply),
+            2 => LogonIdentity::decode_from(rest).map(FromService::Identity),
             _ => None,
         }
     }
@@ -271,6 +446,8 @@ mod tests {
             },
             ToHelper::Session(true),
             ToHelper::Session(false),
+            ToHelper::Banner(Some("DESKTOP-1 (alice)".into())),
+            ToHelper::Banner(None),
         ];
         let from = vec![
             FromHelper::Desktop("Winlogon".into()),
@@ -281,8 +458,49 @@ mod tests {
                 pixels: (0..24).collect(),
             },
             FromHelper::Failed("DuplicateOutput: access denied".into()),
+            FromHelper::EndPressed,
+            FromHelper::Screen {
+                left: -2560,
+                top: 0,
+                width: 2560,
+                height: 1440,
+            },
         ];
         (to, from)
+    }
+
+    fn identity() -> LogonIdentity {
+        LogonIdentity {
+            device_id: "0123456789abcdef".into(),
+            device_name: "鹊桥-PC".into(),
+            key_pkcs8: (0..83).collect(),
+            server: "203.0.113.5:47100".into(),
+            pin: "ab".repeat(32),
+            refresh_token: "cd".repeat(32),
+            allow_account_control: true,
+            pins: vec![
+                ("dev1".into(), "11".repeat(32)),
+                ("dev2".into(), "22".repeat(32)),
+            ],
+        }
+    }
+
+    #[test]
+    fn identity_round_trip_and_refusals() {
+        let message = ToService::LogonIdentity(identity());
+        let bytes = message.encode();
+        assert_eq!(ToService::decode(&bytes), Some(message));
+        let handed = FromService::Identity(identity());
+        assert_eq!(FromService::decode(&handed.encode()), Some(handed));
+        // Cut anywhere, or with anything after it: refused.
+        for cut in 1..bytes.len() {
+            assert_eq!(ToService::decode(&bytes[..cut]), None, "cut at {cut}");
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert_eq!(ToService::decode(&longer), None);
+        // The key never shows in a debug print.
+        assert!(!format!("{:?}", identity()).contains("cdcd"));
     }
 
     #[test]
@@ -294,7 +512,11 @@ mod tests {
         for message in from {
             assert_eq!(FromHelper::decode(&message.encode()), Some(message));
         }
-        for message in [ToService::SendSas, ToService::Restart] {
+        for message in [
+            ToService::SendSas,
+            ToService::Restart,
+            ToService::ForgetLogon,
+        ] {
             assert_eq!(ToService::decode(&message.encode()), Some(message));
         }
         let reply = FromService::Reply("Ctrl+Alt+Del sent".into());
@@ -371,7 +593,8 @@ mod tests {
             .iter()
             .map(ToHelper::encode)
             .chain(from.iter().map(FromHelper::encode))
-            .chain([vec![1], vec![2]])
+            .chain([vec![1], vec![2], vec![4]])
+            .chain([ToService::LogonIdentity(identity()).encode()])
             .collect();
         for round in 0..200_000 {
             let bytes = if round % 2 == 0 {

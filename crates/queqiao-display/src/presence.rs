@@ -218,7 +218,6 @@ impl Presence {
         self.update_tray();
     }
 
-    /// Asks the person whether `viewer` may control the PC; denied after `seconds`.
     /// Asks the person `question` (who wants to control the PC); denied after `seconds`.
     pub fn ask_consent(&mut self, question: &str, seconds: u32) -> Result<()> {
         self.prompt = None;
@@ -702,4 +701,37 @@ const TASKBAR_RESTARTED: u16 = 0xFFFD;
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// The session banner on its own, for the service's desktop helper: on the sign-in, lock and UAC screens there is
+/// no tray, and the person's own banner is on their desktop, out of sight. The same look, with End. Made and
+/// pumped on one thread, which must be on the desktop it is to appear on.
+pub struct SessionBanner {
+    form: Form,
+}
+
+impl SessionBanner {
+    pub fn show(viewer: &str) -> Result<SessionBanner> {
+        let form = Form::create(tr("Queqiao"), 440, 40, Kind::Banner)?;
+        form.label(
+            &format!(
+                "\u{25CF}  {}",
+                trf("{viewer} is controlling this PC", &[("viewer", viewer)])
+            ),
+            [14, 11, 320, 20],
+        )?;
+        form.button(tr("End"), ID_END, false, [346, 6, 84, 28])?;
+        form.show();
+        Ok(SessionBanner { form })
+    }
+
+    /// Handles window messages for up to `wait_ms`; true once End was pressed.
+    pub fn end_pressed(&self, wait_ms: u32) -> bool {
+        matches!(self.form.next_command(wait_ms), Some(ID_END))
+    }
+
+    /// Presses End (for tests: the same path as a click).
+    pub fn press_end(&self) {
+        self.form.post(ID_END);
+    }
 }

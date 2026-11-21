@@ -7,6 +7,7 @@
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use queqiao_core::stun::{self, Class, Message, attr, method};
@@ -15,7 +16,7 @@ use str0m::Candidate;
 use crate::turn::{IceServers, TurnClient, transaction};
 use crate::{Error, err};
 
-const GATHER_LIMIT: Duration = Duration::from_millis(1500);
+pub(crate) const GATHER_LIMIT: Duration = Duration::from_millis(1500);
 const BINDING_RTO: Duration = Duration::from_millis(250);
 
 pub(crate) struct Gathered {
@@ -160,6 +161,106 @@ pub(crate) fn gather(
         turn,
         notes,
     })
+}
+
+/// When the extra sockets stop waiting: the gathering limit, brought forward to shortly after the main socket is
+/// done (an uplink that cannot reach the STUN server must not hold the session up).
+pub(crate) struct ExtraDeadline {
+    started: Instant,
+    /// Milliseconds after `started`.
+    millis: AtomicU64,
+}
+
+/// How long the extra sockets may go on once the main socket's gathering is done.
+const EXTRA_GRACE: Duration = Duration::from_millis(300);
+
+impl ExtraDeadline {
+    pub(crate) fn new(started: Instant) -> ExtraDeadline {
+        ExtraDeadline {
+            started,
+            millis: AtomicU64::new(GATHER_LIMIT.as_millis() as u64),
+        }
+    }
+
+    pub(crate) fn main_done(&self) {
+        let soon = (self.started.elapsed() + EXTRA_GRACE).as_millis() as u64;
+        self.millis.fetch_min(soon, Ordering::Relaxed);
+    }
+
+    fn at(&self) -> Instant {
+        self.started + Duration::from_millis(self.millis.load(Ordering::Relaxed))
+    }
+}
+
+/// The host candidate of another uplink's socket, and its server-reflexive one if `stun` answers there in time
+/// (the relay stays on the session's main socket). Runs alongside `gather`.
+pub(crate) fn gather_extra(
+    socket: &UdpSocket,
+    host: SocketAddr,
+    stun: Option<SocketAddr>,
+    deadline: &ExtraDeadline,
+) -> (Vec<Candidate>, Vec<String>) {
+    let mut candidates = Vec::new();
+    let mut notes = Vec::new();
+    match Candidate::host(host, "udp") {
+        Ok(candidate) => {
+            candidates.push(candidate);
+            notes.push(format!("candidate host {host}"));
+        }
+        Err(error) => {
+            notes.push(format!("no host candidate on {host}: {error}"));
+            return (candidates, notes);
+        }
+    }
+    // A server on this PC's loopback cannot be reached from another card's address.
+    let Some(server) = stun.filter(|server| !server.ip().is_loopback()) else {
+        return (candidates, notes);
+    };
+    let mut binding = Binding::new(server);
+    let mut buffer = vec![0u8; 2048];
+    while binding.mapped.is_none() {
+        let now = Instant::now();
+        let until = deadline.at();
+        if now >= until || (binding.tries >= 5 && now >= binding.next_send) {
+            break;
+        }
+        binding.send_if_due(socket, now);
+        // Short waits, so a deadline brought forward is seen soon.
+        let wait = binding
+            .next_send
+            .min(until)
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(50));
+        if socket
+            .set_read_timeout(Some(wait.max(Duration::from_millis(1))))
+            .is_err()
+        {
+            break;
+        }
+        match socket.recv_from(&mut buffer) {
+            Ok((length, from)) => {
+                binding.accept(from, &buffer[..length]);
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::ConnectionReset
+                ) => {}
+            // Unreachable from this card (no route to the server there): host candidate only.
+            Err(_) => break,
+        }
+    }
+    match binding.mapped {
+        Some(mapped) if mapped != host && mapped.is_ipv4() == host.is_ipv4() => {
+            if let Ok(candidate) = Candidate::server_reflexive(mapped, host, "udp") {
+                candidates.push(candidate);
+                notes.push(format!("candidate server-reflexive {mapped} (from {host})"));
+            }
+        }
+        Some(_) => {}
+        None => notes.push(format!("no answer from the STUN server on {host}")),
+    }
+    (candidates, notes)
 }
 
 /// One STUN Binding request, retransmitted until answered.

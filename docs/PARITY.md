@@ -14,7 +14,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Account, devices on the account, presence, connect by double-click | done (M3) |
 | Saved login, log out, remove (unbind) a device from the account | done (removing: "More..." in the device list, 2026-11-21) |
 | Device remarks (a name of your own) and favourites (listed first), kept on this PC | done (2026-11-21, "More..." in the device list) |
-| Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); manual "switch to relay" while connected: planned |
+| Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); past a VPN or proxy tunnel holding the default route (Clash/Mihomo): a socket and candidates on every uplink, the server's UDP on its own address (2026-11-21; the internet test itself is still to be run); manual "switch to relay" while connected: planned |
 | Help someone else: connect to a device of another account with its help ID (9 digits) and a one-use code (8 characters, 40 bits) that the person there reads out from "Let someone help me..."; "Help someone..." in the device list | done (2026-11-21) |
 | Help: asking without a code (the person there approves in a prompt; only while they take help requests, one ask at a time) | done (2026-11-21) |
 | Help: an own fixed code, invitation links, the code read from the clipboard | planned |
@@ -81,7 +81,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 
 | Feature | Status |
 |---|---|
-| Runs as a service: login screen, UAC prompts, lock screen; unlock with the PC's account password | partly (2026-11-21): with the service (`queqiao-service install`), the lock, Ctrl+Alt+Del and UAC screens of the person signed in are shown and worked through its SYSTEM desktop helper during a session (tested with the Ctrl+Alt+Del screen); the sign-in screen before anyone signs in, and a session that starts on the lock screen: planned (M5) |
+| Runs as a service: login screen, UAC prompts, lock screen; unlock with the PC's account password | partly (2026-11-21): with the service (`queqiao-service install`), the lock, Ctrl+Alt+Del and UAC screens of the person signed in are shown and worked through its SYSTEM desktop helper during a session (tested with the Ctrl+Alt+Del screen, with its banner there too); the sign-in screen before anyone signs in: written (2026-11-21: the agent for the sign-in screen as LocalService, the device handed over by the person's agent and kept for SYSTEM only), not yet tried: the test laptop's antivirus holds the service's process before it starts, and the PC is in use; a session that starts on the lock screen: written, not yet tried |
 | Restart (after confirming, with Windows' 10-second notice) or lock the controlled PC from the session window menu | done (2026-11-21) |
 | Lock the PC when a session ends (tray setting) | done (2026-11-21) |
 | Restart Queqiao remotely | done (2026-11-21, "Restart Queqiao on that PC" in the session window menu; needs the service) |

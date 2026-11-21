@@ -15,10 +15,11 @@ use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    DuplicateTokenEx, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
-    SecurityImpersonation, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
-    TOKEN_ALL_ACCESS, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenPrimary,
-    TokenSessionId, TokenUser,
+    DuplicateTokenEx, GetTokenInformation, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT,
+    LogonUserW, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SecurityImpersonation,
+    SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ALL_ACCESS,
+    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenPrimary, TokenSessionId,
+    TokenUser,
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
@@ -95,6 +96,24 @@ pub fn system_token(session: u32) -> Result<Owned, String> {
     }
     .map_err(|e| format!("SetTokenInformation(session {session}): {e}"))?;
     Ok(copy)
+}
+
+/// A token of LocalService (no rights of note, no profile secrets of anyone): the agent for the sign-in screen
+/// runs as it, in session 0.
+pub fn local_service_token() -> Result<Owned, String> {
+    let mut token = HANDLE::default();
+    unsafe {
+        LogonUserW(
+            windows::core::w!("LocalService"),
+            windows::core::w!("NT AUTHORITY"),
+            PCWSTR::null(),
+            LOGON32_LOGON_SERVICE,
+            LOGON32_PROVIDER_DEFAULT,
+            &mut token,
+        )
+    }
+    .map_err(|e| format!("LogonUserW(LocalService): {e}"))?;
+    Ok(Owned(token))
 }
 
 /// The token of the person signed in to `session`; an error if no one is.
@@ -216,19 +235,25 @@ impl Drop for Descriptor {
     }
 }
 
-/// Starts `program arguments` with `token` on the session's default desktop, inheriting only `inherit`, in
-/// `job`. With `protect_from` (the user's SID), that user may only wait for the process and end it.
+/// The interactive desktop of a session.
+pub const INTERACTIVE: &str = r"winsta0\default";
+/// A window station and desktop of the token's own logon session, made for it (nothing on the screen).
+pub const OWN_WINDOW_STATION: &str = "";
+
+/// Starts `program arguments` with `token` on `desktop`, inheriting only `inherit`, in `job`. With
+/// `protect_from` (the user's SID), that user may only wait for the process and end it.
 pub fn start(
     token: &Owned,
     program: &Path,
     arguments: &str,
     inherit: &[HANDLE],
     protect_from: Option<&str>,
+    desktop: &str,
     job: &Job,
 ) -> Result<Child, String> {
     let mut command = wide(&format!("\"{}\" {arguments}", program.display()));
     let folder = wide(&program.parent().unwrap_or(program).display().to_string());
-    let desktop = wide(r"winsta0\default");
+    let desktop = wide(desktop);
 
     let mut size = 0usize;
     let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut size) };
