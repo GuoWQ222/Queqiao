@@ -21,6 +21,7 @@ mod service_link;
 mod ui;
 mod update;
 mod wake;
+mod wol_check;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -104,6 +105,8 @@ struct Options {
     help_id_file: Option<PathBuf>,
     /// A fixed help code for this run (tests; people set it in the tray).
     fixed_help_code: Option<String>,
+    /// The Wake-on-LAN set-up check into the report, then end.
+    wol_check: bool,
     /// A throwaway device with this name instead of this PC's own (tests with two accounts on one PC).
     test_device: Option<String>,
     /// Lock this PC when a session ends, for this run only (tests: with --dry-run-commands it is only reported).
@@ -230,6 +233,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--help-id-file" => options.help_id_file = Some(PathBuf::from(args.next()?)),
             "--fixed-help-code" => options.fixed_help_code = Some(normalize_code(&args.next()?)),
+            "--wol-check" => options.wol_check = true,
             "--test-device" => options.test_device = Some(args.next()?),
             "--lock-after-session" => options.lock_after_session = true,
             "--test-press-setting" => options.test_press_setting = true,
@@ -246,6 +250,13 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    if options.wol_check {
+        let check = wol_check::check();
+        lines.extend(wol_check::report(&check));
+        lines.push("--- the advice shown in the tray:".into());
+        lines.extend(wol_check::advice(&check).lines().map(str::to_string));
+        return Ok(true);
+    }
     let mut links = Links::open(
         options.service_channel.as_deref(),
         options.desktop_channel.as_deref(),
@@ -625,6 +636,13 @@ fn run_account(
                     }
                 }
                 PresenceEvent::LogIn => {}
+                PresenceEvent::CheckWakeOnLan => {
+                    // powercfg takes a moment: not on this thread.
+                    std::thread::spawn(|| {
+                        let advice = wol_check::advice(&wol_check::check());
+                        queqiao_display::show_info(queqiao_core::text::tr("Queqiao"), &advice);
+                    });
+                }
                 PresenceEvent::CheckUpdates => match &updater {
                     Some(updater) => {
                         lines.push("updates: the person asked for a look".into());

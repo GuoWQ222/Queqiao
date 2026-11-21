@@ -65,6 +65,8 @@ pub enum PresenceEvent {
     SetAutoUpdate(bool),
     /// A fixed help code for this PC (normalized: upper-case letters and digits), or none any more.
     SetFixedHelpCode(Option<String>),
+    /// "Wake-on-LAN check...".
+    CheckWakeOnLan,
 }
 
 /// How this PC stands with the account server (the tray menu's first line).
@@ -98,6 +100,7 @@ const MENU_LOGIN: u16 = 215;
 const MENU_UPDATE_CHECK: u16 = 216;
 const MENU_AUTO_UPDATE: u16 = 217;
 const MENU_FIXED_CODE: u16 = 219;
+const MENU_WOL_CHECK: u16 = 222;
 /// The shortest fixed help code (letters and digits).
 pub const MIN_FIXED_CODE: usize = 8;
 const MENU_PASSWORD: u16 = 220;
@@ -500,6 +503,7 @@ impl Presence {
         let lock_after = wide(tr("Lock this PC when a session ends"));
         let quit = wide(tr("Quit Queqiao on this PC"));
         let check_updates = wide(tr("Check for updates..."));
+        let wol_check = wide(tr("Wake-on-LAN check..."));
         let auto_update = wide(tr("Install updates automatically"));
         let password = wide(if self.password_check.is_some() {
             tr("Remove the settings password...")
@@ -598,6 +602,12 @@ impl Presence {
                 MF_STRING,
                 usize::from(MENU_UPDATE_CHECK),
                 PCWSTR(check_updates.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                usize::from(MENU_WOL_CHECK),
+                PCWSTR(wol_check.as_ptr()),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
@@ -743,6 +753,7 @@ impl Presence {
                     Some(PresenceEvent::SetAutoUpdate(self.auto_update))
                 }
                 MENU_UPDATE_CHECK => Some(PresenceEvent::CheckUpdates),
+                MENU_WOL_CHECK => Some(PresenceEvent::CheckWakeOnLan),
                 MENU_QUIT => Some(PresenceEvent::Quit),
                 _ => None,
             }

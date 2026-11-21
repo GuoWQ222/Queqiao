@@ -159,6 +159,35 @@ const CHINESE: &[(&str, &str)] = &[
     ("Queqiao: not logged in", "鹊桥：未登录"),
     ("Log in...", "登录……"),
     ("Check for updates...", "检查更新……"),
+    ("Wake-on-LAN check...", "检查网络唤醒……"),
+    (
+        "Wake-on-LAN on this PC (another device of your account wakes it through a PC on the same network):",
+        "这台电脑的网络唤醒（你账号的其他设备通过同一网络里的电脑来唤醒它）：",
+    ),
+    ("yes", "是"),
+    ("no", "否"),
+    ("unknown", "未知"),
+    (
+        "- {connection} ({device}): may wake the PC: {armed}; on a magic packet: {magic}",
+        "- {connection}（{device}）：允许唤醒电脑：{armed}；响应魔术包：{magic}",
+    ),
+    (
+        "  A Wi-Fi card can seldom wake a PC that is off: use a network cable for it.",
+        "  无线网卡很少能唤醒已关机的电脑：请改用网线。",
+    ),
+    ("- No network card found.", "- 没有找到网卡。"),
+    (
+        "- Fast Startup is on: many network cards do not wake a PC shut down with it. Turn it off in Control Panel > Power Options > Choose what the power buttons do.",
+        "- 已开启快速启动：用它关机后，很多网卡无法唤醒电脑。请在“控制面板 > 电源选项 > 选择电源按钮的功能”中关闭。",
+    ),
+    (
+        "Windows is ready. If the PC still does not wake, turn on Wake on LAN (or Power On by PCI-E) in its BIOS/UEFI.",
+        "Windows 这边已就绪。如果电脑仍无法唤醒，请在 BIOS/UEFI 中开启 Wake on LAN（或 Power On by PCI-E）。",
+    ),
+    (
+        "To set: Device Manager > Network adapters > the wired card > Power Management: Allow this device to wake the computer, and Only allow a magic packet; Advanced: Wake on Magic Packet: Enabled (this needs an administrator). Then Wake on LAN in the BIOS/UEFI.",
+        "设置方法：设备管理器 > 网络适配器 > 有线网卡 > 电源管理：勾选“允许此设备唤醒计算机”和“只允许幻数据包唤醒计算机”；高级：Wake on Magic Packet 设为“启用”（需要管理员）。然后在 BIOS/UEFI 中开启 Wake on LAN。",
+    ),
     ("Install updates automatically", "自动安装更新"),
     (
         "Queqiao is up to date (version {version}).",
