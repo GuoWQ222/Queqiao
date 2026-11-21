@@ -118,7 +118,7 @@ try {
     [void](Wait-SessionTask 'Queqiao-M5-Open' 60)
     # The task can be done before the report is written; Add-Type alone takes seconds.
     [void](Wait-File $openReport 30)
-    $opened = if (Test-Path -LiteralPath $openReport) { @(Get-Content -LiteralPath $openReport) } else { @('no report') }
+    $opened = @(if (Test-Path -LiteralPath $openReport) { @(Get-Content -LiteralPath $openReport) } else { @('no report') })
     $opened
     foreach ($right in 'copy-handles', 'write-memory', 'start-thread', 'full') {
         Add-Check "protection: $right refused without debug rights" ($opened -contains "no-debug $right refused 5")
@@ -131,8 +131,8 @@ try {
     $viewerResult = Wait-SessionTask 'Queqiao-M5-Viewer' ($Seconds + 150)
     "viewer task: $viewerResult"
     $agentDone = Wait-File "$Out\agent_secure.txt" 40
-    $viewerText = if (Test-Path -LiteralPath "$Out\viewer_secure.txt") { @(Get-Content -LiteralPath "$Out\viewer_secure.txt" -Encoding UTF8) } else { @('no viewer report') }
-    $agentText = if ($agentDone) { @(Get-Content -LiteralPath "$Out\agent_secure.txt" -Encoding UTF8) } else { @('no agent report') }
+    $viewerText = @(if (Test-Path -LiteralPath "$Out\viewer_secure.txt") { @(Get-Content -LiteralPath "$Out\viewer_secure.txt" -Encoding UTF8) } else { @('no viewer report') })
+    $agentText = @(if ($agentDone) { @(Get-Content -LiteralPath "$Out\agent_secure.txt" -Encoding UTF8) } else { @('no agent report') })
     '--- viewer'
     $viewerText
     '--- agent'
@@ -178,7 +178,7 @@ try {
     [void](Wait-SessionTask 'Queqiao-M5-Restart' 120)
     $restarted = Wait-ServiceLog 'started the desktop helper' ($startsBefore + 2) 30
     $asked = (Get-ServiceLog | Where-Object { $_ -match 'the agent asked to restart Queqiao' }).Count -gt 0
-    $viewerRestart = if (Test-Path -LiteralPath "$Out\viewer_restart.txt") { @(Get-Content -LiteralPath "$Out\viewer_restart.txt" -Encoding UTF8) } else { @('no viewer report') }
+    $viewerRestart = @(if (Test-Path -LiteralPath "$Out\viewer_restart.txt") { @(Get-Content -LiteralPath "$Out\viewer_restart.txt" -Encoding UTF8) } else { @('no viewer report') })
     $viewerRestart | Where-Object { $_ -match 'restart|Queqiao|ended|RESULT' }
     Add-Check 'service: the agent asked to restart' $asked
     Add-Check 'service: helper and agent started again' $restarted

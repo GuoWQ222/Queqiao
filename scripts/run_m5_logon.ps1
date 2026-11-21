@@ -110,7 +110,7 @@ try {
     Add-Check 'service: the person''s agent started' (Wait-ServiceLog 'started the desktop helper \(\d+\) and the agent' 1 30)
     Add-Check 'service: the device kept for the sign-in screen' (Wait-ServiceLog 'the sign-in screen: device \S+ kept for it' 1 40)
     $file = Join-Path $env:ProgramData 'Queqiao\logon.bin'
-    $access = if (Test-Path -LiteralPath $file) { (Get-Acl -LiteralPath $file).Access | ForEach-Object { "$($_.IdentityReference):$($_.FileSystemRights)" } } else { @() }
+    $access = @(if (Test-Path -LiteralPath $file) { (Get-Acl -LiteralPath $file).Access | ForEach-Object { "$($_.IdentityReference):$($_.FileSystemRights)" } } else { @() })
     "logon.bin access: $($access -join '; ')"
     Add-Check 'logon.bin: SYSTEM only' (($access.Count -eq 1) -and ($access[0] -like '*SYSTEM*'))
 
@@ -134,8 +134,8 @@ try {
     "viewer task: $viewerResult"
     $deadline = (Get-Date).AddSeconds(40)
     while (-not (Test-Path -LiteralPath "$logonOut\agent_logon.txt") -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
-    $viewerText = if (Test-Path -LiteralPath "$Out\viewer_logon.txt") { @(Get-Content -LiteralPath "$Out\viewer_logon.txt" -Encoding UTF8) } else { @('no viewer report') }
-    $agentText = if (Test-Path -LiteralPath "$logonOut\agent_logon.txt") { @(Get-Content -LiteralPath "$logonOut\agent_logon.txt" -Encoding UTF8) } else { @('no agent report') }
+    $viewerText = @(if (Test-Path -LiteralPath "$Out\viewer_logon.txt") { @(Get-Content -LiteralPath "$Out\viewer_logon.txt" -Encoding UTF8) } else { @('no viewer report') })
+    $agentText = @(if (Test-Path -LiteralPath "$logonOut\agent_logon.txt") { @(Get-Content -LiteralPath "$logonOut\agent_logon.txt" -Encoding UTF8) } else { @('no agent report') })
     '--- viewer'
     $viewerText
     '--- agent for the sign-in screen'

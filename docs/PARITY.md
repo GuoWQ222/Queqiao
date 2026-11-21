@@ -37,7 +37,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | True colour (4:4:4) for sharp text; HDR | planned |
 | Several monitors: switch screens during the session ("Screens" in the session window menu) | done (2026-11-21); tested by switching on a one-screen PC (both test PCs have one screen) - a real second screen still to be tried |
 | Several monitors each in its own window | planned |
-| Virtual displays: create / remove, automatic when no monitor is attached, custom high resolution and refresh ("super screen") | planned: needs an IddCx display driver (Microsoft's MS-PL sample), which must be signed for release |
+| Virtual displays: create / remove, automatic when no monitor is attached, custom high resolution and refresh ("super screen") | not needed for now (the user, 2026-11-21); it needs an IddCx display driver, which must be signed for release |
 | Privacy screen: the controlled PC's monitors dark while controlled, the controlling side still sees the desktop | done (2026-11-21, "Darken that PC's screen" in the session window menu; needs Windows 10 2004 or later there; the session banner with End stays above it) |
 | Block the controlled PC's own mouse and keyboard while the screen is dark | planned (M5: needs the service) |
 | Window: full screen / window, zoom, scaling, small always-on-top window with opacity, several sessions at once | partly: window, full screen (menu or Ctrl+Alt+Enter), always on top (2026-11-21); zoom, opacity, several sessions: planned |
@@ -81,7 +81,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 
 | Feature | Status |
 |---|---|
-| Runs as a service: login screen, UAC prompts, lock screen; unlock with the PC's account password | partly (2026-11-21): with the service (`queqiao-service install`), the lock, Ctrl+Alt+Del and UAC screens of the person signed in are shown and worked through its SYSTEM desktop helper during a session (tested with the Ctrl+Alt+Del screen, with its banner there too); the sign-in screen before anyone signs in: written (2026-11-21: the agent for the sign-in screen as LocalService, the device handed over by the person's agent and kept for SYSTEM only), not yet tried: the test laptop's antivirus holds the service's process before it starts, and the PC is in use; a session that starts on the lock screen: written, not yet tried |
+| Runs as a service: login screen, UAC prompts, lock screen; unlock with the PC's account password | partly (2026-11-21): with the service (`queqiao-service install`), the lock, Ctrl+Alt+Del and UAC screens of the person signed in are shown and worked through its SYSTEM desktop helper during a session (tested with the Ctrl+Alt+Del screen, with its banner there too); the sign-in screen with nobody signed in: done (2026-11-21, tested on the PC with `scripts\run_m5_logon.ps1`: the agent for the sign-in screen as LocalService, the device handed over by the person's agent and kept for SYSTEM only; pictures, the banner and input there); a session that starts on the lock screen: written, not yet tried |
 | Restart (after confirming, with Windows' 10-second notice) or lock the controlled PC from the session window menu | done (2026-11-21) |
 | Lock the PC when a session ends (tray setting) | done (2026-11-21) |
 | Restart Queqiao remotely | done (2026-11-21, "Restart Queqiao on that PC" in the session window menu; needs the service) |

@@ -234,7 +234,10 @@ struct Pair {
     session: u32,
     /// The agent for the sign-in screen (nobody signed in), not the person's.
     logon: bool,
-    job: Job,
+    /// A job each: every process of a job must be in the job's session, and the agent for the sign-in screen
+    /// (session 0) was refused the helper's (the console session's) with "access denied".
+    helper_job: Job,
+    agent_job: Job,
     helper: Child,
     agent: Child,
     to_agent: Writer,
@@ -243,7 +246,8 @@ struct Pair {
 
 impl Pair {
     fn end(self, reason: &str) {
-        self.job.end();
+        self.agent_job.end();
+        self.helper_job.end();
         log::line(&format!(
             "session {}: helper {} and agent {} ended: {reason}",
             self.session, self.helper.pid, self.agent.pid
@@ -291,7 +295,7 @@ fn start_pair(
         }
     };
     let logon = logon_identity.is_some();
-    let job = Job::new()?;
+    let (helper_job, agent_job) = (Job::new()?, Job::new()?);
     let (helper_ends, agent_desktop_ends) = queqiao_local::channel()?;
     let system = launch::system_token(session)?;
     let helper = launch::start(
@@ -301,7 +305,7 @@ fn start_pair(
         &helper_ends.for_child()?,
         None,
         launch::INTERACTIVE,
-        &job,
+        &helper_job,
     )?;
     drop(helper_ends);
     let (ours, theirs) = queqiao_local::channel()?;
@@ -334,11 +338,11 @@ fn start_pair(
         &inherit,
         Some(&sid),
         desktop,
-        &job,
+        &agent_job,
     ) {
         Ok(agent) => agent,
         Err(error) => {
-            job.end();
+            helper_job.end();
             return Err(error);
         }
     };
@@ -348,7 +352,8 @@ fn start_pair(
     if let Some(identity) = logon_identity
         && let Err(error) = to_agent.write(&FromService::Identity(identity).encode())
     {
-        job.end();
+        agent_job.end();
+        helper_job.end();
         return Err(format!("handing over the device: {error}"));
     }
     let requests = requests.clone();
@@ -382,7 +387,8 @@ fn start_pair(
         id,
         session,
         logon,
-        job,
+        helper_job,
+        agent_job,
         helper,
         agent,
         to_agent,
