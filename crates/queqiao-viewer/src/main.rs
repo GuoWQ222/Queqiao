@@ -32,7 +32,8 @@ use queqiao_core::protocol::{
 };
 use queqiao_core::text::{tr, trf};
 use queqiao_display::{
-    HelpAction, HelpForm, PICK_CLOSED, PickList, ask_text, confirm, normalize_code, popup_menu,
+    HelpAction, HelpForm, PICK_CLOSED, PickList, ask_secret, ask_text, confirm, normalize_code,
+    popup_menu,
 };
 
 /// The session window's menu items for the controlled PC (system-menu ids: multiples of 16).
@@ -198,6 +199,10 @@ struct Options {
     invite: Option<String>,
     /// Press Connect in the help form once it is drawn (tests).
     test_submit_help: bool,
+    /// With --user and --password: a new account (on a server that takes them) instead of a login.
+    signup: bool,
+    /// A throwaway device with this name instead of this PC's own (tests); its login is not kept.
+    test_device: Option<String>,
     /// The session window's opacity in percent (as the Opacity menu sets it).
     opacity: Option<u8>,
     /// Boss key test: Ctrl+Alt+F11 for this run, pressed (as Windows would report it) to hide and show the window.
@@ -414,6 +419,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--invite" => options.invite = Some(args.next()?),
             "--test-submit-help" => options.test_submit_help = true,
+            "--signup" => options.signup = true,
+            "--test-device" => options.test_device = Some(args.next()?),
             "--opacity" => options.opacity = args.next().and_then(|v| v.parse().ok()),
             "--boss-key-test" => options.boss_key_test = true,
             "--picture" => {
@@ -469,7 +476,11 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
 }
 
 fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
-    let identity = DeviceIdentity::load_or_create().map_err(|e| e.to_string())?;
+    let identity = match &options.test_device {
+        Some(label) => DeviceIdentity::in_memory(label),
+        None => DeviceIdentity::load_or_create(),
+    }
+    .map_err(|e| e.to_string())?;
     let mut login = SavedLogin::load(AccountRole::Viewer).unwrap_or_default();
     if let Some(server) = &options.server {
         if login.server != *server {
@@ -492,7 +503,9 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
         lines.push("the login form was closed".into());
         return Ok(true);
     };
-    login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+    if options.test_device.is_none() {
+        login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+    }
     if let Some(device) = &options.trust_new_key {
         account.trust_new_key(device).map_err(|e| e.to_string())?;
         lines.push(format!("the key of device {device} will be pinned anew"));
@@ -504,7 +517,9 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
     if options.logout {
         account.send(ClientMessage::Logout);
         login.refresh_token = None;
-        login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+        if options.test_device.is_none() {
+            login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+        }
         lines.push("logged out: the saved login is deleted here and revoked on the server".into());
         return Ok(true);
     }
@@ -610,8 +625,12 @@ fn log_in(
 ) -> Result<Option<Account>, String> {
     let given = options.user.as_deref().zip(options.password.as_deref());
     if options.ui_test.is_none() {
-        if let Some(password) = given {
-            let account = Account::connect(login, identity, AccountRole::Viewer, Some(password));
+        if let Some((user, password)) = given {
+            let account = if options.signup {
+                Account::register(login, identity, AccountRole::Viewer, user, password)
+            } else {
+                Account::connect(login, identity, AccountRole::Viewer, Some((user, password)))
+            };
             return account.map(Some).map_err(|e| e.to_string());
         }
         if login.refresh_token.is_some() && options.user.is_none() {
@@ -652,7 +671,11 @@ fn log_in(
     loop {
         match form.next(15) {
             Some(LoginAction::Cancel) => return Ok(None),
-            Some(LoginAction::Submit(fields)) => {
+            Some(action @ (LoginAction::Submit(_) | LoginAction::Register(_))) => {
+                let register = matches!(action, LoginAction::Register(_));
+                let (LoginAction::Submit(fields) | LoginAction::Register(fields)) = action else {
+                    continue;
+                };
                 if [&fields.server, &fields.pin, &fields.user, &fields.password]
                     .iter()
                     .any(|value| value.is_empty())
@@ -660,21 +683,47 @@ fn log_in(
                     form.set_status(tr("Please fill in all four fields."));
                     continue;
                 }
+                // A new account: the password typed twice.
+                if register
+                    && options.ui_test.is_none()
+                    && ask_secret(tr("Queqiao"), tr("The same password again:")).as_deref()
+                        != Some(fields.password.as_str())
+                {
+                    form.set_status(tr("The two passwords are not the same."));
+                    continue;
+                }
                 if login.server != fields.server {
                     login.refresh_token = None;
                 }
                 login.server = fields.server.clone();
                 login.pin = fields.pin.clone();
-                form.set_busy(true, "Logging in...");
+                form.set_busy(
+                    true,
+                    if register {
+                        tr("Creating the account...")
+                    } else {
+                        tr("Logging in...")
+                    },
+                );
                 // In the background, so the form keeps responding.
                 let (mut attempt, identity) = (login.clone(), identity.clone());
                 let worker = std::thread::spawn(move || {
-                    let result = Account::connect(
-                        &mut attempt,
-                        &identity,
-                        AccountRole::Viewer,
-                        Some((&fields.user, &fields.password)),
-                    );
+                    let result = if register {
+                        Account::register(
+                            &mut attempt,
+                            &identity,
+                            AccountRole::Viewer,
+                            &fields.user,
+                            &fields.password,
+                        )
+                    } else {
+                        Account::connect(
+                            &mut attempt,
+                            &identity,
+                            AccountRole::Viewer,
+                            Some((&fields.user, &fields.password)),
+                        )
+                    };
                     (result, attempt)
                 });
                 while !worker.is_finished() {
@@ -804,7 +853,9 @@ fn device_list(
             Some(ListAction::LogOut) => {
                 account.send(ClientMessage::Logout);
                 login.refresh_token = None;
-                login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+                if options.test_device.is_none() {
+                    login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
+                }
                 lines.push("logged out".into());
                 break;
             }

@@ -68,7 +68,7 @@ $password2 = [guid]::NewGuid().ToString('N')
 # The help session's second account: the probe's lockout checks leave bob locked for 15 minutes.
 $password3 = [guid]::NewGuid().ToString('N')
 & $server add-user carol $password3 --data $data | Out-Null
-$serveArgs = @('serve', '--listen', $listen, '--data', "`"$data`"", '--public-ip', $Address, '--relay-private')
+$serveArgs = @('serve', '--listen', $listen, '--data', "`"$data`"", '--public-ip', $Address, '--relay-private', '--allow-signup')
 $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
 $failed = @()
 try {
@@ -83,7 +83,7 @@ try {
 
     if (-not $SkipProbe) {
         '=== account and relay probe'
-        $probe = & (Join-Path $Bin 'examples\account_probe.exe') $listen $pin alice $password1 bob $password2
+        $probe = & (Join-Path $Bin 'examples\account_probe.exe') $listen $pin alice $password1 bob $password2 --signup-open
         $probe
         if ($probe[-1] -ne 'PROBE_PASS') { $failed += 'probe' }
         # The probe fails logins and codes on purpose (lockout checks); the server starts again so its in-memory
@@ -417,6 +417,16 @@ try {
         if (@($text | Where-Object { $_ -match 'of account alice was let in \(code given or ask allowed\)$' }).Count -ne 2) { $failed += 'help-fixed agent (expected two helpers let in)' }
         if (-not ($text | Where-Object { $_ -eq 'help: open again with the fixed code' })) { $failed += 'help-fixed agent (the fixed code did not take requests again)' }
     }
+    # A new account from the viewer (this server takes new accounts): logged in at once, its devices listed. A
+    # throwaway device: this PC's own belongs to alice by now (one account per device).
+    $signupReport = Join-Path $Out 'viewer_signup.txt'
+    Remove-Item -LiteralPath $signupReport -ErrorAction SilentlyContinue
+    $newUser = 'newbie' + (Get-Random -Maximum 99999)
+    & $viewer --server $listen --pin $pin --user $newUser --password 'a-new-password' --signup --test-device m4-newcomer --list --report $signupReport | Out-Null
+    $signupText = @(Get-Content -LiteralPath $signupReport -ErrorAction SilentlyContinue)
+    '=== a new account from the viewer'
+    $signupText
+    if ($signupText[-1] -ne 'RESULT PASS') { $failed += 'a new account from the viewer' }
 } finally {
     Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
     '=== server log'

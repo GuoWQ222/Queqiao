@@ -56,6 +56,7 @@ const ID_WAKE: u16 = 103;
 const ID_MORE: u16 = 104;
 const ID_AUTOSTART: u16 = 105;
 const ID_SERVICE: u16 = 106;
+const ID_SIGNUP: u16 = 107;
 /// The window was closed (not a control id).
 pub(crate) const CLOSED: u16 = 0xFFFF;
 
@@ -673,6 +674,8 @@ pub fn normalize_code(typed: &str) -> String {
 
 pub enum LoginAction {
     Submit(LoginFields),
+    /// "Create an account": a new account with these fields (on a server that takes new accounts).
+    Register(LoginFields),
     Cancel,
 }
 
@@ -684,6 +687,7 @@ pub struct LoginForm {
     password: HWND,
     status: HWND,
     button: HWND,
+    signup: HWND,
 }
 
 impl LoginForm {
@@ -708,6 +712,12 @@ impl LoginForm {
             true,
             [left + width - 100, 286, 100, 30],
         )?;
+        let signup = form.button(
+            tr("Create an account"),
+            ID_SIGNUP,
+            false,
+            [left, 286, 160, 30],
+        )?;
         form.show();
         // Start where something is missing.
         let first_empty = [
@@ -727,6 +737,7 @@ impl LoginForm {
             password,
             status,
             button,
+            signup,
         })
     }
 
@@ -763,7 +774,13 @@ impl LoginForm {
     /// While a login is under way: no second press, a note in the status line.
     pub fn set_busy(&self, busy: bool, status: &str) {
         let _ = unsafe { EnableWindow(self.button, !busy) };
+        let _ = unsafe { EnableWindow(self.signup, !busy) };
         self.set_status(status);
+    }
+
+    /// Presses "Create an account" as a click would (tests).
+    pub fn press_signup(&self) {
+        self.form.post(ID_SIGNUP);
     }
 
     /// Handles messages for up to `wait_ms` and returns what the user did, if anything.
@@ -771,6 +788,9 @@ impl LoginForm {
         match self.form.next_command(wait_ms)? {
             ID_OK if unsafe { IsWindowEnabled(self.button) }.as_bool() => {
                 Some(LoginAction::Submit(self.fields()))
+            }
+            ID_SIGNUP if unsafe { IsWindowEnabled(self.signup) }.as_bool() => {
+                Some(LoginAction::Register(self.fields()))
             }
             ID_CANCEL | CLOSED => Some(LoginAction::Cancel),
             _ => None,

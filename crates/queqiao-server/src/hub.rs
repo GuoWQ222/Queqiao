@@ -84,6 +84,30 @@ impl From<&str> for Refusal {
     }
 }
 
+/// New accounts from one address in an hour, at most.
+const SIGNUPS_PER_HOUR: usize = 3;
+
+/// A new account's name: 3 to 32 letters, digits, dot, dash or underscore, starting with a letter or digit; its
+/// password: 8 to 128 characters, not the name.
+fn check_new_account(user: &str, password: &str) -> Result<(), String> {
+    let name_ok = (3..=32).contains(&user.len())
+        && user
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !name_ok {
+        return Err("a user name has 3 to 32 letters, digits, dots, dashes or underscores, and starts with a letter or digit".into());
+    }
+    let length = password.chars().count();
+    if !(8..=128).contains(&length) || password.eq_ignore_ascii_case(user) {
+        return Err("a password has 8 to 128 characters and is not the user name".into());
+    }
+    Ok(())
+}
+
 fn guess(message: &str) -> Refusal {
     Refusal {
         message: message.to_string(),
@@ -106,6 +130,10 @@ struct Connection {
 }
 
 pub struct Hub {
+    /// New accounts may be made from the programs' login forms (`serve --allow-signup`).
+    signup: bool,
+    /// When each address last made accounts (the last hour's).
+    signups: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     store: Mutex<Store>,
     failures: Mutex<Failures>,
     turn: Option<Arc<TurnConfig>>,
@@ -130,8 +158,10 @@ struct Identity {
 }
 
 impl Hub {
-    pub fn new(store: Store, turn: Option<Arc<TurnConfig>>) -> Arc<Hub> {
+    pub fn new(store: Store, turn: Option<Arc<TurnConfig>>, signup: bool) -> Arc<Hub> {
         Arc::new(Hub {
+            signup,
+            signups: Mutex::new(HashMap::new()),
             store: Mutex::new(store),
             failures: Mutex::new(Failures::default()),
             turn,
@@ -191,20 +221,35 @@ impl Hub {
             _ => return Err("no login".into()),
         };
         let account_name = match &first {
-            ClientMessage::Login { user, .. } => Some(user.trim().to_lowercase()),
+            ClientMessage::Login { user, .. } | ClientMessage::Register { user, .. } => {
+                Some(user.trim().to_lowercase())
+            }
             _ => None,
         };
         let locked = self.locked(address, account_name.as_deref());
+        // New accounts: at most SIGNUPS_PER_HOUR made from one address.
+        let registering = matches!(first, ClientMessage::Register { .. });
+        let signup_wait = if locked.is_none() && registering {
+            self.signup_wait(address)
+        } else {
+            None
+        };
         // Password hashing takes tens of milliseconds: off the network threads.
         let hub = self.clone();
-        let checked = match locked {
-            Some(minutes) => Err(Refusal::from(format!(
+        let checked = match (locked, signup_wait) {
+            (Some(minutes), _) => Err(Refusal::from(format!(
                 "too many failed logins: try again in {minutes} minutes"
             ))),
-            None => tokio::task::spawn_blocking(move || hub.authenticate(first))
+            (None, Some(minutes)) => Err(Refusal::from(format!(
+                "too many new accounts from this address: try again in {minutes} minutes"
+            ))),
+            (None, None) => tokio::task::spawn_blocking(move || hub.authenticate(first))
                 .await
                 .map_err(|e| e.to_string())?,
         };
+        if registering && checked.is_ok() {
+            self.record_signup(address);
+        }
         if checked.as_ref().is_err_and(|refusal| refusal.guess) {
             self.record_failure(address, account_name.as_deref());
         } else if checked.is_ok()
@@ -760,11 +805,73 @@ impl Hub {
         }
     }
 
+    /// Minutes until `address` may make another account (None: now).
+    fn signup_wait(&self, address: Option<IpAddr>) -> Option<u64> {
+        let address = address?;
+        let mut signups = self.signups.lock().ok()?;
+        let recent = signups.entry(address).or_default();
+        recent.retain(|at| at.elapsed() < Duration::from_secs(3600));
+        if recent.len() >= SIGNUPS_PER_HOUR {
+            let oldest = recent.iter().min().copied()?;
+            return Some(((3600 - oldest.elapsed().as_secs()) / 60).max(1));
+        }
+        None
+    }
+
+    /// An account was made from `address` (only made ones count: a refused attempt costs little and makes nothing).
+    fn record_signup(&self, address: Option<IpAddr>) {
+        if let (Some(address), Ok(mut signups)) = (address, self.signups.lock()) {
+            signups.entry(address).or_default().push(Instant::now());
+        }
+    }
+
     fn authenticate(
         &self,
         first: ClientMessage,
     ) -> Result<(Identity, Option<String>, bool), Refusal> {
         let store = self.store.lock().map_err(|e| e.to_string())?;
+        if let ClientMessage::Register {
+            user,
+            password,
+            device_id,
+            device_name,
+            role,
+            public_key,
+        } = first
+        {
+            if !self.signup {
+                return Err(
+                    "this server does not take new accounts: ask whoever runs it"
+                        .to_string()
+                        .into(),
+                );
+            }
+            // Everything cheap first: nothing is made (and no password hashed) for an attempt that cannot succeed.
+            check_new_account(&user, &password)?;
+            if store.device_owner(&device_id)?.is_some() {
+                return Err("this device belongs to another account: remove it there first (More... in that account's device list)".to_string().into());
+            }
+            if store.user_exists(&user)? {
+                return Err("that user name is taken".to_string().into());
+            }
+            store.add_user(&user, &password).map_err(|error| {
+                if error.contains("UNIQUE") {
+                    "that user name is taken".to_string()
+                } else {
+                    error
+                }
+            })?;
+            drop(store);
+            // Logged in as with a password.
+            return self.authenticate(ClientMessage::Login {
+                user,
+                password,
+                device_id,
+                device_name,
+                role,
+                public_key,
+            });
+        }
         match first {
             ClientMessage::Login {
                 user,
@@ -962,7 +1069,9 @@ impl Hub {
                     let _ = store.revoke_token(&identity.device_id, role_name(identity.role));
                 }
             }
-            ClientMessage::Login { .. } | ClientMessage::Resume { .. } => {
+            ClientMessage::Login { .. }
+            | ClientMessage::Resume { .. }
+            | ClientMessage::Register { .. } => {
                 let message = "already logged in".into();
                 let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
             }

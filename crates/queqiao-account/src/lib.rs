@@ -93,6 +93,15 @@ pub struct Account {
     role: Role,
 }
 
+/// How a connection logs in.
+enum Credentials<'a> {
+    /// The saved refresh token.
+    Saved,
+    Password(&'a str, &'a str),
+    /// A new account with this name and password.
+    NewAccount(&'a str, &'a str),
+}
+
 impl Account {
     /// Connects to `login.server`, checking the pinned certificate, and logs in: with the password when
     /// one is given (the new refresh token is put into `login`), otherwise with the saved refresh token.
@@ -103,6 +112,31 @@ impl Account {
         device: &DeviceIdentity,
         role: Role,
         password: Option<(&str, &str)>,
+    ) -> Result<Account, Error> {
+        let credentials = match password {
+            Some((user, password)) => Credentials::Password(user, password),
+            None => Credentials::Saved,
+        };
+        Self::open(login, device, role, credentials)
+    }
+
+    /// A new account (on a server that takes new accounts: `serve --allow-signup`), logged in at once: the refresh
+    /// token is put into `login`.
+    pub fn register(
+        login: &mut SavedLogin,
+        device: &DeviceIdentity,
+        role: Role,
+        user: &str,
+        password: &str,
+    ) -> Result<Account, Error> {
+        Self::open(login, device, role, Credentials::NewAccount(user, password))
+    }
+
+    fn open(
+        login: &mut SavedLogin,
+        device: &DeviceIdentity,
+        role: Role,
+        credentials: Credentials<'_>,
     ) -> Result<Account, Error> {
         let key = device
             .key
@@ -124,8 +158,8 @@ impl Account {
         let local_ip = tcp.local_addr()?.ip();
         let mut socket = tls::open(tcp, &login.server, &login.pin)?;
 
-        let first = match password {
-            Some((user, password)) => ClientMessage::Login {
+        let first = match credentials {
+            Credentials::Password(user, password) => ClientMessage::Login {
                 user: user.to_string(),
                 password: password.to_string(),
                 device_id: device.id.clone(),
@@ -133,7 +167,15 @@ impl Account {
                 role,
                 public_key: key.public_hex().to_string(),
             },
-            None => ClientMessage::Resume {
+            Credentials::NewAccount(user, password) => ClientMessage::Register {
+                user: user.to_string(),
+                password: password.to_string(),
+                device_id: device.id.clone(),
+                device_name: device.name.clone(),
+                role,
+                public_key: key.public_hex().to_string(),
+            },
+            Credentials::Saved => ClientMessage::Resume {
                 refresh_token: login.refresh_token.clone().ok_or_else(|| {
                     Error("no saved login: give the user name and password".into())
                 })?,

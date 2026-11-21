@@ -35,7 +35,7 @@ fn main() {
         _ => {
             println!("{banner}");
             println!(
-                "usage: queqiao-server serve [--listen 0.0.0.0:47100] [--data <folder>] [--name <host or IP>]..."
+                "usage: queqiao-server serve [--listen 0.0.0.0:47100] [--data <folder>] [--name <host or IP>] [--allow-signup]..."
             );
             println!(
                 "                            [--public-ip <IP>] [--turn-port 3478] [--relay-ports 47200-47399] [--relay-private]"
@@ -116,7 +116,17 @@ fn serve(args: &[String]) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    let hub = hub::Hub::new(store, turn.clone());
+    // New accounts from the programs' login forms: only when the server's owner allows it.
+    let signup = args.iter().any(|arg| arg == "--allow-signup");
+    println!(
+        "new accounts from the login form: {}",
+        if signup {
+            "allowed (--allow-signup)"
+        } else {
+            "no (queqiao-server add-user)"
+        }
+    );
+    let hub = hub::Hub::new(store, turn.clone(), signup);
     runtime.block_on(async move {
         let accounts = hub.serve(listen, tokio_rustls::TlsAcceptor::from(tls));
         match turn {

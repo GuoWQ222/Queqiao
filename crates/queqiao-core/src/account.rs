@@ -54,6 +54,15 @@ pub enum ClientMessage {
         role: Role,
         public_key: String,
     },
+    /// A new account (only on a server that takes new accounts), then logged in as with `Login`.
+    Register {
+        user: String,
+        password: String,
+        device_id: String,
+        device_name: String,
+        role: Role,
+        public_key: String,
+    },
     /// Forward to the program `to_role` on device `to` (same account only).
     Signal {
         to: String,

@@ -3,7 +3,8 @@
 //! devices of the same account; then the relay (TURN) as an attacker and as a client would use it. Needs two
 //! users on the server; saves nothing on this PC.
 //!
-//! account_probe <host:port> <fingerprint> <user1> <password1> <user2> <password2>
+//! account_probe <host:port> <fingerprint> <user1> <password1> <user2> <password2> [--signup-open]
+//! (--signup-open: the server takes new accounts, `serve --allow-signup`; without it, new accounts must be refused).
 //! Prints a CHECK line per check and PROBE_PASS or PROBE_FAIL.
 
 use std::time::{Duration, Instant};
@@ -25,6 +26,81 @@ impl Probe {
         );
         self.failed += u32::from(!ok);
     }
+}
+
+/// New accounts from the login form: refused unless the server takes them; then logged in at once, a taken or bad
+/// name refused, and at most three a hour from one address.
+fn signup(probe: &mut Probe, server: &str, pin: &str, open: bool) {
+    let stamp = &new_session_id()[..8];
+    let name = format!("newcomer{stamp}");
+    // Each from a device of its own unless said otherwise.
+    let register_from = |from: &DeviceIdentity, user: &str, password: &str| {
+        Account::register(&mut login(server, pin), from, Role::Viewer, user, password)
+    };
+    let register = |user: &str, password: &str| register_from(&device("newcomer"), user, password);
+    let first_device = device("newcomer");
+    let first = register_from(&first_device, &name, "a-new-password");
+    if !open {
+        probe.check(
+            "a new account is refused where the server does not take them",
+            first
+                .as_ref()
+                .is_err_and(|e| e.0.contains("does not take new accounts")),
+            first.err().map_or("accepted".into(), |e| e.0),
+        );
+        return;
+    }
+    probe.check(
+        "a new account from the login form is logged in at once",
+        first.as_ref().is_ok_and(|account| account.user == name),
+        match &first {
+            Ok(account) => format!("logged in as {}", account.user),
+            Err(error) => error.0.clone(),
+        },
+    );
+    drop(first);
+    // That device belongs to the new account now: another account from it is refused, and nothing is made.
+    let second_name = format!("second{stamp}");
+    let owned = register_from(&first_device, &second_name, "a-new-password");
+    probe.check(
+        "a new account from a device of another account is refused",
+        owned
+            .as_ref()
+            .is_err_and(|e| e.0.contains("belongs to another account")),
+        owned.err().map_or("accepted".into(), |e| e.0),
+    );
+    let made = register(&second_name, "a-new-password");
+    probe.check(
+        "the refused one made nothing (its name is free)",
+        made.is_ok(),
+        made.err().map_or("free".into(), |e| e.0),
+    );
+    let taken = register(&name, "another-password");
+    probe.check(
+        "a taken user name is refused",
+        taken.as_ref().is_err_and(|e| e.0.contains("taken")),
+        taken.err().map_or("accepted".into(), |e| e.0),
+    );
+    let bad = register("x", "a-new-password");
+    probe.check(
+        "a bad user name is refused",
+        bad.as_ref().is_err_and(|e| e.0.contains("user name has")),
+        bad.err().map_or("accepted".into(), |e| e.0),
+    );
+    let third = register(&format!("third{stamp}"), "a-new-password");
+    probe.check(
+        "a third new account from one address is made",
+        third.is_ok(),
+        third.err().map_or("made".into(), |e| e.0),
+    );
+    let fourth = register(&format!("later{stamp}"), "a-new-password");
+    probe.check(
+        "a fourth new account from one address within the hour is refused",
+        fourth
+            .as_ref()
+            .is_err_and(|e| e.0.contains("too many new accounts")),
+        fourth.err().map_or("accepted".into(), |e| e.0),
+    );
 }
 
 /// A device that lives in this probe only (its own key, pins in memory).
@@ -61,7 +137,11 @@ fn wait_for(
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let signup_open = args.last().is_some_and(|last| last == "--signup-open");
+    if signup_open {
+        args.pop();
+    }
     let [server, pin, user1, password1, user2, password2] = &args[..] else {
         println!(
             "usage: account_probe <host:port> <fingerprint> <user1> <password1> <user2> <password2>"
@@ -394,6 +474,8 @@ fn main() {
         pin,
         [(user1, password1), (user2, password2)],
     );
+    // Before the hardening checks: they lock this address out of logins (and sign-ups) for a while.
+    signup(&mut probe, server, pin, signup_open);
     hardening(
         &mut probe,
         server,

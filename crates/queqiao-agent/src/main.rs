@@ -1179,12 +1179,31 @@ fn tray_log_in(
                 lines.push("login: the form was closed".into());
                 return None;
             }
-            Some(LoginAction::Submit(fields)) => {
+            Some(action @ (LoginAction::Submit(_) | LoginAction::Register(_))) => {
+                let register = matches!(action, LoginAction::Register(_));
+                let (LoginAction::Submit(fields) | LoginAction::Register(fields)) = action else {
+                    continue;
+                };
                 if [&fields.server, &fields.pin, &fields.user, &fields.password]
                     .iter()
                     .any(|value| value.is_empty())
                 {
                     form.set_status(queqiao_core::text::tr("Please fill in all four fields."));
+                    continue;
+                }
+                // A new account: the password typed twice.
+                if register
+                    && !options.test_tray_login
+                    && queqiao_display::ask_secret(
+                        queqiao_core::text::tr("Queqiao"),
+                        queqiao_core::text::tr("The same password again:"),
+                    )
+                    .as_deref()
+                        != Some(fields.password.as_str())
+                {
+                    form.set_status(queqiao_core::text::tr(
+                        "The two passwords are not the same.",
+                    ));
                     continue;
                 }
                 let mut tried = login.clone();
@@ -1196,12 +1215,22 @@ fn tray_log_in(
                 form.set_busy(true, queqiao_core::text::tr("Logging in..."));
                 let identity = identity.clone();
                 let worker = std::thread::spawn(move || {
-                    let result = Account::connect(
-                        &mut tried,
-                        &identity,
-                        AccountRole::Agent,
-                        Some((&fields.user, &fields.password)),
-                    );
+                    let result = if register {
+                        Account::register(
+                            &mut tried,
+                            &identity,
+                            AccountRole::Agent,
+                            &fields.user,
+                            &fields.password,
+                        )
+                    } else {
+                        Account::connect(
+                            &mut tried,
+                            &identity,
+                            AccountRole::Agent,
+                            Some((&fields.user, &fields.password)),
+                        )
+                    };
                     (result.map_err(|error| error.0), tried)
                 });
                 while !worker.is_finished() {

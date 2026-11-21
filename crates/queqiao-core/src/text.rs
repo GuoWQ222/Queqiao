@@ -346,6 +346,12 @@ const CHINESE: &[(&str, &str)] = &[
         "请用鹊桥远程帮我看看电脑：在鹊桥中选择“帮助别人……”（或打开链接）。",
     ),
     ("Copy invitation", "复制邀请"),
+    ("Create an account", "注册账号"),
+    (
+        "The two passwords are not the same.",
+        "两次输入的密码不一致。",
+    ),
+    ("Creating the account...", "正在注册……"),
     ("Command lines...", "命令行……"),
     ("Opacity", "透明度"),
     ("That PC's pointer shape", "使用对方电脑的指针形状"),

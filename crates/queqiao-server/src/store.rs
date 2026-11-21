@@ -104,6 +104,25 @@ impl Store {
         Ok(())
     }
 
+    /// The account a device belongs to, if it is known.
+    pub fn device_owner(&self, device_id: &str) -> Result<Option<i64>, String> {
+        self.db
+            .query_row(
+                "SELECT user_id FROM devices WHERE id = ?1",
+                params![device_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn user_exists(&self, name: &str) -> Result<bool, String> {
+        self.db
+            .prepare("SELECT 1 FROM users WHERE name = ?1")
+            .and_then(|mut query| query.exists(params![name]))
+            .map_err(|e| e.to_string())
+    }
+
     /// The user if the password is right.
     pub fn check_password(&self, name: &str, password: &str) -> Result<Option<UserRow>, String> {
         let row: Option<(i64, String)> = self

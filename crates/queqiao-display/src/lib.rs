@@ -14,8 +14,8 @@ mod yuv;
 pub use cursor::RemoteCursor;
 pub use forms::{
     DeviceList, DeviceRow, HelpAction, HelpForm, ListAction, LoginAction, LoginFields, LoginForm,
-    PICK_CLOSED, PickList, SetupAction, SetupForm, ask_text, confirm, copy_text, normalize_code,
-    popup_menu, save_window_picture, show_error, show_info,
+    PICK_CLOSED, PickList, SetupAction, SetupForm, ask_secret, ask_text, confirm, copy_text,
+    normalize_code, popup_menu, save_window_picture, show_error, show_info,
 };
 pub use presence::{
     AccountState, PasswordCheck, Presence, PresenceEvent, SessionBanner, TEST_MENU_LOGIN,
