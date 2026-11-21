@@ -2,11 +2,17 @@
 //!
 //! - `queqiao-setup` (as downloaded): a window with the choices, then Install.
 //! - `--quiet [--autostart] [--service] [--report <file>]`: the same without a window (tests, updates).
+//! - `--update [--report <file>]`: what an installed agent runs for an update it downloaded and checked: quiet, the
+//!   person's choices kept, the earlier version put back if the new agent does not keep running.
 //! - `--uninstall [--quiet] [--report <file>]`: removes everything it put on this PC (Settings > Apps runs this).
 //! - `--remove-service`: run as an administrator by `--uninstall` when the service is installed.
 //! - `--ui-picture <file>`: shows the window, saves a picture of it and leaves without installing (tests).
 //! - `pack --output <installer> <file>...`: this program with those files appended (they are installed); sign the
 //!   result afterwards (scripts\package.ps1).
+//! - `release-key --output <file>`: a new release key, DPAPI-encrypted for the person running this; prints its
+//!   public half (for queqiao_update::RELEASE_KEY).
+//! - `release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]`: the update feed
+//!   for that installer: the installer as queqiao-setup-<x.y.z>.exe, queqiao-update.json and its signature.
 
 #![windows_subsystem = "windows"]
 
@@ -24,6 +30,7 @@ struct Options {
     service: bool,
     uninstall: bool,
     remove_service: bool,
+    update: bool,
     report: Option<PathBuf>,
     ui_picture: Option<PathBuf>,
 }
@@ -32,8 +39,14 @@ fn main() {
     queqiao_core::platform::install_crash_log("queqiao-setup");
     let _ = queqiao_core::platform::prepare_process();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("pack") {
-        let code = match pack(&args[1..]) {
+    let tool = match args.first().map(String::as_str) {
+        Some("pack") => Some(pack as fn(&[String]) -> Result<String, String>),
+        Some("release-key") => Some(release_key as fn(&[String]) -> Result<String, String>),
+        Some("release") => Some(release as fn(&[String]) -> Result<String, String>),
+        _ => None,
+    };
+    if let Some(tool) = tool {
+        let code = match tool(&args[1..]) {
             Ok(line) => {
                 println!("{line}");
                 0
@@ -57,6 +70,23 @@ fn main() {
         std::process::exit(2);
     };
     let mut lines = vec![queqiao_core::banner(env!("CARGO_PKG_NAME"))];
+    // One installer at a time in this session: an update started while an install still finishes waits for it. Not
+    // for --remove-service: --uninstall, which holds it, runs that and waits for it.
+    let _turn = if options.remove_service || options.ui_picture.is_some() {
+        None
+    } else {
+        match one_at_a_time() {
+            Ok(turn) => Some(turn),
+            Err(error) => {
+                lines.push(format!("ERROR {error}"));
+                lines.push("RESULT FAIL".into());
+                if let Some(path) = &options.report {
+                    let _ = std::fs::write(path, lines.join("\r\n") + "\r\n");
+                }
+                std::process::exit(1);
+            }
+        }
+    };
     let result = if options.remove_service {
         install::remove_service(&mut lines)
     } else if options.uninstall {
@@ -81,6 +111,20 @@ fn main() {
     std::process::exit(if passed { 0 } else { 1 });
 }
 
+/// Waits for any other installer of this session to finish (at most 3 minutes); held until this one ends.
+fn one_at_a_time() -> Result<windows::Win32::Foundation::HANDLE, String> {
+    use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+    let mutex = unsafe { CreateMutexW(None, false, windows::core::w!("Local\\QueqiaoSetup")) }
+        .map_err(|e| format!("installer lock: {}", e.message()))?;
+    let waited = unsafe { WaitForSingleObject(mutex, 180_000) };
+    if waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED {
+        Ok(mutex)
+    } else {
+        Err("another Queqiao installer is still running".into())
+    }
+}
+
 fn parse(args: &[String]) -> Option<Options> {
     let mut options = Options {
         quiet: false,
@@ -88,6 +132,7 @@ fn parse(args: &[String]) -> Option<Options> {
         service: false,
         uninstall: false,
         remove_service: false,
+        update: false,
         report: None,
         ui_picture: None,
     };
@@ -99,6 +144,10 @@ fn parse(args: &[String]) -> Option<Options> {
             "--service" => options.service = true,
             "--uninstall" => options.uninstall = true,
             "--remove-service" => options.remove_service = true,
+            "--update" => {
+                options.update = true;
+                options.quiet = true;
+            }
             "--report" => options.report = Some(PathBuf::from(rest.next()?)),
             "--ui-picture" => options.ui_picture = Some(PathBuf::from(rest.next()?)),
             _ => return None,
@@ -111,6 +160,18 @@ fn run_install(options: &Options, lines: &mut Vec<String>) -> Result<(), String>
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let data = std::fs::read(&me).map_err(|e| format!("{}: {e}", me.display()))?;
     let entries = payload::read(&data)?;
+    if options.update {
+        if !install::target().exists() {
+            return Err("Queqiao is not installed for this person: nothing to update".into());
+        }
+        let choices = install::current_choices();
+        lines.push(format!(
+            "update to {} (start with Windows: {})",
+            queqiao_core::VERSION,
+            choices.autostart
+        ));
+        return install::install(&entries, &choices, lines);
+    }
     if options.quiet {
         let choices = install::Choices {
             autostart: options.autostart,
@@ -172,6 +233,86 @@ fn uninstall(options: &Options, lines: &mut Vec<String>) -> Result<(), String> {
         queqiao_display::show_info(tr("Queqiao"), tr("Queqiao has been removed from this PC."));
     }
     Ok(())
+}
+
+/// `--name value` pairs of a tool's command line.
+fn named(args: &[String], names: &[&str]) -> Result<Vec<Option<String>>, String> {
+    let mut values = vec![None; names.len()];
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let at = names
+            .iter()
+            .position(|name| arg == name)
+            .ok_or_else(|| format!("unknown option {arg}"))?;
+        values[at] = Some(
+            rest.next()
+                .ok_or_else(|| format!("{arg} needs a value"))?
+                .clone(),
+        );
+    }
+    Ok(values)
+}
+
+/// `release-key --output <file>`
+fn release_key(args: &[String]) -> Result<String, String> {
+    let [output] = &named(args, &["--output"])?[..] else {
+        unreachable!()
+    };
+    let output = output
+        .as_ref()
+        .ok_or("usage: queqiao-setup release-key --output <file>")?;
+    if std::path::Path::new(output).exists() {
+        return Err(format!("{output} exists: a release key is not replaced"));
+    }
+    let (key, public) = queqiao_update::release::generate_key()?;
+    let sealed = queqiao_update::release::protect(&key)?;
+    std::fs::write(output, sealed).map_err(|e| format!("{output}: {e}"))?;
+    Ok(format!(
+        "release key in {output} (DPAPI, this Windows user only); public key: {public}"
+    ))
+}
+
+/// `release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]`
+fn release(args: &[String]) -> Result<String, String> {
+    let usage = "usage: queqiao-setup release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]";
+    let values = named(
+        args,
+        &["--key", "--installer", "--version", "--output", "--notes"],
+    )?;
+    let [
+        Some(key),
+        Some(installer),
+        Some(version),
+        Some(output),
+        notes,
+    ] = &values[..]
+    else {
+        return Err(usage.into());
+    };
+    let sealed = std::fs::read(key).map_err(|e| format!("{key}: {e}"))?;
+    let key = queqiao_update::release::unprotect(&sealed)?;
+    let public = queqiao_update::release::public_key(&key)?;
+    let bytes = std::fs::read(installer).map_err(|e| format!("{installer}: {e}"))?;
+    let (manifest, signature) =
+        queqiao_update::release::sign(&key, version, &bytes, notes.as_deref().unwrap_or(""))?;
+    let folder = PathBuf::from(output);
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{output}: {e}"))?;
+    let name = format!("queqiao-setup-{version}.exe");
+    for (file, data) in [
+        (name.as_str(), bytes.as_slice()),
+        (queqiao_update::MANIFEST, manifest.as_slice()),
+        (queqiao_update::SIGNATURE, signature.as_bytes()),
+    ] {
+        std::fs::write(folder.join(file), data).map_err(|e| format!("{file}: {e}"))?;
+    }
+    let matches = if public == queqiao_update::RELEASE_KEY {
+        "this build's release key"
+    } else {
+        "NOT this build's release key"
+    };
+    Ok(format!(
+        "feed for {version} in {output} (signed by {public}: {matches})"
+    ))
 }
 
 /// `pack --output <installer> <file>...`

@@ -243,6 +243,7 @@ fn run(
         }
     };
     presence.set_password_check(password_check(password));
+    presence.set_auto_update(settings.auto_update);
     let _ = ready.send(Ok(presence.tray_shown()));
     // (when, file name) of a picture to take once the window has drawn itself.
     let mut picture: Option<(Instant, &str)> = None;
@@ -367,6 +368,9 @@ pub struct Settings {
     /// The settings password's stored form (PBKDF2); empty: none.
     #[serde(default)]
     pub settings_password: String,
+    /// Install updates by themselves (signed by the release key; never during a session).
+    #[serde(default = "yes")]
+    pub auto_update: bool,
 }
 
 /// The check for the settings password's stored form.
@@ -393,6 +397,7 @@ impl Default for Settings {
             allow_terminal: true,
             lock_after_session: false,
             settings_password: String::new(),
+            auto_update: true,
         }
     }
 }

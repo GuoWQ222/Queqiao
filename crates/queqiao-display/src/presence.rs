@@ -59,6 +59,10 @@ pub enum PresenceEvent {
     Consent(bool),
     /// "Log in...": the person wants to log this PC in to their account (offered while it is not online).
     LogIn,
+    /// "Check for updates...".
+    CheckUpdates,
+    /// Install updates by itself (true) or only when asked.
+    SetAutoUpdate(bool),
 }
 
 /// How this PC stands with the account server (the tray menu's first line).
@@ -88,10 +92,13 @@ const ID_HELP_CLOSE: u16 = 214;
 const MENU_HELP: u16 = 208;
 const MENU_LOCK_AFTER: u16 = 209;
 const MENU_LOGIN: u16 = 215;
+const MENU_UPDATE_CHECK: u16 = 216;
+const MENU_AUTO_UPDATE: u16 = 217;
 const MENU_PASSWORD: u16 = 220;
 /// Menu items tests can choose (the same path as a click).
 pub const TEST_MENU_TERMINAL: u16 = MENU_TERMINAL;
 pub const TEST_MENU_LOGIN: u16 = MENU_LOGIN;
+pub const TEST_MENU_UPDATE_CHECK: u16 = MENU_UPDATE_CHECK;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
 /// The tray window asks for its menu (not a control id).
@@ -131,6 +138,7 @@ pub struct Presence {
     password_check: Option<PasswordCheck>,
     viewer: Option<String>,
     account: AccountState,
+    auto_update: bool,
 }
 
 impl Presence {
@@ -193,6 +201,7 @@ impl Presence {
             password_check: None,
             viewer: None,
             account: AccountState::Online,
+            auto_update: true,
         };
         presence.update_tray();
         Ok(presence)
@@ -471,6 +480,8 @@ impl Presence {
         let autostart = wide(tr("Start with Windows"));
         let lock_after = wide(tr("Lock this PC when a session ends"));
         let quit = wide(tr("Quit Queqiao on this PC"));
+        let check_updates = wide(tr("Check for updates..."));
+        let auto_update = wide(tr("Install updates automatically"));
         let password = wide(if self.password_check.is_some() {
             tr("Remove the settings password...")
         } else {
@@ -548,6 +559,19 @@ impl Presence {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
                 menu,
+                checked(self.auto_update),
+                usize::from(MENU_AUTO_UPDATE),
+                PCWSTR(auto_update.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                usize::from(MENU_UPDATE_CHECK),
+                PCWSTR(check_updates.as_ptr()),
+            );
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(
+                menu,
                 MF_STRING,
                 usize::from(MENU_QUIT),
                 PCWSTR(quit.as_ptr()),
@@ -577,6 +601,11 @@ impl Presence {
         self.password_check = check;
     }
 
+    /// Whether updates are installed by themselves (the menu's check mark).
+    pub fn set_auto_update(&mut self, on: bool) {
+        self.auto_update = on;
+    }
+
     /// How this PC stands with the account server (shown in the menu; "Log in..." while not online).
     pub fn set_account_state(&mut self, state: AccountState) {
         self.account = state;
@@ -598,6 +627,7 @@ impl Presence {
                 | MENU_TERMINAL
                 | MENU_AUTOSTART
                 | MENU_LOCK_AFTER
+                | MENU_AUTO_UPDATE
                 | MENU_QUIT
         );
         let protected = setting || item == MENU_PASSWORD || item == MENU_LOGIN;
@@ -653,6 +683,11 @@ impl Presence {
                     self.lock_after = !self.lock_after;
                     Some(PresenceEvent::SetLockAfter(self.lock_after))
                 }
+                MENU_AUTO_UPDATE => {
+                    self.auto_update = !self.auto_update;
+                    Some(PresenceEvent::SetAutoUpdate(self.auto_update))
+                }
+                MENU_UPDATE_CHECK => Some(PresenceEvent::CheckUpdates),
                 MENU_QUIT => Some(PresenceEvent::Quit),
                 _ => None,
             }

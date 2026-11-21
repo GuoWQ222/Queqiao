@@ -17,7 +17,7 @@ pub use forms::{
 };
 pub use presence::{
     AccountState, PasswordCheck, Presence, PresenceEvent, SessionBanner, TEST_MENU_LOGIN,
-    TEST_MENU_TERMINAL,
+    TEST_MENU_TERMINAL, TEST_MENU_UPDATE_CHECK,
 };
 pub use present::{Presenter, fit};
 pub use privacy::PrivacyScreen;

@@ -19,6 +19,7 @@ mod autostart;
 mod power;
 mod service_link;
 mod ui;
+mod update;
 mod wake;
 
 use std::path::PathBuf;
@@ -167,10 +168,12 @@ fn main() {
     };
     let mut lines = vec![banner];
     let mut not_logged_in = false;
+    let mut already_running = false;
     let passed = match run(&options, &mut lines) {
         Ok(passed) => passed,
         Err(error) => {
             not_logged_in = error.starts_with("not logged in");
+            already_running = error == autostart::ALREADY_RUNNING;
             lines.push(format!("ERROR {error}"));
             false
         }
@@ -182,11 +185,14 @@ fn main() {
         }
         None => lines.iter().for_each(|line| println!("{line}")),
     }
-    // Started by the service: 3 tells it there is nothing to do until the next sign-in.
+    // Started by the service: 3 tells it there is nothing to do until the next sign-in. 4: another agent runs in this
+    // session (the installer does not take that for a failed start).
     let code = if passed {
         0
     } else if not_logged_in && options.service_channel.is_some() {
         3
+    } else if already_running {
+        4
     } else {
         1
     };
@@ -462,6 +468,9 @@ fn run_account(
     if options.test_tray_login {
         ui.press_menu(queqiao_display::TEST_MENU_LOGIN);
     }
+    // Updates, for the person's own agent of an installed Queqiao.
+    let updater = (tolerant && !options.test_tray_login && update::installed_here())
+        .then(|| update::Updater::start(lines));
     loop {
         if end.is_some_and(|end| Instant::now() > end)
             || options.sessions.is_some_and(|n| sessions >= n)
@@ -563,6 +572,26 @@ fn run_account(
                     }
                 }
                 PresenceEvent::LogIn => {}
+                PresenceEvent::CheckUpdates => match &updater {
+                    Some(updater) => {
+                        lines.push("updates: the person asked for a look".into());
+                        updater.request();
+                    }
+                    None => notify(
+                        false,
+                        queqiao_core::text::tr(
+                            "Updates come with an installed Queqiao (installed with queqiao-setup).",
+                        )
+                        .to_string(),
+                    ),
+                },
+                PresenceEvent::SetAutoUpdate(on) => {
+                    settings.auto_update = on;
+                    let _ = settings.save();
+                    lines.push(format!(
+                        "the person at this PC set: install updates automatically: {on}"
+                    ));
+                }
                 PresenceEvent::SettingsLocked => {
                     lines.push("a setting was chosen while someone of another account controls this PC: refused".into())
                 }
@@ -582,6 +611,79 @@ fn run_account(
         if quit {
             lines.push("quit from the tray icon".into());
             break;
+        }
+        // An update found: installed between sessions, by itself if the person lets it, or when they asked and agree.
+        if let Some(found) = updater.as_ref().and_then(update::Updater::try_result) {
+            match found {
+                update::Found::UpToDate { by_hand } => {
+                    lines.push(format!("updates: {} is the latest", queqiao_core::VERSION));
+                    if by_hand {
+                        notify(
+                            false,
+                            trf(
+                                "Queqiao is up to date (version {version}).",
+                                &[("version", queqiao_core::VERSION)],
+                            ),
+                        );
+                    }
+                }
+                update::Found::Skipped { version, by_hand } => {
+                    lines.push(format!(
+                        "updates: {version} did not keep running here before: skipped"
+                    ));
+                    if by_hand {
+                        notify(
+                            false,
+                            trf(
+                                "Queqiao {version} did not start on this PC and was put back. Queqiao waits for a later version.",
+                                &[("version", &version)],
+                            ),
+                        );
+                    }
+                }
+                update::Found::Failed { error, by_hand } => {
+                    lines.push(format!("updates: {error}"));
+                    if by_hand {
+                        notify(
+                            true,
+                            trf("The update check failed: {error}", &[("error", &error)]),
+                        );
+                    }
+                }
+                update::Found::Ready {
+                    version,
+                    notes,
+                    installer,
+                    by_hand,
+                } => {
+                    lines.push(format!("updates: {version} downloaded and checked"));
+                    let install = if by_hand {
+                        queqiao_display::confirm(
+                            windows::Win32::Foundation::HWND::default(),
+                            queqiao_core::text::tr("Queqiao"),
+                            &trf(
+                                "Queqiao {version} is ready to install. Queqiao closes for a moment and starts again.\n\n{notes}\n\nInstall it now?",
+                                &[("version", &version), ("notes", &notes)],
+                            ),
+                        )
+                    } else {
+                        settings.auto_update
+                    };
+                    if install {
+                        match update::apply(&installer, &version) {
+                            Ok(()) => {
+                                lines.push(format!(
+                                    "updates: installing {version}; this agent leaves"
+                                ));
+                                break;
+                            }
+                            Err(error) => {
+                                lines.push(format!("updates: the installer did not start: {error}"))
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Offline or not logged in: the tray, and while offline an attempt in the background now and then.
         let Some(online) = account.as_mut() else {
@@ -868,6 +970,18 @@ fn run_account(
     }
     lines.push(format!("{sessions} sessions"));
     Ok(passed && options.sessions.is_none_or(|n| sessions >= n))
+}
+
+/// A message for the person at this PC, on a thread of its own (the agent goes on meanwhile).
+fn notify(error: bool, text: String) {
+    std::thread::spawn(move || {
+        let title = queqiao_core::text::tr("Queqiao");
+        if error {
+            queqiao_display::show_error(title, &text);
+        } else {
+            queqiao_display::show_info(title, &text);
+        }
+    });
 }
 
 /// Whether the server wants the password again (the saved login expired, was revoked, or the password changed).

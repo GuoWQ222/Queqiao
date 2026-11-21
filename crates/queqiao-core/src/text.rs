@@ -146,6 +146,25 @@ const CHINESE: &[(&str, &str)] = &[
     ),
     ("Queqiao: not logged in", "鹊桥：未登录"),
     ("Log in...", "登录……"),
+    ("Check for updates...", "检查更新……"),
+    ("Install updates automatically", "自动安装更新"),
+    (
+        "Queqiao is up to date (version {version}).",
+        "鹊桥已是最新版本（{version}）。",
+    ),
+    (
+        "Queqiao {version} is ready to install. Queqiao closes for a moment and starts again.\n\n{notes}\n\nInstall it now?",
+        "鹊桥 {version} 已下载，可以安装。安装时鹊桥会关闭片刻，然后重新启动。\n\n{notes}\n\n现在安装吗？",
+    ),
+    ("The update check failed: {error}", "检查更新失败：{error}"),
+    (
+        "Queqiao {version} did not start on this PC and was put back. Queqiao waits for a later version.",
+        "鹊桥 {version} 在这台电脑上没能启动，已恢复为原来的版本。鹊桥会等待更新的版本。",
+    ),
+    (
+        "Updates come with an installed Queqiao (installed with queqiao-setup).",
+        "只有用 queqiao-setup 安装的鹊桥才会更新。",
+    ),
     ("Queqiao - log in this PC", "鹊桥 - 登录这台电脑"),
     ("Logging in...", "正在登录……"),
     (

@@ -16,6 +16,7 @@ queqiao-terminal.workspace = true
 queqiao-core.workspace = true
 queqiao-input.workspace = true
 queqiao-local.workspace = true
+queqiao-update.workspace = true
 queqiao-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true

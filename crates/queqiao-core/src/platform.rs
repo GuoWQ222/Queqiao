@@ -49,7 +49,7 @@ pub fn install_crash_log(program: &'static str) {
             let _ = std::fs::create_dir_all(&folder);
             let report = format!(
                 "{program} {} crashed (Unix time {stamp})\n{info}\n\n{backtrace}\n",
-                env!("CARGO_PKG_VERSION")
+                crate::VERSION
             );
             let _ = std::fs::write(folder.join(format!("{program}-{stamp}.txt")), report);
             keep_newest(&folder, 20);

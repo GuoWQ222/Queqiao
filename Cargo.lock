@@ -791,6 +791,7 @@ dependencies = [
  "queqiao-local",
  "queqiao-terminal",
  "queqiao-transport",
+ "queqiao-update",
  "serde",
  "serde_json",
  "windows",
@@ -906,6 +907,7 @@ version = "0.1.0"
 dependencies = [
  "queqiao-core",
  "queqiao-display",
+ "queqiao-update",
  "sha2",
  "windows",
 ]
@@ -926,6 +928,17 @@ dependencies = [
  "queqiao-core",
  "socket2",
  "str0m",
+ "windows",
+]
+
+[[package]]
+name = "queqiao-update"
+version = "0.1.0"
+dependencies = [
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
  "windows",
 ]
 

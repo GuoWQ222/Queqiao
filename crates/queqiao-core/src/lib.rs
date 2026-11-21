@@ -14,12 +14,16 @@ pub mod text;
 /// Peers with a different version refuse to connect.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// This build's version: the workspace's, or QUEQIAO_VERSION when it was set at build time (an update test builds
+/// a later version of the same code that way).
+pub const VERSION: &str = match option_env!("QUEQIAO_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// One-line start-up banner: program name, workspace version, protocol version.
 pub fn banner(program: &str) -> String {
-    format!(
-        "{program} {} (protocol {PROTOCOL_VERSION})",
-        env!("CARGO_PKG_VERSION")
-    )
+    format!("{program} {VERSION} (protocol {PROTOCOL_VERSION})")
 }
 
 /// Test switch for fallback paths, so every path can run on any machine: the environment variable

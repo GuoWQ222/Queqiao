@@ -50,6 +50,26 @@ pub struct Choices {
     pub service: bool,
 }
 
+/// What an update keeps: start with Windows if the Run key starts this installation's agent; the service as it is.
+pub fn current_choices() -> Choices {
+    let agent = target()
+        .join(PROGRAMS[1])
+        .display()
+        .to_string()
+        .to_ascii_lowercase();
+    Choices {
+        autostart: read_value(RUN_KEY, RUN_VALUE)
+            .is_some_and(|command| command.to_ascii_lowercase().contains(&agent)),
+        service: false,
+    }
+}
+
+/// How long a new agent must keep running to count as started.
+const START_WATCH: Duration = Duration::from_secs(8);
+/// The agent's exit codes that are not a failed start: 0 (it left: the Queqiao service runs Queqiao here) and 4
+/// (another agent runs in this session).
+const LEFT_ON_PURPOSE: [i32; 2] = [0, 4];
+
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
@@ -109,6 +129,29 @@ pub fn install(
         target.display(),
         entries.len()
     ));
+
+    // With the service chosen, it comes first: the agent started next leaves for the service's own.
+    if choices.service {
+        match run_elevated(&target.join(PROGRAMS[2]), "install") {
+            Ok(0) => lines
+                .push("the Queqiao service is installed (sign-in, lock and UAC screens)".into()),
+            Ok(code) => return Err(format!("installing the service failed (exit code {code})")),
+            Err(error) => return Err(format!("the service was not installed: {error}")),
+        }
+    }
+
+    // Queqiao for this person now. The new agent must keep running: an update goes back to the earlier version if
+    // it does not.
+    let agent = target.join(PROGRAMS[1]);
+    let started = start_and_watch(&agent);
+    match &started {
+        Ok(note) => lines.push(note.clone()),
+        Err(error) if had_earlier => {
+            lines.push(format!("the new agent did not keep running: {error}"));
+            return Err(roll_back(&target, &old, error, lines));
+        }
+        Err(error) => lines.push(format!("the agent did not keep running: {error}")),
+    }
     if had_earlier {
         let _ = std::fs::remove_dir_all(&old);
         lines.push("the earlier installation was replaced".into());
@@ -123,7 +166,7 @@ pub fn install(
     let uninstall = format!("\"{}\" --uninstall", setup.display());
     let values: [(&str, Value); 9] = [
         ("DisplayName", Value::Text("Queqiao")),
-        ("DisplayVersion", Value::Text(env!("CARGO_PKG_VERSION"))),
+        ("DisplayVersion", Value::Text(queqiao_core::VERSION)),
         ("Publisher", Value::Text("Queqiao")),
         (
             "DisplayIcon",
@@ -162,21 +205,62 @@ pub fn install(
         delete_value(RUN_KEY, RUN_VALUE)?;
     }
 
-    if choices.service {
-        match run_elevated(&target.join(PROGRAMS[2]), "install") {
-            Ok(0) => lines
-                .push("the Queqiao service is installed (sign-in, lock and UAC screens)".into()),
-            Ok(code) => return Err(format!("installing the service failed (exit code {code})")),
-            Err(error) => return Err(format!("the service was not installed: {error}")),
+    // Installed, but Queqiao is not running: said, so it is not taken for a success.
+    started.map(|_| ())
+}
+
+/// Starts the agent and watches it for [`START_WATCH`]: still running then, or ended on purpose, is a start.
+fn start_and_watch(agent: &Path) -> Result<String, String> {
+    let mut child = std::process::Command::new(agent)
+        .current_dir(agent.parent().unwrap_or(agent))
+        .creation_flags(DETACHED_PROCESS.0)
+        .spawn()
+        .map_err(|e| format!("it did not start: {e}"))?;
+    let deadline = Instant::now() + START_WATCH;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return match status.code() {
+                    Some(code) if LEFT_ON_PURPOSE.contains(&code) => Ok(if code == 0 {
+                        "the agent left by itself (exit code 0: the Queqiao service runs Queqiao here, or an update)"
+                            .into()
+                    } else {
+                        "another Queqiao agent runs in this session".into()
+                    }),
+                    code => Err(format!(
+                        "it ended within {} s (exit code {})",
+                        START_WATCH.as_secs(),
+                        code.map_or("none".into(), |code| code.to_string())
+                    )),
+                };
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Err(error) => return Err(error.to_string()),
         }
     }
+    Ok("the agent is running (tray icon)".into())
+}
 
-    // Queqiao for this person now (with the service running, its own agent takes over).
-    match start_detached(&agent) {
-        Ok(()) => lines.push("the agent is running (tray icon)".into()),
-        Err(error) => lines.push(format!("the agent did not start: {error}")),
+/// The earlier installation back in place and its agent started; the error to report.
+fn roll_back(target: &Path, old: &Path, error: &str, lines: &mut Vec<String>) -> String {
+    stop_running(target, lines);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while target.exists() && std::fs::remove_dir_all(target).is_err() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(300));
     }
-    Ok(())
+    if let Err(problem) = std::fs::rename(old, target) {
+        return format!(
+            "the update did not keep running ({error}), and the earlier version could not be put back: {problem}"
+        );
+    }
+    lines.push("the earlier version is back".into());
+    match start_and_watch(&target.join(PROGRAMS[1])) {
+        Ok(note) => lines.push(format!("earlier version: {note}")),
+        Err(problem) => lines.push(format!(
+            "the earlier agent did not keep running either: {problem}"
+        )),
+    }
+    format!("the update did not keep running ({error}): the earlier version is back")
 }
 
 fn place(entries: &[Entry], target: &Path) -> Result<(), String> {
@@ -243,6 +327,11 @@ pub fn uninstall(lines: &mut Vec<String>) -> Result<(), String> {
     }
     let _ = std::fs::remove_file(shortcut());
     delete_tree(UNINSTALL_KEY)?;
+    // Downloaded updates.
+    let updates = known("LOCALAPPDATA", r"C:\Users\Public\AppData\Local").join(r"Queqiao\updates");
+    if updates.exists() && std::fs::remove_dir_all(&updates).is_ok() {
+        lines.push(format!("{} is removed", updates.display()));
+    }
     lines.push("the Start menu shortcut and the Apps entry are removed".into());
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     // A program that just ended may hold its file a moment longer.
@@ -369,15 +458,6 @@ fn stop_running(folder: &Path, lines: &mut Vec<String>) {
         more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
     }
     let _ = unsafe { CloseHandle(snapshot) };
-}
-
-fn start_detached(program: &Path) -> Result<(), String> {
-    std::process::Command::new(program)
-        .current_dir(program.parent().unwrap_or(program))
-        .creation_flags(DETACHED_PROCESS.0)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
 }
 
 /// Runs `program parameters` as an administrator: Windows asks (UAC); refusing it is an error. Its exit code.

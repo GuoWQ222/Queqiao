@@ -133,12 +133,15 @@ pub fn service_runs() -> bool {
     }
 }
 
+/// The error when another agent runs in this session.
+pub const ALREADY_RUNNING: &str = "Queqiao is running already";
+
 /// Claims "the agent of this user session"; an error when another agent has it. Kept for the process's life.
 pub fn claim_single_instance() -> Result<(), String> {
     let mutex: HANDLE =
         unsafe { CreateMutexW(None, false, w!("Local\\QueqiaoAgent")) }.map_err(|e| e.message())?;
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        return Err("Queqiao is running already".into());
+        return Err(ALREADY_RUNNING.into());
     }
     // Never closed: Windows frees it when this process ends.
     let _ = mutex;

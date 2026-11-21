@@ -1,12 +1,12 @@
 # Makes the installer from the release build: signs queqiao-viewer.exe, queqiao-agent.exe and queqiao-service.exe
 # (scripts\sign.ps1), packs them into queqiao-setup.exe (queqiao-setup pack), signs that too, and prints its SHA-256.
 # Output: target\package\queqiao-setup-<version>.exe. For now the signature is the test certificate's.
-# Usage: scripts\package.ps1 [-Subject 'CN=Queqiao Test Signing'] [-NoTimestamp]
+# Usage: scripts\package.ps1 [-Bin <release folder, default target\release>] [-Subject 'CN=Queqiao Test Signing'] [-NoTimestamp]
 # Prints PACKAGE_PASS <file> <sha256> or PACKAGE_FAIL <reason>. ASCII only.
-param([string]$Subject = 'CN=Queqiao Test Signing', [switch]$NoTimestamp)
+param([string]$Bin = '', [string]$Subject = 'CN=Queqiao Test Signing', [switch]$NoTimestamp)
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
-$release = Join-Path $root 'target\release'
+$release = if ($Bin) { $Bin } else { Join-Path $root 'target\release' }
 $programs = @('queqiao-viewer.exe', 'queqiao-agent.exe', 'queqiao-service.exe') | ForEach-Object { Join-Path $release $_ }
 foreach ($program in $programs + (Join-Path $release 'queqiao-setup.exe')) {
     if (-not (Test-Path -LiteralPath $program)) { "PACKAGE_FAIL $program is missing (build the release first)"; return }
