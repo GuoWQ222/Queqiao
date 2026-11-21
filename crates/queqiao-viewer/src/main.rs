@@ -178,6 +178,10 @@ struct Options {
     /// Help someone of another account: their help ID and code (tests; people use "Help someone...").
     help_id: Option<String>,
     help_code: Option<String>,
+    /// A help invitation link (queqiao://help/<help ID>/<code>): the help form, filled in from it.
+    invite: Option<String>,
+    /// Press Connect in the help form once it is drawn (tests).
+    test_submit_help: bool,
 }
 
 impl Options {
@@ -388,6 +392,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--max-bitrate" => options.max_bitrate = Some(args.next()?.parse().ok()?),
             "--help-id" => options.help_id = Some(args.next()?),
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
+            "--invite" => options.invite = Some(args.next()?),
+            "--test-submit-help" => options.test_submit_help = true,
             "--picture" => {
                 let value = args.next()?;
                 let (fps, quality) = value.split_once(',')?;
@@ -452,7 +458,7 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
     if let Some(pin) = &options.pin {
         login.pin = pin.clone();
     }
-    let pictures = options.ui_test.as_ref().map(|_| {
+    let pictures = (options.ui_test.is_some() || options.test_submit_help).then(|| {
         options
             .report
             .as_ref()
@@ -510,6 +516,34 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
             &device,
             &context,
             Addresses::All,
+            lines,
+        );
+    }
+    if let Some(invite) = &options.invite {
+        let prefill = queqiao_core::invitation::parse(invite)
+            .ok_or_else(|| format!("not a Queqiao help link: {invite}"))?;
+        lines.push(format!(
+            "help: from the invitation link, help ID {}",
+            prefill.0
+        ));
+        let Some(target) = ask_for_help_target(
+            &mut account,
+            Some(prefill),
+            options,
+            pictures.as_deref(),
+            lines,
+        ) else {
+            lines.push("help: the form was closed".into());
+            return Ok(!options.test_submit_help);
+        };
+        // A PC of another account: this PC's other addresses stay unknown to it.
+        return connect_to(
+            &mut account,
+            &target,
+            options,
+            &device,
+            &context,
+            Addresses::RouteOnly,
             lines,
         );
     }
@@ -716,7 +750,7 @@ fn device_list(
             }
             Some(ListAction::Help) => {
                 list.set_enabled(false);
-                if let Some(target) = ask_for_help_target(account, lines) {
+                if let Some(target) = ask_for_help_target(account, None, options, pictures, lines) {
                     sessions += 1;
                     match connect_to(
                         account,
@@ -936,8 +970,46 @@ fn wait_for_device(account: &mut Account, key: &str, timeout: Duration) -> Resul
 
 /// A session with the agent on `target`, set up through the server.
 /// The "Help someone..." dialog: the help ID and code, until the server grants them (or the person gives up).
-fn ask_for_help_target(account: &mut Account, lines: &mut Vec<String>) -> Option<Device> {
+/// Filled in from an invitation link, or else from an invitation on the clipboard; Connect stays the person's click.
+fn ask_for_help_target(
+    account: &mut Account,
+    prefill: Option<(String, String)>,
+    options: &Options,
+    pictures: Option<&Path>,
+    lines: &mut Vec<String>,
+) -> Option<Device> {
     let mut form = HelpForm::new().ok()?;
+    let clipboard = || {
+        queqiao_input::clipboard_text(None)
+            .as_deref()
+            .and_then(queqiao_core::invitation::parse)
+    };
+    match prefill {
+        Some((help_id, code)) => {
+            form.fill(&help_id, &code);
+            form.set_status(tr(
+                "Filled in from the invitation link: check it and press Connect.",
+            ));
+        }
+        None => {
+            if let Some((help_id, code)) = clipboard() {
+                form.fill(&help_id, &code);
+                form.set_status(tr(
+                    "Filled in from the clipboard: check it and press Connect.",
+                ));
+                lines.push(format!(
+                    "help: filled in from the clipboard, help ID {help_id}"
+                ));
+            }
+        }
+    }
+    if options.test_submit_help {
+        settle(|| form.next(20).is_some());
+        if let Some(folder) = pictures {
+            let _ = form.save_picture(&folder.join("help_form.bmp"));
+        }
+        form.press_connect();
+    }
     loop {
         match form.next(50) {
             Some(HelpAction::Submit { help_id, code }) => {
@@ -945,6 +1017,10 @@ fn ask_for_help_target(account: &mut Account, lines: &mut Vec<String>) -> Option
                     Ok(target) => {
                         lines.push(format!("help granted: {} ({})", target.name, target.id));
                         return Some(target);
+                    }
+                    Err(error) if options.test_submit_help => {
+                        lines.push(format!("help refused: {error}"));
+                        return None;
                     }
                     Err(error) => form.set_status(&error.0),
                 }

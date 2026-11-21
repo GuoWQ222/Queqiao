@@ -38,6 +38,18 @@ fn system_language() -> Language {
 }
 
 /// `english` in the user's language.
+/// `english` and its translations (to read text written in any language Queqiao speaks).
+pub fn in_all_languages(english: &'static str) -> Vec<&'static str> {
+    let mut all = vec![english];
+    all.extend(
+        CHINESE
+            .iter()
+            .filter(|(source, _)| *source == english)
+            .map(|(_, chinese)| *chinese),
+    );
+    all
+}
+
 pub fn tr(english: &'static str) -> &'static str {
     translate(english, language())
 }
@@ -283,6 +295,23 @@ const CHINESE: &[(&str, &str)] = &[
     ("New code", "换一个验证码"),
     ("Close", "关闭"),
     ("Help someone...", "帮助别人……"),
+    (
+        "Please help me on my PC with Queqiao: in Queqiao choose Help someone... (or open the link).",
+        "请用鹊桥远程帮我看看电脑：在鹊桥中选择“帮助别人……”（或打开链接）。",
+    ),
+    ("Copy invitation", "复制邀请"),
+    (
+        "Copied: send it to the person who helps you.",
+        "已复制，请发给帮助你的人。",
+    ),
+    (
+        "Filled in from the clipboard: check it and press Connect.",
+        "已从剪贴板填入，请核对后点“连接”。",
+    ),
+    (
+        "Filled in from the invitation link: check it and press Connect.",
+        "已从邀请链接填入，请核对后点“连接”。",
+    ),
     ("Wake up", "唤醒"),
     ("More...", "更多……"),
     ("Rename...", "重命名……"),

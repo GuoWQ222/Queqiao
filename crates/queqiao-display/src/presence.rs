@@ -89,6 +89,7 @@ const MENU_AUTOSTART: u16 = 207;
 const ID_END: u16 = 210;
 const ID_NEW_CODE: u16 = 213;
 const ID_HELP_CLOSE: u16 = 214;
+const ID_COPY_INVITATION: u16 = 218;
 const MENU_HELP: u16 = 208;
 const MENU_LOCK_AFTER: u16 = 209;
 const MENU_LOGIN: u16 = 215;
@@ -123,6 +124,9 @@ pub struct Presence {
     banner: Option<Form>,
     /// The help window (help ID and code), while help requests are open.
     help: Option<Form>,
+    /// The help window's invitation text and its status line.
+    help_invitation: String,
+    help_status: Option<HWND>,
     prompt: Option<Prompt>,
     allow: bool,
     ask: bool,
@@ -190,6 +194,8 @@ impl Presence {
             banner: None,
             prompt: None,
             help: None,
+            help_invitation: String::new(),
+            help_status: None,
             allow,
             ask,
             clipboard,
@@ -339,27 +345,23 @@ impl Presence {
             [20, 14, 380, 44],
         )?;
         // The ID in groups of three, the code in two halves: easier to read out.
-        let spaced: String = help_id
-            .chars()
-            .enumerate()
-            .flat_map(|(at, c)| {
-                (at > 0 && at % 3 == 0)
-                    .then_some(' ')
-                    .into_iter()
-                    .chain(Some(c))
-            })
-            .collect();
-        let halves = if code.len() == 8 {
-            format!("{}-{}", &code[..4], &code[4..])
-        } else {
-            code.to_string()
-        };
+        let spaced = queqiao_core::invitation::spaced_id(help_id);
+        let halves = queqiao_core::invitation::halved_code(code);
         form.label(&format!("{}   {spaced}", tr("Help ID:")), [20, 74, 380, 24])?;
         form.label(&format!("{}   {halves}", tr("Code:")), [20, 106, 380, 24])?;
+        let status = form.label("", [20, 138, 380, 24])?;
+        form.button(
+            tr("Copy invitation"),
+            ID_COPY_INVITATION,
+            false,
+            [20, 176, 150, 30],
+        )?;
         form.button(tr("New code"), ID_NEW_CODE, false, [190, 176, 100, 30])?;
         form.button(tr("Close"), ID_HELP_CLOSE, true, [300, 176, 100, 30])?;
         form.show();
         self.help = Some(form);
+        self.help_invitation = queqiao_core::invitation::text(help_id, code);
+        self.help_status = Some(status);
         Ok(())
     }
 
@@ -385,6 +387,16 @@ impl Presence {
         if let Some(hwnd) = self.help.as_ref().map(|form| form.hwnd) {
             while let Some(command) = crate::forms::take_action(hwnd) {
                 match command {
+                    ID_COPY_INVITATION => {
+                        if crate::forms::copy_text(hwnd, &self.help_invitation)
+                            && let Some(status) = self.help_status
+                        {
+                            crate::forms::set_text(
+                                status,
+                                tr("Copied: send it to the person who helps you."),
+                            );
+                        }
+                    }
                     ID_NEW_CODE => return Some(PresenceEvent::HelpNewCode),
                     ID_HELP_CLOSE | crate::forms::ID_CANCEL | crate::forms::CLOSED => {
                         self.help = None;

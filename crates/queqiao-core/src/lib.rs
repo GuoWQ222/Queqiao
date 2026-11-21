@@ -4,6 +4,7 @@
 //! start-up, and the test switch that forces fallback paths. Planned (docs/DESIGN.md): identity.
 
 pub mod account;
+pub mod invitation;
 #[cfg(windows)]
 pub mod platform;
 pub mod protocol;

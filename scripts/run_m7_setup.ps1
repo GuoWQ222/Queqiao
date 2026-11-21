@@ -77,6 +77,8 @@ $installed = Get-Installed
 Add-Check 'Settings > Apps entry with an uninstall command' ($installed.Entry -and $installed.Entry.UninstallString -like "*queqiao-setup.exe*--uninstall*")
 Add-Check 'Start menu shortcut to the viewer' ((Test-Path -LiteralPath $shortcut) -and ((New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath -like '*queqiao-viewer.exe'))
 Add-Check 'starts with Windows (Run entry to the agent)' ($installed.Run -like "*$target\queqiao-agent.exe*")
+$linkCommand = (Get-ItemProperty -LiteralPath "$userKey\Software\Classes\queqiao\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
+Add-Check 'queqiao: links open the viewer with --invite' ($linkCommand -eq ('"' + $target + '\queqiao-viewer.exe" --invite "%1"'))
 # It stays (in the tray) even when it cannot go online: give it 5 s.
 Start-Sleep -Seconds 5
 $first = Get-AgentsThere
@@ -103,6 +105,7 @@ Add-Check 'uninstall: the programs folder is gone' (-not (Test-Path -LiteralPath
 Add-Check 'uninstall: the Apps entry is gone' (-not $installed.Entry)
 Add-Check 'uninstall: the shortcut is gone' (-not (Test-Path -LiteralPath $shortcut))
 Add-Check 'uninstall: the Run entry is gone' (-not $installed.Run)
+Add-Check 'uninstall: the queqiao: link handler is gone' (-not (Test-Path -LiteralPath "$userKey\Software\Classes\queqiao"))
 Add-Check 'uninstall: no agent runs from there' ((Get-AgentsThere).Count -eq 0)
 
 '=== 4. with the service, then uninstall'

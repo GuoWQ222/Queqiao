@@ -627,6 +627,21 @@ impl HelpForm {
         self.form.post(ID_OK);
     }
 
+    /// Fills the form (from an invitation), leaving Connect to the person.
+    pub fn fill(&self, help_id: &str, code: &str) {
+        set_text(self.help_id, &queqiao_core::invitation::spaced_id(help_id));
+        set_text(self.code, &queqiao_core::invitation::halved_code(code));
+    }
+
+    /// Presses Connect as a click would (tests).
+    pub fn press_connect(&self) {
+        self.form.post(ID_OK);
+    }
+
+    pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
+        save_window_picture(self.form.hwnd, path)
+    }
+
     pub fn set_status(&self, text: &str) {
         set_text(self.status, text);
     }
@@ -1002,6 +1017,38 @@ pub fn show_error(title: &str, text: &str) {
             MB_ICONERROR | MB_OK,
         )
     };
+}
+
+/// Puts `text` on the clipboard; whether it worked.
+pub fn copy_text(owner: HWND, text: &str) -> bool {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    const CF_UNICODETEXT: u32 = 13;
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        if OpenClipboard(Some(owner)).is_err() {
+            return false;
+        }
+        let done = (|| -> Option<()> {
+            EmptyClipboard().ok()?;
+            let memory = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).ok()?;
+            let target = GlobalLock(memory).cast::<u16>();
+            if target.is_null() {
+                return None;
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), target, wide.len());
+            let _ = GlobalUnlock(memory);
+            // The clipboard owns the memory from here.
+            SetClipboardData(CF_UNICODETEXT, Some(HANDLE(memory.0))).ok()?;
+            Some(())
+        })()
+        .is_some();
+        let _ = CloseClipboard();
+        done
+    }
 }
 
 /// A message box with an information icon.

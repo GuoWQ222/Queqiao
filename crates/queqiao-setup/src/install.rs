@@ -44,6 +44,8 @@ const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstal
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Queqiao";
 const SERVICE_KEY: &str = r"SYSTEM\CurrentControlSet\Services\Queqiao";
+/// queqiao: links (help invitations) open the device list's help form.
+const LINK_KEY: &str = r"Software\Classes\queqiao";
 
 pub struct Choices {
     pub autostart: bool,
@@ -193,6 +195,22 @@ pub fn install(
     make_shortcut(&shortcut(), &target.join(PROGRAMS[0]))?;
     lines.push(format!("Start menu: {}", shortcut().display()));
 
+    // Help invitation links: only fill in the help form (connecting is the person's click).
+    let viewer = target.join(PROGRAMS[0]).display().to_string();
+    set_value(LINK_KEY, "", Value::Text("URL:Queqiao"))?;
+    set_value(LINK_KEY, "URL Protocol", Value::Text(""))?;
+    set_value(
+        &format!(r"{LINK_KEY}\DefaultIcon"),
+        "",
+        Value::Owned(viewer.clone()),
+    )?;
+    set_value(
+        &format!(r"{LINK_KEY}\shell\open\command"),
+        "",
+        Value::Owned(format!("\"{viewer}\" --invite \"%1\"")),
+    )?;
+    lines.push("queqiao: links open the help form".into());
+
     let agent = target.join(PROGRAMS[1]);
     if choices.autostart {
         set_value(
@@ -327,6 +345,7 @@ pub fn uninstall(lines: &mut Vec<String>) -> Result<(), String> {
     }
     let _ = std::fs::remove_file(shortcut());
     delete_tree(UNINSTALL_KEY)?;
+    delete_tree(LINK_KEY)?;
     // Downloaded updates.
     let updates = known("LOCALAPPDATA", r"C:\Users\Public\AppData\Local").join(r"Queqiao\updates");
     if updates.exists() && std::fs::remove_dir_all(&updates).is_ok() {

@@ -336,6 +336,40 @@ try {
             }
         }
     }
+    # The same through an invitation link: the help form filled in from it and Connect pressed (the code is right, the
+    # person helped is still asked).
+    if ($Sessions -contains 'help-link' -or $Sessions -contains 'all') {
+        $idFile = Join-Path $Out 'help_link_id.txt'
+        Remove-Item -LiteralPath $idFile, (Join-Path $Out 'help_form.bmp') -ErrorAction SilentlyContinue
+        $helpCode = 'M4LINKCODE'
+        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 1 --seconds $($Seconds + 90) --verify-input --answer allow --help-code $helpCode --help-id-file `"$idFile`" --report `"$Out\agent_help_link.txt`""
+        Start-SessionTask 'Queqiao-M4-Agent-help-link' $agent $agentArgs ''
+        $until = (Get-Date).AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $idFile) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
+        $helpId = if (Test-Path -LiteralPath $idFile) { (Get-Content -LiteralPath $idFile -Raw).Trim() } else { '' }
+        if (-not $helpId) { $failed += 'help-link agent (no help ID within 30 s)' }
+        $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --seconds $Seconds --input-test --width 960 --mute --invite queqiao://help/$helpId/$helpCode --test-submit-help --report `"$Out\viewer_help_link.txt`""
+        Start-SessionTask 'Queqiao-M4-Viewer-help-link' $viewer $viewerArgs ''
+        $viewerResult = Wait-SessionTask 'Queqiao-M4-Viewer-help-link' ($Seconds + 120)
+        $agentResult = Wait-SessionTask 'Queqiao-M4-Agent-help-link' 60
+        "=== session 'help-link' (help ID $helpId): agent exit $agentResult, viewer exit $viewerResult"
+        $linkChecks = @(
+            @('agent', @('^help: .* of account alice was let in \(code given or ask allowed\)$', '^the person at this PC allowed ', '^helper session: ')),
+            @('viewer', @('^help: from the invitation link, help ID \d{9}$', '^help granted: ', '^input events sent: [1-9]'))
+        )
+        foreach ($check in $linkChecks) {
+            $program, $patterns = $check
+            $report = Join-Path $Out "${program}_help_link.txt"
+            $text = if (Test-Path -LiteralPath $report) { @(Get-Content -LiteralPath $report -Encoding UTF8) } else { @("no report at $report") }
+            "--- $program"
+            $text
+            if ($text[-1] -ne 'RESULT PASS') { $failed += "help-link $program" }
+            foreach ($pattern in $patterns) {
+                if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "help-link $program (expected '$pattern')" }
+            }
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $Out 'help_form.bmp'))) { $failed += 'help-link (no picture of the help form)' }
+    }
 } finally {
     Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
     '=== server log'
