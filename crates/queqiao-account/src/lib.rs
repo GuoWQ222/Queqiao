@@ -62,6 +62,12 @@ pub enum AccountEvent {
     },
     /// Viewer: the help code was right; a session with `device` may start.
     HelpGranted(Device),
+    /// Agent: `device` of account `user` asks to help without a code; answer with `answer_help`.
+    HelpAsked {
+        request: u64,
+        device: Device,
+        user: String,
+    },
     /// Agent: send Wake-on-LAN packets for the account's offline device `name`.
     WakeRequest {
         name: String,
@@ -357,6 +363,11 @@ impl Account {
         self.send(ClientMessage::CloseHelp);
     }
 
+    /// Agent: the person's answer to `AccountEvent::HelpAsked`.
+    pub fn answer_help(&self, request: u64, allow: bool) {
+        self.send(ClientMessage::HelpAnswer { request, allow });
+    }
+
     /// Viewer: asks to help the device with `help_id`; returns it (a device of another account) when the code
     /// is right.
     pub fn request_help(&mut self, help_id: &str, code: &str) -> Result<Device, Error> {
@@ -364,12 +375,14 @@ impl Account {
             help_id: help_id.to_string(),
             code: code.to_string(),
         });
-        let deadline = Instant::now() + Duration::from_secs(15);
+        // Without a code the person there decides (their prompt waits 25 s).
+        let wait = if code.trim().is_empty() { 45 } else { 15 };
+        let deadline = Instant::now() + Duration::from_secs(wait);
         let mut other = Vec::new();
         let result = loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                break Err(Error("the server did not answer the help request".into()));
+                break Err(Error("no answer to the help request".into()));
             }
             match self.next_event(left) {
                 Some(AccountEvent::HelpGranted(device)) => break Ok(device),

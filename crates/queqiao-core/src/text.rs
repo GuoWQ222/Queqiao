@@ -254,6 +254,14 @@ const CHINESE: &[(&str, &str)] = &[
     ("Help ID", "帮助 ID"),
     ("Code", "验证码"),
     (
+        "Code (leave empty to ask the person to allow it)",
+        "验证码（留空则请对方确认）",
+    ),
+    (
+        "{viewer} (account {user}) asks to help you on this PC. Allow it?",
+        "{viewer}（账号 {user}）请求帮助你操作这台电脑。允许吗？",
+    ),
+    (
         "{viewer} (account {user}) wants to control this PC to help you.",
         "{viewer}（账号 {user}）想要控制这台电脑来帮助你。",
     ),

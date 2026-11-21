@@ -593,7 +593,10 @@ impl HelpForm {
         )?;
         form.label(tr("Help ID"), [20, 64, 340, 18])?;
         let help_id = form.edit("", false, [20, 84, 340, 24])?;
-        form.label(tr("Code"), [20, 118, 340, 18])?;
+        form.label(
+            tr("Code (leave empty to ask the person to allow it)"),
+            [20, 118, 340, 18],
+        )?;
         let code = form.edit("", false, [20, 138, 340, 24])?;
         let status = form.label("", [20, 170, 340, 36])?;
         form.button(tr("Connect"), ID_OK, true, [260, 214, 100, 30])?;

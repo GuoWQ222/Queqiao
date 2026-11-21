@@ -16,7 +16,8 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Device remarks (a name of your own) and favourites (listed first), kept on this PC | done (2026-11-21, "More..." in the device list) |
 | Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); manual "switch to relay" while connected: planned |
 | Help someone else: connect to a device of another account with its help ID (9 digits) and a one-use code (8 characters, 40 bits) that the person there reads out from "Let someone help me..."; "Help someone..." in the device list | done (2026-11-21) |
-| Help: an own fixed code, asking without a code (the other side approves), invitation links, the code read from the clipboard | planned |
+| Help: asking without a code (the person there approves in a prompt; only while they take help requests, one ask at a time) | done (2026-11-21) |
+| Help: an own fixed code, invitation links, the code read from the clipboard | planned |
 | Consent on the controlled PC before a session (Allow / Deny), tray icon, session banner with End, session history | done (security point 2) |
 | Code plus local confirmation for helpers from other accounts (always asked, whatever the settings); 5 wrong codes close help; the code works once | done (2026-11-21) |
 | Auto-lock the client's settings while being helped (the helper holds the mouse; only ending the session stays) | done (2026-11-21) |

@@ -86,6 +86,18 @@ try {
         $probe = & (Join-Path $Bin 'examples\account_probe.exe') $listen $pin alice $password1 bob $password2
         $probe
         if ($probe[-1] -ne 'PROBE_PASS') { $failed += 'probe' }
+        # The probe fails logins and codes on purpose (lockout checks); the server starts again so its in-memory
+        # failure counts do not lock the sessions out. Accounts and devices stay (they are in its database).
+        Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+        $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out2.txt" -RedirectStandardError "$Out\server_err.txt"
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 200
+            $client = New-Object Net.Sockets.TcpClient
+            try { $client.Connect($Address, 47100); $up = $true } catch { $up = $false } finally { $client.Dispose() }
+        } while (-not $up -and (Get-Date) -lt $deadline)
+        if (-not $up) { 'RUN_FAIL the server did not start again'; return }
     }
 
     # Crash reports: a crash on purpose must leave a report with what panicked.
@@ -303,12 +315,13 @@ try {
         if (-not $helpId) { $failed += 'help agent (no help ID within 30 s)' }
         # What a helper may not do: restart, darken the screen, command lines, sending files.
         $viewerArgs += " --command restart --privacy --terminal-test --send-file `"$fileToAgent`""
-        Start-SessionTask 'Queqiao-M4-Viewer-help' $viewer "$viewerArgs --help-id $helpId --help-code $helpCode" ''
+        # The viewer asks without the code: the person at the helped PC allows it (--answer allow).
+        Start-SessionTask 'Queqiao-M4-Viewer-help' $viewer "$viewerArgs --help-id $helpId" ''
         $viewerResult = Wait-SessionTask 'Queqiao-M4-Viewer-help' ($Seconds + 120)
         $agentResult = Wait-SessionTask 'Queqiao-M4-Agent-help' 60
         "=== session 'help' (help ID $helpId): agent exit $agentResult, viewer exit $viewerResult"
         $helpChecks = @(
-            @('agent', @('^help: open, help ID \d{9}$', '^help: .* of account alice gave the code$', '^the person at this PC allowed ', '^helper session: .* of account alice; ', '^command from the helper refused: ', '^a setting was chosen while someone of another account controls this PC: refused')),
+            @('agent', @('^help: open, help ID \d{9}$', '^help: .* of account alice asked without a code: allowed$', '^the person at this PC allowed ', '^helper session: .* of account alice; ', '^command from the helper refused: ', '^a setting was chosen while someone of another account controls this PC: refused')),
             @('viewer', @('^help granted: ', '^input events sent: [1-9]', '^notice from that PC: someone helping from another account cannot do that', '^command line \d+ failed: the person at that PC does not allow remote command lines', '^file failed: .*receiving files is turned off on that PC'))
         )
         foreach ($check in $helpChecks) {

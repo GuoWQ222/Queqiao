@@ -382,6 +382,12 @@ fn main() {
         pin,
         [(user1, password1), (user2, password2)],
     );
+    help_ask(
+        &mut probe,
+        server,
+        pin,
+        [(user1, password1), (user2, password2)],
+    );
     help(
         &mut probe,
         server,
@@ -1042,4 +1048,72 @@ fn wake(probe: &mut Probe, server: &str, pin: &str, users: [(&str, &str); 2]) {
         }
         Err(error) => probe.check("a stranger logs in", false, error),
     }
+}
+
+/// Asking to help without a code: only while the person takes help requests; their yes grants, their no refuses.
+fn help_ask(probe: &mut Probe, server: &str, pin: &str, users: [(&str, &str); 2]) {
+    let [(user1, password1), (user2, password2)] = users;
+    let wait = Duration::from_secs(5);
+    let connect = |label: &str, role: Role, user: &str, password: &str| {
+        let identity = device(label);
+        let mut saved = login(server, pin);
+        Account::connect(&mut saved, &identity, role, Some((user, password)))
+    };
+    let (Ok(mut helped), Ok(mut helper)) = (
+        connect("asked", Role::Agent, user2, password2),
+        connect("asker", Role::Viewer, user1, password1),
+    ) else {
+        return probe.check("ask: both log in", false, "");
+    };
+    let open = |account: &mut Account, code: &str| {
+        account.open_help(code);
+        match wait_for(account, wait, |e| matches!(e, AccountEvent::HelpOpen(_))) {
+            Some(AccountEvent::HelpOpen(id)) => id,
+            _ => String::new(),
+        }
+    };
+    let help_id = open(&mut helped, "ASKCODE1");
+    helped.close_help();
+    std::thread::sleep(Duration::from_millis(300));
+    let closed = helper.request_help(&help_id, "");
+    probe.check(
+        "an ask while help is closed gets the wrong-code answer",
+        matches!(closed, Err(ref e) if e.0.contains("wrong help ID or code")),
+        format!("{closed:?}"),
+    );
+    // Asks and answers: the person's side answers on its own thread while the helper waits.
+    let ask = |helped: &mut Account, helper: &mut Account, yes: bool| {
+        std::thread::scope(|scope| {
+            let answering = scope.spawn(|| {
+                let asked = wait_for(helped, wait, |e| {
+                    matches!(e, AccountEvent::HelpAsked { .. })
+                });
+                if let Some(AccountEvent::HelpAsked { request, .. }) = &asked {
+                    helped.answer_help(*request, yes);
+                }
+                asked
+            });
+            let result = helper.request_help(&help_id, "");
+            (result, answering.join().ok().flatten())
+        })
+    };
+    open(&mut helped, "ASKCODE2");
+    let (granted, asked) = ask(&mut helped, &mut helper, true);
+    probe.check(
+        "an ask reaches the person there, with who asks",
+        matches!(asked, Some(AccountEvent::HelpAsked { ref user, .. }) if user == user1),
+        format!("{asked:?}"),
+    );
+    probe.check(
+        "their yes grants the helped device",
+        matches!(granted, Ok(ref d) if d.id == helped.device_id),
+        format!("{granted:?}"),
+    );
+    open(&mut helped, "ASKCODE3");
+    let (declined, _) = ask(&mut helped, &mut helper, false);
+    probe.check(
+        "their no refuses",
+        matches!(declined, Err(ref e) if e.0.contains("declined")),
+        format!("{declined:?}"),
+    );
 }

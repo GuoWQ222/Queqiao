@@ -324,6 +324,8 @@ fn run_account(
     }
     // Help for someone of another account: the code shown while help requests are open.
     let mut help_code: Option<String> = options.help_code.clone();
+    // A helper the person allowed when it asked without a code (its next session request needs no prompt).
+    let mut helper_allowed: Option<String> = None;
     if let Some(code) = &help_code {
         account.open_help(code);
     }
@@ -460,7 +462,11 @@ fn run_account(
                     continue;
                 }
                 // Someone of another account is always asked about, whatever the settings.
-                if helper.is_some() || options.ask || settings.ask_before_session {
+                let asked_already =
+                    helper.is_some() && helper_allowed.as_deref() == Some(from.as_str());
+                if asked_already {
+                    helper_allowed = None;
+                } else if helper.is_some() || options.ask || settings.ask_before_session {
                     let question = match &helper {
                         Some(user) => trf(
                             "{viewer} (account {user}) wants to control this PC to help you.",
@@ -576,6 +582,31 @@ fn run_account(
                 Ok(sent) => lines.push(format!("wake: sent {sent} wake-up packets for {name}")),
                 Err(error) => lines.push(format!("wake: could not wake {name}: {error}")),
             },
+            Some(AccountEvent::HelpAsked {
+                request,
+                device,
+                user,
+            }) => {
+                // Only while this PC takes help requests; the person decides.
+                let allowed = help_code.is_some() && {
+                    let question = trf(
+                        "{viewer} (account {user}) asks to help you on this PC. Allow it?",
+                        &[("viewer", &device.name), ("user", &user)],
+                    );
+                    matches!(ask_consent(ui, &question, options.answer), Ok(true))
+                };
+                account.answer_help(request, allowed);
+                lines.push(format!(
+                    "help: {} of account {user} asked without a code: {}",
+                    device.name,
+                    if allowed { "allowed" } else { "declined" }
+                ));
+                if allowed {
+                    lines.push(format!("the person at this PC allowed {}", device.name));
+                    // Its session request that follows is not asked about again.
+                    helper_allowed = Some(device.id.clone());
+                }
+            }
             Some(AccountEvent::HelpClosed(reason)) => {
                 lines.push(format!("help: closed: {reason}"));
                 help_code = None;
@@ -583,7 +614,7 @@ fn run_account(
             }
             Some(AccountEvent::HelpRequested { device, user }) => {
                 lines.push(format!(
-                    "help: {} of account {user} gave the code",
+                    "help: {} of account {user} was let in (code given or ask allowed)",
                     device.name
                 ));
                 // The code is used up: a new one, while the window is open.

@@ -496,9 +496,11 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
         let target = wait_for_device(&mut account, key, Duration::from_secs(30))?;
         return connect_to(&mut account, &target, options, &device, &context, lines);
     }
-    if let (Some(help_id), Some(code)) = (&options.help_id, &options.help_code) {
+    if let Some(help_id) = &options.help_id {
+        // Without --help-code: ask the person there to allow it.
+        let code = options.help_code.clone().unwrap_or_default();
         let target = account
-            .request_help(help_id, code)
+            .request_help(help_id, &code)
             .map_err(|e| e.to_string())?;
         lines.push(format!("help granted: {} ({})", target.name, target.id));
         return connect_to(&mut account, &target, options, &device, &context, lines);
@@ -780,6 +782,7 @@ fn device_list(
                     | AccountEvent::HelpClosed(_)
                     | AccountEvent::HelpRequested { .. }
                     | AccountEvent::HelpGranted(_)
+                    | AccountEvent::HelpAsked { .. }
                     | AccountEvent::WakeRequest { .. } => {}
                 }
             }

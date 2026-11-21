@@ -36,6 +36,15 @@ const ACCOUNT_WINDOW: Duration = Duration::from_secs(900);
 /// Wrong help codes for one device before its help requests close (the person opens them again for a new code).
 const HELP_FAILURES: u32 = 5;
 
+/// A viewer's ask to help without a code, waiting for the person at the agent's PC.
+struct PendingAsk {
+    request: u64,
+    viewer_device: String,
+    viewer_name: String,
+    viewer_user: String,
+    viewer_sender: UnboundedSender<Outgoing>,
+}
+
 /// An agent's open help requests: the code's SHA-256 and the wrong tries so far.
 struct HelpOffer {
     code_hash: [u8; 32],
@@ -107,6 +116,8 @@ pub struct Hub {
     /// (viewer device, agent device) of different accounts that may signal each other: the viewer gave the
     /// agent's help code. Ends when the agent closes help or leaves.
     grants: Mutex<HashSet<(String, String)>>,
+    /// Asks without a code, by agent device: one at a time each.
+    asks: Mutex<HashMap<String, PendingAsk>>,
 }
 
 /// Who a connection is, after login.
@@ -128,6 +139,7 @@ impl Hub {
             next_id: AtomicU64::new(1),
             help: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashSet::new()),
+            asks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -354,9 +366,86 @@ impl Hub {
         if let Ok(mut help) = self.help.lock() {
             help.remove(device_id);
         }
+        // An ask waiting for this PC gets its answer: no.
+        if let Some(ask) = self
+            .asks
+            .lock()
+            .ok()
+            .and_then(|mut asks| asks.remove(device_id))
+        {
+            let message = "that PC stopped taking help requests".into();
+            let _ = ask
+                .viewer_sender
+                .send(Outgoing::Message(ServerMessage::Error { message }));
+        }
         if let Ok(mut grants) = self.grants.lock() {
             grants.retain(|(_, agent)| agent != device_id);
         }
+    }
+
+    /// The person's answer to an ask without a code: yes grants as a right code would (and uses up the help
+    /// request); no tells the viewer.
+    fn answer_help(&self, identity: &Identity, request: u64, allow: bool) {
+        let ask = self.asks.lock().ok().and_then(|mut asks| {
+            asks.get(&identity.device_id)
+                .is_some_and(|ask| ask.request == request)
+                .then(|| asks.remove(&identity.device_id))
+                .flatten()
+        });
+        let Some(ask) = ask else {
+            return;
+        };
+        if !allow {
+            let message = "the person at that PC declined".into();
+            let _ = ask
+                .viewer_sender
+                .send(Outgoing::Message(ServerMessage::Error { message }));
+            return;
+        }
+        if let Ok(mut help) = self.help.lock() {
+            help.remove(&identity.device_id);
+        }
+        if let Ok(mut grants) = self.grants.lock() {
+            grants.insert((ask.viewer_device.clone(), identity.device_id.clone()));
+        }
+        let (viewer_key, agent_key) = self
+            .store
+            .lock()
+            .ok()
+            .map(|store| {
+                (
+                    store.public_key(&ask.viewer_device).unwrap_or_default(),
+                    store.public_key(&identity.device_id).unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        if let Some(agent) = self.online.lock().ok().and_then(|online| {
+            online
+                .get(&(identity.device_id.clone(), Role::Agent))
+                .map(|c| c.sender.clone())
+        }) {
+            let _ = agent.send(Outgoing::Message(ServerMessage::HelpRequested {
+                device: Device {
+                    id: ask.viewer_device.clone(),
+                    name: ask.viewer_name.clone(),
+                    controllable: false,
+                    online: true,
+                    public_key: viewer_key,
+                },
+                user: ask.viewer_user.clone(),
+            }));
+        }
+        let _ = ask
+            .viewer_sender
+            .send(Outgoing::Message(ServerMessage::HelpGranted {
+                device: Device {
+                    id: identity.device_id.clone(),
+                    name: identity.device_name.clone(),
+                    controllable: true,
+                    online: true,
+                    public_key: agent_key,
+                },
+            }));
     }
 
     /// Whether `from` may signal `to` across accounts (a help grant in either direction).
@@ -405,6 +494,55 @@ impl Hub {
                 .filter(|c| c.user_id == agent_user)
                 .map(|c| c.sender.clone())
         });
+        // No code: ask the person there (only while they take help requests; one ask at a time).
+        if code.trim().is_empty() {
+            let open = self
+                .help
+                .lock()
+                .is_ok_and(|help| help.contains_key(&agent_id));
+            let Some(agent_sender) = agent_sender.filter(|_| open) else {
+                // Only refused asks count against the address (a real ask is not a guess).
+                self.record_failure(address, None);
+                return refuse(wrong);
+            };
+            let Ok(mut asks) = self.asks.lock() else {
+                return refuse("server error");
+            };
+            if asks.contains_key(&agent_id) {
+                return refuse("that PC is answering another request: try again in a minute");
+            }
+            let request = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let viewer_key = self
+                .store
+                .lock()
+                .ok()
+                .and_then(|store| store.public_key(&identity.device_id).ok())
+                .unwrap_or_default();
+            asks.insert(
+                agent_id.clone(),
+                PendingAsk {
+                    request,
+                    viewer_device: identity.device_id.clone(),
+                    viewer_name: identity.device_name.clone(),
+                    viewer_user: identity.user.clone(),
+                    viewer_sender: sender.clone(),
+                },
+            );
+            let _ = agent_sender.send(Outgoing::Message(ServerMessage::HelpAsked {
+                request,
+                device: Device {
+                    id: identity.device_id.clone(),
+                    name: identity.device_name.clone(),
+                    controllable: false,
+                    online: true,
+                    public_key: viewer_key,
+                },
+                user: identity.user.clone(),
+            }));
+            // The viewer hears when the person answers.
+            let _ = (agent_name, agent_key);
+            return;
+        }
         let hash: [u8; 32] = Sha256::digest(code.trim().as_bytes()).into();
         let verdict = {
             let Ok(mut help) = self.help.lock() else {
@@ -794,6 +932,9 @@ impl Hub {
                 }
             }
             ClientMessage::CloseHelp => self.close_help(&identity.device_id),
+            ClientMessage::HelpAnswer { request, allow } => {
+                self.answer_help(identity, request, allow)
+            }
             ClientMessage::DeviceInfo { macs } => {
                 let valid = macs.len() <= 16 && macs.iter().all(|mac| is_mac(mac));
                 let stored = valid

@@ -198,6 +198,15 @@ pub(crate) fn run(
                         AccountEvent::HelpRequested { device, user }
                     }
                     Ok(ServerMessage::HelpGranted { device }) => AccountEvent::HelpGranted(device),
+                    Ok(ServerMessage::HelpAsked {
+                        request,
+                        device,
+                        user,
+                    }) => AccountEvent::HelpAsked {
+                        request,
+                        device,
+                        user,
+                    },
                     Ok(ServerMessage::WakeRequest { name, macs }) => {
                         AccountEvent::WakeRequest { name, macs }
                     }

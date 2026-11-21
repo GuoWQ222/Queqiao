@@ -81,9 +81,11 @@ pub enum ClientMessage {
     OpenHelp { code: String },
     /// Agent: no more help requests.
     CloseHelp,
-    /// Viewer: help the device with this help ID, with the code its person read out. Answered by `HelpGranted`
-    /// (the device to start a session with) or an error.
+    /// Viewer: help the device with this help ID, with the code its person read out (empty: ask the person to
+    /// allow it). Answered by `HelpGranted` (the device to start a session with) or an error.
     RequestHelp { help_id: String, code: String },
+    /// Agent: the person's answer to `HelpAsked`.
+    HelpAnswer { request: u64, allow: bool },
     /// Agent: this PC's network cards (MAC addresses, "AA-BB-CC-DD-EE-FF"), for Wake-on-LAN.
     DeviceInfo { macs: Vec<String> },
     /// Wake a device of this account that is offline, through another device of the account on its network.
@@ -150,6 +152,13 @@ pub enum ServerMessage {
     /// To an agent: `device` of account `user` gave the right code; its session request may follow (the code
     /// is used up). Its key is in `device`.
     HelpRequested {
+        device: Device,
+        user: String,
+    },
+    /// To an agent taking help requests: `device` of account `user` asks to help without a code; answer with
+    /// `HelpAnswer`.
+    HelpAsked {
+        request: u64,
         device: Device,
         user: String,
     },
