@@ -2634,3 +2634,45 @@ fn summary(values: &mut [f64]) -> String {
 fn describe(error: windows::core::Error) -> String {
     format!("0x{:08X} {}", error.code().0, error.message())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows reports system-menu commands masked with 0xFFF0: every id must be a multiple of 16, and all different
+    /// (an id that is not came back as another item: the opacity items once all acted as "Opaque").
+    #[test]
+    fn system_menu_ids_survive_windows_masking() {
+        let mut ids = vec![
+            MENU_CTRL_ALT_DEL,
+            MENU_LOCK,
+            MENU_RESTART,
+            MENU_SOUND,
+            MENU_FULL_SCREEN,
+            MENU_PRIVACY,
+            MENU_TERMINAL,
+            MENU_GAME_MOUSE,
+            MENU_MUTE_SPEAKERS,
+            MENU_SHORTCUTS,
+            MENU_ON_TOP,
+            MENU_CUSTOM_BITRATE,
+            MENU_TRANSFERS,
+            MENU_RESTART_QUEQIAO,
+            MENU_COMMAND_LINES,
+            MENU_ACTUAL_SIZE,
+            MENU_HOTKEYS,
+        ];
+        ids.extend(MENU_FPS.iter().map(|(id, _, _)| *id));
+        ids.extend(MENU_QUALITY.iter().map(|(id, _, _)| *id));
+        ids.extend(MENU_RESOLUTION.iter().map(|(id, _, _)| *id));
+        ids.extend(MENU_OPACITY.iter().map(|(id, _, _)| *id));
+        // Up to 16 screens.
+        ids.extend((0..16u16).map(|index| MENU_SCREENS + 16 * index));
+        for id in &ids {
+            assert_eq!(id & 0xF, 0, "menu id {id:#x} is not a multiple of 16");
+            assert!(*id < 0xF000, "menu id {id:#x} is in Windows' own range");
+        }
+        let unique: HashSet<u16> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "two menu items share an id");
+    }
+}
