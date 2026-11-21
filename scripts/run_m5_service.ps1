@@ -139,6 +139,9 @@ try {
     $agentText
     # One call per check: in an array, PowerShell's comma binds before -ge and -and.
     Add-Check 'agent: started by the service' (($agentText -match '^started by the Queqiao service').Count -gt 0)
+    # The agent the service starts may not duplicate its own handles (its process is closed to that): sockets are
+    # shared, not copied. A copy used to fail with WSAEINVAL and took the sound (and with several uplinks the session).
+    Add-Check 'agent: sound starts (no socket copy refused)' (($agentText -match '^sound: not sent').Count -eq 0)
     Add-Check 'agent: Ctrl+Alt+Del through the service' (($agentText -match 'CtrlAltDel: Ctrl\+Alt\+Del sent').Count -gt 0)
     Add-Check 'agent: switched to the desktop helper' (($agentText -match 'another desktop takes input').Count -gt 0)
     Add-Check 'agent: back to its own capture' (($agentText -match 'own desktop takes input again').Count -gt 0)
@@ -147,6 +150,8 @@ try {
     Add-Check 'viewer: pictures of the Ctrl+Alt+Del screen' ((Get-Number $viewerText '(\d+) pictures shown while the Ctrl\+Alt\+Del screen was up') -ge 1)
     Add-Check 'viewer: pictures after Escape' ((Get-Number $viewerText '(\d+) pictures shown after Escape') -ge 1)
     Add-Check 'helper: saw the Winlogon desktop' (@(Get-ServiceLog | Where-Object { $_ -match 'input desktop Winlogon' }).Count -gt 0)
+    # The person's own banner is out of sight there: the helper shows one on that screen.
+    Add-Check 'helper: banner shown on the Ctrl+Alt+Del screen' (@(Get-ServiceLog | Where-Object { $_ -match 'banner shown on Winlogon' }).Count -gt 0)
     # The helper's own count, and how soon after Ctrl+Alt+Del the person's desktop was back (Escape goes 2 s after
     # it; without Escape that screen closed by itself after about 4.8 s on this PC).
     [void](Wait-ServiceLog 'desktop helper: ending .*injected \d+' 1 15)

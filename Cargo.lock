@@ -894,6 +894,7 @@ version = "0.1.0"
 dependencies = [
  "queqiao-capture",
  "queqiao-core",
+ "queqiao-display",
  "queqiao-input",
  "queqiao-local",
  "windows",

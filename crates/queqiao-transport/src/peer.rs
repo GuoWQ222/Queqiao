@@ -43,8 +43,11 @@ pub enum Addresses {
 }
 
 /// A socket on another uplink.
+/// Shared, never duplicated: `UdpSocket::try_clone` is WSADuplicateSocket, which opens this process for
+/// PROCESS_DUP_HANDLE, and the agent the service starts may not (its process is closed to that, so no other program
+/// can copy its handles): sessions there failed with WSAEINVAL (10022), and so did its sound.
 struct Extra {
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
     local: SocketAddr,
 }
 
@@ -118,7 +121,7 @@ const UNCONNECTED_WAIT: Duration = Duration::from_millis(50);
 pub struct Peer {
     commands: Sender<Command>,
     events: Receiver<PeerEvent>,
-    waker: UdpSocket,
+    waker: Arc<UdpSocket>,
     wake_to: SocketAddr,
     thread: Option<JoinHandle<()>>,
     notes: Vec<String>,
@@ -211,7 +214,10 @@ impl Peer {
                     .filter_map(|ip| {
                         let socket = bind_socket(ip).ok()?;
                         let local = socket.local_addr().ok()?;
-                        Some(Extra { socket, local })
+                        Some(Extra {
+                            socket: Arc::new(socket),
+                            local,
+                        })
                     })
                     .collect()
             } else {
@@ -289,14 +295,14 @@ impl Peer {
         } else {
             bind_ip
         };
-        let waker = UdpSocket::bind((wake_ip, 0))?;
+        let waker = Arc::new(UdpSocket::bind((wake_ip, 0))?);
         let wake_to = SocketAddr::new(wake_ip.into(), port);
         let wake_from = waker.local_addr()?;
         let (arrivals, arrived) = mpsc::channel();
         let stop_extras = Arc::new(AtomicBool::new(false));
         for extra in &extras {
-            let socket = extra.socket.try_clone()?;
-            let waker = waker.try_clone()?;
+            let socket = extra.socket.clone();
+            let waker = waker.clone();
             let (local, arrivals, stop) = (extra.local, arrivals.clone(), stop_extras.clone());
             std::thread::Builder::new()
                 .name("queqiao-net-in".into())
@@ -401,7 +407,7 @@ impl Peer {
     pub fn audio_sender(&self) -> Result<AudioSender, Error> {
         Ok(AudioSender {
             commands: self.commands.clone(),
-            waker: self.waker.try_clone()?,
+            waker: self.waker.clone(),
             wake_to: self.wake_to,
         })
     }
@@ -416,7 +422,7 @@ impl Peer {
 /// Sends Opus packets into the session from any thread; see [`Peer::audio_sender`].
 pub struct AudioSender {
     commands: Sender<Command>,
-    waker: UdpSocket,
+    waker: Arc<UdpSocket>,
     wake_to: SocketAddr,
 }
 
@@ -497,9 +503,9 @@ fn flush_channel(
 
 /// Receives on another uplink's socket and hands each datagram to the network thread, waking it.
 fn receive_extra(
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
     local: SocketAddr,
-    waker: UdpSocket,
+    waker: Arc<UdpSocket>,
     wake_to: SocketAddr,
     arrivals: Sender<Arriving>,
     stop: Arc<AtomicBool>,
