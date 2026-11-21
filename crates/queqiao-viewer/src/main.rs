@@ -137,7 +137,7 @@ const TEST_SCANCODE: u16 = 0x76;
 /// A session that is not connected after this long is given up.
 const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Options {
     /// A device whose new key the person confirmed (its old pin is dropped).
     trust_new_key: Option<String>,
@@ -148,6 +148,8 @@ struct Options {
     user: Option<String>,
     password: Option<String>,
     device: Option<String>,
+    /// With --device: a second device of the account at the same time (tests: several sessions at once).
+    also_device: Option<String>,
     list: bool,
     logout: bool,
     ui_test: Option<String>,
@@ -390,6 +392,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--user" => options.user = args.next(),
             "--password" => options.password = args.next(),
             "--device" => options.device = args.next(),
+            "--also-device" => options.also_device = args.next(),
             "--list" => options.list = true,
             "--logout" => options.logout = true,
             "--ui-test" => options.ui_test = args.next(),
@@ -544,6 +547,38 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
     }
     let (device, context, gpu) = create_device()?;
     lines.push(format!("device: {gpu}"));
+    if let (Some(first), Some(second)) = (&options.device, &options.also_device) {
+        // Several sessions at once: each on a thread of its own, as from the device list.
+        let mut running = Vec::new();
+        for key in [first, second] {
+            let target = wait_for_device(&mut account, key, Duration::from_secs(30))?;
+            let (peer, started) = start_peer(&mut account, &target, Addresses::All)?;
+            running.push((
+                target.name.clone(),
+                session_thread(options, peer, started, target.name.clone()),
+            ));
+        }
+        let mut passed = true;
+        for (at, (name, thread)) in running.into_iter().enumerate() {
+            let (result, session_lines) = thread
+                .join()
+                .unwrap_or_else(|_| (Err("the session's thread failed".into()), Vec::new()));
+            lines.extend(
+                session_lines
+                    .into_iter()
+                    .map(|line| format!("{}| {line}", at + 1)),
+            );
+            match result {
+                Ok(ok) => passed &= ok,
+                Err(error) => {
+                    passed = false;
+                    lines.push(format!("{}| session with {name} failed: {error}", at + 1));
+                }
+            }
+        }
+        lines.push(format!("sessions at once: 2, all passed: {passed}"));
+        return Ok(passed);
+    }
     if let Some(key) = &options.device {
         let target = wait_for_device(&mut account, key, Duration::from_secs(30))?;
         return connect_to(
@@ -772,6 +807,12 @@ fn device_list(
     let (mut sessions, mut passed) = (0u32, true);
     let mut reconnect_at: Option<Instant> = None;
     let mut test_picked = false;
+    // Sessions on their own threads: (the device's name, the thread).
+    type Running = (
+        String,
+        std::thread::JoinHandle<(Result<bool, String>, Vec<String>)>,
+    );
+    let mut running: Vec<Running> = Vec::new();
     let test_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match list.next(15) {
@@ -861,6 +902,29 @@ fn device_list(
             }
             Some(ListAction::Connect(id)) => {
                 match account.devices.iter().find(|d| d.id == id).cloned() {
+                    Some(target) if target.controllable && options.ui_test.is_none() => {
+                        // On a thread of its own: the list stays usable, for more sessions at once.
+                        match start_peer(account, &target, Addresses::All) {
+                            Ok((peer, started)) => {
+                                list.set_status(&trf(
+                                    "Connected to {name}.",
+                                    &[("name", &target.name)],
+                                ));
+                                running.push((
+                                    target.name.clone(),
+                                    session_thread(options, peer, started, target.name.clone()),
+                                ));
+                            }
+                            Err(error) => {
+                                passed = false;
+                                lines.push(format!("session failed: {error}"));
+                                list.set_status(&trf(
+                                    "Could not connect to {name}: {error}",
+                                    &[("name", &target.name), ("error", &error)],
+                                ));
+                            }
+                        }
+                    }
                     Some(target) if target.controllable => {
                         list.set_enabled(false);
                         list.set_status(&trf("Connected to {name}.", &[("name", &target.name)]));
@@ -906,6 +970,35 @@ fn device_list(
                 }
             }
             None => {}
+        }
+        // Sessions that ended.
+        let (ended, still): (Vec<Running>, Vec<Running>) = running
+            .drain(..)
+            .partition(|(_, thread)| thread.is_finished());
+        running = still;
+        for (name, thread) in ended {
+            let (result, session_lines) = thread
+                .join()
+                .unwrap_or_else(|_| (Err("the session's thread failed".into()), Vec::new()));
+            lines.extend(session_lines);
+            sessions += 1;
+            match result {
+                Ok(ok) => {
+                    passed &= ok;
+                    list.set_status(&trf(
+                        "The session with {name} has ended.",
+                        &[("name", &name)],
+                    ));
+                }
+                Err(error) => {
+                    passed = false;
+                    lines.push(format!("session failed: {error}"));
+                    list.set_status(&trf(
+                        "Could not connect to {name}: {error}",
+                        &[("name", &name), ("error", &error)],
+                    ));
+                }
+            }
         }
         if reconnect_at.is_none() {
             while let Some(event) = account.next_event(Duration::ZERO) {
@@ -975,6 +1068,18 @@ fn device_list(
         }
     }
     lines.push(format!("{sessions} sessions from the device list"));
+    // The list was closed: sessions still open end when their windows do.
+    for (name, thread) in running {
+        let (result, session_lines) = thread
+            .join()
+            .unwrap_or_else(|_| (Err("the session's thread failed".into()), Vec::new()));
+        lines.extend(session_lines);
+        sessions += 1;
+        if let Err(error) = &result {
+            lines.push(format!("session with {name} failed: {error}"));
+        }
+        passed &= result.unwrap_or(false);
+    }
     Ok(passed && (options.ui_test.is_none() || sessions == 1))
 }
 
@@ -1137,6 +1242,56 @@ fn session(
     addresses: Addresses,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
+    let started = Instant::now();
+    let peer = Peer::start_with(Role::Viewer, signal, addresses).map_err(|e| e.to_string())?;
+    run_session(options, device, context, peer, started, agent, lines)
+}
+
+/// Connects to `target` through the server: the hellos, offer, answer and candidates (signalling needs the account,
+/// so this is on its thread). The peer and when it started.
+fn start_peer(
+    account: &mut Account,
+    target: &Device,
+    addresses: Addresses,
+) -> Result<(Peer, Instant), String> {
+    let id = new_session_id();
+    let mut signal = account.session(&target.id, AccountRole::Agent, &id);
+    signal.hello("viewer").map_err(|e| e.to_string())?;
+    let started = Instant::now();
+    let peer = Peer::start_with(Role::Viewer, &mut signal, addresses).map_err(|e| e.to_string())?;
+    Ok((peer, started))
+}
+
+/// A session on a thread of its own, with a graphics device of its own (several run at once): its outcome and
+/// report lines when it ends.
+fn session_thread(
+    options: &Options,
+    peer: Peer,
+    started: Instant,
+    agent: String,
+) -> std::thread::JoinHandle<(Result<bool, String>, Vec<String>)> {
+    let options = options.clone();
+    std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        let result = create_device().and_then(|(device, context, _)| {
+            run_session(
+                &options, &device, &context, peer, started, &agent, &mut lines,
+            )
+        });
+        (result, lines)
+    })
+}
+
+/// A session once its peer is set up: the window, the picture, input, sound, files, command lines.
+fn run_session(
+    options: &Options,
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    peer: Peer,
+    started: Instant,
+    agent: &str,
+    lines: &mut Vec<String>,
+) -> Result<bool, String> {
     lines.push(format!("agent: {agent}"));
     let width = options.width.unwrap_or(1280);
     let mut window = Window::new(&format!("Queqiao - {agent}"), width, width * 9 / 16)
@@ -1146,9 +1301,6 @@ fn session(
     let mut decoder = H264Decoder::new(device, context, DecoderChoice::from_env())
         .map_err(|e| format!("decoder: {}", describe(e)))?;
     lines.push(format!("decoder: {}", decoder.name()));
-
-    let started = Instant::now();
-    let peer = Peer::start_with(Role::Viewer, signal, addresses).map_err(|e| e.to_string())?;
     lines.extend(peer.candidates().iter().cloned());
     let end = options.seconds.map(|s| started + Duration::from_secs(s));
     let mut stats = Stats::default();

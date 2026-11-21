@@ -417,6 +417,30 @@ try {
         if (@($text | Where-Object { $_ -match 'of account alice was let in \(code given or ask allowed\)$' }).Count -ne 2) { $failed += 'help-fixed agent (expected two helpers let in)' }
         if (-not ($text | Where-Object { $_ -eq 'help: open again with the fixed code' })) { $failed += 'help-fixed agent (the fixed code did not take requests again)' }
     }
+    # Several sessions at once: this PC's agent and a second one (a throwaway device of the same account), and one
+    # viewer with a session to each, each on a thread and in a window of its own. No input test: two agents injecting
+    # into one PC at once would spoil each other's checks.
+    if ($Sessions -contains 'two-at-once' -or $Sessions -contains 'all') {
+        $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --report `"$Out\agent_two_1.txt`""
+        Start-SessionTask 'Queqiao-M4-Agent-two-1' $agent $agentArgs ''
+        $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --test-device m4-second --sessions 1 --seconds $($Seconds + 90) --report `"$Out\agent_two_2.txt`""
+        Start-SessionTask 'Queqiao-M4-Agent-two-2' $agent $agentArgs ''
+        Start-Sleep -Seconds 4
+        $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --also-device m4-second --seconds $Seconds --width 640 --mute --report `"$Out\viewer_two.txt`""
+        Start-SessionTask 'Queqiao-M4-Viewer-two' $viewer $viewerArgs ''
+        $viewerResult = Wait-SessionTask 'Queqiao-M4-Viewer-two' ($Seconds + 120)
+        $agentResults = @(1, 2 | ForEach-Object { Wait-SessionTask "Queqiao-M4-Agent-two-$_" 60 })
+        "=== session 'two-at-once': agents exit $($agentResults -join '/'), viewer exit $viewerResult"
+        $text = @(Get-Content -LiteralPath "$Out\viewer_two.txt" -Encoding UTF8 -ErrorAction SilentlyContinue)
+        $text | Where-Object { $_ -match '^(\d\| (agent|first picture|pictures shown|frames)|sessions at once|RESULT|ERROR)' }
+        if ($text[-1] -ne 'RESULT PASS') { $failed += 'two-at-once viewer' }
+        if (-not ($text | Where-Object { $_ -match '^sessions at once: 2, all passed: true$' })) { $failed += 'two-at-once viewer (both sessions)' }
+        foreach ($at in 1, 2) {
+            if (-not ($text | Where-Object { $_ -match "^$at\| agent: " })) { $failed += "two-at-once viewer (no session $at)" }
+            $agentText = @(Get-Content -LiteralPath "$Out\agent_two_$at.txt" -ErrorAction SilentlyContinue)
+            if ($agentText[-1] -ne 'RESULT PASS') { $failed += "two-at-once agent $at" }
+        }
+    }
     # A new account from the viewer (this server takes new accounts): logged in at once, its devices listed. A
     # throwaway device: this PC's own belongs to alice by now (one account per device).
     $signupReport = Join-Path $Out 'viewer_signup.txt'
