@@ -956,6 +956,8 @@ dependencies = [
  "queqiao-input",
  "queqiao-terminal",
  "queqiao-transport",
+ "serde",
+ "serde_json",
  "windows",
 ]
 

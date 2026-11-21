@@ -216,8 +216,25 @@ const CHINESE: &[(&str, &str)] = &[
     ("Mute that PC's speakers", "让那台电脑的扬声器静音"),
     ("Darken that PC's screen", "让那台电脑黑屏（隐私屏）"),
     ("Open a command line on that PC", "在那台电脑上打开命令行"),
-    ("Full screen (Ctrl+Alt+Enter)", "全屏（Ctrl+Alt+Enter）"),
-    ("Game mouse (Ctrl+Alt+M)", "游戏鼠标（Ctrl+Alt+M）"),
+    ("Full screen ({key})", "全屏（{key}）"),
+    ("Game mouse ({key})", "游戏鼠标（{key}）"),
+    ("Hotkeys...", "快捷键……"),
+    (
+        "Full screen key (for example Ctrl+Alt+Enter):",
+        "全屏快捷键（例如 Ctrl+Alt+Enter）：",
+    ),
+    (
+        "Game mouse key (for example Ctrl+Alt+M):",
+        "游戏鼠标快捷键（例如 Ctrl+Alt+M）：",
+    ),
+    (
+        "Boss key, hides this window at once (for example Ctrl+Alt+H; empty: none):",
+        "老板键，立即隐藏此窗口（例如 Ctrl+Alt+H；留空：不用）：",
+    ),
+    (
+        "Not a key Queqiao can use: {key}. A key is Ctrl and/or Alt (Shift may be added) with one letter, digit, F1 to F12 or Enter, Space, Home and the like.",
+        "鹊桥无法使用这个快捷键：{key}。快捷键需包含 Ctrl 和/或 Alt（可加 Shift），再加一个字母、数字、F1 到 F12，或 Enter、Space、Home 等。",
+    ),
     ("Always on top", "窗口置顶"),
     ("Transfers...", "传输列表……"),
     ("Queqiao - transfers", "鹊桥 - 传输列表"),

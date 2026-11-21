@@ -153,7 +153,7 @@ try {
         # Full screen: the drawing area must cover the monitor (the input test maps to it too).
         if ($label -eq 'ended-here') { $viewerArgs += " --full-screen --picture 30,sharp --resolution 720 --send-file `"$fileToAgent`" --cancel-test" }
         # A command line on that PC, in a window of its own that closes by itself.
-        if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0 --opacity 60' }
+        if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0 --opacity 60 --boss-key-test' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`" --clipboard-files-test `"$clipFile`"" }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
@@ -236,6 +236,9 @@ try {
                     $receivedFolder = $received | ForEach-Object { $_ -replace '\\(top\.txt|inner\\deep\.bin)$', '' } | Select-Object -First 1
                     if ($receivedFolder -and $receivedFolder -like '*queqiao-test-folder*') { Remove-Item -LiteralPath $receivedFolder -Recurse -Force -ErrorAction SilentlyContinue }
                 }
+            }
+            if ($label -eq 'relay' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^boss key test: PASS' })) {
+                $failed += "$label viewer (expected 'boss key test: PASS')"
             }
             if ($label -eq 'relay' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^window: opacity 60 % asked, 60 % as Windows has it$' })) {
                 $failed += "$label viewer (expected the window at 60 % opacity)"

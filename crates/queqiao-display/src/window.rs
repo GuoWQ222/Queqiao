@@ -62,6 +62,8 @@ pub enum WindowEvent {
         dx: i32,
         dy: i32,
     },
+    /// A hotkey registered with [`Window::register_hotkey`] was pressed (anywhere).
+    Hotkey(i32),
 }
 
 thread_local! {
@@ -159,6 +161,60 @@ impl Window {
         }
         let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         let _ = unsafe { AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(title.as_ptr())) };
+    }
+
+    /// New text for a menu item added with [`Window::add_menu_items`].
+    pub fn rename_menu_item(&self, id: u16, text: &str) {
+        let menu = unsafe { GetSystemMenu(self.hwnd, false) };
+        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let _ = unsafe {
+            ModifyMenuW(
+                menu,
+                u32::from(id),
+                MF_BYCOMMAND | MF_STRING,
+                usize::from(id),
+                PCWSTR(text.as_ptr()),
+            )
+        };
+    }
+
+    /// A system-wide hotkey for this window ([`WindowEvent::Hotkey`] when pressed, even with the window hidden);
+    /// false if Windows refused it (another program has that key).
+    pub fn register_hotkey(&self, id: i32, modifiers: u32, vk: u32) -> bool {
+        unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::RegisterHotKey(
+                Some(self.hwnd),
+                id,
+                windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS(modifiers),
+                vk,
+            )
+        }
+        .is_ok()
+    }
+
+    pub fn unregister_hotkey(&self, id: i32) {
+        let _ = unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(Some(self.hwnd), id)
+        };
+    }
+
+    /// Tests: as if the hotkey were pressed.
+    pub fn press_hotkey(&self, id: i32) {
+        let _ = unsafe { PostMessageW(Some(self.hwnd), WM_HOTKEY, WPARAM(id as usize), LPARAM(0)) };
+    }
+
+    /// Shown (in front) or hidden.
+    pub fn set_visible(&self, visible: bool) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, if visible { SW_SHOW } else { SW_HIDE });
+            if visible {
+                let _ = SetForegroundWindow(self.hwnd);
+            }
+        }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        unsafe { IsWindowVisible(self.hwnd) }.as_bool()
     }
 
     /// Puts a check mark on a menu item added with [`Window::add_menu_items`], or takes it off.
@@ -633,6 +689,10 @@ extern "system" fn window_proc(
             }
             unsafe { DragFinish(drop) };
             push(WindowEvent::FilesDropped(paths));
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            push(WindowEvent::Hotkey(wparam.0 as i32));
             LRESULT(0)
         }
         WM_KILLFOCUS => {

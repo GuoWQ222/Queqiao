@@ -51,14 +51,18 @@ const MENU_CUSTOM_BITRATE: u16 = 0x10B0;
 const MENU_TRANSFERS: u16 = 0x10C0;
 const MENU_RESTART_QUEQIAO: u16 = 0x10D0;
 const MENU_COMMAND_LINES: u16 = 0x10E0;
-const MENU_ACTUAL_SIZE: u16 = 0x10E1;
+// System-menu command ids are multiples of 16: Windows reports them masked with 0xFFF0.
+const MENU_ACTUAL_SIZE: u16 = 0x1640;
+const MENU_HOTKEYS: u16 = 0x1650;
 /// The window's opacity: (menu id, percent, label).
 const MENU_OPACITY: [(u16, u8, &str); 4] = [
-    (0x10F0, 100, "Opaque"),
-    (0x10F1, 80, "80 %"),
-    (0x10F2, 60, "60 %"),
-    (0x10F3, 40, "40 %"),
+    (0x1600, 100, "Opaque"),
+    (0x1610, 80, "80 %"),
+    (0x1620, 60, "60 %"),
+    (0x1630, 40, "40 %"),
 ];
+/// The boss key's id with Windows.
+const BOSS_HOTKEY: i32 = 1;
 /// The transfer list's buttons.
 const TRANSFER_PAUSE: u16 = 301;
 const TRANSFER_CANCEL: u16 = 302;
@@ -70,8 +74,6 @@ const MENU_RESOLUTION: [(u16, u16, &str); 3] = [
     (0x1310, 1080, "1080p"),
     (0x1320, 720, "720p"),
 ];
-/// Ctrl+Alt+M: game mouse on or off.
-const KEY_M: u16 = 0x32;
 /// The game-mouse test's relative moves (mouse counts).
 const TEST_DELTAS: [(i16, i16); 4] = [(40, 0), (0, 40), (-40, 0), (0, -40)];
 /// Picture settings: frame rate (at most 30, 60, or what that screen shows) and quality.
@@ -92,14 +94,12 @@ const MENU_QUALITY: [(u16, Quality, &str); 3] = [
 ];
 /// A new command line's window size until its window reports its own.
 const TERMINAL_SIZE: (u16, u16) = (120, 30);
-/// Scancodes of the full-screen key, Ctrl+Alt+Enter (handled here, not sent): Enter, Ctrl, Alt.
-const KEY_ENTER: u16 = 0x1C;
-const KEY_CTRL: u16 = 0x1D;
-const KEY_ALT: u16 = 0x38;
 use queqiao_audio::{Player, TEST_TONE_HZ};
 use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
 use queqiao_files::{Outcome, TransferRow, Transfers, downloads_folder};
 use queqiao_input::{ClipContent, Clipboard};
+
+mod hotkeys;
 
 /// The start of the clipboard text the tests send (each side checks it got the other's).
 const CLIPBOARD_TEST_TEXT: &str = "Queqiao clipboard test";
@@ -193,6 +193,8 @@ struct Options {
     test_submit_help: bool,
     /// The session window's opacity in percent (as the Opacity menu sets it).
     opacity: Option<u8>,
+    /// Boss key test: Ctrl+Alt+F11 for this run, pressed (as Windows would report it) to hide and show the window.
+    boss_key_test: bool,
 }
 
 impl Options {
@@ -406,6 +408,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--invite" => options.invite = Some(args.next()?),
             "--test-submit-help" => options.test_submit_help = true,
             "--opacity" => options.opacity = args.next().and_then(|v| v.parse().ok()),
+            "--boss-key-test" => options.boss_key_test = true,
             "--picture" => {
                 let value = args.next()?;
                 let (fps, quality) = value.split_once(',')?;
@@ -1128,6 +1131,16 @@ fn session(
     // The other PC's sound; "Play that PC's sound" in the window menu turns it off there (no data then).
     let player = Player::start(options.sound_device.clone(), options.sound_test);
     let mut sound_on = !options.mute;
+    // The window's own keys (changed with Hotkeys...).
+    let mut keys = hotkeys::Keys::load();
+    if options.boss_key_test {
+        keys.boss_key = "Ctrl+Alt+F11".into();
+    }
+    let full_screen_label = trf(
+        "Full screen ({key})",
+        &[("key", &keys.full_screen().text())],
+    );
+    let game_mouse_label = trf("Game mouse ({key})", &[("key", &keys.game_mouse().text())]);
     player.set_muted(options.mute);
     window.add_menu_items(&[
         (MENU_CTRL_ALT_DEL, tr("Send Ctrl+Alt+Del")),
@@ -1139,11 +1152,11 @@ fn session(
         (MENU_PRIVACY, tr("Darken that PC's screen")),
         (MENU_TERMINAL, tr("Open a command line on that PC")),
         (MENU_COMMAND_LINES, tr("Command lines...")),
-        (MENU_FULL_SCREEN, tr("Full screen (Ctrl+Alt+Enter)")),
+        (MENU_FULL_SCREEN, full_screen_label.as_str()),
         (MENU_ON_TOP, tr("Always on top")),
         (MENU_TRANSFERS, tr("Transfers...")),
         (MENU_CUSTOM_BITRATE, tr("Custom bitrate...")),
-        (MENU_GAME_MOUSE, tr("Game mouse (Ctrl+Alt+M)")),
+        (MENU_GAME_MOUSE, game_mouse_label.as_str()),
         (
             MENU_SHORTCUTS,
             tr("Send Windows shortcuts to that PC (Win, Alt+Tab)"),
@@ -1154,6 +1167,30 @@ fn session(
     window.set_send_shortcuts(true);
     window.check_menu_item(MENU_SHORTCUTS, window.is_sending_shortcuts());
     let mut on_top = false;
+    // The boss key: registered with Windows (it works with the window hidden); hidden: the window and its sound.
+    let register_boss = |window: &Window, keys: &hotkeys::Keys, lines: &mut Vec<String>| -> bool {
+        window.unregister_hotkey(BOSS_HOTKEY);
+        let Some(boss) = keys.boss_key() else {
+            return false;
+        };
+        let (modifiers, vk) = boss.system();
+        let registered = window.register_hotkey(BOSS_HOTKEY, modifiers, vk);
+        lines.push(format!(
+            "boss key {}: {}",
+            boss.text(),
+            if registered {
+                "registered"
+            } else {
+                "not registered (another program has it)"
+            }
+        ));
+        registered
+    };
+    let boss_registered = register_boss(&window, &keys, lines);
+    let mut boss_hidden = false;
+    let mut boss_test: Option<(Instant, u8, bool)> = options
+        .boss_key_test
+        .then(|| (Instant::now() + Duration::from_secs(1), 0, false));
     // The transfer list window, while open.
     let mut transfer_list: Option<PickList> = None;
     let mut cancel_test_done = false;
@@ -1181,7 +1218,10 @@ fn session(
         .map(|(id, _, text)| (*id, tr(text)))
         .collect();
     window.add_submenu(tr("Opacity"), &opacity_items);
-    window.add_menu_items(&[(MENU_ACTUAL_SIZE, tr("Actual size (1:1)"))]);
+    window.add_menu_items(&[
+        (MENU_ACTUAL_SIZE, tr("Actual size (1:1)")),
+        (MENU_HOTKEYS, tr("Hotkeys...")),
+    ]);
     let show_opacity = |window: &Window, percent: u8| {
         for (id, value, _) in MENU_OPACITY {
             window.check_menu_item(id, value == percent);
@@ -1346,6 +1386,39 @@ fn session(
                         window.set_client_size(picture_size.0, picture_size.1);
                         None
                     }
+                    MENU_HOTKEYS => {
+                        // Each key in turn (Cancel keeps it); an empty boss key turns it off.
+                        let mut changed = keys.clone();
+                        let asks: [(&str, &mut String, bool); 3] = [
+                            (tr("Full screen key (for example Ctrl+Alt+Enter):"), &mut changed.full_screen, false),
+                            (tr("Game mouse key (for example Ctrl+Alt+M):"), &mut changed.game_mouse, false),
+                            (tr("Boss key, hides this window at once (for example Ctrl+Alt+H; empty: none):"), &mut changed.boss_key, true),
+                        ];
+                        for (prompt, value, may_be_empty) in asks {
+                            if let Some(typed) = ask_text(tr("Queqiao"), prompt, value) {
+                                let typed = typed.trim().to_string();
+                                match hotkeys::Hotkey::parse(&typed) {
+                                    Some(key) => *value = key.text(),
+                                    None if typed.is_empty() && may_be_empty => value.clear(),
+                                    None => show_error(
+                                        tr("Queqiao"),
+                                        &trf("Not a key Queqiao can use: {key}. A key is Ctrl and/or Alt (Shift may be added) with one letter, digit, F1 to F12 or Enter, Space, Home and the like.", &[("key", &typed)]),
+                                    ),
+                                }
+                            }
+                        }
+                        if changed != keys {
+                            keys = changed;
+                            if let Err(error) = keys.save() {
+                                lines.push(format!("hotkeys: not kept: {error}"));
+                            }
+                            window.rename_menu_item(MENU_FULL_SCREEN, &trf("Full screen ({key})", &[("key", &keys.full_screen().text())]));
+                            window.rename_menu_item(MENU_GAME_MOUSE, &trf("Game mouse ({key})", &[("key", &keys.game_mouse().text())]));
+                            register_boss(&window, &keys, lines);
+                            lines.push("hotkeys changed".into());
+                        }
+                        None
+                    }
                     MENU_ON_TOP => {
                         on_top = !on_top;
                         window.set_always_on_top(on_top);
@@ -1403,27 +1476,48 @@ fn session(
                 }
                 continue;
             }
-            // Ctrl+Alt+Enter: full screen on or off (every other key goes to that PC).
+            // The boss key: the window and its sound hidden at once, or back.
+            if event == WindowEvent::Hotkey(BOSS_HOTKEY) {
+                boss_hidden = !boss_hidden;
+                if boss_hidden && window.is_game_mouse() {
+                    window.set_game_mouse(false);
+                    window.check_menu_item(MENU_GAME_MOUSE, false);
+                }
+                window.set_visible(!boss_hidden);
+                if sound_on {
+                    player.set_muted(boss_hidden);
+                    let command = if boss_hidden {
+                        Command::SoundOff
+                    } else {
+                        Command::SoundOn
+                    };
+                    peer.send_data(Message::Command(command).encode());
+                }
+                lines.push(format!(
+                    "boss key: window {}",
+                    if boss_hidden { "hidden" } else { "shown" }
+                ));
+                continue;
+            }
+            // The full-screen key (Ctrl+Alt+Enter unless changed): full screen on or off. Every other key goes to that PC.
             if let WindowEvent::Key {
-                scancode: KEY_ENTER,
+                scancode,
+                extended,
                 down: true,
-                ..
             } = event
-                && held_keys.iter().any(|(code, _)| *code == KEY_CTRL)
-                && held_keys.iter().any(|(code, _)| *code == KEY_ALT)
+                && keys.full_screen().matches(scancode, extended, &held_keys)
             {
                 let on = !window.is_full_screen();
                 window.set_full_screen(on);
                 continue;
             }
-            // Ctrl+Alt+M: game mouse on or off.
+            // The game-mouse key (Ctrl+Alt+M unless changed).
             if let WindowEvent::Key {
-                scancode: KEY_M,
+                scancode,
+                extended,
                 down: true,
-                ..
             } = event
-                && held_keys.iter().any(|(code, _)| *code == KEY_CTRL)
-                && held_keys.iter().any(|(code, _)| *code == KEY_ALT)
+                && keys.game_mouse().matches(scancode, extended, &held_keys)
             {
                 let on = !window.is_game_mouse();
                 window.set_game_mouse(on);
@@ -1451,6 +1545,33 @@ fn session(
                 peer.send_data(message.encode());
                 stats.inputs_sent += 1;
             }
+        }
+        // Boss key test: pressed once (hidden?), again (shown?).
+        if let Some((due, step, hidden_seen)) = boss_test
+            && first_picture_after.is_some()
+            && Instant::now() >= due
+        {
+            let next = Instant::now() + Duration::from_millis(700);
+            boss_test = match step {
+                0 => {
+                    window.press_hotkey(BOSS_HOTKEY);
+                    Some((next, 1, false))
+                }
+                1 => {
+                    let hidden = !window.is_visible();
+                    window.press_hotkey(BOSS_HOTKEY);
+                    Some((next, 2, hidden))
+                }
+                _ => {
+                    let shown = window.is_visible();
+                    let passed = boss_registered && hidden_seen && shown;
+                    lines.push(format!(
+                        "boss key test: {} (registered: {boss_registered}, hidden: {hidden_seen}, shown again: {shown})",
+                        if passed { "PASS" } else { "FAIL" }
+                    ));
+                    None
+                }
+            };
         }
         if options.input_test
             && channel_open
@@ -2062,7 +2183,9 @@ fn translate(
                 down,
             }
         }
-        WindowEvent::FilesDropped(_) | WindowEvent::Menu(_) => return Vec::new(),
+        WindowEvent::FilesDropped(_) | WindowEvent::Menu(_) | WindowEvent::Hotkey(_) => {
+            return Vec::new();
+        }
         WindowEvent::FocusLost => {
             return held
                 .drain()
