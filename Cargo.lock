@@ -788,6 +788,7 @@ dependencies = [
  "queqiao-display",
  "queqiao-files",
  "queqiao-input",
+ "queqiao-local",
  "queqiao-terminal",
  "queqiao-transport",
  "serde",
@@ -861,6 +862,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "queqiao-local"
+version = "0.1.0"
+dependencies = [
+ "queqiao-core",
+ "windows",
+]
+
+[[package]]
 name = "queqiao-server"
 version = "0.1.0"
 dependencies = [
@@ -883,7 +892,11 @@ dependencies = [
 name = "queqiao-service"
 version = "0.1.0"
 dependencies = [
+ "queqiao-capture",
  "queqiao-core",
+ "queqiao-input",
+ "queqiao-local",
+ "windows",
 ]
 
 [[package]]

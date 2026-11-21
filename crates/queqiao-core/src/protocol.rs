@@ -105,6 +105,8 @@ pub enum Command {
     Screen(u8),
     /// The highest bitrate, kbit/s (instead of a quality preset); 0 goes back to the preset.
     MaxBitrate(u32),
+    /// End Queqiao on that PC and start it again (through its service).
+    RestartQueqiao,
 }
 
 /// How the bitrate is spent: fewer bits (slow networks), the size-based amount, or twice that (sharp text).
@@ -201,6 +203,7 @@ impl Message {
                 match command {
                     Command::CtrlAltDel => out.push(1),
                     Command::Lock => out.push(2),
+                    Command::RestartQueqiao => out.push(13),
                     Command::Restart => out.push(3),
                     Command::SoundOn => out.push(4),
                     Command::SoundOff => out.push(5),
@@ -306,6 +309,7 @@ impl Message {
             COMMAND => Message::Command(match rest.first()? {
                 1 => Command::CtrlAltDel,
                 2 => Command::Lock,
+                13 => Command::RestartQueqiao,
                 3 => Command::Restart,
                 4 => Command::SoundOn,
                 5 => Command::SoundOff,
@@ -389,6 +393,7 @@ mod tests {
             Message::Leave,
             Message::ClipboardText("copied text, ä 中文".into()),
             Message::Command(Command::Lock),
+            Message::Command(Command::RestartQueqiao),
             Message::Command(Command::Restart),
             Message::Command(Command::CtrlAltDel),
             Message::Command(Command::SoundOn),

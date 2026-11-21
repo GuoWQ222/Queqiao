@@ -15,6 +15,7 @@ queqiao-files.workspace = true
 queqiao-terminal.workspace = true
 queqiao-core.workspace = true
 queqiao-input.workspace = true
+queqiao-local.workspace = true
 queqiao-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -27,5 +28,6 @@ windows = { workspace = true, features = [
     "Win32_Security",
     "Win32_System_Registry",
     "Win32_System_Shutdown",
+    "Win32_System_Services",
     "Win32_System_Threading",
 ] }

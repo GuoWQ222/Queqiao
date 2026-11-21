@@ -31,6 +31,18 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
 }
 
 $failedStep = $null
+
+# Windows PowerShell 5.1 reads a script without a byte-order mark in the system code page (GBK on a Chinese
+# Windows): non-ASCII text in it can swallow the closing quote and break the script there only (found 2026-11-21).
+# Scripts stay ASCII, or carry a UTF-8 byte-order mark.
+$scriptProblems = @(Get-ChildItem -LiteralPath (Join-Path $Root 'scripts'), (Join-Path $Root 'tools') -Filter '*.ps1' -ErrorAction SilentlyContinue | Where-Object {
+    $bytes = [IO.File]::ReadAllBytes($_.FullName)
+    $marked = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    -not $marked -and @($bytes | Where-Object { $_ -ge 0x80 }).Count -gt 0
+})
+'{0,-8} {1}' -f 'scripts', $(if ($scriptProblems.Count) { 'non-ASCII without a byte-order mark: ' + (($scriptProblems | ForEach-Object Name) -join ', ') } else { 'ascii ok' })
+if ($scriptProblems.Count) { $failedStep = 'scripts' }
+
 $steps = @(
     @{ Name = 'fmt'; CargoArgs = @('fmt', '--all', '--check') },
     @{ Name = 'clippy'; CargoArgs = @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings') },

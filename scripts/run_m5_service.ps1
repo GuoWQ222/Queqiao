@@ -1,0 +1,190 @@
+# M5 check on one PC (run as an administrator): queqiao-server (fresh data folder, one user), then queqiao-service
+# installed with that test account as the agent's arguments, and
+# 1. the service starts the desktop helper (SYSTEM) and the agent (as the person at the screen) in the console session;
+# 2. the agent's process, as seen by its own user: waiting for it and ending it is allowed; copying its handles, writing
+#    into it, starting threads in it or full access are refused;
+# 3. a session with the viewer's --secure-test: Ctrl+Alt+Del through the service, the Ctrl+Alt+Del screen shown
+#    through the desktop helper, Escape through the helper (which closes that screen), this PC's own desktop again;
+# 4. "Restart Queqiao on that PC": the service ends the agent and its helper and starts both again.
+# The service is removed at the end (-Keep leaves it installed). Prints M5_SERVICE_PASS or M5_SERVICE_FAIL.
+# Usage: scripts\run_m5_service.ps1 [-Bin target\release] [-Out <report folder>] [-Seconds 20] [-Keep]
+param(
+    [string]$Bin = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\release'),
+    [string]$Out = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\probe\m5_service'),
+    [int]$Seconds = 20,
+    [switch]$Keep
+)
+$ErrorActionPreference = 'Stop'
+$consoleUser = (Get-CimInstance Win32_ComputerSystem).UserName
+if (-not $consoleUser) { 'RUN_FAIL nobody is signed in at the console'; return }
+New-Item -ItemType Directory -Force $Out | Out-Null
+Remove-Item -Path "$Out\*.txt" -ErrorAction SilentlyContinue
+$data = Join-Path $Out 'server-data'
+if (Test-Path -LiteralPath $data) { Remove-Item -Recurse -Force -LiteralPath $data }
+
+function Start-SessionTask([string]$Name, [string]$Exe, [string]$Arguments) {
+    $action = New-ScheduledTaskAction -Execute $Exe -Argument $Arguments -WorkingDirectory (Split-Path -Parent $Exe)
+    $principal = New-ScheduledTaskPrincipal -UserId $consoleUser -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds ($Seconds + 180)) -Priority 4
+    Register-ScheduledTask -TaskName $Name -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskName $Name
+}
+
+function Wait-SessionTask([string]$Name, [int]$TimeoutSec) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        Start-Sleep -Milliseconds 300
+        $result = (Get-ScheduledTaskInfo -TaskName $Name).LastTaskResult
+        $state = (Get-ScheduledTask -TaskName $Name).State
+        $busy = ($state -eq 'Running') -or ($result -eq 267009) -or ($result -eq 267011)
+    } while ($busy -and (Get-Date) -lt $deadline)
+    if ($busy) { Stop-ScheduledTask -TaskName $Name; $result = 'timeout' }
+    Unregister-ScheduledTask -TaskName $Name -Confirm:$false
+    $result
+}
+
+$serviceLog = Join-Path $env:ProgramData 'Queqiao\service.log'
+$logSkip = if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog).Count } else { 0 }
+function Get-ServiceLog { if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog | Select-Object -Skip $logSkip) } else { @() } }
+function Wait-ServiceLog([string]$Pattern, [int]$Count, [int]$TimeoutSec) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        $hits = @(Get-ServiceLog | Where-Object { $_ -match $Pattern }).Count
+        if ($hits -ge $Count) { return $true }
+        Start-Sleep -Milliseconds 300
+    } while ((Get-Date) -lt $deadline)
+    $false
+}
+function Wait-File([string]$Path, [int]$TimeoutSec) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while (-not (Test-Path -LiteralPath $Path) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    Test-Path -LiteralPath $Path
+}
+function Add-Check([string]$Name, [bool]$Ok) {
+    '{0,-52} {1}' -f $Name, $(if ($Ok) { 'ok' } else { 'FAIL' })
+    if (-not $Ok) { $script:failed += $Name }
+}
+function Get-Number([string[]]$Text, [string]$Pattern) {
+    $match = [regex]::Match(($Text -join "`n"), $Pattern)
+    if ($match.Success) { [int]$match.Groups[1].Value } else { -1 }
+}
+
+$server = Join-Path $Bin 'queqiao-server.exe'
+$viewer = Join-Path $Bin 'queqiao-viewer.exe'
+$serviceExe = Join-Path $Bin 'queqiao-service.exe'
+$listen = '127.0.0.1:47100'
+$device = $env:COMPUTERNAME
+$init = & $server init --data $data
+$pin = ([regex]::Match(($init -join "`n"), 'fingerprint: ([0-9a-f]{64})')).Groups[1].Value
+if (-not $pin) { "RUN_FAIL no fingerprint from: $init"; return }
+$password = [guid]::NewGuid().ToString('N')
+& $server add-user alice $password --data $data | Out-Null
+$serveArgs = @('serve', '--listen', $listen, '--data', "`"$data`"", '--public-ip', '127.0.0.1', '--relay-private')
+$serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
+$failed = @()
+$completed = $false
+try {
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 200
+        $client = New-Object Net.Sockets.TcpClient
+        try { $client.Connect('127.0.0.1', 47100); $up = $true } catch { $up = $false } finally { $client.Dispose() }
+    } while (-not $up -and (Get-Date) -lt $deadline)
+    if (-not $up) { 'RUN_FAIL the server did not start'; return }
+
+    '=== 1. install: the service starts the desktop helper and the agent'
+    $agentArgs = "--server $listen --pin $pin --user alice --password $password --sessions 1 --seconds 150 --dry-run-commands --report `"$Out\agent_secure.txt`""
+    & $serviceExe install --agent-arguments $agentArgs --no-restart 2>&1 | ForEach-Object { "$_" }
+    if (-not (Wait-ServiceLog 'started the desktop helper \(\d+\) and the agent \(\d+\)' 1 30)) {
+        $failed += 'service start'
+        Get-ServiceLog
+        return
+    }
+    Get-ServiceLog | Where-Object { $_ -match 'started|helper' }
+    $installed = Join-Path $env:ProgramFiles 'Queqiao'
+    $agentProcess = Get-Process queqiao-agent -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$installed\*" } | Select-Object -First 1
+    $helperProcess = Get-CimInstance Win32_Process -Filter "Name = 'queqiao-service.exe'" | Where-Object { $_.CommandLine -match ' desktop --channel ' } | Select-Object -First 1
+    if (-not $agentProcess -or -not $helperProcess) { $failed += 'processes'; "agent: $($agentProcess.Id) helper: $($helperProcess.ProcessId)"; return }
+    $helperOwner = Invoke-CimMethod -InputObject $helperProcess -MethodName GetOwner
+    "agent $($agentProcess.Id) in session $($agentProcess.SessionId); helper $($helperProcess.ProcessId) in session $($helperProcess.SessionId) as $($helperOwner.Domain)\$($helperOwner.User)"
+    if ($helperOwner.User -ne 'SYSTEM') { $failed += 'helper account' }
+
+    '=== 2. the agent''s process, opened by its own user'
+    # An administrator's elevated programs (SeDebugPrivilege enabled) may open any process; the protection is for
+    # programs without that privilege, so the probe tries both ways and the check is on the second.
+    $probeScript = Join-Path $PSScriptRoot 'open_process_probe.ps1'
+    $openReport = Join-Path $Out 'open_agent.txt'
+    Start-SessionTask 'Queqiao-M5-Open' (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') "-NoProfile -ExecutionPolicy Bypass -File `"$probeScript`" -ProcessId $($agentProcess.Id) -Report `"$openReport`""
+    [void](Wait-SessionTask 'Queqiao-M5-Open' 60)
+    # The task can be done before the report is written; Add-Type alone takes seconds.
+    [void](Wait-File $openReport 30)
+    $opened = if (Test-Path -LiteralPath $openReport) { @(Get-Content -LiteralPath $openReport) } else { @('no report') }
+    $opened
+    foreach ($right in 'copy-handles', 'write-memory', 'start-thread', 'full') {
+        Add-Check "protection: $right refused without debug rights" ($opened -contains "no-debug $right refused 5")
+    }
+    Add-Check 'protection: waiting and ending still allowed' ($opened -contains 'no-debug wait-and-end opened')
+
+    '=== 3. a session: Ctrl+Alt+Del, its screen through the desktop helper, Escape, the own desktop again'
+    Start-Sleep -Seconds 3
+    Start-SessionTask 'Queqiao-M5-Viewer' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds $Seconds --secure-test --width 960 --report `"$Out\viewer_secure.txt`""
+    $viewerResult = Wait-SessionTask 'Queqiao-M5-Viewer' ($Seconds + 150)
+    "viewer task: $viewerResult"
+    $agentDone = Wait-File "$Out\agent_secure.txt" 40
+    $viewerText = if (Test-Path -LiteralPath "$Out\viewer_secure.txt") { @(Get-Content -LiteralPath "$Out\viewer_secure.txt" -Encoding UTF8) } else { @('no viewer report') }
+    $agentText = if ($agentDone) { @(Get-Content -LiteralPath "$Out\agent_secure.txt" -Encoding UTF8) } else { @('no agent report') }
+    '--- viewer'
+    $viewerText
+    '--- agent'
+    $agentText
+    # One call per check: in an array, PowerShell's comma binds before -ge and -and.
+    Add-Check 'agent: started by the service' (($agentText -match '^started by the Queqiao service').Count -gt 0)
+    Add-Check 'agent: Ctrl+Alt+Del through the service' (($agentText -match 'CtrlAltDel: Ctrl\+Alt\+Del sent').Count -gt 0)
+    Add-Check 'agent: switched to the desktop helper' (($agentText -match 'another desktop takes input').Count -gt 0)
+    Add-Check 'agent: back to its own capture' (($agentText -match 'own desktop takes input again').Count -gt 0)
+    Add-Check 'agent: pictures from the helper' ((Get-Number $agentText '(\d+) pictures from it') -ge 1)
+    Add-Check 'agent: Escape passed to the helper' ((Get-Number $agentText '(\d+) inputs passed to it') -ge 2)
+    Add-Check 'viewer: pictures of the Ctrl+Alt+Del screen' ((Get-Number $viewerText '(\d+) pictures shown while the Ctrl\+Alt\+Del screen was up') -ge 1)
+    Add-Check 'viewer: pictures after Escape' ((Get-Number $viewerText '(\d+) pictures shown after Escape') -ge 1)
+    Add-Check 'helper: saw the Winlogon desktop' (@(Get-ServiceLog | Where-Object { $_ -match 'input desktop Winlogon' }).Count -gt 0)
+    # The helper's own count, and how soon after Ctrl+Alt+Del the person's desktop was back (Escape goes 2 s after
+    # it; without Escape that screen closed by itself after about 4.8 s on this PC).
+    [void](Wait-ServiceLog 'desktop helper: ending .*injected \d+' 1 15)
+    $injected = Get-Number (Get-ServiceLog) 'injected (\d+)'
+    $stamp = { param($line) [datetime]::ParseExact($line.Substring(0, 23), 'yyyy-MM-dd HH:mm:ss.fff', $null) }
+    $sasLine = Get-ServiceLog | Where-Object { $_ -match 'Ctrl\+Alt\+Del sent' } | Select-Object -First 1
+    $backLine = if ($sasLine) { Get-ServiceLog | Where-Object { $_ -match 'input desktop Default' -and (& $stamp $_) -gt (& $stamp $sasLine) } | Select-Object -First 1 }
+    $backAfter = if ($sasLine -and $backLine) { ((& $stamp $backLine) - (& $stamp $sasLine)).TotalSeconds } else { -1 }
+    "helper injected: $injected; the own desktop was back $([math]::Round($backAfter, 2)) s after Ctrl+Alt+Del"
+    Add-Check 'helper: injected Escape (down and up)' ($injected -ge 2)
+    Add-Check 'Escape closed the screen (back in 1.5..4 s)' (($backAfter -ge 1.5) -and ($backAfter -lt 4))
+    # The PC must not be left on the Ctrl+Alt+Del screen.
+    $lastDesktop = @(Get-ServiceLog | Where-Object { $_ -match 'input desktop (\S+)' } | ForEach-Object { [regex]::Match($_, 'input desktop (\S+)').Groups[1].Value }) | Select-Object -Last 1
+    "last input desktop the helper saw: $lastDesktop"
+    if ($lastDesktop -ne 'Default') { $failed += 'left on another desktop'; 'WARNING: the PC may still show the Ctrl+Alt+Del screen' }
+
+    '=== 4. Restart Queqiao on that PC: the service starts the agent again'
+    $agentArgs2 = "--server $listen --pin $pin --user alice --password $password --sessions 2 --seconds 150 --report `"$Out\agent_restart.txt`""
+    $startsBefore = @(Get-ServiceLog | Where-Object { $_ -match 'started the desktop helper' }).Count
+    & $serviceExe install --agent-arguments $agentArgs2 --no-restart 2>&1 | ForEach-Object { "$_" }
+    if (-not (Wait-ServiceLog 'started the desktop helper' ($startsBefore + 1) 30)) { $failed += 'service start 2' }
+    Start-Sleep -Seconds 3
+    Start-SessionTask 'Queqiao-M5-Restart' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds 8 --command restart-queqiao --width 960 --report `"$Out\viewer_restart.txt`""
+    [void](Wait-SessionTask 'Queqiao-M5-Restart' 120)
+    $restarted = Wait-ServiceLog 'started the desktop helper' ($startsBefore + 2) 30
+    $asked = (Get-ServiceLog | Where-Object { $_ -match 'the agent asked to restart Queqiao' }).Count -gt 0
+    $viewerRestart = if (Test-Path -LiteralPath "$Out\viewer_restart.txt") { @(Get-Content -LiteralPath "$Out\viewer_restart.txt" -Encoding UTF8) } else { @('no viewer report') }
+    $viewerRestart | Where-Object { $_ -match 'restart|Queqiao|ended|RESULT' }
+    Add-Check 'service: the agent asked to restart' $asked
+    Add-Check 'service: helper and agent started again' $restarted
+    $completed = $true
+} finally {
+    '=== service log (this run)'
+    Get-ServiceLog
+    if (-not $Keep) {
+        & $serviceExe uninstall 2>&1 | ForEach-Object { "$_" }
+    }
+    Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+    if (-not $completed -and -not $failed.Count) { $failed += 'stopped early' }
+    if ($failed.Count) { "M5_SERVICE_FAIL $($failed -join ', ')" } else { 'M5_SERVICE_PASS' }
+}

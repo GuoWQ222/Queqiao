@@ -17,6 +17,7 @@
 
 mod autostart;
 mod power;
+mod service_link;
 mod ui;
 mod wake;
 
@@ -38,10 +39,12 @@ use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{
     ClipContent, Clipboard, Injector, ScreenRect, cursor_position, key_is_down, set_cursor_position,
 };
+use queqiao_local::FromHelper;
 use queqiao_terminal::{TerminalMessage, Terminals};
 use queqiao_transport::{
     Peer, PeerEvent, Role, START_BITRATE, Signal, Signaling, Stream, check_hello, hello_body,
 };
+use service_link::Links;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
@@ -112,6 +115,9 @@ struct Options {
     fps: Option<u32>,
     report: Option<PathBuf>,
     verify_input: bool,
+    /// The channels the Queqiao service hands over when it starts the agent (`<read>,<write>` handles).
+    service_channel: Option<String>,
+    desktop_channel: Option<String>,
 }
 
 #[derive(Default)]
@@ -151,9 +157,11 @@ fn main() {
         return;
     };
     let mut lines = vec![banner];
+    let mut not_logged_in = false;
     let passed = match run(&options, &mut lines) {
         Ok(passed) => passed,
         Err(error) => {
+            not_logged_in = error.starts_with("not logged in");
             lines.push(format!("ERROR {error}"));
             false
         }
@@ -165,7 +173,15 @@ fn main() {
         }
         None => lines.iter().for_each(|line| println!("{line}")),
     }
-    std::process::exit(if passed { 0 } else { 1 });
+    // Started by the service: 3 tells it there is nothing to do until the next sign-in.
+    let code = if passed {
+        0
+    } else if not_logged_in && options.service_channel.is_some() {
+        3
+    } else {
+        1
+    };
+    std::process::exit(code);
 }
 
 fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
@@ -199,6 +215,8 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--test-device" => options.test_device = Some(args.next()?),
             "--lock-after-session" => options.lock_after_session = true,
             "--test-press-setting" => options.test_press_setting = true,
+            "--service-channel" => options.service_channel = Some(args.next()?),
+            "--desktop-channel" => options.desktop_channel = Some(args.next()?),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -208,8 +226,24 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    let mut links = Links::open(
+        options.service_channel.as_deref(),
+        options.desktop_channel.as_deref(),
+    )?;
+    if links.service.is_some() {
+        lines.push(
+            "started by the Queqiao service: the sign-in, lock, Ctrl+Alt+Del and UAC screens come through its desktop helper"
+                .into(),
+        );
+    }
     // Started without options (at sign-in, or by hand): one agent per user session.
     if options.server.is_none() && options.connect.is_none() && options.listen.is_none() {
+        // With the Queqiao service running, Queqiao for the person signed in is the one it starts (the Run key's
+        // copy, started at sign-in as well, leaves).
+        if options.service_channel.is_none() && autostart::service_runs() {
+            lines.push("the Queqiao service runs Queqiao on this PC: this copy leaves".into());
+            return Ok(true);
+        }
         autostart::claim_single_instance()?;
     }
     let end = options
@@ -239,7 +273,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         }
     ));
     if options.connect.is_none() && options.listen.is_none() {
-        return run_account(options, end, &ui, settings, lines);
+        return run_account(options, end, &ui, settings, &mut links, lines);
     }
     let mut signal = match (&options.connect, &options.listen) {
         (Some(address), _) => Signal::connect(address, Duration::from_secs(60)),
@@ -263,6 +297,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             terminal: settings.allow_terminal,
             helper: false,
         },
+        &mut links,
         &mut deferred,
         lines,
     )?;
@@ -276,6 +311,7 @@ fn run_account(
     end: Option<Instant>,
     ui: &ui::Ui,
     mut settings: ui::Settings,
+    links: &mut Links,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
     // Tests run two accounts on one PC: a throwaway device (own key, pins in memory) for the second.
@@ -525,6 +561,7 @@ fn run_account(
                         terminal: settings.allow_terminal && helper.is_none(),
                         helper: helper.is_some(),
                     },
+                    links,
                     &mut deferred,
                     lines,
                 ) {
@@ -816,6 +853,7 @@ fn run_command(command: Command, dry_run: bool) -> String {
         | Command::Resolution(_)
         | Command::Screen(_)
         | Command::MaxBitrate(_)
+        | Command::RestartQueqiao
         | Command::Picture { .. } => "changed".into(),
     }
 }
@@ -1002,6 +1040,7 @@ fn session(
     end: Option<Instant>,
     ui: &ui::Ui,
     permissions: Permissions,
+    links: &mut Links,
     deferred: &mut Vec<PresenceEvent>,
     lines: &mut Vec<String>,
 ) -> Result<SessionOutcome, String> {
@@ -1018,10 +1057,41 @@ fn session(
     let frequency = qpc_frequency() as f64;
     let ms = |ticks: i64| ticks as f64 * 1000.0 / frequency;
 
-    let mut duplicator = Duplicator::primary().map_err(describe)?;
-    let mut info = duplicator.info().clone();
-    let (mut device, mut context) = (duplicator.device().clone(), duplicator.context().clone());
-    let snapshot = duplicator.snapshot_image().map_err(describe)?;
+    // This PC's own capture; none while another desktop takes input (the sign-in, lock, Ctrl+Alt+Del or UAC
+    // screen), whose pictures come from the service's desktop helper.
+    let (mut secure_switches, mut secure_frames, mut secure_inputs) = (0u32, 0u32, 0u32);
+    if let Some(link) = links.desktop.as_mut() {
+        for name in link.poll_desktop() {
+            lines.push(format!("input desktop: {name}"));
+        }
+        link.session(true);
+    }
+    let (mut duplicator, mut info, mut device, mut context, snapshot) = match Duplicator::primary()
+    {
+        Ok(own) => {
+            let snapshot = own.snapshot_image().map_err(describe)?;
+            let (info, device, context) = (
+                own.info().clone(),
+                own.device().clone(),
+                own.context().clone(),
+            );
+            (Some(own), info, device, context, snapshot)
+        }
+        Err(error) => {
+            let Some(link) = links.desktop.as_mut() else {
+                return Err(describe(error));
+            };
+            let opened = queqiao_capture::screen_device(None).map_err(describe)?;
+            link.capture(opened.index);
+            let snapshot = first_helper_picture(link)?;
+            secure_switches += 1;
+            lines.push(format!(
+                "this PC's own desktop does not take input now ({}): pictures and input through the desktop helper",
+                describe(error)
+            ));
+            (None, opened.info, opened.device, opened.context, snapshot)
+        }
+    };
     let mut latest = upload(&device, &snapshot)?;
     let fps = options
         .fps
@@ -1143,6 +1213,28 @@ fn session(
     }
     let mut end_pressed = false;
     let mut ended_here = false;
+    let mut last_own_try = Instant::now();
+    let mut size_noted = false;
+    // A newly opened screen of this PC (after a desktop or display change) replaces the old one.
+    macro_rules! adopt {
+        ($opened:expr) => {{
+            let opened = $opened;
+            duplicator = Some(opened.duplicator);
+            info = opened.info;
+            (device, context) = (opened.device, opened.context);
+            latest = opened.latest;
+            screen = opened.screen;
+            encoder = opened.encoder;
+            injector = opened.injector;
+            size_bitrate = encoder.config().bitrate;
+            max_bitrate = custom_bitrate
+                .unwrap_or(((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE));
+            peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
+            let _ = encoder.set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
+            force_keyframe = true;
+            waiting = Some((0, qpc_now()));
+        }};
+    }
     'session: loop {
         if end.is_some_and(|end| Instant::now() > end) {
             break;
@@ -1192,6 +1284,14 @@ fn session(
                 PeerEvent::Data(bytes) => match Message::decode(&bytes) {
                     Some(Message::Input(event)) => {
                         stats.inputs += 1;
+                        // On another desktop (sign-in, lock, Ctrl+Alt+Del, UAC) the desktop helper injects.
+                        if duplicator.is_none()
+                            && let Some(link) = links.desktop.as_mut()
+                        {
+                            link.input(event, injector.screen());
+                            secure_inputs += 1;
+                            continue;
+                        }
                         let before = cursor_position();
                         match injector.inject(&event) {
                             Ok(())
@@ -1215,7 +1315,9 @@ fn session(
                         closed = Some("the viewer left".to_string());
                         break 'session;
                     }
-                    Some(Message::Command(Command::PrivacyOn | Command::Restart)) if helper => {
+                    Some(Message::Command(
+                        Command::PrivacyOn | Command::Restart | Command::RestartQueqiao,
+                    )) if helper => {
                         let notice =
                             "someone helping from another account cannot do that on this PC"
                                 .to_string();
@@ -1340,11 +1442,18 @@ fn session(
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
                     }
+                    Some(Message::Command(Command::Screen(_))) if duplicator.is_none() => {
+                        let notice =
+                            "the screen can be changed once this PC's own desktop takes input again"
+                                .to_string();
+                        lines.push(format!("command from the viewer: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
                     Some(Message::Command(Command::Screen(index))) => {
                         let fixed = options.fps.is_some();
                         // DXGI lets a process duplicate a screen once: the current duplication goes first. If the
                         // new screen cannot be opened, the one before is opened again (or the session ends).
-                        drop(duplicator);
+                        drop(duplicator.take());
                         let (opened, shown) = match open_screen(
                             usize::from(index),
                             fps,
@@ -1362,7 +1471,7 @@ fn session(
                                 (back, false)
                             }
                         };
-                        duplicator = opened.duplicator;
+                        duplicator = Some(opened.duplicator);
                         info = opened.info;
                         (device, context) = (opened.device, opened.context);
                         latest = opened.latest;
@@ -1433,6 +1542,36 @@ fn session(
                             sound = start_sound(&peer, options, lines);
                         }
                         lines.push("the viewer turned this PC's sound on".into());
+                    }
+                    Some(Message::Command(Command::CtrlAltDel)) if links.service.is_some() => {
+                        let notice = links
+                            .service
+                            .as_mut()
+                            .map(|service| service.send_sas())
+                            .unwrap_or_default();
+                        lines.push(format!("command from the viewer: CtrlAltDel: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::RestartQueqiao)) => {
+                        let notice = match &links.service {
+                            Some(_) if options.dry_run_commands => {
+                                "Queqiao would restart on that PC now (test run)"
+                            }
+                            Some(_) => "Queqiao restarts on that PC: connect again in a few seconds",
+                            None => "restarting Queqiao needs the Queqiao service on that PC, which is not running",
+                        }
+                        .to_string();
+                        lines.push(format!("command from the viewer: RestartQueqiao: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                        if !options.dry_run_commands
+                            && let Some(service) = links.service.as_mut()
+                        {
+                            // The notice first; then the service ends this agent.
+                            std::thread::sleep(Duration::from_millis(300));
+                            if let Err(error) = service.restart() {
+                                lines.push(format!("restarting Queqiao failed: {error}"));
+                            }
+                        }
                     }
                     Some(Message::Command(command)) => {
                         let notice = run_command(command, options.dry_run_commands);
@@ -1563,7 +1702,9 @@ fn session(
 
         if privacy_check_due {
             privacy_check_due = false;
-            lines.push(privacy_check(&mut duplicator, ui));
+            if let Some(own) = duplicator.as_mut() {
+                lines.push(privacy_check(own, ui));
+            }
         }
         if let Some(capture) = &sound {
             for note in capture.notes() {
@@ -1623,17 +1764,123 @@ fn session(
         } else {
             5
         };
-        match duplicator.acquire(wait) {
-            Ok(Some(frame)) if frame.present_qpc != 0 => {
+        let fixed = options.fps.is_some();
+        let acquired = duplicator.as_mut().map(|own| own.acquire(wait));
+        match acquired {
+            Some(Ok(Some(frame))) if frame.present_qpc != 0 => {
                 stats.captured += 1;
                 unsafe { context.CopyResource(&latest, &frame.texture) };
                 waiting = Some((frame.present_qpc, frame.acquired_qpc));
             }
-            Ok(_) => {}
-            Err(error) if needs_restart(&error) => {
-                return Err("the desktop switched (login screen, UAC or a display change)".into());
+            Some(Ok(_)) => {}
+            Some(Err(error)) if needs_restart(&error) => {
+                // The desktop switched (sign-in, lock, Ctrl+Alt+Del or UAC screen) or the display changed.
+                duplicator = None;
+                match open_screen(screen_index, fps, fixed, resolution_limit) {
+                    Ok(opened) => {
+                        adopt!(opened);
+                        lines.push(format!(
+                            "{} ms: the display changed: captured again ({}x{})",
+                            started.elapsed().as_millis(),
+                            info.width,
+                            info.height
+                        ));
+                    }
+                    Err(error) => match links.desktop.as_mut() {
+                        Some(link) if !link.closed => {
+                            link.capture(screen_index);
+                            secure_switches += 1;
+                            last_own_try = Instant::now();
+                            lines.push(format!(
+                                "{} ms: another desktop takes input ({error}): pictures and input through the desktop helper",
+                                started.elapsed().as_millis()
+                            ));
+                        }
+                        _ => {
+                            return Err(format!(
+                                "the desktop switched (sign-in, lock or UAC screen, or a display change) and cannot be captured: {error}"
+                            ));
+                        }
+                    },
+                }
             }
-            Err(error) => return Err(describe(error)),
+            Some(Err(error)) => return Err(describe(error)),
+            None => {
+                // Pictures from the desktop helper until this PC's own desktop takes input again.
+                let Some(link) = links.desktop.as_mut() else {
+                    return Err("nothing captures this PC's screen".into());
+                };
+                let gap = last_own_try.elapsed();
+                let back = ((link.on_own_desktop() || link.closed)
+                    && gap >= Duration::from_millis(250))
+                    || gap >= Duration::from_secs(3);
+                if back {
+                    last_own_try = Instant::now();
+                    if let Ok(opened) = open_screen(screen_index, fps, fixed, resolution_limit) {
+                        link.stop_capture();
+                        adopt!(opened);
+                        lines.push(format!(
+                            "{} ms: this PC's own desktop takes input again: captured here",
+                            started.elapsed().as_millis()
+                        ));
+                    }
+                }
+                if let Some(link) = links.desktop.as_mut().filter(|_| duplicator.is_none()) {
+                    if link.closed {
+                        return Err(
+                            "the desktop helper is gone and this PC's own desktop cannot be captured"
+                                .into(),
+                        );
+                    }
+                    match link.next(Duration::from_millis(u64::from(wait))) {
+                        Some(FromHelper::Frame {
+                            width,
+                            height,
+                            pixels,
+                        }) => {
+                            if (width, height) == screen {
+                                latest = upload(
+                                    &device,
+                                    &BgraImage {
+                                        width,
+                                        height,
+                                        pixels,
+                                    },
+                                )?;
+                                stats.captured += 1;
+                                secure_frames += 1;
+                                waiting = Some((0, qpc_now()));
+                            } else if !size_noted {
+                                size_noted = true;
+                                lines.push(format!(
+                                    "a {width}x{height} picture from the desktop helper does not fit the {}x{} screen: left out",
+                                    screen.0, screen.1
+                                ));
+                            }
+                        }
+                        Some(FromHelper::Failed(error)) => lines.push(format!(
+                            "{} ms: desktop helper: {error}",
+                            started.elapsed().as_millis()
+                        )),
+                        Some(FromHelper::Desktop(name)) => lines.push(format!(
+                            "{} ms: input desktop: {name}",
+                            started.elapsed().as_millis()
+                        )),
+                        None => {}
+                    }
+                }
+            }
+        }
+        // While capturing here: the helper's word on desktop changes (and no pictures).
+        if duplicator.is_some()
+            && let Some(link) = links.desktop.as_mut()
+        {
+            for name in link.poll_desktop() {
+                lines.push(format!(
+                    "{} ms: input desktop: {name}",
+                    started.elapsed().as_millis()
+                ));
+            }
         }
 
         // Encode as soon as there is a change and the frame time has passed.
@@ -1670,6 +1917,12 @@ fn session(
                 peer.send_data(info.encode());
             }
         }
+    }
+    if let Some(link) = links.desktop.as_mut() {
+        link.session(false);
+        lines.push(format!(
+            "desktop helper: {secure_switches} switches to another desktop, {secure_frames} pictures from it, {secure_inputs} inputs passed to it"
+        ));
     }
     if closed.is_none() || ended_here {
         // Our end (time is up, or the person here ended it): tell the viewer at once.
@@ -1815,6 +2068,39 @@ fn verify(injector: &Injector, event: &InputEvent, stats: &mut Stats) {
         }
         _ => {}
     }
+}
+
+/// The desktop helper's first picture (a session that starts while another desktop takes input).
+fn first_helper_picture(link: &mut service_link::DesktopLink) -> Result<BgraImage, String> {
+    let until = Instant::now() + Duration::from_secs(3);
+    let mut failure = String::new();
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        match link.next(left) {
+            Some(FromHelper::Frame {
+                width,
+                height,
+                pixels,
+            }) => {
+                return Ok(BgraImage {
+                    width,
+                    height,
+                    pixels,
+                });
+            }
+            Some(FromHelper::Failed(error)) => failure = error,
+            Some(FromHelper::Desktop(_)) => {}
+            None if link.closed => break,
+            None => {}
+        }
+    }
+    Err(format!(
+        "the desktop helper sent no picture within 3 s{}",
+        if failure.is_empty() {
+            String::new()
+        } else {
+            format!(" ({failure})")
+        }
+    ))
 }
 
 fn upload(device: &ID3D11Device, image: &BgraImage) -> Result<ID3D11Texture2D, String> {

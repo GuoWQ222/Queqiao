@@ -167,6 +167,7 @@ const CHINESE: &[(&str, &str)] = &[
     // The session window.
     ("Send Ctrl+Alt+Del", "发送 Ctrl+Alt+Del"),
     ("Lock that PC", "锁定那台电脑"),
+    ("Restart Queqiao on that PC", "重启那台电脑上的鹊桥"),
     ("Restart that PC...", "重启那台电脑……"),
     ("Play that PC's sound", "播放那台电脑的声音"),
     ("Mute that PC's speakers", "让那台电脑的扬声器静音"),

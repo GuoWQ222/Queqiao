@@ -49,6 +49,7 @@ const MENU_SHORTCUTS: u16 = 0x1090;
 const MENU_ON_TOP: u16 = 0x10A0;
 const MENU_CUSTOM_BITRATE: u16 = 0x10B0;
 const MENU_TRANSFERS: u16 = 0x10C0;
+const MENU_RESTART_QUEQIAO: u16 = 0x10D0;
 /// The transfer list's buttons.
 const TRANSFER_PAUSE: u16 = 301;
 const TRANSFER_CANCEL: u16 = 302;
@@ -161,6 +162,9 @@ struct Options {
     mute_speakers: bool,
     /// Cancel a file this side sends once its first piece went out (tests).
     cancel_test: bool,
+    /// Tests of the sign-in screens through the service: Ctrl+Alt+Del 3 s after the data channel opens, Escape
+    /// (which closes that screen) 2 s later; the pictures shown meanwhile and after are reported.
+    secure_test: bool,
     /// Send this file as a clipboard copy (tests: the other side must put it on its clipboard).
     clipboard_files_test: Option<PathBuf>,
     /// The picture's short side at most this (720, 1080) from the start; 0 or none: the screen's own.
@@ -373,6 +377,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--game-mouse-test" => options.game_mouse_test = true,
             "--mute-speakers" => options.mute_speakers = true,
             "--cancel-test" => options.cancel_test = true,
+            "--secure-test" => options.secure_test = true,
             "--clipboard-files-test" => {
                 options.clipboard_files_test = Some(PathBuf::from(args.next()?))
             }
@@ -396,6 +401,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
                 "lock" => Command::Lock,
                 "restart" => Command::Restart,
                 "ctrl-alt-del" => Command::CtrlAltDel,
+                "restart-queqiao" => Command::RestartQueqiao,
                 _ => return None,
             }),
             "--trust-new-key" => options.trust_new_key = args.next(),
@@ -993,6 +999,7 @@ fn session(
         (MENU_CTRL_ALT_DEL, tr("Send Ctrl+Alt+Del")),
         (MENU_LOCK, tr("Lock that PC")),
         (MENU_RESTART, tr("Restart that PC...")),
+        (MENU_RESTART_QUEQIAO, tr("Restart Queqiao on that PC")),
         (MENU_SOUND, tr("Play that PC's sound")),
         (MENU_MUTE_SPEAKERS, tr("Mute that PC's speakers")),
         (MENU_PRIVACY, tr("Darken that PC's screen")),
@@ -1015,6 +1022,8 @@ fn session(
     // The transfer list window, while open.
     let mut transfer_list: Option<PickList> = None;
     let mut cancel_test_done = false;
+    // The secure-desktop test: when it started, its step, and the pictures shown when that step began.
+    let mut secure_test: Option<(Instant, u8, u64)> = None;
     let mut speakers_muted = options.mute_speakers;
     window.check_menu_item(MENU_MUTE_SPEAKERS, speakers_muted);
     let fps_items: Vec<(u16, &str)> = MENU_FPS
@@ -1087,6 +1096,7 @@ fn session(
                 let command = match id {
                     MENU_CTRL_ALT_DEL => Some(Command::CtrlAltDel),
                     MENU_LOCK => Some(Command::Lock),
+                    MENU_RESTART_QUEQIAO => Some(Command::RestartQueqiao),
                     id if MENU_FPS.iter().any(|(item, _, _)| *item == id) => {
                         fps_cap = MENU_FPS.iter().find(|(item, _, _)| *item == id).map_or(60, |(_, fps, _)| *fps);
                         show_picture_choice(&window, fps_cap, quality);
@@ -1330,6 +1340,37 @@ fn session(
             next_ping = Instant::now() + Duration::from_millis(500);
         }
 
+        // Test: Ctrl+Alt+Del, then Escape, then a look at what came back.
+        if let Some((began, step, shown_before)) = secure_test {
+            let at = began.elapsed();
+            let shown_now = u64::from(stats.shown);
+            if step == 0 && at >= Duration::from_secs(3) {
+                peer.send_data(Message::Command(Command::CtrlAltDel).encode());
+                lines.push("secure test: sent Ctrl+Alt+Del".into());
+                secure_test = Some((began, 1, shown_now));
+            } else if step == 1 && at >= Duration::from_secs(5) {
+                lines.push(format!(
+                    "secure test: {} pictures shown while the Ctrl+Alt+Del screen was up",
+                    shown_now - shown_before
+                ));
+                for down in [true, false] {
+                    let key = InputEvent::Key {
+                        scancode: 0x01,
+                        extended: false,
+                        down,
+                    };
+                    peer.send_data(Message::Input(key).encode());
+                }
+                lines.push("secure test: sent Escape".into());
+                secure_test = Some((began, 2, shown_now));
+            } else if step == 2 && at >= Duration::from_secs(9) {
+                lines.push(format!(
+                    "secure test: {} pictures shown after Escape",
+                    shown_now - shown_before
+                ));
+                secure_test = Some((began, 3, shown_now));
+            }
+        }
         // Test: a file this side sends is cancelled once its first piece went out.
         if options.cancel_test
             && !cancel_test_done
@@ -1444,6 +1485,9 @@ fn session(
                     for command in &options.commands {
                         peer.send_data(Message::Command(*command).encode());
                         lines.push(format!("sent command: {command:?}"));
+                    }
+                    if options.secure_test && secure_test.is_none() {
+                        secure_test = Some((Instant::now(), 0, u64::from(stats.shown)));
                     }
                 }
                 PeerEvent::StreamOpen(Stream::Files) => report_files(transfers.opened(), lines),

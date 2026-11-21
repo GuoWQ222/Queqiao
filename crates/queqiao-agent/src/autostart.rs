@@ -108,6 +108,31 @@ fn delete(key: &str, value: &str) -> Result<(), String> {
     result.ok().map_err(|e| e.message())
 }
 
+/// Whether the Queqiao service runs on this PC (it then starts Queqiao for the person signed in).
+pub fn service_runs() -> bool {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,
+        SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_STATUS,
+    };
+    unsafe {
+        let Ok(manager) = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) else {
+            return false;
+        };
+        let running = match OpenServiceW(manager, w!("Queqiao"), SERVICE_QUERY_STATUS) {
+            Ok(service) => {
+                let mut status = SERVICE_STATUS::default();
+                let running = QueryServiceStatus(service, &mut status).is_ok()
+                    && status.dwCurrentState == SERVICE_RUNNING;
+                let _ = CloseServiceHandle(service);
+                running
+            }
+            Err(_) => false,
+        };
+        let _ = CloseServiceHandle(manager);
+        running
+    }
+}
+
 /// Claims "the agent of this user session"; an error when another agent has it. Kept for the process's life.
 pub fn claim_single_instance() -> Result<(), String> {
     let mutex: HANDLE =

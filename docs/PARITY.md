@@ -48,7 +48,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 |---|---|
 | Mouse and keyboard by scancode | done (M2) |
 | Windows shortcuts (Win, Alt+Tab, Alt+Esc, Ctrl+Esc, Ctrl+Shift+Esc) to the remote while the session window is in front, or kept local | done (2026-11-21, session window menu) |
-| Ctrl+Alt+Del | partly: "Send Ctrl+Alt+Del" in the session window menu (the controlled PC answers that it needs the service until M5) |
+| Ctrl+Alt+Del | done (2026-11-21): "Send Ctrl+Alt+Del" in the session window menu, through the Queqiao service (without the service the controlled PC answers that it needs it) |
 | Configurable hotkeys, "boss key" | planned |
 | Game mouse: relative movement from raw input, the pointer hidden and held in the window (menu or Ctrl+Alt+M; leaving the window gives it back) | done (2026-11-21) |
 | Local cursor vs remote cursor, game mouse speed | planned |
@@ -81,11 +81,11 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 
 | Feature | Status |
 |---|---|
-| Runs as a service: login screen, UAC prompts, lock screen; unlock with the PC's account password | planned (M5) |
+| Runs as a service: login screen, UAC prompts, lock screen; unlock with the PC's account password | partly (2026-11-21): with the service (`queqiao-service install`), the lock, Ctrl+Alt+Del and UAC screens of the person signed in are shown and worked through its SYSTEM desktop helper during a session (tested with the Ctrl+Alt+Del screen); the sign-in screen before anyone signs in, and a session that starts on the lock screen: planned (M5) |
 | Restart (after confirming, with Windows' 10-second notice) or lock the controlled PC from the session window menu | done (2026-11-21) |
 | Lock the PC when a session ends (tray setting) | done (2026-11-21) |
-| Restart Queqiao remotely | planned (M5) |
-| Start with Windows (at sign-in, with the saved login), stay in the tray, one agent per user session | done (2026-11-21, "Start with Windows" in the tray); before sign-in: M5 (service) |
+| Restart Queqiao remotely | done (2026-11-21, "Restart Queqiao on that PC" in the session window menu; needs the service) |
+| Start with Windows (at sign-in, with the saved login), stay in the tray, one agent per user session | done (2026-11-21, "Start with Windows" in the tray; with the service installed, the service starts Queqiao for whoever signs in and the Run key's copy leaves); before sign-in: M5 (service) |
 | Wake-on-LAN through another Queqiao device of the account on the same network ("Wake up" in the device list) | done (2026-11-21) |
 | Wake-on-LAN set-up check (network card and BIOS settings) | planned |
 | Remote command line: several at once (ConPTY: PowerShell, or cmd), each in a console window; the person at the PC can forbid them in the tray | done (2026-11-21) |

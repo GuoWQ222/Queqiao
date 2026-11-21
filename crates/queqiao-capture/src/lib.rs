@@ -320,6 +320,55 @@ pub fn screens() -> Result<Vec<ScreenSummary>> {
 }
 
 /// The screens attached to the desktop, across all GPUs, with the GPU each belongs to.
+/// A screen's D3D11 device and description, without duplicating it: for a session that starts while another
+/// desktop takes input (the sign-in or lock screen), whose pictures come from the service's desktop helper.
+/// `index` counts screens as [`screens`] does; `None` is the main screen (as [`Duplicator::primary`]).
+pub struct ScreenDevice {
+    pub device: ID3D11Device,
+    pub context: ID3D11DeviceContext,
+    pub info: OutputInfo,
+    pub index: usize,
+}
+
+pub fn screen_device(index: Option<usize>) -> Result<ScreenDevice> {
+    let screens = attached_outputs()?;
+    let count = screens.len();
+    let index = index.unwrap_or_else(|| {
+        screens
+            .iter()
+            .position(|(_, _, desc)| {
+                let origin = desc.DesktopCoordinates;
+                origin.left == 0 && origin.top == 0
+            })
+            .unwrap_or(0)
+    });
+    let Some((adapter, _, desc)) = screens.into_iter().nth(index) else {
+        let text = format!("screen {index} not found ({count} attached)");
+        return Err(Error::new(DXGI_ERROR_NOT_FOUND, text));
+    };
+    let (device, context) = create_device(&adapter)?;
+    let adapter_desc = unsafe { adapter.GetDesc1() }?;
+    let area = desc.DesktopCoordinates;
+    let info = OutputInfo {
+        adapter: wide_to_string(&adapter_desc.Description),
+        output: wide_to_string(&desc.DeviceName),
+        width: (area.right - area.left).max(1) as u32,
+        height: (area.bottom - area.top).max(1) as u32,
+        // Not known without a duplication; the pictures come at most 30 a second anyway.
+        refresh_hz: 60.0,
+        rotation: rotation_degrees(desc.Rotation),
+        method: "none (pictures from the desktop helper)",
+        left: area.left,
+        top: area.top,
+    };
+    Ok(ScreenDevice {
+        device,
+        context,
+        info,
+        index,
+    })
+}
+
 fn attached_outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput, DXGI_OUTPUT_DESC)>> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
     let mut screens = Vec::new();
