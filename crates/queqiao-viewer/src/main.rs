@@ -161,6 +161,8 @@ struct Options {
     mute_speakers: bool,
     /// Cancel a file this side sends once its first piece went out (tests).
     cancel_test: bool,
+    /// Send this file as a clipboard copy (tests: the other side must put it on its clipboard).
+    clipboard_files_test: Option<PathBuf>,
     /// The picture's short side at most this (720, 1080) from the start; 0 or none: the screen's own.
     resolution: Option<u16>,
     /// Show that PC's screen n (from 0) from the start.
@@ -367,6 +369,9 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--game-mouse-test" => options.game_mouse_test = true,
             "--mute-speakers" => options.mute_speakers = true,
             "--cancel-test" => options.cancel_test = true,
+            "--clipboard-files-test" => {
+                options.clipboard_files_test = Some(PathBuf::from(args.next()?))
+            }
             "--resolution" => options.resolution = Some(args.next()?.parse().ok()?),
             "--screen" => options.screen = Some(args.next()?.parse().ok()?),
             "--max-bitrate" => options.max_bitrate = Some(args.next()?.parse().ok()?),
@@ -963,6 +968,12 @@ fn session(
     let (mut images_received, mut images_sent, mut image_test_received) = (0u32, 0u32, false);
     // The image last received: not put on the clipboard again, nor sent back (as for text).
     let mut last_image_in: Option<u64> = None;
+    // Files from the other side's clipboard copies, by copy; they go on this clipboard as they arrive.
+    let mut clip_files: HashMap<u32, Vec<PathBuf>> = HashMap::new();
+    let mut clip_files_set = 0u32;
+    if let Some(path) = &options.clipboard_files_test {
+        let _ = transfers.send_clipboard(std::slice::from_ref(path));
+    }
     for path in &options.send_files {
         let _ = transfers.send(path);
     }
@@ -1266,6 +1277,18 @@ fn session(
                     peer.send_data(Message::ClipboardText(text).encode());
                     clipboard_out += 1;
                 }
+                // Files copied here go over at once (not those that came from the other side).
+                Some(ClipContent::Files(paths)) => {
+                    let own = downloads_folder();
+                    let paths: Vec<PathBuf> = paths
+                        .into_iter()
+                        .filter(|path| !path.starts_with(&own))
+                        .collect();
+                    if !paths.is_empty() && clipboard_size(&paths) <= CLIPBOARD_FILES_LIMIT {
+                        let _ = transfers.send_clipboard(&paths);
+                        lines.push(format!("clipboard files: sending {}", paths.len()));
+                    }
+                }
                 // Queued (compressed) to go on the clipboard stream.
                 Some(ClipContent::Image(image))
                     if last_image_in != Some(image_fingerprint(&image))
@@ -1357,11 +1380,26 @@ fn session(
         for message in transfers.take(peer.room(Stream::Files)) {
             peer.send_stream(Stream::Files, message);
         }
+        let outcomes = transfers.outcomes();
+        for outcome in &outcomes {
+            if let Outcome::Received { batch, top, .. } = outcome
+                && *batch > 0
+            {
+                let files = clip_files.entry(*batch).or_default();
+                if !files.contains(top) {
+                    files.push(top.clone());
+                }
+                clip_files_set += 1;
+                if let Some(clipboard) = &clipboard {
+                    clipboard.set(ClipContent::Files(files.clone()));
+                }
+            }
+        }
+        report_files(outcomes, lines);
         for message in images.take(peer.room(Stream::Clipboard)) {
             peer.send_stream(Stream::Clipboard, message);
         }
         terminals.poll(&peer, lines);
-        report_files(transfers.outcomes(), lines);
 
         let mut event = peer.wait_event(Duration::from_millis(2));
         while let Some(current) = event.take() {
@@ -1667,6 +1705,11 @@ fn session(
         "clipboard images: {images_received} received, {images_sent} sent; test image from the other side received: {}",
         if image_test_received { "yes" } else { "no" }
     ));
+    if clip_files_set > 0 {
+        lines.push(format!(
+            "clipboard files: {clip_files_set} put on the clipboard from the other side"
+        ));
+    }
     for (stage, values) in [
         ("window messages", &mut stats.pump_ms),
         ("frame arrival -> picked up", &mut stats.pickup_ms),
@@ -1935,6 +1978,31 @@ impl TerminalWindows {
     }
 }
 
+/// Files copied to the clipboard go over at once up to this many bytes in all.
+const CLIPBOARD_FILES_LIMIT: u64 = 512 << 20;
+
+/// The size of files and folders (folders counted with everything in them, links not followed).
+fn clipboard_size(paths: &[PathBuf]) -> u64 {
+    let mut total = 0u64;
+    let mut pending: Vec<PathBuf> = paths.to_vec();
+    while let Some(path) = pending.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                pending.extend(entries.flatten().map(|entry| entry.path()));
+            }
+        } else if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        }
+        if total > CLIPBOARD_FILES_LIMIT {
+            break;
+        }
+    }
+    total
+}
+
 /// One report line per finished or failed file.
 fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
     for outcome in outcomes {
@@ -1942,7 +2010,7 @@ fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
             Outcome::Sent { name, size } => {
                 format!("file sent: {name} ({size} bytes, checked by the agent)")
             }
-            Outcome::Received { path, size } => {
+            Outcome::Received { path, size, .. } => {
                 format!(
                     "file received: {} ({size} bytes, SHA-256 checked)",
                     path.display()

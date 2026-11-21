@@ -106,6 +106,9 @@ try {
     $bytes = New-Object byte[] 300000
     $random.GetBytes($bytes)
     [IO.File]::WriteAllBytes((Join-Path $folderToAgent 'inner\deep.bin'), $bytes)
+    # A file copied to the clipboard on the viewer's side (allowed session).
+    $clipFile = Join-Path $Out 'queqiao-clipboard-file.txt'
+    [IO.File]::WriteAllText($clipFile, 'queqiao clipboard file test')
     # label, QUEQIAO_FORCE, extra agent options, what the agent's report must say, what the viewer's must say,
     # whether both runs must pass (a declined session passes neither). Later options win, so an extra --seconds shortens the agent's run.
     $runs = @(
@@ -128,7 +131,7 @@ try {
         # A command line on that PC, in a window of its own that closes by itself.
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
-        if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`"" }
+        if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`" --clipboard-files-test `"$clipFile`"" }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
         if ($soundTest) {
             $agentArgs += " --sound-device `"$AgentSoundDevice`""
@@ -191,6 +194,13 @@ try {
                 $wanted = if ($program -eq 'agent') { @('^privacy test: PASS', '^privacy: the session banner is above the dark screen: yes', '^command from the viewer: bitrate: up to 3\.0 Mbit/s', 'highest allowed 3\.0 Mbit/s') } else { @("^notice from that PC: that PC's screen is dark") }
                 foreach ($pattern in $wanted) {
                     if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "$label $program (expected '$pattern')" }
+                }
+                # Copied files: the agent's clipboard holds the file that came (then it is removed).
+                if ($program -eq 'agent') {
+                    foreach ($pattern in @('^clipboard files: 1 put on the clipboard from the other side', '^clipboard now holds: .*queqiao-clipboard-file\.txt')) {
+                        if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "$label agent (expected '$pattern')" }
+                    }
+                    Remove-Item -LiteralPath "$env:USERPROFILE\Downloads\Queqiao\queqiao-clipboard-file.txt" -Force -ErrorAction SilentlyContinue
                 }
                 # The folder: both files arrive inside it (the subfolder too) and match; then they are removed.
                 if ($program -eq 'agent') {

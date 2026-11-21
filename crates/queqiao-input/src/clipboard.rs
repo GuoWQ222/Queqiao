@@ -17,7 +17,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
+use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
+use windows::Win32::UI::Shell::{DROPFILES, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
@@ -31,6 +32,8 @@ const MAX_IMAGE: usize = 64 << 20;
 pub enum ClipContent {
     Text(String),
     Image(Vec<u8>),
+    /// Files and folders copied in Explorer (CF_HDROP).
+    Files(Vec<std::path::PathBuf>),
 }
 
 impl ClipContent {
@@ -47,6 +50,7 @@ impl std::hash::Hash for ClipContent {
         match self {
             ClipContent::Text(text) => (0u8, text).hash(state),
             ClipContent::Image(bytes) => (1u8, bytes).hash(state),
+            ClipContent::Files(paths) => (2u8, paths).hash(state),
         }
     }
 }
@@ -203,8 +207,10 @@ extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_CLIPBOARDUPDATE => {
-            let content = read_text(Some(hwnd))
-                .map(ClipContent::Text)
+            // Files first: Explorer's copy may carry other formats too.
+            let content = read_files(Some(hwnd))
+                .map(ClipContent::Files)
+                .or_else(|| read_text(Some(hwnd)).map(ClipContent::Text))
                 .or_else(|| read_image(Some(hwnd)).map(ClipContent::Image));
             if let Some(content) = content {
                 let print = content.fingerprint();
@@ -229,6 +235,9 @@ extern "system" fn window_proc(
                 let placed = match &content {
                     ClipContent::Text(text) => write_text(hwnd, text),
                     ClipContent::Image(bytes) => write_global(hwnd, u32::from(CF_DIB.0), bytes),
+                    ClipContent::Files(paths) => {
+                        write_global(hwnd, u32::from(CF_HDROP.0), &drop_files(paths))
+                    }
                 };
                 if placed {
                     STATE.with_borrow_mut(|state| {
@@ -311,6 +320,60 @@ pub fn read_image(owner: Option<HWND>) -> Option<Vec<u8>> {
     })();
     let _ = unsafe { CloseClipboard() };
     image
+}
+
+/// The files and folders on the clipboard (copied in Explorer), if any.
+pub fn read_files(owner: Option<HWND>) -> Option<Vec<std::path::PathBuf>> {
+    if unsafe { IsClipboardFormatAvailable(u32::from(CF_HDROP.0)) }.is_err() || !open(owner) {
+        return None;
+    }
+    let files = (|| {
+        let handle = unsafe { GetClipboardData(u32::from(CF_HDROP.0)) }.ok()?;
+        let drop = HDROP(handle.0);
+        let count = unsafe { DragQueryFileW(drop, u32::MAX, None) };
+        let mut paths = Vec::new();
+        for index in 0..count.min(10_000) {
+            let length = unsafe { DragQueryFileW(drop, index, None) } as usize;
+            let mut buffer = vec![0u16; length + 1];
+            let copied = unsafe { DragQueryFileW(drop, index, Some(&mut buffer)) } as usize;
+            paths.push(std::path::PathBuf::from(String::from_utf16_lossy(
+                &buffer[..copied.min(length)],
+            )));
+        }
+        (!paths.is_empty()).then_some(paths)
+    })();
+    let _ = unsafe { CloseClipboard() };
+    files
+}
+
+/// CF_HDROP's memory: a DROPFILES header, then each path (UTF-16) ending in a zero, then one more zero.
+fn drop_files(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    let header = size_of::<DROPFILES>();
+    let mut bytes = vec![0u8; header];
+    let dropfiles = DROPFILES {
+        pFiles: header as u32,
+        fWide: true.into(),
+        ..Default::default()
+    };
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (&raw const dropfiles).cast::<u8>(),
+            bytes.as_mut_ptr(),
+            header,
+        )
+    };
+    for path in paths {
+        for unit in path
+            .as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(Some(0))
+        {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+    }
+    bytes.extend_from_slice(&[0, 0]);
+    bytes
 }
 
 fn write_text(owner: HWND, text: &str) -> bool {

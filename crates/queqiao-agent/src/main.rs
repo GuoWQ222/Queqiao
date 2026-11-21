@@ -866,6 +866,31 @@ fn new_help_code() -> String {
         .collect()
 }
 
+/// Files copied to the clipboard go over at once up to this many bytes in all.
+const CLIPBOARD_FILES_LIMIT: u64 = 512 << 20;
+
+/// The size of files and folders (folders counted with everything in them, links not followed).
+fn clipboard_size(paths: &[PathBuf]) -> u64 {
+    let mut total = 0u64;
+    let mut pending: Vec<PathBuf> = paths.to_vec();
+    while let Some(path) = pending.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&path) {
+                pending.extend(entries.flatten().map(|entry| entry.path()));
+            }
+        } else if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        }
+        if total > CLIPBOARD_FILES_LIMIT {
+            break;
+        }
+    }
+    total
+}
+
 /// One report line per finished or failed file.
 fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
     for outcome in outcomes {
@@ -873,7 +898,7 @@ fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
             Outcome::Sent { name, size } => {
                 format!("file sent: {name} ({size} bytes, checked by the viewer)")
             }
-            Outcome::Received { path, size } => {
+            Outcome::Received { path, size, .. } => {
                 format!(
                     "file received: {} ({size} bytes, SHA-256 checked)",
                     path.display()
@@ -1071,6 +1096,10 @@ fn session(
     let (mut images_received, mut images_sent, mut image_test_received) = (0u32, 0u32, false);
     // The image last received: not put on the clipboard again, nor sent back (as for text).
     let mut last_image_in: Option<u64> = None;
+    // Files from the other side's clipboard copies, by copy; they go on this clipboard as they arrive.
+    let mut clip_files: std::collections::HashMap<u32, Vec<PathBuf>> =
+        std::collections::HashMap::new();
+    let mut clip_files_set = 0u32;
     // Remote command lines (while the person at this PC allows them).
     let mut terminals = Terminals::new(allow_terminal);
     for path in &options.send_files {
@@ -1470,6 +1499,22 @@ fn session(
         for message in transfers.take(peer.room(Stream::Files)) {
             peer.send_stream(Stream::Files, message);
         }
+        let outcomes = transfers.outcomes();
+        for outcome in &outcomes {
+            if let Outcome::Received { batch, top, .. } = outcome
+                && *batch > 0
+            {
+                let files = clip_files.entry(*batch).or_default();
+                if !files.contains(top) {
+                    files.push(top.clone());
+                }
+                clip_files_set += 1;
+                if let Some(clipboard) = &clipboard {
+                    clipboard.set(ClipContent::Files(files.clone()));
+                }
+            }
+        }
+        report_files(outcomes, lines);
         for message in images.take(peer.room(Stream::Clipboard)) {
             peer.send_stream(Stream::Clipboard, message);
         }
@@ -1479,7 +1524,7 @@ fn session(
             }
             peer.send_stream(Stream::Terminal, message.encode());
         }
-        report_files(transfers.outcomes(), lines);
+
         if privacy_check_due {
             privacy_check_due = false;
             lines.push(privacy_check(&mut duplicator, ui));
@@ -1497,6 +1542,18 @@ fn session(
                 {
                     peer.send_data(Message::ClipboardText(text).encode());
                     clipboard_stats.sent += 1;
+                }
+                // Files copied here go over at once (not those that came from the other side).
+                Some(ClipContent::Files(paths)) => {
+                    let own = downloads_folder();
+                    let paths: Vec<PathBuf> = paths
+                        .into_iter()
+                        .filter(|path| !path.starts_with(&own))
+                        .collect();
+                    if !paths.is_empty() && clipboard_size(&paths) <= CLIPBOARD_FILES_LIMIT {
+                        let _ = transfers.send_clipboard(&paths);
+                        lines.push(format!("clipboard files: sending {}", paths.len()));
+                    }
                 }
                 // Queued (compressed) to go on the clipboard stream.
                 Some(ClipContent::Image(image))
@@ -1607,6 +1664,16 @@ fn session(
         summary(&mut stats.agent_ms)
     ));
     lines.push(clipboard_stats.line());
+    if clip_files_set > 0 {
+        lines.push(format!(
+            "clipboard files: {clip_files_set} put on the clipboard from the other side"
+        ));
+        // What the clipboard holds now (the watcher puts them there on its own thread).
+        std::thread::sleep(Duration::from_millis(300));
+        let held = queqiao_input::clipboard_files(None).unwrap_or_default();
+        let names: Vec<String> = held.iter().map(|path| path.display().to_string()).collect();
+        lines.push(format!("clipboard now holds: {}", names.join(", ")));
+    }
     lines.push(format!(
         "clipboard images: {images_received} received, {images_sent} sent; test image from the other side received: {}",
         if image_test_received { "yes" } else { "no" }

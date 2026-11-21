@@ -7,7 +7,9 @@
 
 mod clipboard;
 
-pub use clipboard::{ClipContent, Clipboard, read_text as clipboard_text};
+pub use clipboard::{
+    ClipContent, Clipboard, read_files as clipboard_files, read_text as clipboard_text,
+};
 
 use queqiao_core::protocol::{InputEvent, MouseButton};
 use windows::Win32::Foundation::POINT;

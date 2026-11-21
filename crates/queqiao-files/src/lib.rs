@@ -65,6 +65,11 @@ pub enum FileMessage {
         id: u32,
         reason: String,
     },
+    /// File `id` (offered next) belongs to clipboard copy `batch`: once received it goes on the clipboard.
+    Batch {
+        id: u32,
+        batch: u32,
+    },
 }
 
 const OFFER: u8 = 1;
@@ -75,6 +80,7 @@ const DONE: u8 = 5;
 const RECEIVED: u8 = 6;
 const CANCEL: u8 = 7;
 const ABORT: u8 = 8;
+const BATCH: u8 = 9;
 
 impl FileMessage {
     pub fn encode(&self) -> Vec<u8> {
@@ -90,6 +96,11 @@ impl FileMessage {
                 out.extend_from_slice(&id.to_le_bytes());
                 out.extend_from_slice(&size.to_le_bytes());
                 text(&mut out, name);
+            }
+            FileMessage::Batch { id, batch } => {
+                out.push(BATCH);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&batch.to_le_bytes());
             }
             FileMessage::Accept { id } => {
                 out.push(ACCEPT);
@@ -140,6 +151,10 @@ impl FileMessage {
                 name: text(after_id.get(8..)?)?,
             },
             ACCEPT => FileMessage::Accept { id },
+            BATCH if after_id.len() == 4 => FileMessage::Batch {
+                id,
+                batch: u32::from_le_bytes(after_id.try_into().ok()?),
+            },
             REJECT => FileMessage::Reject {
                 id,
                 reason: text(after_id)?,
@@ -175,15 +190,29 @@ pub fn for_receiver(message: &FileMessage) -> bool {
             | FileMessage::Chunk { .. }
             | FileMessage::Done { .. }
             | FileMessage::Cancel { .. }
+            | FileMessage::Batch { .. }
     )
 }
 
 /// What happened to a file, for the program's report and display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Sent { name: String, size: u64 },
-    Received { path: PathBuf, size: u64 },
-    Failed { name: String, reason: String },
+    Sent {
+        name: String,
+        size: u64,
+    },
+    /// `batch` > 0: part of a clipboard copy; `top` is what goes on the clipboard (the file, or the folder it
+    /// came in).
+    Received {
+        path: PathBuf,
+        size: u64,
+        batch: u32,
+        top: PathBuf,
+    },
+    Failed {
+        name: String,
+        reason: String,
+    },
 }
 
 #[derive(PartialEq, Eq)]
@@ -225,18 +254,29 @@ pub struct Outbox {
     files: VecDeque<Outgoing>,
     messages: Vec<FileMessage>,
     outcomes: Vec<Outcome>,
+    /// The clipboard copy the files being added belong to (0: none).
+    batch: u32,
 }
 
 impl Outbox {
     /// Queues `path` (a file) and offers it.
     pub fn add(&mut self, path: &Path) -> Result<(), String> {
+        self.add_in(path, 0)
+    }
+
+    /// As `add`, the file (or every file of the folder) marked as part of clipboard copy `batch` (0: none).
+    pub fn add_in(&mut self, path: &Path, batch: u32) -> Result<(), String> {
         let name = path
             .file_name()
             .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
-        if path.is_dir() {
-            return self.add_folder(path, &name);
-        }
-        self.add_named(path, name)
+        self.batch = batch;
+        let result = if path.is_dir() {
+            self.add_folder(path, &name)
+        } else {
+            self.add_named(path, name)
+        };
+        self.batch = 0;
+        result
     }
 
     /// Every file in `folder` (and below), offered as "<folder name>/<path inside>"; links are not followed.
@@ -277,6 +317,12 @@ impl Outbox {
         }
         self.next_id += 1;
         let id = self.next_id;
+        if self.batch > 0 {
+            self.messages.push(FileMessage::Batch {
+                id,
+                batch: self.batch,
+            });
+        }
         self.messages.push(FileMessage::Offer {
             id,
             name: name.clone(),
@@ -462,6 +508,8 @@ pub struct Inbox {
     allow: bool,
     files: HashMap<u32, Incoming>,
     outcomes: Vec<Outcome>,
+    /// Clipboard copy of each announced file id (Batch messages).
+    batches: HashMap<u32, u32>,
 }
 
 impl Inbox {
@@ -472,6 +520,7 @@ impl Inbox {
             allow,
             files: HashMap::new(),
             outcomes: Vec::new(),
+            batches: HashMap::new(),
         }
     }
 
@@ -520,9 +569,19 @@ impl Inbox {
                 let target = unique(&incoming.target);
                 match std::fs::rename(&incoming.part, &target) {
                     Ok(()) => {
+                        // What goes on the clipboard: the file itself, or the folder it came in.
+                        let relative = safe_relative_path(&incoming.name);
+                        let top = match relative.components().next() {
+                            Some(first) if relative.components().count() > 1 => {
+                                self.folder.join(first)
+                            }
+                            _ => target.clone(),
+                        };
                         self.outcomes.push(Outcome::Received {
                             path: target,
                             size: incoming.size,
+                            batch: self.batches.remove(&id).unwrap_or(0),
+                            top,
                         });
                         vec![FileMessage::Received { id }]
                     }
@@ -538,6 +597,13 @@ impl Inbox {
                         }]
                     }
                 }
+            }
+            FileMessage::Batch { id, batch } => {
+                // Kept for a bounded number of files (the other side's word).
+                if self.batches.len() < 10_000 {
+                    self.batches.insert(id, batch);
+                }
+                Vec::new()
             }
             FileMessage::Cancel { id, reason } => {
                 if let Some(incoming) = self.files.remove(&id) {
@@ -668,7 +734,9 @@ pub struct Transfers {
     outbox: Outbox,
     inbox: Inbox,
     open: bool,
-    queued: Vec<PathBuf>,
+    /// Files to send once the channel is open, with their clipboard copy (0: none).
+    queued: Vec<(PathBuf, u32)>,
+    last_batch: u32,
 }
 
 impl Transfers {
@@ -679,6 +747,7 @@ impl Transfers {
             inbox: Inbox::new(folder, allow_receive),
             open: false,
             queued: Vec::new(),
+            last_batch: 0,
         }
     }
 
@@ -686,8 +755,8 @@ impl Transfers {
     pub fn opened(&mut self) -> Vec<Outcome> {
         self.open = true;
         let mut failed = Vec::new();
-        for path in std::mem::take(&mut self.queued) {
-            if let Err(reason) = self.outbox.add(&path) {
+        for (path, batch) in std::mem::take(&mut self.queued) {
+            if let Err(reason) = self.outbox.add_in(&path, batch) {
                 failed.push(Outcome::Failed {
                     name: path.display().to_string(),
                     reason,
@@ -699,10 +768,24 @@ impl Transfers {
 
     /// Sends `path` (now, or once the channel is open).
     pub fn send(&mut self, path: &Path) -> Result<(), String> {
+        self.send_in(path, 0)
+    }
+
+    /// Sends `paths` as one clipboard copy: once they arrived, the other side's clipboard holds them.
+    pub fn send_clipboard(&mut self, paths: &[PathBuf]) -> Result<(), String> {
+        self.last_batch = self.last_batch.wrapping_add(1).max(1);
+        let batch = self.last_batch;
+        for path in paths {
+            self.send_in(path, batch)?;
+        }
+        Ok(())
+    }
+
+    fn send_in(&mut self, path: &Path, batch: u32) -> Result<(), String> {
         if self.open {
-            self.outbox.add(path)
+            self.outbox.add_in(path, batch)
         } else {
-            self.queued.push(path.to_path_buf());
+            self.queued.push((path.to_path_buf(), batch));
             Ok(())
         }
     }
@@ -929,7 +1012,7 @@ mod tests {
         let outcomes = inbox.take_outcomes();
         assert_eq!(outcomes.len(), 2, "{outcomes:?}");
         for outcome in &outcomes {
-            let Outcome::Received { path, size } = outcome else {
+            let Outcome::Received { path, size, .. } = outcome else {
                 panic!("{outcome:?}");
             };
             assert_eq!(*size, content.len() as u64);
