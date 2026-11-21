@@ -200,6 +200,8 @@ impl Options {
 struct Stats {
     received: u32,
     lost: u32,
+    /// Frames before the first picture that were not keyframes (each asks the agent for one).
+    waiting_for_keyframe: u32,
     decoded: u32,
     shown: u32,
     bytes: usize,
@@ -1579,6 +1581,14 @@ fn session(
                     stats.received += 1;
                     stats.lost += u32::from(!contiguous);
                     stats.bytes += data.len();
+                    // Until the first picture a frame that is not a keyframe shows nothing, and no loss tells the agent:
+                    // over the internet it finished connecting seconds before this side, and its first keyframe was
+                    // dropped here (2026-11-21: the first picture after 19 s). Ask for one (the transport spaces the
+                    // requests 600 ms apart).
+                    if stats.shown == 0 && !queqiao_codec::nal_types(&data).contains(&5) {
+                        stats.waiting_for_keyframe += 1;
+                        peer.request_keyframe();
+                    }
                     let decode_start = Instant::now();
                     decoder
                         .decode(&data, time_90khz as i64, &mut decoded)
@@ -1717,6 +1727,12 @@ fn session(
         stats.decoded,
         stats.shown
     ));
+    if stats.waiting_for_keyframe > 0 {
+        lines.push(format!(
+            "before the first picture: {} frames without a keyframe (a keyframe asked for)",
+            stats.waiting_for_keyframe
+        ));
+    }
     lines.push(format!("decode, ms: {}", summary(&mut stats.decode_ms)));
     lines.push(format!(
         "network round trip, ms: {}",

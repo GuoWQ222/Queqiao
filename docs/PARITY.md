@@ -14,7 +14,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Account, devices on the account, presence, connect by double-click | done (M3) |
 | Saved login, log out, remove (unbind) a device from the account | done (removing: "More..." in the device list, 2026-11-21) |
 | Device remarks (a name of your own) and favourites (listed first), kept on this PC | done (2026-11-21, "More..." in the device list) |
-| Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); past a VPN or proxy tunnel holding the default route (Clash/Mihomo): a socket and candidates on every uplink, the server's UDP on its own address (2026-11-21; the internet test itself is still to be run); manual "switch to relay" while connected: planned |
+| Direct on the LAN, through NAT (STUN), through the relay (TURN), forced relay | done (M4); past a VPN or proxy tunnel holding the default route (Clash/Mihomo): a socket and candidates on every uplink, the server's UDP on its own address (2026-11-21); tested over the internet 2026-11-21 between the PC (public address) and the laptop behind its campus network and proxy: direct 20 ms median screen change -> shown, relayed 238 ms, input 7/7 both; manual "switch to relay" while connected: planned |
 | Help someone else: connect to a device of another account with its help ID (9 digits) and a one-use code (8 characters, 40 bits) that the person there reads out from "Let someone help me..."; "Help someone..." in the device list | done (2026-11-21) |
 | Help: asking without a code (the person there approves in a prompt; only while they take help requests, one ask at a time) | done (2026-11-21) |
 | Help: an own fixed code, invitation links, the code read from the clipboard | planned |
