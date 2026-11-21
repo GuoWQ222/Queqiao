@@ -94,7 +94,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 
 | Feature | Status |
 |---|---|
-| Crash reports kept on the PC (what panicked, where, the call stack; newest 20 in %APPDATA%Queqiaocrashes) | done (2026-11-21); sending them anywhere: not without the user's say |
+| Crash reports kept on the PC (what panicked, where, the call stack; newest 20 in %APPDATA%\Queqiao\crashes) | done (2026-11-21); sending them anywhere: not without the user's say |
 | Installer, self-update with rollback | planned (M7) |
 | Languages: Simplified Chinese and English, from Windows' display language (QUEQIAO_LANG=en/zh decides instead) | done (2026-11-21) for everything people click and read; the controlled PC's short notices to the viewer are still English |
 | Mobile and macOS clients, phone as an extra screen | later (the first version is Windows only) |
