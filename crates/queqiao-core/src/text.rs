@@ -166,6 +166,12 @@ const CHINESE: &[(&str, &str)] = &[
     ("Open a command line on that PC", "在那台电脑上打开命令行"),
     ("Full screen (Ctrl+Alt+Enter)", "全屏（Ctrl+Alt+Enter）"),
     ("Game mouse (Ctrl+Alt+M)", "游戏鼠标（Ctrl+Alt+M）"),
+    ("Always on top", "窗口置顶"),
+    ("Custom bitrate...", "自定义码率……"),
+    (
+        "Highest bitrate in Mbit/s (0: as the quality setting says):",
+        "最高码率（Mbit/s，0 表示按画质设置）：",
+    ),
     (
         "Send Windows shortcuts to that PC (Win, Alt+Tab)",
         "把 Windows 快捷键发给那台电脑（Win、Alt+Tab）",

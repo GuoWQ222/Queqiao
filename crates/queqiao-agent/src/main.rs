@@ -756,6 +756,7 @@ fn run_command(command: Command, dry_run: bool) -> String {
         | Command::MuteSpeakers(_)
         | Command::Resolution(_)
         | Command::Screen(_)
+        | Command::MaxBitrate(_)
         | Command::Picture { .. } => "changed".into(),
     }
 }
@@ -999,6 +1000,8 @@ fn session(
     let mut size_bitrate = config.bitrate;
     // The quality the viewer chose (a share of the size-based bitrate), kept when the size changes.
     let mut quality_factor = 1.0f64;
+    // A bitrate ceiling the viewer typed in (bit/s), instead of the preset's share of the size-based one.
+    let mut custom_bitrate: Option<u32> = None;
     let mut max_bitrate = size_bitrate;
     let mut last_estimate = START_BITRATE;
     peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
@@ -1169,8 +1172,9 @@ fn session(
                         };
                         interval = Duration::from_secs_f64(1.0 / f64::from(frames));
                         quality_factor = quality.bitrate_factor();
-                        max_bitrate =
-                            ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE);
+                        max_bitrate = custom_bitrate.unwrap_or(
+                            ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE),
+                        );
                         peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
                         let target = adapted_bitrate(last_estimate, max_bitrate);
                         let changed = encoder.set_bitrate(target).is_ok();
@@ -1224,8 +1228,10 @@ fn session(
                                 encoder = new;
                                 force_keyframe = true;
                                 size_bitrate = encoder.config().bitrate;
-                                max_bitrate = ((f64::from(size_bitrate) * quality_factor) as u32)
-                                    .max(MIN_BITRATE);
+                                max_bitrate = custom_bitrate.unwrap_or(
+                                    ((f64::from(size_bitrate) * quality_factor) as u32)
+                                        .max(MIN_BITRATE),
+                                );
                                 peer.set_bitrate_range(
                                     u64::from(MIN_BITRATE),
                                     u64::from(max_bitrate),
@@ -1276,8 +1282,9 @@ fn session(
                             screen_index = usize::from(index);
                         }
                         size_bitrate = encoder.config().bitrate;
-                        max_bitrate =
-                            ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE);
+                        max_bitrate = custom_bitrate.unwrap_or(
+                            ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE),
+                        );
                         peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
                         let _ = encoder.set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
                         // The screen's first picture goes at once.
@@ -1299,6 +1306,28 @@ fn session(
                                 screen_index + 1
                             )
                         };
+                        lines.push(format!("command from the viewer: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::MaxBitrate(kbit))) => {
+                        // 0.5 to 200 Mbit/s; 0 goes back to the preset.
+                        custom_bitrate = (kbit > 0).then(|| kbit.clamp(500, 200_000) * 1000);
+                        max_bitrate = custom_bitrate.unwrap_or(
+                            ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE),
+                        );
+                        peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
+                        let changed = encoder
+                            .set_bitrate(adapted_bitrate(last_estimate, max_bitrate))
+                            .is_ok();
+                        let notice = format!(
+                            "bitrate: up to {:.1} Mbit/s{}",
+                            f64::from(max_bitrate) / 1e6,
+                            if changed {
+                                ""
+                            } else {
+                                " (the encoder keeps its bitrate)"
+                            }
+                        );
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
                     }

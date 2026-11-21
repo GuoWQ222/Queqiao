@@ -44,6 +44,8 @@ const MENU_TERMINAL: u16 = 0x1060;
 const MENU_GAME_MOUSE: u16 = 0x1070;
 const MENU_MUTE_SPEAKERS: u16 = 0x1080;
 const MENU_SHORTCUTS: u16 = 0x1090;
+const MENU_ON_TOP: u16 = 0x10A0;
+const MENU_CUSTOM_BITRATE: u16 = 0x10B0;
 /// The other PC's screens: menu ids from here, 16 apart.
 const MENU_SCREENS: u16 = 0x1400;
 /// Resolution: that screen's own, or its short side at most 1080 or 720 pixels.
@@ -155,6 +157,8 @@ struct Options {
     resolution: Option<u16>,
     /// Show that PC's screen n (from 0) from the start.
     screen: Option<u8>,
+    /// A bitrate ceiling (kbit/s) to send at the start (tests; people use "Custom bitrate...").
+    max_bitrate: Option<u32>,
     /// Picture settings to send at the start: frames per second at most (0: the screen's) and quality.
     picture: Option<(u8, Quality)>,
     /// Help someone of another account: their help ID and code (tests; people use "Help someone...").
@@ -356,6 +360,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--mute-speakers" => options.mute_speakers = true,
             "--resolution" => options.resolution = Some(args.next()?.parse().ok()?),
             "--screen" => options.screen = Some(args.next()?.parse().ok()?),
+            "--max-bitrate" => options.max_bitrate = Some(args.next()?.parse().ok()?),
             "--help-id" => options.help_id = Some(args.next()?),
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--picture" => {
@@ -966,6 +971,8 @@ fn session(
         (MENU_PRIVACY, tr("Darken that PC's screen")),
         (MENU_TERMINAL, tr("Open a command line on that PC")),
         (MENU_FULL_SCREEN, tr("Full screen (Ctrl+Alt+Enter)")),
+        (MENU_ON_TOP, tr("Always on top")),
+        (MENU_CUSTOM_BITRATE, tr("Custom bitrate...")),
         (MENU_GAME_MOUSE, tr("Game mouse (Ctrl+Alt+M)")),
         (
             MENU_SHORTCUTS,
@@ -976,6 +983,7 @@ fn session(
     // Windows shortcuts go to that PC while the window is in front (on unless turned off).
     window.set_send_shortcuts(true);
     window.check_menu_item(MENU_SHORTCUTS, window.is_sending_shortcuts());
+    let mut on_top = false;
     let mut speakers_muted = options.mute_speakers;
     window.check_menu_item(MENU_MUTE_SPEAKERS, speakers_muted);
     let fps_items: Vec<(u16, &str)> = MENU_FPS
@@ -1081,6 +1089,19 @@ fn session(
                         privacy_on = !privacy_on;
                         window.check_menu_item(MENU_PRIVACY, privacy_on);
                         Some(if privacy_on { Command::PrivacyOn } else { Command::PrivacyOff })
+                    }
+                    MENU_ON_TOP => {
+                        on_top = !on_top;
+                        window.set_always_on_top(on_top);
+                        window.check_menu_item(MENU_ON_TOP, on_top);
+                        None
+                    }
+                    MENU_CUSTOM_BITRATE => {
+                        let typed = ask_text(tr("Queqiao"), tr("Highest bitrate in Mbit/s (0: as the quality setting says):"), "");
+                        typed
+                            .and_then(|text| text.trim().replace(',', ".").parse::<f64>().ok())
+                            .filter(|mbit| mbit.is_finite() && *mbit >= 0.0)
+                            .map(|mbit| Command::MaxBitrate((mbit * 1000.0).min(f64::from(u32::MAX)) as u32))
                     }
                     MENU_SHORTCUTS => {
                         let on = !window.is_sending_shortcuts();
@@ -1284,6 +1305,9 @@ fn session(
                     }
                     if let Some(index) = options.screen {
                         peer.send_data(Message::Command(Command::Screen(index)).encode());
+                    }
+                    if let Some(kbit) = options.max_bitrate {
+                        peer.send_data(Message::Command(Command::MaxBitrate(kbit)).encode());
                     }
                     if options.picture.is_some() {
                         peer.send_data(

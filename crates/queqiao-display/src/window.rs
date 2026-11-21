@@ -203,6 +203,22 @@ impl Window {
         GAME_MOUSE.get()
     }
 
+    /// Above all other windows (true) or not.
+    pub fn set_always_on_top(&self, on: bool) {
+        let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
+        let _ = unsafe {
+            SetWindowPos(
+                self.hwnd,
+                Some(after),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
+    }
+
     pub fn is_full_screen(&self) -> bool {
         self.restore.is_some()
     }

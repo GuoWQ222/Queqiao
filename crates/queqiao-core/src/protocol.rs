@@ -103,6 +103,8 @@ pub enum Command {
     Resolution(u16),
     /// Show screen `n` (counted as in `Message::Screens`).
     Screen(u8),
+    /// The highest bitrate, kbit/s (instead of a quality preset); 0 goes back to the preset.
+    MaxBitrate(u32),
 }
 
 /// How the bitrate is spent: fewer bits (slow networks), the size-based amount, or twice that (sharp text).
@@ -210,6 +212,10 @@ impl Message {
                         out.extend_from_slice(&short.to_le_bytes());
                     }
                     Command::Screen(index) => out.extend([11, index]),
+                    Command::MaxBitrate(kbit) => {
+                        out.push(12);
+                        out.extend_from_slice(&kbit.to_le_bytes());
+                    }
                     Command::Picture { fps, quality } => out.extend([
                         8,
                         fps,
@@ -307,6 +313,7 @@ impl Message {
                 7 => Command::PrivacyOff,
                 10 => Command::Resolution(u16::from_le_bytes(rest.get(1..3)?.try_into().ok()?)),
                 11 => Command::Screen(*rest.get(1)?),
+                12 => Command::MaxBitrate(u32::from_le_bytes(rest.get(1..5)?.try_into().ok()?)),
                 9 => Command::MuteSpeakers(match rest.get(1)? {
                     0 => false,
                     1 => true,
@@ -393,6 +400,7 @@ mod tests {
             Message::Command(Command::Resolution(720)),
             Message::Command(Command::Resolution(0)),
             Message::Command(Command::Screen(1)),
+            Message::Command(Command::MaxBitrate(50_000)),
             Message::Screens {
                 current: 1,
                 sizes: vec![(2560, 1440), (1920, 1080)],

@@ -120,7 +120,7 @@ try {
         # A command line on that PC, in a window of its own that closes by itself.
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
-        if ($extra -like '*--privacy-test*') { $viewerArgs += ' --privacy' }
+        if ($extra -like '*--privacy-test*') { $viewerArgs += ' --privacy --max-bitrate 3000' }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
         if ($soundTest) {
             $agentArgs += " --sound-device `"$AgentSoundDevice`""
@@ -173,7 +173,7 @@ try {
                 }
             }
             if ($extra -like '*--privacy-test*') {
-                $wanted = if ($program -eq 'agent') { @('^privacy test: PASS', '^privacy: the session banner is above the dark screen: yes') } else { @("^notice from that PC: that PC's screen is dark") }
+                $wanted = if ($program -eq 'agent') { @('^privacy test: PASS', '^privacy: the session banner is above the dark screen: yes', '^command from the viewer: bitrate: up to 3\.0 Mbit/s', 'highest allowed 3\.0 Mbit/s') } else { @("^notice from that PC: that PC's screen is dark") }
                 foreach ($pattern in $wanted) {
                     if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "$label $program (expected '$pattern')" }
                 }
