@@ -62,6 +62,24 @@ pub struct Duplicator {
     info: OutputInfo,
     holding_frame: bool,
     staging: Option<(ID3D11Texture2D, (u32, u32))>,
+    /// A new pointer shape since it was last taken.
+    pointer_shape: Option<PointerShapeRaw>,
+    /// The pointer's visibility as last seen, and whether it changed since it was last taken.
+    pointer_visible: Option<bool>,
+    pointer_visible_changed: bool,
+}
+
+/// The pointer's shape as Windows gives it (DXGI_OUTDUPL_POINTER_SHAPE_INFO): `kind` 1 monochrome, 2 colour,
+/// 4 masked colour; rows `pitch` bytes apart; for monochrome, `height` counts both masks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PointerShapeRaw {
+    pub kind: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pitch: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
+    pub data: Vec<u8>,
 }
 
 impl Duplicator {
@@ -120,6 +138,9 @@ impl Duplicator {
             info,
             holding_frame: false,
             staging: None,
+            pointer_shape: None,
+            pointer_visible: None,
+            pointer_visible_changed: false,
         })
     }
 
@@ -205,6 +226,39 @@ impl Duplicator {
             Err(error) => return Err(error),
         }
         self.holding_frame = true;
+        // The pointer: its visibility when it changed, its shape when there is a new one.
+        if info.LastMouseUpdateTime != 0 {
+            let visible = info.PointerPosition.Visible.as_bool();
+            if self.pointer_visible != Some(visible) {
+                self.pointer_visible = Some(visible);
+                self.pointer_visible_changed = true;
+            }
+        }
+        if info.PointerShapeBufferSize > 0 {
+            let mut buffer = vec![0u8; info.PointerShapeBufferSize as usize];
+            let mut required = 0u32;
+            let mut shape = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+            let fetched = unsafe {
+                dup.GetFramePointerShape(
+                    info.PointerShapeBufferSize,
+                    buffer.as_mut_ptr().cast(),
+                    &mut required,
+                    &mut shape,
+                )
+            };
+            if fetched.is_ok() {
+                buffer.truncate(required as usize);
+                self.pointer_shape = Some(PointerShapeRaw {
+                    kind: shape.Type,
+                    width: shape.Width,
+                    height: shape.Height,
+                    pitch: shape.Pitch,
+                    hot_x: shape.HotSpot.x,
+                    hot_y: shape.HotSpot.y,
+                    data: buffer,
+                });
+            }
+        }
         let resource = resource.ok_or_else(|| Error::from(E_UNEXPECTED))?;
         Ok(Some(Frame {
             texture: resource.cast()?,
@@ -212,6 +266,22 @@ impl Duplicator {
             acquired_qpc,
             accumulated: info.AccumulatedFrames,
         }))
+    }
+
+    /// A new pointer shape since the last call (Windows gives one when it changes, and after duplication starts
+    /// once the pointer moves).
+    pub fn take_pointer_shape(&mut self) -> Option<PointerShapeRaw> {
+        self.pointer_shape.take()
+    }
+
+    /// The pointer's visibility when it changed since the last call.
+    pub fn take_pointer_visible(&mut self) -> Option<bool> {
+        if self.pointer_visible_changed {
+            self.pointer_visible_changed = false;
+            self.pointer_visible
+        } else {
+            None
+        }
     }
 
     /// Gives the current frame back to Windows (the next `acquire` does this by itself).

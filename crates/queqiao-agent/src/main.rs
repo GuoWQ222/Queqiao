@@ -1246,6 +1246,53 @@ fn ask_consent(ui: &ui::Ui, question: &str, answer: Option<bool>) -> Result<bool
     }
 }
 
+/// The largest pointer shape sent each way (a 128 x 128 colour shape is 64 KB: one data channel message).
+const POINTER_LIMIT: u32 = 128;
+
+/// Windows' pointer shape in the protocol's form (rows tightly packed); None if too large or of an unknown kind.
+fn pointer_shape(
+    raw: &queqiao_capture::PointerShapeRaw,
+) -> Option<queqiao_core::protocol::PointerShape> {
+    use queqiao_core::protocol::{PointerKind, PointerShape};
+    let (kind, height, row) = match raw.kind {
+        1 => (
+            PointerKind::Monochrome,
+            raw.height / 2,
+            raw.width.div_ceil(8),
+        ),
+        2 => (PointerKind::Color, raw.height, raw.width * 4),
+        4 => (PointerKind::MaskedColor, raw.height, raw.width * 4),
+        _ => return None,
+    };
+    if raw.width == 0
+        || height == 0
+        || raw.width > POINTER_LIMIT
+        || height > POINTER_LIMIT
+        || raw.pitch < row
+    {
+        return None;
+    }
+    let rows = if kind == PointerKind::Monochrome {
+        height * 2
+    } else {
+        height
+    };
+    let mut data = Vec::with_capacity((row * rows) as usize);
+    for y in 0..rows as usize {
+        let start = y * raw.pitch as usize;
+        data.extend_from_slice(raw.data.get(start..start + row as usize)?);
+    }
+    let shape = PointerShape {
+        kind,
+        width: raw.width as u16,
+        height: height as u16,
+        hot_x: raw.hot_x.clamp(0, raw.width as i32 - 1) as u16,
+        hot_y: raw.hot_y.clamp(0, height as i32 - 1) as u16,
+        data,
+    };
+    shape.is_valid().then_some(shape)
+}
+
 /// The local keyboard and mouse back (the privacy screen went, or Windows' own screen came up).
 fn end_local_block(block: &mut Option<queqiao_input::LocalInputBlock>, lines: &mut Vec<String>) {
     if let Some(block) = block.take() {
@@ -1734,6 +1781,9 @@ fn session(
     };
     let mut sound_report = Vec::new();
     let mut privacy_check_due = false;
+    // That PC's pointer shape as last sent, and how many were sent or left out.
+    let mut last_pointer: Option<queqiao_core::protocol::PointerShape> = None;
+    let (mut pointer_shapes, mut pointer_skipped) = (0u32, 0u32);
     // The local keyboard and mouse off while the privacy screen is up.
     let mut local_block: Option<queqiao_input::LocalInputBlock> = None;
     // Muted speakers: whether they were muted before, to put back when the session ends.
@@ -2380,6 +2430,23 @@ fn session(
             5
         };
         let fixed = options.fps.is_some();
+        // The pointer: its shape when it changed (the viewer's cursor takes it), and when it hides or shows.
+        if let Some(own) = duplicator.as_mut() {
+            if let Some(raw) = own.take_pointer_shape() {
+                match pointer_shape(&raw) {
+                    Some(shape) if last_pointer.as_ref() != Some(&shape) => {
+                        peer.send_data(Message::PointerShape(shape.clone()).encode());
+                        pointer_shapes += 1;
+                        last_pointer = Some(shape);
+                    }
+                    Some(_) => {}
+                    None => pointer_skipped += 1,
+                }
+            }
+            if let Some(visible) = own.take_pointer_visible() {
+                peer.send_data(Message::PointerVisible(visible).encode());
+            }
+        }
         let acquired = duplicator.as_mut().map(|own| own.acquire(wait));
         match acquired {
             Some(Ok(Some(frame))) if frame.present_qpc != 0 => {
@@ -2616,6 +2683,14 @@ fn session(
     if transfers.busy() {
         lines.push("files: a transfer was cut off when the session ended".into());
     }
+    lines.push(format!(
+        "pointer: {pointer_shapes} shapes sent{}",
+        if pointer_skipped > 0 {
+            format!(", {pointer_skipped} not (too large or of an unknown kind)")
+        } else {
+            String::new()
+        }
+    ));
     lines.push(format!(
         "bitrate: started at {:.1}, lowest {:.1}, last {:.1}, highest allowed {:.1} Mbit/s; {bitrate_changes} changes",
         f64::from(start_bitrate) / 1e6,

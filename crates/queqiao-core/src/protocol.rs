@@ -75,6 +75,57 @@ pub enum Message {
         current: u8,
         sizes: Vec<(u16, u16)>,
     },
+    /// Agent -> viewer: the pointer's shape on that PC (the session window's cursor takes it).
+    PointerShape(PointerShape),
+    /// Agent -> viewer: that PC's pointer is hidden (false; games, videos) or shown again.
+    PointerVisible(bool),
+}
+
+/// A pointer shape as Windows gives it, rows tightly packed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PointerShape {
+    pub kind: PointerKind,
+    /// The pointer's size in pixels (at most [`MAX_POINTER`] each way).
+    pub width: u16,
+    pub height: u16,
+    /// Where the pointer points, inside it.
+    pub hot_x: u16,
+    pub hot_y: u16,
+    /// Monochrome: the AND mask's rows, then the XOR mask's (1 bit per pixel, `(width + 7) / 8` bytes per row);
+    /// colour and masked colour: `width * 4` bytes per row, B, G, R, A.
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerKind {
+    Monochrome,
+    /// Alpha blended.
+    Color,
+    /// Alpha 0xFF: the pixel is XORed with the screen; 0: it replaces it.
+    MaskedColor,
+}
+
+/// The largest pointer shape sent, each way.
+pub const MAX_POINTER: u16 = 256;
+
+impl PointerShape {
+    /// How many bytes `data` holds for this kind and size.
+    pub fn expected_len(kind: PointerKind, width: u16, height: u16) -> usize {
+        let (width, height) = (usize::from(width), usize::from(height));
+        match kind {
+            PointerKind::Monochrome => width.div_ceil(8) * height * 2,
+            PointerKind::Color | PointerKind::MaskedColor => width * height * 4,
+        }
+    }
+
+    /// Within the limits, the hot spot inside, `data` the right length.
+    pub fn is_valid(&self) -> bool {
+        (1..=MAX_POINTER).contains(&self.width)
+            && (1..=MAX_POINTER).contains(&self.height)
+            && self.hot_x < self.width
+            && self.hot_y < self.height
+            && self.data.len() == Self::expected_len(self.kind, self.width, self.height)
+    }
 }
 
 /// What the viewer can ask the controlled PC to do.
@@ -144,6 +195,8 @@ const CLIPBOARD_TEXT: u8 = 50;
 const COMMAND: u8 = 60;
 const NOTICE: u8 = 61;
 const SCREENS: u8 = 62;
+const POINTER_SHAPE: u8 = 63;
+const POINTER_VISIBLE: u8 = 64;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -241,6 +294,19 @@ impl Message {
                     out.extend_from_slice(&height.to_le_bytes());
                 }
             }
+            Message::PointerShape(ref shape) => {
+                out.push(POINTER_SHAPE);
+                out.push(match shape.kind {
+                    PointerKind::Monochrome => 1,
+                    PointerKind::Color => 2,
+                    PointerKind::MaskedColor => 4,
+                });
+                for value in [shape.width, shape.height, shape.hot_x, shape.hot_y] {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+                out.extend_from_slice(&shape.data);
+            }
+            Message::PointerVisible(visible) => out.extend([POINTER_VISIBLE, u8::from(visible)]),
         }
         out
     }
@@ -354,6 +420,33 @@ impl Message {
                     .collect();
                 Message::Screens { current, sizes }
             }
+            POINTER_SHAPE => {
+                let kind = match rest.first()? {
+                    1 => PointerKind::Monochrome,
+                    2 => PointerKind::Color,
+                    4 => PointerKind::MaskedColor,
+                    _ => return None,
+                };
+                let at =
+                    |i: usize| Some(u16::from_le_bytes(rest.get(1 + i..3 + i)?.try_into().ok()?));
+                let shape = PointerShape {
+                    kind,
+                    width: at(0)?,
+                    height: at(2)?,
+                    hot_x: at(4)?,
+                    hot_y: at(6)?,
+                    data: rest.get(9..)?.to_vec(),
+                };
+                if !shape.is_valid() {
+                    return None;
+                }
+                Message::PointerShape(shape)
+            }
+            POINTER_VISIBLE => Message::PointerVisible(match rest {
+                [0] => false,
+                [1] => true,
+                _ => return None,
+            }),
             _ => return None,
         })
     }
@@ -362,6 +455,68 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_shapes_round_trip_and_bad_ones_are_refused() {
+        let shapes = [
+            PointerShape {
+                kind: PointerKind::Monochrome,
+                width: 32,
+                height: 32,
+                hot_x: 0,
+                hot_y: 0,
+                data: vec![0xAA; 4 * 32 * 2],
+            },
+            PointerShape {
+                kind: PointerKind::Color,
+                width: 48,
+                height: 48,
+                hot_x: 10,
+                hot_y: 20,
+                data: vec![7; 48 * 48 * 4],
+            },
+            PointerShape {
+                kind: PointerKind::MaskedColor,
+                width: 17,
+                height: 5,
+                hot_x: 16,
+                hot_y: 4,
+                data: vec![1; 17 * 5 * 4],
+            },
+        ];
+        for shape in shapes {
+            let message = Message::PointerShape(shape.clone());
+            assert_eq!(Message::decode(&message.encode()), Some(message.clone()));
+            // One byte short or long, the hot spot outside, too large: refused.
+            let bytes = message.encode();
+            assert_eq!(Message::decode(&bytes[..bytes.len() - 1]), None);
+            let mut longer = bytes.clone();
+            longer.push(0);
+            assert_eq!(Message::decode(&longer), None);
+            let outside = PointerShape {
+                hot_x: shape.width,
+                ..shape.clone()
+            };
+            assert_eq!(
+                Message::decode(&Message::PointerShape(outside).encode()),
+                None
+            );
+        }
+        let huge = PointerShape {
+            kind: PointerKind::Color,
+            width: MAX_POINTER + 1,
+            height: 1,
+            hot_x: 0,
+            hot_y: 0,
+            data: vec![0; (usize::from(MAX_POINTER) + 1) * 4],
+        };
+        assert_eq!(Message::decode(&Message::PointerShape(huge).encode()), None);
+        for visible in [false, true] {
+            let message = Message::PointerVisible(visible);
+            assert_eq!(Message::decode(&message.encode()), Some(message));
+        }
+        assert_eq!(Message::decode(&[POINTER_VISIBLE, 2]), None);
+    }
 
     #[test]
     fn every_message_round_trips() {

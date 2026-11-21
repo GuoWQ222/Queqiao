@@ -68,6 +68,9 @@ pub enum WindowEvent {
 
 thread_local! {
     static EVENTS: RefCell<Vec<WindowEvent>> = const { RefCell::new(Vec::new()) };
+    /// That PC's pointer shape as this window's cursor (0: the arrow), and whether that pointer is hidden.
+    static REMOTE_CURSOR: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static POINTER_HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub struct Window {
@@ -76,6 +79,8 @@ pub struct Window {
     slow: Vec<String>,
     /// While full screen: the style and placement to go back to.
     restore: Option<(isize, WINDOWPLACEMENT)>,
+    /// That PC's pointer shape, while this window's cursor takes it.
+    remote_cursor: Option<crate::cursor::RemoteCursor>,
 }
 
 impl Window {
@@ -127,6 +132,7 @@ impl Window {
             closed: false,
             slow: Vec::new(),
             restore: None,
+            remote_cursor: None,
         })
     }
 
@@ -161,6 +167,39 @@ impl Window {
         }
         let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         let _ = unsafe { AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR(title.as_ptr())) };
+    }
+
+    /// That PC's pointer shape as the cursor over the picture (None: the arrow again).
+    pub fn set_remote_cursor(&mut self, cursor: Option<crate::cursor::RemoteCursor>) {
+        REMOTE_CURSOR.set(
+            cursor
+                .as_ref()
+                .map_or(0, |cursor| cursor.handle().0 as isize),
+        );
+        // The old one goes only after the window no longer names it.
+        self.remote_cursor = cursor;
+        self.refresh_cursor();
+    }
+
+    /// That PC's pointer is hidden (a game, a video): so is the cursor over the picture.
+    pub fn set_pointer_hidden(&self, hidden: bool) {
+        POINTER_HIDDEN.set(hidden);
+        self.refresh_cursor();
+    }
+
+    /// Applies the cursor now if the pointer is over this window (otherwise the next WM_SETCURSOR does).
+    fn refresh_cursor(&self) {
+        let mut at = POINT::default();
+        if unsafe { GetCursorPos(&mut at) }.is_ok() && unsafe { WindowFromPoint(at) } == self.hwnd {
+            let _ = unsafe {
+                PostMessageW(
+                    Some(self.hwnd),
+                    WM_SETCURSOR,
+                    WPARAM(self.hwnd.0 as usize),
+                    LPARAM(HTCLIENT as isize),
+                )
+            };
+        }
     }
 
     /// New text for a menu item added with [`Window::add_menu_items`].
@@ -690,6 +729,20 @@ extern "system" fn window_proc(
             unsafe { DragFinish(drop) };
             push(WindowEvent::FilesDropped(paths));
             LRESULT(0)
+        }
+        // That PC's pointer: its shape over the picture, or none while it is hidden.
+        WM_SETCURSOR
+            if (lparam.0 & 0xFFFF) as u32 == HTCLIENT
+                && !GAME_MOUSE.get()
+                && (POINTER_HIDDEN.get() || REMOTE_CURSOR.get() != 0) =>
+        {
+            let cursor = if POINTER_HIDDEN.get() {
+                None
+            } else {
+                Some(HCURSOR(REMOTE_CURSOR.get() as *mut _))
+            };
+            unsafe { SetCursor(cursor) };
+            LRESULT(1)
         }
         WM_HOTKEY => {
             push(WindowEvent::Hotkey(wparam.0 as i32));

@@ -348,6 +348,11 @@ const CHINESE: &[(&str, &str)] = &[
     ("Copy invitation", "复制邀请"),
     ("Command lines...", "命令行……"),
     ("Opacity", "透明度"),
+    ("That PC's pointer shape", "使用对方电脑的指针形状"),
+    ("Game mouse speed", "游戏鼠标速度"),
+    ("Slow (x0.5)", "慢（×0.5）"),
+    ("Normal", "正常"),
+    ("Fast (x2)", "快（×2）"),
     ("Opaque", "不透明"),
     ("Actual size (1:1)", "原始大小（1:1）"),
     (

@@ -237,6 +237,16 @@ try {
                     if ($receivedFolder -and $receivedFolder -like '*queqiao-test-folder*') { Remove-Item -LiteralPath $receivedFolder -Recurse -Force -ErrorAction SilentlyContinue }
                 }
             }
+            # The pointer's shape: the agent sends it when it changes (the input test moves the pointer), the viewer
+            # gets every one.
+            if ($label -eq 'direct' -and $program -eq 'viewer') {
+                $agentReport = Join-Path $Out "agent_$label.txt"
+                $sent = @(Get-Content -LiteralPath $agentReport -ErrorAction SilentlyContinue | Where-Object { $_ -match '^pointer: (\d+) shapes sent' } | ForEach-Object { [int]($_ -replace '^pointer: (\d+) shapes sent.*$', '$1') })
+                $got = @($text | Where-Object { $_ -match '^pointer: (\d+) shapes from that PC' } | ForEach-Object { [int]($_ -replace '^pointer: (\d+) shapes from that PC.*$', '$1') })
+                if (-not ($sent.Count -eq 1 -and $got.Count -eq 1 -and $got[0] -ge 1 -and $got[0] -eq $sent[0])) {
+                    $failed += "$label viewer (expected the agent's pointer shapes, all of them: sent $sent, got $got)"
+                }
+            }
             if ($label -eq 'relay' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^boss key test: PASS' })) {
                 $failed += "$label viewer (expected 'boss key test: PASS')"
             }

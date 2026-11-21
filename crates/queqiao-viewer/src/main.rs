@@ -54,6 +54,13 @@ const MENU_COMMAND_LINES: u16 = 0x10E0;
 // System-menu command ids are multiples of 16: Windows reports them masked with 0xFFF0.
 const MENU_ACTUAL_SIZE: u16 = 0x1640;
 const MENU_HOTKEYS: u16 = 0x1650;
+const MENU_POINTER_SHAPE: u16 = 0x1660;
+/// The game mouse's speed: (menu id, percent, label).
+const MENU_MOUSE_SPEED: [(u16, u32, &str); 3] = [
+    (0x1670, 50, "Slow (x0.5)"),
+    (0x1680, 100, "Normal"),
+    (0x1690, 200, "Fast (x2)"),
+];
 /// The window's opacity: (menu id, percent, label).
 const MENU_OPACITY: [(u16, u8, &str); 4] = [
     (0x1600, 100, "Opaque"),
@@ -1221,7 +1228,28 @@ fn session(
     window.add_menu_items(&[
         (MENU_ACTUAL_SIZE, tr("Actual size (1:1)")),
         (MENU_HOTKEYS, tr("Hotkeys...")),
+        (MENU_POINTER_SHAPE, tr("That PC's pointer shape")),
     ]);
+    let speed_items: Vec<(u16, &str)> = MENU_MOUSE_SPEED
+        .iter()
+        .map(|(id, _, text)| (*id, tr(text)))
+        .collect();
+    window.add_submenu(tr("Game mouse speed"), &speed_items);
+    // That PC's pointer shape as this window's cursor (the last one, to show again when turned back on).
+    let mut pointer_shape_on = true;
+    window.check_menu_item(MENU_POINTER_SHAPE, true);
+    let mut last_pointer: Option<queqiao_core::protocol::PointerShape> = None;
+    let mut pointer_hidden = false;
+    let mut pointer_shapes = 0u32;
+    // The game mouse's speed in percent, and the part of a count not sent yet (so slow loses nothing).
+    let mut mouse_speed = 100u32;
+    let mut mouse_rest = (0i32, 0i32);
+    let show_speed = |window: &Window, speed: u32| {
+        for (id, value, _) in MENU_MOUSE_SPEED {
+            window.check_menu_item(id, value == speed);
+        }
+    };
+    show_speed(&window, mouse_speed);
     let show_opacity = |window: &Window, percent: u8| {
         for (id, value, _) in MENU_OPACITY {
             window.check_menu_item(id, value == percent);
@@ -1386,6 +1414,24 @@ fn session(
                         window.set_client_size(picture_size.0, picture_size.1);
                         None
                     }
+                    MENU_POINTER_SHAPE => {
+                        pointer_shape_on = !pointer_shape_on;
+                        window.check_menu_item(MENU_POINTER_SHAPE, pointer_shape_on);
+                        window.set_remote_cursor(
+                            last_pointer
+                                .as_ref()
+                                .filter(|_| pointer_shape_on)
+                                .and_then(queqiao_display::RemoteCursor::from_shape),
+                        );
+                        window.set_pointer_hidden(pointer_shape_on && pointer_hidden);
+                        None
+                    }
+                    id if MENU_MOUSE_SPEED.iter().any(|(item, _, _)| *item == id) => {
+                        mouse_speed = MENU_MOUSE_SPEED.iter().find(|(item, _, _)| *item == id).map_or(100, |(_, speed, _)| *speed);
+                        show_speed(&window, mouse_speed);
+                        mouse_rest = (0, 0);
+                        None
+                    }
                     MENU_HOTKEYS => {
                         // Each key in turn (Cancel keeps it); an empty boss key turns it off.
                         let mut changed = keys.clone();
@@ -1541,6 +1587,16 @@ fn session(
             if options.input_test {
                 continue;
             }
+            // The game mouse's speed (the part of a count left over is carried to the next move).
+            let event = match event {
+                WindowEvent::MouseDelta { dx, dy } if mouse_speed != 100 => {
+                    WindowEvent::MouseDelta {
+                        dx: scaled_move(dx, mouse_speed, &mut mouse_rest.0),
+                        dy: scaled_move(dy, mouse_speed, &mut mouse_rest.1),
+                    }
+                }
+                other => other,
+            };
             for message in translate(event, picture_size, window.client_size(), &mut held_keys) {
                 peer.send_data(message.encode());
                 stats.inputs_sent += 1;
@@ -1940,6 +1996,19 @@ fn session(
                         lines.push(format!("notice from that PC: {text}"));
                         status.notice(&text);
                     }
+                    Some(Message::PointerShape(shape)) => {
+                        pointer_shapes += 1;
+                        if pointer_shape_on {
+                            window.set_remote_cursor(queqiao_display::RemoteCursor::from_shape(
+                                &shape,
+                            ));
+                        }
+                        last_pointer = Some(shape);
+                    }
+                    Some(Message::PointerVisible(visible)) => {
+                        pointer_hidden = !visible;
+                        window.set_pointer_hidden(pointer_shape_on && pointer_hidden);
+                    }
                     Some(Message::ClipboardText(text)) => {
                         clipboard_in += 1;
                         clipboard_test_received |= text.starts_with(CLIPBOARD_TEST_TEXT);
@@ -2040,6 +2109,13 @@ fn session(
         summary(&mut total)
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
+    lines.push(format!(
+        "pointer: {pointer_shapes} shapes from that PC{}",
+        last_pointer.as_ref().map_or(String::new(), |shape| format!(
+            " (the last {}x{}, {:?})",
+            shape.width, shape.height, shape.kind
+        ))
+    ));
     lines.push(format!("window title: {}", status.title));
     lines.push(format!(
         "last picture size: {}x{}",
@@ -2631,6 +2707,14 @@ fn summary(values: &mut [f64]) -> String {
     )
 }
 
+/// `value` mouse counts at `percent` speed; what is left of a count is kept in `rest` (hundredths) for the next.
+fn scaled_move(value: i32, percent: u32, rest: &mut i32) -> i32 {
+    let total = value * percent as i32 + *rest;
+    let out = total / 100;
+    *rest = total - out * 100;
+    out
+}
+
 fn describe(error: windows::core::Error) -> String {
     format!("0x{:08X} {}", error.code().0, error.message())
 }
@@ -2661,7 +2745,9 @@ mod tests {
             MENU_COMMAND_LINES,
             MENU_ACTUAL_SIZE,
             MENU_HOTKEYS,
+            MENU_POINTER_SHAPE,
         ];
+        ids.extend(MENU_MOUSE_SPEED.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_FPS.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_QUALITY.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_RESOLUTION.iter().map(|(id, _, _)| *id));
@@ -2674,5 +2760,18 @@ mod tests {
         }
         let unique: HashSet<u16> = ids.iter().copied().collect();
         assert_eq!(unique.len(), ids.len(), "two menu items share an id");
+    }
+
+    #[test]
+    fn slow_game_mouse_loses_no_counts() {
+        let mut rest = 0;
+        let moved: i32 = (0..10).map(|_| scaled_move(1, 50, &mut rest)).sum();
+        assert_eq!(moved, 5);
+        let mut rest = 0;
+        let moved: i32 = (0..10).map(|_| scaled_move(-3, 50, &mut rest)).sum();
+        assert_eq!(moved, -15);
+        let mut rest = 0;
+        assert_eq!(scaled_move(7, 200, &mut rest), 14);
+        assert_eq!(rest, 0);
     }
 }

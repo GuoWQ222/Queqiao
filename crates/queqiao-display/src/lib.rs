@@ -2,6 +2,7 @@
 //! to send) and a [`Presenter`] that puts decoded NV12 pictures into it through a D3D11 swap chain (GPU
 //! video processor, or the CPU on devices without one).
 
+mod cursor;
 mod forms;
 mod presence;
 mod present;
@@ -10,6 +11,7 @@ mod shortcuts;
 mod window;
 mod yuv;
 
+pub use cursor::RemoteCursor;
 pub use forms::{
     DeviceList, DeviceRow, HelpAction, HelpForm, ListAction, LoginAction, LoginFields, LoginForm,
     PICK_CLOSED, PickList, SetupAction, SetupForm, ask_text, confirm, copy_text, normalize_code,
