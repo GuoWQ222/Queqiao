@@ -27,7 +27,7 @@ use queqiao_account::{
     Account, AccountEvent, ClientMessage, DeviceIdentity, Role as AccountRole, SavedLogin,
 };
 use queqiao_audio::{Capture, TEST_TONE_HZ, Tone};
-use queqiao_capture::{BgraImage, Duplicator, needs_restart, qpc_frequency, qpc_now};
+use queqiao_capture::{BgraImage, Duplicator, OutputInfo, needs_restart, qpc_frequency, qpc_now};
 use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{Command, InputEvent, Message};
@@ -755,8 +755,55 @@ fn run_command(command: Command, dry_run: bool) -> String {
         | Command::PrivacyOff
         | Command::MuteSpeakers(_)
         | Command::Resolution(_)
+        | Command::Screen(_)
         | Command::Picture { .. } => "changed".into(),
     }
+}
+
+/// Everything that belongs to the screen being shown.
+struct OpenedScreen {
+    duplicator: Duplicator,
+    info: OutputInfo,
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    latest: ID3D11Texture2D,
+    screen: (u32, u32),
+    encoder: ScreenEncoder,
+    injector: Injector,
+}
+
+/// Opens screen `index`: capture (on the GPU that drives it), a first picture, an encoder for its size (within
+/// `limit`) and input mapped to it.
+fn open_screen(
+    index: usize,
+    fps: u32,
+    fixed_fps: bool,
+    limit: Option<(u32, u32)>,
+) -> Result<OpenedScreen, String> {
+    let duplicator = Duplicator::new(index).map_err(describe)?;
+    let info = duplicator.info().clone();
+    let (device, context) = (duplicator.device().clone(), duplicator.context().clone());
+    let snapshot = duplicator.snapshot_image().map_err(describe)?;
+    let latest = upload(&device, &snapshot)?;
+    let screen = (snapshot.width, snapshot.height);
+    let encoder = ScreenEncoder::with_limit(&device, &context, screen, fps, fixed_fps, limit)
+        .map_err(|e| format!("encoder: {}", describe(e)))?;
+    let injector = Injector::new(ScreenRect {
+        left: info.left,
+        top: info.top,
+        width: info.width,
+        height: info.height,
+    });
+    Ok(OpenedScreen {
+        duplicator,
+        info,
+        device,
+        context,
+        latest,
+        screen,
+        encoder,
+        injector,
+    })
 }
 
 /// Locks the PC after a session when the person chose so (or a test asked).
@@ -887,14 +934,14 @@ fn session(
     let ms = |ticks: i64| ticks as f64 * 1000.0 / frequency;
 
     let mut duplicator = Duplicator::primary().map_err(describe)?;
-    let info = duplicator.info().clone();
-    let (device, context) = (duplicator.device().clone(), duplicator.context().clone());
+    let mut info = duplicator.info().clone();
+    let (mut device, mut context) = (duplicator.device().clone(), duplicator.context().clone());
     let snapshot = duplicator.snapshot_image().map_err(describe)?;
-    let latest = upload(&device, &snapshot)?;
+    let mut latest = upload(&device, &snapshot)?;
     let fps = options
         .fps
         .unwrap_or((info.refresh_hz.round() as u32).clamp(1, 60));
-    let screen = (snapshot.width, snapshot.height);
+    let mut screen = (snapshot.width, snapshot.height);
     let mut encoder = ScreenEncoder::new(&device, &context, screen, fps, options.fps.is_some())
         .map_err(|e| format!("encoder: {}", describe(e)))?;
     let config = encoder.config().clone();
@@ -916,12 +963,18 @@ fn session(
         f64::from(config.bitrate) / 1e6,
         encoder.converter_description()
     ));
-    let injector = Injector::new(ScreenRect {
+    let mut injector = Injector::new(ScreenRect {
         left: info.left,
         top: info.top,
         width: info.width,
         height: info.height,
     });
+    // The screen shown (counted as queqiao_capture::screens does) and the picture size the viewer chose.
+    let mut screen_index = queqiao_capture::screens()
+        .ok()
+        .and_then(|list| list.iter().position(|s| s.primary))
+        .unwrap_or(0);
+    let mut resolution_limit: Option<(u32, u32)> = None;
 
     lines.push(format!("viewer: {viewer}"));
     let started = Instant::now();
@@ -1158,6 +1211,7 @@ fn session(
                         // A new encoder for the new size (the screen is still captured whole and scaled).
                         let limit =
                             (short > 0).then(|| (u32::from(short) * 16 / 9, u32::from(short)));
+                        resolution_limit = limit;
                         let notice = match ScreenEncoder::with_limit(
                             &device,
                             &context,
@@ -1185,6 +1239,65 @@ fn session(
                                 )
                             }
                             Err(error) => format!("the picture size stays: {}", describe(error)),
+                        };
+                        lines.push(format!("command from the viewer: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::Screen(index))) => {
+                        let fixed = options.fps.is_some();
+                        // DXGI lets a process duplicate a screen once: the current duplication goes first. If the
+                        // new screen cannot be opened, the one before is opened again (or the session ends).
+                        drop(duplicator);
+                        let (opened, shown) = match open_screen(
+                            usize::from(index),
+                            fps,
+                            fixed,
+                            resolution_limit,
+                        ) {
+                            Ok(opened) => (opened, true),
+                            Err(error) => {
+                                lines.push(format!(
+                                    "screen {} cannot be shown: {error}",
+                                    usize::from(index) + 1
+                                ));
+                                let back = open_screen(screen_index, fps, fixed, resolution_limit)
+                                    .map_err(|again| format!("the screen before cannot be shown again either: {again}"))?;
+                                (back, false)
+                            }
+                        };
+                        duplicator = opened.duplicator;
+                        info = opened.info;
+                        (device, context) = (opened.device, opened.context);
+                        latest = opened.latest;
+                        screen = opened.screen;
+                        encoder = opened.encoder;
+                        injector = opened.injector;
+                        if shown {
+                            screen_index = usize::from(index);
+                        }
+                        size_bitrate = encoder.config().bitrate;
+                        max_bitrate =
+                            ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE);
+                        peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
+                        let _ = encoder.set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
+                        // The screen's first picture goes at once.
+                        force_keyframe = true;
+                        waiting = Some((0, qpc_now()));
+                        let notice = if shown {
+                            format!(
+                                "screen {} ({}x{}), picture {}x{}",
+                                usize::from(index) + 1,
+                                info.width,
+                                info.height,
+                                encoder.config().width,
+                                encoder.config().height
+                            )
+                        } else {
+                            format!(
+                                "screen {} cannot be shown; screen {} again",
+                                usize::from(index) + 1,
+                                screen_index + 1
+                            )
                         };
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
@@ -1241,7 +1354,18 @@ fn session(
                         last_bitrate_change = Some(Instant::now());
                     }
                 }
-                PeerEvent::ChannelOpen => channel_open_at = Some(Instant::now()),
+                PeerEvent::ChannelOpen => {
+                    channel_open_at = Some(Instant::now());
+                    // The viewer can offer the other screens in its menu.
+                    if let Ok(list) = queqiao_capture::screens() {
+                        let sizes = list
+                            .iter()
+                            .map(|s| (s.width.min(65535) as u16, s.height.min(65535) as u16))
+                            .collect();
+                        let current = screen_index.min(255) as u8;
+                        peer.send_data(Message::Screens { current, sizes }.encode());
+                    }
+                }
                 PeerEvent::StreamOpen(Stream::Files) => report_files(transfers.opened(), lines),
                 PeerEvent::StreamOpen(Stream::Clipboard) => {}
                 PeerEvent::StreamData(Stream::Clipboard, bytes) => {

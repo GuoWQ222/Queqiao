@@ -118,7 +118,7 @@ try {
         # Full screen: the drawing area must cover the monitor (the input test maps to it too).
         if ($label -eq 'ended-here') { $viewerArgs += ' --full-screen --picture 30,sharp --resolution 720' }
         # A command line on that PC, in a window of its own that closes by itself.
-        if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test' }
+        if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += ' --privacy' }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
@@ -180,6 +180,11 @@ try {
             }
             if ($label -eq 'relay' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^terminal test: PASS' })) {
                 $failed += "$label viewer (expected 'terminal test: PASS')"
+            }
+            # Screens: the viewer learns them, and switching (here to the screen shown already) opens it anew.
+            if ($label -eq 'relay') {
+                $wanted = if ($program -eq 'agent') { '^command from the viewer: screen 1 \(\d+x\d+\), picture \d+x\d+$' } else { '^screens of that PC: Screen 1 \(\d+x\d+\)' }
+                if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label $program (expected '$wanted')" }
             }
             if ($label -eq 'relay' -and $program -eq 'agent' -and -not ($text | Where-Object { $_ -match 'relative moves right 4/4' })) {
                 $failed += "$label agent (expected 'relative moves right 4/4')"

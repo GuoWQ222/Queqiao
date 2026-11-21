@@ -173,6 +173,8 @@ const CHINESE: &[(&str, &str)] = &[
     ("Frame rate", "帧率"),
     ("Picture quality", "画质"),
     ("Resolution", "分辨率"),
+    ("Screens", "屏幕"),
+    ("Screen {n}", "屏幕 {n}"),
     ("As that screen", "与那台电脑的屏幕一致"),
     ("30 frames per second", "每秒 30 帧"),
     ("60 frames per second", "每秒 60 帧"),

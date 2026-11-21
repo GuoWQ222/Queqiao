@@ -44,6 +44,8 @@ const MENU_TERMINAL: u16 = 0x1060;
 const MENU_GAME_MOUSE: u16 = 0x1070;
 const MENU_MUTE_SPEAKERS: u16 = 0x1080;
 const MENU_SHORTCUTS: u16 = 0x1090;
+/// The other PC's screens: menu ids from here, 16 apart.
+const MENU_SCREENS: u16 = 0x1400;
 /// Resolution: that screen's own, or its short side at most 1080 or 720 pixels.
 const MENU_RESOLUTION: [(u16, u16, &str); 3] = [
     (0x1300, 0, "As that screen"),
@@ -151,6 +153,8 @@ struct Options {
     mute_speakers: bool,
     /// The picture's short side at most this (720, 1080) from the start; 0 or none: the screen's own.
     resolution: Option<u16>,
+    /// Show that PC's screen n (from 0) from the start.
+    screen: Option<u8>,
     /// Picture settings to send at the start: frames per second at most (0: the screen's) and quality.
     picture: Option<(u8, Quality)>,
     /// Help someone of another account: their help ID and code (tests; people use "Help someone...").
@@ -351,6 +355,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--game-mouse-test" => options.game_mouse_test = true,
             "--mute-speakers" => options.mute_speakers = true,
             "--resolution" => options.resolution = Some(args.next()?.parse().ok()?),
+            "--screen" => options.screen = Some(args.next()?.parse().ok()?),
             "--help-id" => options.help_id = Some(args.next()?),
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--picture" => {
@@ -995,6 +1000,8 @@ fn session(
         }
     };
     show_resolution(&window, resolution);
+    // That PC's screens, once it has told them (a submenu then).
+    let mut screen_count = 0u8;
     let (mut fps_cap, mut quality) = options.picture.unwrap_or((60, Quality::Balanced));
     let show_picture_choice = |window: &Window, fps_cap: u8, quality: Quality| {
         for (id, fps, _) in MENU_FPS {
@@ -1053,6 +1060,13 @@ fn session(
                             .map_or(Quality::Balanced, |(_, level, _)| *level);
                         show_picture_choice(&window, fps_cap, quality);
                         Some(Command::Picture { fps: fps_cap, quality })
+                    }
+                    id if id >= MENU_SCREENS && id < MENU_SCREENS + 16 * u16::from(screen_count) => {
+                        let index = ((id - MENU_SCREENS) / 16) as u8;
+                        for other in 0..screen_count {
+                            window.check_menu_item(MENU_SCREENS + 16 * u16::from(other), other == index);
+                        }
+                        Some(Command::Screen(index))
                     }
                     id if MENU_RESOLUTION.iter().any(|(item, _, _)| *item == id) => {
                         resolution = MENU_RESOLUTION.iter().find(|(item, _, _)| *item == id).map_or(0, |(_, short, _)| *short);
@@ -1268,6 +1282,9 @@ fn session(
                     if resolution != 0 {
                         peer.send_data(Message::Command(Command::Resolution(resolution)).encode());
                     }
+                    if let Some(index) = options.screen {
+                        peer.send_data(Message::Command(Command::Screen(index)).encode());
+                    }
                     if options.picture.is_some() {
                         peer.send_data(
                             Message::Command(Command::Picture {
@@ -1364,6 +1381,36 @@ fn session(
                     Some(Message::Leave) => {
                         closed = Some("the agent ended the session".to_string());
                         break 'session;
+                    }
+                    Some(Message::Screens { current, sizes })
+                        if screen_count == 0 && !sizes.is_empty() =>
+                    {
+                        let names: Vec<String> = sizes
+                            .iter()
+                            .enumerate()
+                            .map(|(index, (width, height))| {
+                                format!(
+                                    "{} ({width}x{height})",
+                                    trf("Screen {n}", &[("n", &(index + 1).to_string())])
+                                )
+                            })
+                            .collect();
+                        let items: Vec<(u16, &str)> = names
+                            .iter()
+                            .enumerate()
+                            .map(|(index, name)| (MENU_SCREENS + 16 * index as u16, name.as_str()))
+                            .collect();
+                        window.add_submenu(tr("Screens"), &items);
+                        screen_count = sizes.len() as u8;
+                        window.check_menu_item(MENU_SCREENS + 16 * u16::from(current), true);
+                        let english: Vec<String> = sizes
+                            .iter()
+                            .enumerate()
+                            .map(|(index, (width, height))| {
+                                format!("Screen {} ({width}x{height})", index + 1)
+                            })
+                            .collect();
+                        lines.push(format!("screens of that PC: {}", english.join(", ")));
                     }
                     Some(Message::Notice(text)) => {
                         lines.push(format!("notice from that PC: {text}"));

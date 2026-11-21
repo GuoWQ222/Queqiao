@@ -292,6 +292,33 @@ pub fn qpc_frequency() -> i64 {
     frequency
 }
 
+/// One screen attached to the desktop, as `Duplicator::new` counts them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenSummary {
+    pub index: usize,
+    pub width: u32,
+    pub height: u32,
+    /// The main screen (its top-left corner is the desktop's origin): `Duplicator::primary` opens it.
+    pub primary: bool,
+}
+
+/// The screens attached to the desktop, in `Duplicator::new`'s order.
+pub fn screens() -> Result<Vec<ScreenSummary>> {
+    Ok(attached_outputs()?
+        .into_iter()
+        .enumerate()
+        .map(|(index, (_, _, desc))| {
+            let area = desc.DesktopCoordinates;
+            ScreenSummary {
+                index,
+                width: (area.right - area.left).max(0) as u32,
+                height: (area.bottom - area.top).max(0) as u32,
+                primary: area.left == 0 && area.top == 0,
+            }
+        })
+        .collect())
+}
+
 /// The screens attached to the desktop, across all GPUs, with the GPU each belongs to.
 fn attached_outputs() -> Result<Vec<(IDXGIAdapter1, IDXGIOutput, DXGI_OUTPUT_DESC)>> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;

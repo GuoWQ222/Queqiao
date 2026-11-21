@@ -70,6 +70,11 @@ pub enum Message {
     Command(Command),
     /// Agent -> viewer: something to show the person controlling (e.g. why a command cannot run).
     Notice(String),
+    /// Agent -> viewer: the PC's screens (width, height) and which one is shown (at most 16).
+    Screens {
+        current: u8,
+        sizes: Vec<(u16, u16)>,
+    },
 }
 
 /// What the viewer can ask the controlled PC to do.
@@ -96,6 +101,8 @@ pub enum Command {
     MuteSpeakers(bool),
     /// The picture's size: its short side at most this many pixels (e.g. 720, 1080), or 0 for the screen's own.
     Resolution(u16),
+    /// Show screen `n` (counted as in `Message::Screens`).
+    Screen(u8),
 }
 
 /// How the bitrate is spent: fewer bits (slow networks), the size-based amount, or twice that (sharp text).
@@ -132,6 +139,7 @@ const LEAVE: u8 = 40;
 const CLIPBOARD_TEXT: u8 = 50;
 const COMMAND: u8 = 60;
 const NOTICE: u8 = 61;
+const SCREENS: u8 = 62;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -201,6 +209,7 @@ impl Message {
                         out.push(10);
                         out.extend_from_slice(&short.to_le_bytes());
                     }
+                    Command::Screen(index) => out.extend([11, index]),
                     Command::Picture { fps, quality } => out.extend([
                         8,
                         fps,
@@ -215,6 +224,13 @@ impl Message {
             Message::Notice(ref text) => {
                 out.push(NOTICE);
                 out.extend_from_slice(text.as_bytes());
+            }
+            Message::Screens { current, ref sizes } => {
+                out.extend([SCREENS, current, sizes.len().min(16) as u8]);
+                for (width, height) in sizes.iter().take(16) {
+                    out.extend_from_slice(&width.to_le_bytes());
+                    out.extend_from_slice(&height.to_le_bytes());
+                }
             }
         }
         out
@@ -290,6 +306,7 @@ impl Message {
                 6 => Command::PrivacyOn,
                 7 => Command::PrivacyOff,
                 10 => Command::Resolution(u16::from_le_bytes(rest.get(1..3)?.try_into().ok()?)),
+                11 => Command::Screen(*rest.get(1)?),
                 9 => Command::MuteSpeakers(match rest.get(1)? {
                     0 => false,
                     1 => true,
@@ -307,6 +324,25 @@ impl Message {
                 _ => return None,
             }),
             NOTICE => Message::Notice(String::from_utf8(rest.to_vec()).ok()?),
+            SCREENS => {
+                let (&current, rest) = rest.split_first()?;
+                let (&count, sizes) = rest.split_first()?;
+                if count > 16 || sizes.len() != usize::from(count) * 4 {
+                    return None;
+                }
+                let sizes = sizes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|pair| {
+                        (
+                            u16::from_le_bytes([pair[0], pair[1]]),
+                            u16::from_le_bytes([pair[2], pair[3]]),
+                        )
+                    })
+                    .collect();
+                Message::Screens { current, sizes }
+            }
             _ => return None,
         })
     }
@@ -356,6 +392,11 @@ mod tests {
             Message::Command(Command::MuteSpeakers(false)),
             Message::Command(Command::Resolution(720)),
             Message::Command(Command::Resolution(0)),
+            Message::Command(Command::Screen(1)),
+            Message::Screens {
+                current: 1,
+                sizes: vec![(2560, 1440), (1920, 1080)],
+            },
             Message::Command(Command::Picture {
                 fps: 30,
                 quality: Quality::Sharp,
