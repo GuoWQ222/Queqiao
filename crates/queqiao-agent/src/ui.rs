@@ -22,6 +22,10 @@ enum Command {
     /// For tests: the same path as a click.
     PressConsent(bool),
     PressEnd,
+    /// For tests: a tray menu item chosen, as by a click.
+    PressMenu(u16),
+    /// Settings locked (someone of another account controls the PC) or not.
+    LockSettings(bool),
     /// The help window with this help ID and code, or none.
     Help(Option<(String, String)>),
     /// The privacy screen on (with how it looks) or off.
@@ -131,6 +135,14 @@ impl Ui {
 
     pub fn press_end(&self) {
         self.send(Command::PressEnd);
+    }
+
+    pub fn press_menu(&self, item: u16) {
+        self.send(Command::PressMenu(item));
+    }
+
+    pub fn lock_settings(&self, locked: bool) {
+        self.send(Command::LockSettings(locked));
     }
 
     pub fn try_event(&self) -> Option<PresenceEvent> {
@@ -247,6 +259,12 @@ fn run(
                 }
                 Ok(Command::PressConsent(allow)) => presence.press_consent(allow),
                 Ok(Command::PressEnd) => presence.press_end(),
+                Ok(Command::PressMenu(item)) => {
+                    if let Some(event) = presence.choose(item) {
+                        let _ = events.send(event);
+                    }
+                }
+                Ok(Command::LockSettings(locked)) => presence.set_settings_locked(locked),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }

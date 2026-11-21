@@ -99,6 +99,8 @@ struct Options {
     test_device: Option<String>,
     /// Lock this PC when a session ends, for this run only (tests: with --dry-run-commands it is only reported).
     lock_after_session: bool,
+    /// In a helper's session, choose a tray setting as a click would (tests: it must be refused).
+    test_press_setting: bool,
     connect: Option<String>,
     listen: Option<String>,
     server: Option<String>,
@@ -191,6 +193,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--help-id-file" => options.help_id_file = Some(PathBuf::from(args.next()?)),
             "--test-device" => options.test_device = Some(args.next()?),
             "--lock-after-session" => options.lock_after_session = true,
+            "--test-press-setting" => options.test_press_setting = true,
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => return None,
         }
@@ -389,6 +392,9 @@ fn run_account(
                     help_code = None;
                     lines.push("help: closed by the person at this PC".into());
                 }
+                PresenceEvent::SettingsLocked => {
+                    lines.push("a setting was chosen while someone of another account controls this PC: refused".into())
+                }
                 PresenceEvent::EndSession | PresenceEvent::Consent(_) => {}
             }
         }
@@ -478,6 +484,11 @@ fn run_account(
                     lines.push(format!(
                         "helper session: {from_name} of account {user}; file transfer, command lines, the privacy screen and restarting are off"
                     ));
+                    // The helper holds the mouse: this PC's settings are locked until the session ends.
+                    ui.lock_settings(true);
+                    if options.test_press_setting {
+                        ui.press_menu(queqiao_display::TEST_MENU_TERMINAL);
+                    }
                 }
                 let started_at = std::time::SystemTime::now();
                 match session(
@@ -500,8 +511,10 @@ fn run_account(
                         passed &= outcome.passed;
                         ui::record_session(&from_name, &from, started_at, &outcome.ended);
                         lock_after(options, &settings, lines);
+                        ui.lock_settings(false);
                     }
                     Err(error) => {
+                        ui.lock_settings(false);
                         lock_after(options, &settings, lines);
                         lines.push(format!("session {sessions} failed: {error}"));
                         ui::record_session(
@@ -1080,6 +1093,9 @@ fn session(
                     deferred.push(PresenceEvent::Quit);
                     break 'session;
                 }
+                PresenceEvent::SettingsLocked => lines.push(
+                    "a setting was chosen while someone of another account controls this PC: refused".into(),
+                ),
                 other => deferred.push(other),
             }
         }

@@ -241,7 +241,7 @@ try {
         $idFile = Join-Path $Out 'help_id.txt'
         Remove-Item -LiteralPath $idFile -ErrorAction SilentlyContinue
         $helpCode = 'M4HELPCODE'
-        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 1 --seconds $($Seconds + 90) --verify-input --dry-run-commands --answer allow --help-code $helpCode --help-id-file `"$idFile`" --report `"$Out\agent_help.txt`""
+        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 1 --seconds $($Seconds + 90) --verify-input --dry-run-commands --test-press-setting --answer allow --help-code $helpCode --help-id-file `"$idFile`" --report `"$Out\agent_help.txt`""
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_help.txt`""
         if ($AgentSoundDevice -and $ViewerSoundDevice) {
             $agentArgs += " --sound-device `"$AgentSoundDevice`""
@@ -261,7 +261,7 @@ try {
         $agentResult = Wait-SessionTask 'Queqiao-M4-Agent-help' 60
         "=== session 'help' (help ID $helpId): agent exit $agentResult, viewer exit $viewerResult"
         $helpChecks = @(
-            @('agent', @('^help: open, help ID \d{9}$', '^help: .* of account alice gave the code$', '^the person at this PC allowed ', '^helper session: .* of account alice; ', '^command from the helper refused: ')),
+            @('agent', @('^help: open, help ID \d{9}$', '^help: .* of account alice gave the code$', '^the person at this PC allowed ', '^helper session: .* of account alice; ', '^command from the helper refused: ', '^a setting was chosen while someone of another account controls this PC: refused')),
             @('viewer', @('^help granted: ', '^input events sent: [1-9]', '^notice from that PC: someone helping from another account cannot do that', '^command line \d+ failed: the person at that PC does not allow remote command lines', '^file failed: .*receiving files is turned off on that PC'))
         )
         foreach ($check in $helpChecks) {

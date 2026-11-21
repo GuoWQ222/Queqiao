@@ -41,6 +41,8 @@ pub enum PresenceEvent {
     SetAutostart(bool),
     /// Lock this PC when a session ends (true) or not.
     SetLockAfter(bool),
+    /// A setting was chosen while settings are locked (someone of another account is controlling): refused.
+    SettingsLocked,
     /// "Let someone help me...": open help requests (show the help ID and a code).
     OpenHelp,
     /// The help window asks for a new code.
@@ -67,6 +69,8 @@ const ID_NEW_CODE: u16 = 213;
 const ID_HELP_CLOSE: u16 = 214;
 const MENU_HELP: u16 = 208;
 const MENU_LOCK_AFTER: u16 = 209;
+/// Menu items tests can choose (the same path as a click).
+pub const TEST_MENU_TERMINAL: u16 = MENU_TERMINAL;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
 /// The tray window asks for its menu (not a control id).
@@ -99,6 +103,9 @@ pub struct Presence {
     terminal: bool,
     autostart: bool,
     lock_after: bool,
+    /// While someone of another account controls the PC, the settings (and Quit) cannot be changed from here:
+    /// they hold the mouse too.
+    settings_locked: bool,
     viewer: Option<String>,
 }
 
@@ -158,6 +165,7 @@ impl Presence {
             terminal,
             autostart,
             lock_after,
+            settings_locked: false,
             viewer: None,
         };
         presence.update_tray();
@@ -408,12 +416,14 @@ impl Presence {
 
     fn show_menu(&mut self) -> Option<PresenceEvent> {
         let menu = unsafe { CreatePopupMenu() }.ok()?;
+        let locked = self.settings_locked;
         let checked = |on: bool| {
-            if on {
+            let flags = if on {
                 MF_STRING | MF_CHECKED
             } else {
                 MF_STRING
-            }
+            };
+            if locked { flags | MF_GRAYED } else { flags }
         };
         let status = wide(&match &self.viewer {
             Some(viewer) => trf(
@@ -509,7 +519,33 @@ impl Presence {
             .0;
             let _ = PostMessageW(Some(self.tray), WM_NULL, WPARAM(0), LPARAM(0));
             let _ = DestroyMenu(menu);
-            match u16::try_from(chosen).unwrap_or(0) {
+            self.choose(u16::try_from(chosen).unwrap_or(0))
+        }
+    }
+
+    /// Locks the settings (true while someone of another account controls the PC) or unlocks them.
+    pub fn set_settings_locked(&mut self, locked: bool) {
+        self.settings_locked = locked;
+    }
+
+    /// What choosing tray menu item `item` does (also the path tests take).
+    pub fn choose(&mut self, item: u16) -> Option<PresenceEvent> {
+        let setting = matches!(
+            item,
+            MENU_ALLOW
+                | MENU_ASK
+                | MENU_CLIPBOARD
+                | MENU_FILES
+                | MENU_TERMINAL
+                | MENU_AUTOSTART
+                | MENU_LOCK_AFTER
+                | MENU_QUIT
+        );
+        if self.settings_locked && setting {
+            return Some(PresenceEvent::SettingsLocked);
+        }
+        {
+            match item {
                 MENU_END => Some(PresenceEvent::EndSession),
                 MENU_HELP => Some(PresenceEvent::OpenHelp),
                 MENU_ALLOW => {

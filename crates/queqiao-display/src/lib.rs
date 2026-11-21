@@ -14,7 +14,7 @@ pub use forms::{
     DeviceList, DeviceRow, HelpAction, HelpForm, ListAction, LoginAction, LoginFields, LoginForm,
     ask_text, confirm, normalize_code, popup_menu, save_window_picture, show_error,
 };
-pub use presence::{Presence, PresenceEvent};
+pub use presence::{Presence, PresenceEvent, TEST_MENU_TERMINAL};
 pub use present::{Presenter, fit};
 pub use privacy::PrivacyScreen;
 pub use window::{Window, WindowEvent};
