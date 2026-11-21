@@ -151,6 +151,14 @@ const CHINESE: &[(&str, &str)] = &[
     ("Allow remote command lines", "允许远程命令行"),
     ("Start with Windows", "开机自动启动"),
     ("Lock this PC when a session ends", "会话结束时锁定这台电脑"),
+    (
+        "Lock these settings with a password...",
+        "用密码锁定这些设置……",
+    ),
+    ("Remove the settings password...", "移除设置密码……"),
+    ("The settings password:", "设置密码："),
+    ("A password for these settings:", "为这些设置设一个密码："),
+    ("The same password again:", "再输入一次同样的密码："),
     ("Quit Queqiao on this PC", "退出这台电脑上的鹊桥"),
     (
         "This PC is being used remotely with Queqiao. Its screen stays dark until the session ends.",

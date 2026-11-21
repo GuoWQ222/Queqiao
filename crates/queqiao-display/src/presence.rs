@@ -21,7 +21,10 @@ use windows::core::{PCWSTR, Result, w};
 use crate::forms::{Form, Kind, set_text};
 
 /// What the person did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Checks a typed settings password.
+pub type PasswordCheck = Box<dyn Fn(&str) -> bool>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresenceEvent {
     /// End the current session (banner or tray).
     EndSession,
@@ -41,8 +44,11 @@ pub enum PresenceEvent {
     SetAutostart(bool),
     /// Lock this PC when a session ends (true) or not.
     SetLockAfter(bool),
-    /// A setting was chosen while settings are locked (someone of another account is controlling): refused.
+    /// A setting was chosen while settings are locked (someone of another account is controlling, or the
+    /// settings password was not given): refused.
     SettingsLocked,
+    /// A new settings password (Some), or none any more.
+    SetPassword(Option<String>),
     /// "Let someone help me...": open help requests (show the help ID and a code).
     OpenHelp,
     /// The help window asks for a new code.
@@ -69,6 +75,7 @@ const ID_NEW_CODE: u16 = 213;
 const ID_HELP_CLOSE: u16 = 214;
 const MENU_HELP: u16 = 208;
 const MENU_LOCK_AFTER: u16 = 209;
+const MENU_PASSWORD: u16 = 220;
 /// Menu items tests can choose (the same path as a click).
 pub const TEST_MENU_TERMINAL: u16 = MENU_TERMINAL;
 const ID_ALLOW: u16 = 211;
@@ -106,6 +113,8 @@ pub struct Presence {
     /// While someone of another account controls the PC, the settings (and Quit) cannot be changed from here:
     /// they hold the mouse too.
     settings_locked: bool,
+    /// Checks the settings password, when one is set: settings and Quit ask for it.
+    password_check: Option<PasswordCheck>,
     viewer: Option<String>,
 }
 
@@ -166,6 +175,7 @@ impl Presence {
             autostart,
             lock_after,
             settings_locked: false,
+            password_check: None,
             viewer: None,
         };
         presence.update_tray();
@@ -441,6 +451,11 @@ impl Presence {
         let autostart = wide(tr("Start with Windows"));
         let lock_after = wide(tr("Lock this PC when a session ends"));
         let quit = wide(tr("Quit Queqiao on this PC"));
+        let password = wide(if self.password_check.is_some() {
+            tr("Remove the settings password...")
+        } else {
+            tr("Lock these settings with a password...")
+        });
         let help = wide(tr("Let someone help me..."));
         unsafe {
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
@@ -496,6 +511,12 @@ impl Presence {
                 usize::from(MENU_LOCK_AFTER),
                 PCWSTR(lock_after.as_ptr()),
             );
+            let _ = AppendMenuW(
+                menu,
+                checked(false),
+                usize::from(MENU_PASSWORD),
+                PCWSTR(password.as_ptr()),
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(
                 menu,
@@ -523,6 +544,11 @@ impl Presence {
         }
     }
 
+    /// The settings password's check (None: no password).
+    pub fn set_password_check(&mut self, check: Option<PasswordCheck>) {
+        self.password_check = check;
+    }
+
     /// Locks the settings (true while someone of another account controls the PC) or unlocks them.
     pub fn set_settings_locked(&mut self, locked: bool) {
         self.settings_locked = locked;
@@ -541,8 +567,25 @@ impl Presence {
                 | MENU_LOCK_AFTER
                 | MENU_QUIT
         );
-        if self.settings_locked && setting {
+        let protected = setting || item == MENU_PASSWORD;
+        if self.settings_locked && protected {
             return Some(PresenceEvent::SettingsLocked);
+        }
+        if protected && let Some(check) = &self.password_check {
+            let typed = crate::forms::ask_secret(tr("Queqiao"), tr("The settings password:"));
+            if !typed.is_some_and(|typed| check(&typed)) {
+                return Some(PresenceEvent::SettingsLocked);
+            }
+        }
+        if item == MENU_PASSWORD {
+            if self.password_check.is_some() {
+                return Some(PresenceEvent::SetPassword(None));
+            }
+            let first =
+                crate::forms::ask_secret(tr("Queqiao"), tr("A password for these settings:"))?;
+            let again = crate::forms::ask_secret(tr("Queqiao"), tr("The same password again:"))?;
+            return (!first.is_empty() && first == again)
+                .then_some(PresenceEvent::SetPassword(Some(first)));
         }
         {
             match item {

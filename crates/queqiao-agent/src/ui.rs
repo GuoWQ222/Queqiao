@@ -26,6 +26,8 @@ enum Command {
     PressMenu(u16),
     /// Settings locked (someone of another account controls the PC) or not.
     LockSettings(bool),
+    /// The settings password's stored form (None: no password).
+    PasswordHash(Option<String>),
     /// The help window with this help ID and code, or none.
     Help(Option<(String, String)>),
     /// The privacy screen on (with how it looks) or off.
@@ -145,6 +147,10 @@ impl Ui {
         self.send(Command::LockSettings(locked));
     }
 
+    pub fn set_password_hash(&self, hash: Option<String>) {
+        self.send(Command::PasswordHash(hash));
+    }
+
     pub fn try_event(&self) -> Option<PresenceEvent> {
         self.events.try_recv().ok()
     }
@@ -176,6 +182,7 @@ fn run(
     events: &Sender<PresenceEvent>,
     ready: &Sender<Result<bool, String>>,
 ) {
+    let password = Some(settings.settings_password.clone());
     let mut presence = match Presence::new(
         settings.allow_account_control,
         settings.ask_before_session,
@@ -192,6 +199,7 @@ fn run(
             return;
         }
     };
+    presence.set_password_check(password_check(password));
     let _ = ready.send(Ok(presence.tray_shown()));
     // (when, file name) of a picture to take once the window has drawn itself.
     let mut picture: Option<(Instant, &str)> = None;
@@ -265,6 +273,9 @@ fn run(
                     }
                 }
                 Ok(Command::LockSettings(locked)) => presence.set_settings_locked(locked),
+                Ok(Command::PasswordHash(hash)) => {
+                    presence.set_password_check(password_check(hash))
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }
@@ -309,6 +320,17 @@ pub struct Settings {
     /// Lock this PC when a session ends (whoever ended it).
     #[serde(default)]
     pub lock_after_session: bool,
+    /// The settings password's stored form (PBKDF2); empty: none.
+    #[serde(default)]
+    pub settings_password: String,
+}
+
+/// The check for the settings password's stored form.
+fn password_check(hash: Option<String>) -> Option<queqiao_display::PasswordCheck> {
+    hash.filter(|hash| !hash.is_empty()).map(|hash| {
+        Box::new(move |typed: &str| queqiao_account::check_local_password(&hash, typed))
+            as queqiao_display::PasswordCheck
+    })
 }
 
 fn yes() -> bool {
@@ -326,6 +348,7 @@ impl Default for Settings {
             receive_files: true,
             allow_terminal: true,
             lock_after_session: false,
+            settings_password: String::new(),
         }
     }
 }

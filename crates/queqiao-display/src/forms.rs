@@ -454,6 +454,24 @@ pub fn ask_text(title: &str, prompt: &str, initial: &str) -> Option<String> {
     }
 }
 
+/// Asks for a password (not shown as typed); None when cancelled.
+pub fn ask_secret(title: &str, prompt: &str) -> Option<String> {
+    let form = Form::new(title, 380, 170).ok()?;
+    form.label(prompt, [20, 16, 340, 20]).ok()?;
+    let field = form.edit("", true, [20, 40, 340, 24]).ok()?;
+    form.button(tr("OK"), ID_OK, true, [260, 90, 100, 30])
+        .ok()?;
+    form.show();
+    let _ = unsafe { SetFocus(Some(field)) };
+    loop {
+        match form.next_command(50) {
+            Some(ID_OK) => return Some(text_of(field)),
+            Some(ID_CANCEL | CLOSED) => return None,
+            _ => {}
+        }
+    }
+}
+
 /// A yes/no question (No is the default).
 pub fn confirm(owner: HWND, title: &str, text: &str) -> bool {
     let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();

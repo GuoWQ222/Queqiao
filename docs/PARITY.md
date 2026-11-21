@@ -20,7 +20,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Consent on the controlled PC before a session (Allow / Deny), tray icon, session banner with End, session history | done (security point 2) |
 | Code plus local confirmation for helpers from other accounts (always asked, whatever the settings); 5 wrong codes close help; the code works once | done (2026-11-21) |
 | Auto-lock the client's settings while being helped (the helper holds the mouse; only ending the session stays) | done (2026-11-21) |
-| Lock the client's settings with a separate password | planned |
+| Lock the client's settings with a separate password (stored as PBKDF2-HMAC-SHA256 on this PC) | done (2026-11-21, tray menu); the prompts are not driven by the automatic tests |
 | Network status: delay, frame rate, data rate, direct or relayed | done (2026-11-21, in the session window title, once a second); an overlay on the picture: planned (UI) |
 
 ## Picture

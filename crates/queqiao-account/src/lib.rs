@@ -6,6 +6,7 @@
 
 mod config;
 mod keys;
+mod local_password;
 mod notes;
 mod tls;
 
@@ -21,6 +22,7 @@ use tungstenite::Message;
 
 pub use config::{DeviceIdentity, SavedLogin, folder as data_folder};
 pub use keys::{DeviceKey, KnownDevices, Pin, verify};
+pub use local_password::{check_local_password, hash_local_password};
 pub use notes::{DeviceNote, DeviceNotes};
 pub use queqiao_core::account::{ClientMessage, Device, Role};
 

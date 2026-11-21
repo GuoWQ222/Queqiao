@@ -395,6 +395,16 @@ fn run_account(
                 PresenceEvent::SettingsLocked => {
                     lines.push("a setting was chosen while someone of another account controls this PC: refused".into())
                 }
+                PresenceEvent::SetPassword(password) => {
+                    settings.settings_password = password.as_deref().map(queqiao_account::hash_local_password).unwrap_or_default();
+                    let _ = settings.save();
+                    let hash = (!settings.settings_password.is_empty()).then(|| settings.settings_password.clone());
+                    ui.set_password_hash(hash);
+                    lines.push(format!(
+                        "the person at this PC {} the settings password",
+                        if password.is_some() { "set" } else { "removed" }
+                    ));
+                }
                 PresenceEvent::EndSession | PresenceEvent::Consent(_) => {}
             }
         }
