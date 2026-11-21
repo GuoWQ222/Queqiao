@@ -325,6 +325,7 @@ impl Peer {
             arrived,
             stop_extras,
             connected: false,
+            dtls_notes: (0, 0),
             path: None,
             clock: Instant::now(),
             streams: [None; STREAMS],
@@ -501,6 +502,27 @@ fn flush_channel(
     }
 }
 
+/// The DTLS records in a datagram, for notes: "hs1" (handshake, its message type: 1 ClientHello, 2 ServerHello, 11
+/// Certificate, 12 ServerKeyExchange, 13 CertificateRequest, 14 ServerHelloDone, 15 CertificateVerify, 16
+/// ClientKeyExchange), "ccs", "enc" (a record of epoch 1 or later: Finished or application data), "alert".
+fn dtls_records(bytes: &[u8]) -> String {
+    let mut parts = Vec::new();
+    let mut at = 0;
+    while at + 13 <= bytes.len() {
+        let kind = bytes[at];
+        let epoch = u16::from_be_bytes([bytes[at + 3], bytes[at + 4]]);
+        let length = usize::from(u16::from_be_bytes([bytes[at + 11], bytes[at + 12]]));
+        parts.push(match (kind, epoch) {
+            (20, _) => "ccs".to_string(),
+            (21, 0) => "alert".to_string(),
+            (22, 0) => format!("hs{}", bytes.get(at + 13).copied().unwrap_or(0)),
+            (_, _) => format!("enc{kind}"),
+        });
+        at += 13 + length;
+    }
+    parts.join(" ")
+}
+
 /// Receives on another uplink's socket and hands each datagram to the network thread, waking it.
 fn receive_extra(
     socket: Arc<UdpSocket>,
@@ -567,6 +589,8 @@ struct Network {
     arrived: Receiver<Arriving>,
     stop_extras: Arc<AtomicBool>,
     connected: bool,
+    /// DTLS packets noted before connecting (out, in): where the handshake goes and how long it takes.
+    dtls_notes: (u32, u32),
     path: Option<String>,
     /// The latest time given to str0m: inputs never go back in time (deadlines are served up to 1 ms early).
     clock: Instant,
@@ -635,6 +659,13 @@ impl Network {
             let mut took = false;
             while let Ok(arriving) = self.arrived.try_recv() {
                 took = true;
+                self.dtls_note(
+                    false,
+                    &arriving.contents,
+                    arriving.destination,
+                    arriving.source,
+                    false,
+                );
                 let Ok(contents) = arriving.contents.as_slice().try_into() else {
                     continue;
                 };
@@ -648,9 +679,11 @@ impl Network {
                         contents,
                     },
                 );
-                if self.rtc.accepts(&input) {
-                    self.rtc.handle_input(input).map_err(err)?;
-                }
+                // Not `rtc.accepts`: before ICE has a pair it refuses DTLS from a candidate not yet checked, and the
+                // viewer's first ClientHello (sent as soon as its own ICE connected) was dropped here; its resend
+                // came 2 s later (seen over the internet 2026-11-21). One Rtc per session: everything goes to it, as
+                // on the main socket.
+                self.rtc.handle_input(input).map_err(err)?;
             }
             if took {
                 continue;
@@ -672,6 +705,7 @@ impl Network {
                     continue;
                 }
                 Ok((length, source)) => {
+                    self.dtls_note(false, &buffer[..length], self.local, source, false);
                     // Something that is not STUN, DTLS or RTP (anyone can send to this port): left out, the
                     // session goes on.
                     let Ok(contents) = buffer[..length].try_into() else {
@@ -729,6 +763,13 @@ impl Network {
                             None
                         }
                     };
+                    self.dtls_note(
+                        true,
+                        &packet.contents,
+                        packet.source,
+                        packet.destination,
+                        relayed.is_some(),
+                    );
                     // DTLS and SRTP packets (first byte 20 and up; STUN starts with 0 or 1) go only on the
                     // selected pair, so they show which way the session goes.
                     if self.connected && packet.contents.first().is_some_and(|byte| *byte >= 20) {
@@ -894,18 +935,61 @@ impl Network {
         let relayed = turn.relayed;
         self.flush_turn();
         if let (Incoming::Data { peer, payload }, Some(relayed)) = (incoming, relayed) {
+            self.dtls_note(false, &payload, relayed, peer, true);
+            // As on the direct sockets: what is not STUN, DTLS or RTP is left out, the session goes on.
+            let Ok(contents) = payload.as_slice().try_into() else {
+                return Ok(());
+            };
             let input = Input::Receive(
                 now,
                 Receive {
                     proto: Protocol::Udp,
                     source: peer,
                     destination: relayed,
-                    contents: payload.as_slice().try_into().map_err(err)?,
+                    contents,
                 },
             );
             self.rtc.handle_input(input).map_err(err)?;
         }
         Ok(())
+    }
+
+    /// Before connecting: a note for each DTLS packet either way (at most 12 each), to see where the handshake goes.
+    fn dtls_note(
+        &mut self,
+        outgoing: bool,
+        bytes: &[u8],
+        local: SocketAddr,
+        remote: SocketAddr,
+        relayed: bool,
+    ) {
+        // DTLS records only (content types 20 to 23; SRTP starts at 128), until connected.
+        if self.connected || !bytes.first().is_some_and(|byte| (20..=23).contains(byte)) {
+            return;
+        }
+        let count = if outgoing {
+            &mut self.dtls_notes.0
+        } else {
+            &mut self.dtls_notes.1
+        };
+        if *count >= 12 {
+            return;
+        }
+        *count += 1;
+        let how = if relayed { " (relayed)" } else { "" };
+        let records = dtls_records(bytes);
+        let note = if outgoing {
+            format!(
+                "DTLS out {} bytes [{records}], {local} -> {remote}{how}",
+                bytes.len()
+            )
+        } else {
+            format!(
+                "DTLS in {} bytes [{records}], {remote} -> {local}{how}",
+                bytes.len()
+            )
+        };
+        let _ = self.events.send(PeerEvent::Note(note));
     }
 
     /// Writes queued data-channel messages, in order, as far as str0m's buffer takes them (a refused write is
