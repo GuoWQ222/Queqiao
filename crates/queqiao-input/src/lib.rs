@@ -5,7 +5,10 @@
 //! hardware scancodes, so the controlled PC's keyboard layout decides the characters. The process must
 //! be per-monitor DPI aware (the agent is), so desktop positions are physical pixels.
 
+mod block;
 mod clipboard;
+
+pub use block::LocalInputBlock;
 
 pub use clipboard::{
     ClipContent, Clipboard, read_files as clipboard_files, read_text as clipboard_text,

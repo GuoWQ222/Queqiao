@@ -1156,6 +1156,16 @@ fn ask_consent(ui: &ui::Ui, question: &str, answer: Option<bool>) -> Result<bool
     }
 }
 
+/// The local keyboard and mouse back (the privacy screen went, or Windows' own screen came up).
+fn end_local_block(block: &mut Option<queqiao_input::LocalInputBlock>, lines: &mut Vec<String>) {
+    if let Some(block) = block.take() {
+        lines.push(format!(
+            "privacy: the local keyboard and mouse work again ({} local events were held back)",
+            block.swallowed()
+        ));
+    }
+}
+
 /// The privacy test's square: 320 x 200 pixels, 100 pixels in from the captured monitor's top left corner.
 const PRIVACY_TEST_SIZE: (i32, i32) = (320, 200);
 const PRIVACY_TEST_OFFSET: i32 = 100;
@@ -1631,6 +1641,8 @@ fn session(
     };
     let mut sound_report = Vec::new();
     let mut privacy_check_due = false;
+    // The local keyboard and mouse off while the privacy screen is up.
+    let mut local_block: Option<queqiao_input::LocalInputBlock> = None;
     // Muted speakers: whether they were muted before, to put back when the session ends.
     let mut speakers_before: Option<bool> = None;
     // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
@@ -1838,7 +1850,21 @@ fn session(
                                     "privacy: the session banner is above the dark screen: {}",
                                     if banner_above { "yes" } else { "no" }
                                 ));
-                                "that PC's screen is dark: only you see it".to_string()
+                                // Nobody types or clicks unseen there meanwhile: its own keyboard and mouse are
+                                // off (Ctrl+Alt+Del gives them back).
+                                match queqiao_input::LocalInputBlock::start() {
+                                    Ok(block) => {
+                                        local_block = Some(block);
+                                        lines.push(
+                                            "privacy: the local keyboard and mouse are off".into(),
+                                        );
+                                        "that PC's screen is dark and its keyboard and mouse are off: only you see and use it".to_string()
+                                    }
+                                    Err(error) => {
+                                        lines.push(format!("privacy: {error}"));
+                                        "that PC's screen is dark: only you see it (its keyboard and mouse still work)".to_string()
+                                    }
+                                }
                             }
                             Err(error) => format!("that PC's screen could not be hidden: {error}"),
                         };
@@ -1847,6 +1873,7 @@ fn session(
                     }
                     Some(Message::Command(Command::PrivacyOff)) => {
                         let _ = ui.set_privacy(None);
+                        end_local_block(&mut local_block, lines);
                         let notice = "that PC's screen is shown again".to_string();
                         lines.push(format!("command from the viewer: PrivacyOff: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
@@ -2290,6 +2317,19 @@ fn session(
                                 "{} ms: another desktop takes input ({error}): pictures and input through the desktop helper",
                                 started.elapsed().as_millis()
                             ));
+                            // Windows' own screen came up (Ctrl+Alt+Del, the lock screen, a UAC prompt): the dark
+                            // screen and the local block end, so the person there is never shut out.
+                            if local_block.is_some() {
+                                let _ = ui.set_privacy(None);
+                                end_local_block(&mut local_block, lines);
+                                peer.send_data(
+                                    Message::Notice(
+                                        "Windows' own screen came up on that PC (Ctrl+Alt+Del, lock or UAC): its screen is shown again and its keyboard and mouse work"
+                                            .into(),
+                                    )
+                                    .encode(),
+                                );
+                            }
                         }
                         _ => {
                             return Err(format!(

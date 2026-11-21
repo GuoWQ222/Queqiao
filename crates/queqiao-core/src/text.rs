@@ -192,8 +192,8 @@ const CHINESE: &[(&str, &str)] = &[
     ("The same password again:", "再输入一次同样的密码："),
     ("Quit Queqiao on this PC", "退出这台电脑上的鹊桥"),
     (
-        "This PC is being used remotely with Queqiao. Its screen stays dark until the session ends.",
-        "这台电脑正在通过鹊桥被远程使用。会话结束前屏幕将保持黑屏。",
+        "This PC is being used remotely with Queqiao. Its screen stays dark and its keyboard and mouse stay off until the session ends. Ctrl+Alt+Del gives them back.",
+        "这台电脑正在通过鹊桥被远程使用。会话结束前屏幕保持黑屏，键盘和鼠标暂时不可用。按 Ctrl+Alt+Del 可恢复。",
     ),
     // The session window.
     ("Send Ctrl+Alt+Del", "发送 Ctrl+Alt+Del"),

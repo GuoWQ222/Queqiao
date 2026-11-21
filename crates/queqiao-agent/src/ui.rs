@@ -45,8 +45,7 @@ pub struct PrivacyLook {
 }
 
 /// What the person at this PC reads on the privacy screen.
-const PRIVACY_TEXT: &str =
-    "This PC is being used remotely with Queqiao. Its screen stays dark until the session ends.";
+const PRIVACY_TEXT: &str = "This PC is being used remotely with Queqiao. Its screen stays dark and its keyboard and mouse stay off until the session ends. Ctrl+Alt+Del gives them back.";
 
 pub struct Ui {
     commands: Sender<Command>,

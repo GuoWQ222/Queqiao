@@ -40,7 +40,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 | Several monitors each in its own window | planned |
 | Virtual displays: create / remove, automatic when no monitor is attached, custom high resolution and refresh ("super screen") | not needed for now (the user, 2026-11-21); it needs an IddCx display driver, which must be signed for release |
 | Privacy screen: the controlled PC's monitors dark while controlled, the controlling side still sees the desktop | done (2026-11-21, "Darken that PC's screen" in the session window menu; needs Windows 10 2004 or later there; the session banner with End stays above it) |
-| Block the controlled PC's own mouse and keyboard while the screen is dark | planned (M5: needs the service) |
+| Block the controlled PC's own mouse and keyboard while the screen is dark | done (2026-11-22): with the privacy screen, low-level keyboard and mouse hooks on a thread of their own let only injected input through (no service needed); Ctrl+Alt+Del gives them back (with the service, Windows' own screen ends the privacy screen and the block; without it, that ends the session). Tested in `run_m4_local.ps1` (the hooks set, the viewer's input test passing through them); held-back hardware input cannot be produced by a test (SendInput is always marked injected) |
 | Window: full screen / window, zoom, scaling, small always-on-top window with opacity, several sessions at once | partly: window, full screen (menu or Ctrl+Alt+Enter), always on top (2026-11-21); zoom, opacity, several sessions: planned |
 
 ## Input
