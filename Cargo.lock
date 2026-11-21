@@ -898,6 +898,7 @@ dependencies = [
  "queqiao-display",
  "queqiao-input",
  "queqiao-local",
+ "queqiao-update",
  "windows",
 ]
 

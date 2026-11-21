@@ -16,6 +16,7 @@ mod launch;
 mod log;
 mod logon;
 mod service;
+mod update;
 
 /// The service's name, and the registry key under Services that holds its settings.
 pub const NAME: &str = "Queqiao";

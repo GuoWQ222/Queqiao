@@ -33,6 +33,9 @@ pub enum Found {
         version: String,
         notes: String,
         installer: PathBuf,
+        /// The manifest's exact bytes and signature, for the service (it checks them itself).
+        manifest: Vec<u8>,
+        signature: String,
         by_hand: bool,
     },
     Failed {
@@ -100,15 +103,17 @@ impl Updater {
 fn look(feed: &str, by_hand: bool) -> Found {
     match queqiao_update::check(feed, queqiao_core::VERSION) {
         Ok(None) => Found::UpToDate { by_hand },
-        Ok(Some(manifest)) if failed_before(&manifest.version) => Found::Skipped {
-            version: manifest.version,
+        Ok(Some(offer)) if failed_before(&offer.manifest.version) => Found::Skipped {
+            version: offer.manifest.version,
             by_hand,
         },
-        Ok(Some(manifest)) => match queqiao_update::download(feed, &manifest, &folder()) {
+        Ok(Some(offer)) => match queqiao_update::download(feed, &offer.manifest, &folder()) {
             Ok(installer) => Found::Ready {
-                version: manifest.version,
-                notes: manifest.notes,
+                version: offer.manifest.version,
+                notes: offer.manifest.notes,
                 installer,
+                manifest: offer.raw,
+                signature: offer.signature,
                 by_hand,
             },
             Err(error) => Found::Failed { error, by_hand },
@@ -161,6 +166,45 @@ pub fn apply(installer: &Path, version: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("{}: {e}", installer.display()))
+}
+
+/// With the Queqiao service: this person's own installation (the device list in the Start menu) is updated first,
+/// as above but waited for, then the service gets the update for its copy (it checks it itself, stops, replaces its
+/// programs and starts again, with this agent).
+pub fn apply_through_service(
+    service: &mut crate::service_link::ServiceLink,
+    installer: &Path,
+    version: &str,
+    manifest: &[u8],
+    signature: &str,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    write_text("UpdateTried", version)?;
+    let own = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|local| local.join("Programs").join("Queqiao"));
+    if own.is_some_and(|folder| folder.join("queqiao-setup.exe").is_file()) {
+        let report = folder().join("update_report.txt");
+        let status = std::process::Command::new(installer)
+            .args(["--quiet", "--update", "--report"])
+            .arg(&report)
+            .current_dir(installer.parent().unwrap_or(installer))
+            .status();
+        lines.push(match status {
+            Ok(status) if status.success() => {
+                format!("updates: this person's installation is {version} now")
+            }
+            Ok(status) => format!(
+                "updates: this person's installation was not updated (exit code {:?})",
+                status.code()
+            ),
+            Err(error) => format!("updates: this person's installation: {error}"),
+        });
+    }
+    let bytes = std::fs::read(installer).map_err(|e| format!("{}: {e}", installer.display()))?;
+    let reply = service.update(manifest, signature, bytes)?;
+    lines.push(format!("updates: the Queqiao service: {reply}"));
+    Ok(())
 }
 
 fn feed() -> String {

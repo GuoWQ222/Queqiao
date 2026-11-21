@@ -164,15 +164,31 @@ pub fn check_feed(feed: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// What the feed offers, if it is later than `current`: the manifest, verified.
+/// A later version on the feed: the manifest as verified, and its exact bytes and signature (the service checks
+/// them again itself).
+#[derive(Clone, Debug)]
+pub struct Offer {
+    pub manifest: Manifest,
+    pub raw: Vec<u8>,
+    pub signature: String,
+}
+
+/// What the feed offers, if it is later than `current`, verified.
 #[cfg(windows)]
-pub fn check(feed: &str, current: &str) -> Result<Option<Manifest>, String> {
+pub fn check(feed: &str, current: &str) -> Result<Option<Offer>, String> {
     check_feed(feed)?;
-    let manifest = fetch(&format!("{feed}{MANIFEST}"), MAX_SMALL)?;
+    let raw = fetch(&format!("{feed}{MANIFEST}"), MAX_SMALL)?;
     let signature = fetch(&format!("{feed}{SIGNATURE}"), MAX_SMALL)?;
-    let signature = String::from_utf8(signature).map_err(|_| "the update signature is not text")?;
-    let manifest = verify_manifest(&manifest, &signature)?;
-    Ok(newer(&manifest.version, current).then_some(manifest))
+    let signature = String::from_utf8(signature)
+        .map_err(|_| "the update signature is not text")?
+        .trim()
+        .to_string();
+    let manifest = verify_manifest(&raw, &signature)?;
+    Ok(newer(&manifest.version, current).then_some(Offer {
+        manifest,
+        raw,
+        signature,
+    }))
 }
 
 /// Downloads the installer `manifest` names into `folder` and checks it; its path.

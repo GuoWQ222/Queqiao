@@ -11,6 +11,7 @@ queqiao-core.workspace = true
 queqiao-display.workspace = true
 queqiao-input.workspace = true
 queqiao-local.workspace = true
+queqiao-update.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",

@@ -87,6 +87,30 @@ impl ServiceLink {
         }
     }
 
+    /// Hands an update to the service for its own copy of Queqiao (it checks all of it itself); its answer.
+    pub fn update(
+        &mut self,
+        manifest: &[u8],
+        signature: &str,
+        installer: Vec<u8>,
+    ) -> Result<String, String> {
+        while self.replies.try_recv().is_ok() {}
+        let message = ToService::Update {
+            manifest: manifest.to_vec(),
+            signature: signature.to_string(),
+            installer,
+        };
+        self.writer.write(&message.encode())?;
+        match self.replies.recv_timeout(Duration::from_secs(30)) {
+            Ok(FromService::Reply(reply)) if reply.starts_with("refused") => Err(reply),
+            Ok(FromService::Reply(reply)) => Ok(reply),
+            Ok(FromService::Identity(_)) => {
+                Err("the Queqiao service answered something else".into())
+            }
+            Err(_) => Err("the Queqiao service did not answer".into()),
+        }
+    }
+
     /// Asks the service to end this agent and its helper and start both again.
     pub fn restart(&mut self) -> Result<(), String> {
         self.writer.write(&ToService::Restart.encode())

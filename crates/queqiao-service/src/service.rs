@@ -443,6 +443,33 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
                     )),
                     Err(error) => log::line(&format!("the sign-in screen: not kept: {error}")),
                 },
+                // Only the person's own agent asks for updates.
+                ToService::Update { .. } if current.logon => {
+                    log::line("the agent for the sign-in screen asked for an update: ignored");
+                }
+                ToService::Update {
+                    manifest,
+                    signature,
+                    installer,
+                } => {
+                    let reply = match crate::update::start(&manifest, &signature, &installer) {
+                        Ok(version) => {
+                            log::line(&format!(
+                                "session {}: update to {version} checked (signed by the release key); its installer stops and starts this service",
+                                current.session
+                            ));
+                            format!("installing {version}")
+                        }
+                        Err(error) => {
+                            log::line(&format!(
+                                "session {}: update refused: {error}",
+                                current.session
+                            ));
+                            format!("refused: {error}")
+                        }
+                    };
+                    let _ = current.to_agent.write(&FromService::Reply(reply).encode());
+                }
                 ToService::ForgetLogon => {
                     if logon::stored() {
                         logon::forget();

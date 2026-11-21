@@ -71,7 +71,22 @@ pub enum ToService {
     LogonIdentity(LogonIdentity),
     /// The person does not allow control at the sign-in screen (any more): the service forgets the identity.
     ForgetLogon,
+    /// An update for the service's own copy of Queqiao, as the agent downloaded it: the manifest, its signature and
+    /// the installer. The service checks all of it itself (the release key's signature, the installer's SHA-256, a
+    /// later version) before it runs anything.
+    Update {
+        manifest: Vec<u8>,
+        signature: String,
+        installer: Vec<u8>,
+    },
 }
+
+/// The most an update's manifest may be in a message.
+pub const MAX_UPDATE_MANIFEST: usize = 64 * 1024;
+/// The most an update's installer may be in a message.
+pub const MAX_UPDATE_INSTALLER: usize = 128 << 20;
+// The largest update fits in one message.
+const _: () = assert!(MAX_UPDATE_MANIFEST + MAX_UPDATE_INSTALLER + 16 + MAX_TEXT < MAX_MESSAGE);
 
 /// From the service to the agent.
 #[derive(Clone, Debug, PartialEq)]
@@ -367,6 +382,20 @@ impl ToService {
                 out
             }
             ToService::ForgetLogon => vec![4],
+            ToService::Update {
+                manifest,
+                signature,
+                installer,
+            } => {
+                let mut out = Vec::with_capacity(16 + manifest.len() + installer.len());
+                out.push(5);
+                out.extend_from_slice(&(manifest.len() as u32).to_le_bytes());
+                out.extend_from_slice(manifest);
+                text(&mut out, signature);
+                out.extend_from_slice(&(installer.len() as u32).to_le_bytes());
+                out.extend_from_slice(installer);
+                out
+            }
         }
     }
 
@@ -376,6 +405,24 @@ impl ToService {
             [2] => Some(ToService::Restart),
             [3, rest @ ..] => LogonIdentity::decode_from(rest).map(ToService::LogonIdentity),
             [4] => Some(ToService::ForgetLogon),
+            [5, rest @ ..] => {
+                let mut fields = Fields(rest);
+                let length = u32::from_le_bytes(fields.take(4)?.try_into().ok()?) as usize;
+                if length > MAX_UPDATE_MANIFEST {
+                    return None;
+                }
+                let manifest = fields.take(length)?.to_vec();
+                let signature = fields.text()?;
+                let length = u32::from_le_bytes(fields.take(4)?.try_into().ok()?) as usize;
+                if length > MAX_UPDATE_INSTALLER || fields.0.len() != length {
+                    return None;
+                }
+                Some(ToService::Update {
+                    manifest,
+                    signature,
+                    installer: fields.0.to_vec(),
+                })
+            }
             _ => None,
         }
     }
@@ -501,6 +548,34 @@ mod tests {
         assert_eq!(ToService::decode(&longer), None);
         // The key never shows in a debug print.
         assert!(!format!("{:?}", identity()).contains("cdcd"));
+    }
+
+    #[test]
+    fn update_round_trip_and_refusals() {
+        let message = ToService::Update {
+            manifest: br#"{"version":"0.1.1"}"#.to_vec(),
+            signature: "ab".repeat(64),
+            installer: (0..=255u8).cycle().take(100_000).collect(),
+        };
+        let bytes = message.encode();
+        assert_eq!(ToService::decode(&bytes), Some(message));
+        // Cut, or with anything after it: refused.
+        for cut in [1, 4, 5, 20, 30, bytes.len() - 1] {
+            assert_eq!(ToService::decode(&bytes[..cut]), None, "cut at {cut}");
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert_eq!(ToService::decode(&longer), None);
+        // A manifest or installer over the limits: refused (as their lengths say, before anything else is read).
+        let mut big_manifest = vec![5];
+        big_manifest.extend(((MAX_UPDATE_MANIFEST + 1) as u32).to_le_bytes());
+        big_manifest.extend(vec![b'x'; MAX_UPDATE_MANIFEST + 1]);
+        assert_eq!(ToService::decode(&big_manifest), None);
+        let mut big_installer = vec![5];
+        big_installer.extend(0u32.to_le_bytes());
+        big_installer.extend(0u16.to_le_bytes());
+        big_installer.extend(((MAX_UPDATE_INSTALLER + 1) as u32).to_le_bytes());
+        assert_eq!(ToService::decode(&big_installer), None);
     }
 
     #[test]

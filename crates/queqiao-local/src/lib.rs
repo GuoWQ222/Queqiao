@@ -10,7 +10,8 @@
 mod messages;
 
 pub use messages::{
-    FromHelper, FromService, LogonIdentity, MAX_MESSAGE, MAX_TEXT, ToHelper, ToService,
+    FromHelper, FromService, LogonIdentity, MAX_MESSAGE, MAX_TEXT, MAX_UPDATE_INSTALLER,
+    MAX_UPDATE_MANIFEST, ToHelper, ToService,
 };
 
 use windows::Win32::Foundation::{

@@ -468,9 +468,12 @@ fn run_account(
     if options.test_tray_login {
         ui.press_menu(queqiao_display::TEST_MENU_LOGIN);
     }
-    // Updates, for the person's own agent of an installed Queqiao.
-    let updater = (tolerant && !options.test_tray_login && update::installed_here())
-        .then(|| update::Updater::start(lines));
+    // Updates, for the person's own agent of an installed Queqiao: put there by queqiao-setup, or started by the
+    // Queqiao service (which updates its own copy).
+    let updater = (tolerant
+        && !options.test_tray_login
+        && (update::installed_here() || links.service.is_some()))
+    .then(|| update::Updater::start(lines));
     loop {
         if end.is_some_and(|end| Instant::now() > end)
             || options.sessions.is_some_and(|n| sessions >= n)
@@ -654,6 +657,8 @@ fn run_account(
                     version,
                     notes,
                     installer,
+                    manifest,
+                    signature,
                     by_hand,
                 } => {
                     lines.push(format!("updates: {version} downloaded and checked"));
@@ -670,16 +675,25 @@ fn run_account(
                         settings.auto_update
                     };
                     if install {
-                        match update::apply(&installer, &version) {
-                            Ok(()) => {
-                                lines.push(format!(
-                                    "updates: installing {version}; this agent leaves"
-                                ));
-                                break;
+                        match links.service.as_mut() {
+                            // The service replaces its programs and starts this agent again.
+                            Some(service) => {
+                                if let Err(error) = update::apply_through_service(
+                                    service, &installer, &version, &manifest, &signature, lines,
+                                ) {
+                                    lines.push(format!("updates: {error}"));
+                                }
                             }
-                            Err(error) => {
-                                lines.push(format!("updates: the installer did not start: {error}"))
-                            }
+                            None => match update::apply(&installer, &version) {
+                                Ok(()) => {
+                                    lines.push(format!(
+                                        "updates: installing {version}; this agent leaves"
+                                    ));
+                                    break;
+                                }
+                                Err(error) => lines
+                                    .push(format!("updates: the installer did not start: {error}")),
+                            },
                         }
                     }
                 }

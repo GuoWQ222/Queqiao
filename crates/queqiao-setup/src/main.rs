@@ -4,6 +4,8 @@
 //! - `--quiet [--autostart] [--service] [--report <file>]`: the same without a window (tests, updates).
 //! - `--update [--report <file>]`: what an installed agent runs for an update it downloaded and checked: quiet, the
 //!   person's choices kept, the earlier version put back if the new agent does not keep running.
+//! - `--service-update [--report <file>]`: run as SYSTEM by the Queqiao service for an update it checked: its
+//!   programs in %ProgramFiles%\Queqiao replaced, put back if its new agent does not keep running.
 //! - `--uninstall [--quiet] [--report <file>]`: removes everything it put on this PC (Settings > Apps runs this).
 //! - `--remove-service`: run as an administrator by `--uninstall` when the service is installed.
 //! - `--ui-picture <file>`: shows the window, saves a picture of it and leaves without installing (tests).
@@ -18,6 +20,7 @@
 
 mod install;
 mod payload;
+mod service_update;
 
 use std::path::PathBuf;
 
@@ -31,6 +34,7 @@ struct Options {
     uninstall: bool,
     remove_service: bool,
     update: bool,
+    service_update: bool,
     report: Option<PathBuf>,
     ui_picture: Option<PathBuf>,
 }
@@ -87,7 +91,13 @@ fn main() {
             }
         }
     };
-    let result = if options.remove_service {
+    let result = if options.service_update {
+        std::env::current_exe()
+            .map_err(|e| e.to_string())
+            .and_then(|me| std::fs::read(&me).map_err(|e| format!("{}: {e}", me.display())))
+            .and_then(|data| payload::read(&data))
+            .and_then(|entries| service_update::service_update(&entries, &mut lines))
+    } else if options.remove_service {
         install::remove_service(&mut lines)
     } else if options.uninstall {
         uninstall(&options, &mut lines)
@@ -133,6 +143,7 @@ fn parse(args: &[String]) -> Option<Options> {
         uninstall: false,
         remove_service: false,
         update: false,
+        service_update: false,
         report: None,
         ui_picture: None,
     };
@@ -146,6 +157,10 @@ fn parse(args: &[String]) -> Option<Options> {
             "--remove-service" => options.remove_service = true,
             "--update" => {
                 options.update = true;
+                options.quiet = true;
+            }
+            "--service-update" => {
+                options.service_update = true;
                 options.quiet = true;
             }
             "--report" => options.report = Some(PathBuf::from(rest.next()?)),

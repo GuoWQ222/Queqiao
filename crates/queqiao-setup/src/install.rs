@@ -92,7 +92,7 @@ fn shortcut() -> PathBuf {
         .join(r"Microsoft\Windows\Start Menu\Programs\Queqiao.lnk")
 }
 
-fn program_files() -> PathBuf {
+pub(crate) fn program_files() -> PathBuf {
     known("ProgramFiles", r"C:\Program Files").join("Queqiao")
 }
 
@@ -402,16 +402,22 @@ pub fn remove_service(lines: &mut Vec<String>) -> Result<(), String> {
         return Err(format!("{} could not be removed", folder.display()));
     }
     lines.push(format!("{} is removed", folder.display()));
+    // Installers the service kept for its updates.
+    let updates = known("ProgramData", r"C:\ProgramData").join(r"Queqiao\updates");
+    if updates.exists() && std::fs::remove_dir_all(&updates).is_ok() {
+        lines.push(format!("{} is removed", updates.display()));
+    }
     Ok(())
 }
 
-/// Ends the programs that run from `folder` (an earlier installation), except this one.
-fn stop_running(folder: &Path, lines: &mut Vec<String>) {
+/// The processes that run from `folder` (pid, program path), except this one.
+pub(crate) fn processes_from(folder: &Path) -> Vec<(u32, String)> {
     let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-        return;
+        return Vec::new();
     };
     let prefix = folder.display().to_string().to_ascii_lowercase() + "\\";
     let own = std::process::id();
+    let mut found = Vec::new();
     let mut entry = PROCESSENTRY32W {
         dwSize: size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
@@ -420,13 +426,8 @@ fn stop_running(folder: &Path, lines: &mut Vec<String>) {
     while more {
         let pid = entry.th32ProcessID;
         if pid != own
-            && let Ok(process) = unsafe {
-                OpenProcess(
-                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
-                    false,
-                    pid,
-                )
-            }
+            && let Ok(process) =
+                unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
         {
             let mut name = [0u16; 1024];
             let mut length = name.len() as u32;
@@ -440,24 +441,35 @@ fn stop_running(folder: &Path, lines: &mut Vec<String>) {
             }
             .ok()
             .map(|()| String::from_utf16_lossy(&name[..length as usize]));
-            if path
-                .as_ref()
-                .is_some_and(|path| path.to_ascii_lowercase().starts_with(&prefix))
-            {
-                let path = path.unwrap_or_default();
-                let ended = unsafe { TerminateProcess(process, 0) }.is_ok()
-                    && unsafe { WaitForSingleObject(process, 5000) } == WAIT_OBJECT_0;
-                lines.push(if ended {
-                    format!("ended {path} (process {pid})")
-                } else {
-                    format!("could not end {path} (process {pid})")
-                });
-            }
             let _ = unsafe { CloseHandle(process) };
+            if let Some(path) = path.filter(|path| path.to_ascii_lowercase().starts_with(&prefix)) {
+                found.push((pid, path));
+            }
         }
         more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
     }
     let _ = unsafe { CloseHandle(snapshot) };
+    found
+}
+
+/// Ends the programs that run from `folder` (an earlier installation), except this one.
+fn stop_running(folder: &Path, lines: &mut Vec<String>) {
+    for (pid, path) in processes_from(folder) {
+        let Ok(process) =
+            (unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid) })
+        else {
+            lines.push(format!("could not end {path} (process {pid})"));
+            continue;
+        };
+        let ended = unsafe { TerminateProcess(process, 0) }.is_ok()
+            && unsafe { WaitForSingleObject(process, 5000) } == WAIT_OBJECT_0;
+        let _ = unsafe { CloseHandle(process) };
+        lines.push(if ended {
+            format!("ended {path} (process {pid})")
+        } else {
+            format!("could not end {path} (process {pid})")
+        });
+    }
 }
 
 /// Runs `program parameters` as an administrator: Windows asks (UAC); refusing it is an error. Its exit code.
