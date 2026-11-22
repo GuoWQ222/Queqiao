@@ -30,7 +30,7 @@ $init = & $server init --data $data
 $pin = ([regex]::Match(($init -join "`n"), 'fingerprint: ([0-9a-f]{64})')).Groups[1].Value
 if (-not $pin) { "M7_LOGIN_FAIL no fingerprint from: $init"; return }
 $password = [guid]::NewGuid().ToString('N')
-& $server add-user tester $password --data $data | Out-Null
+$password | & $server add-user tester --data $data | Out-Null
 $address = "127.0.0.1:$Port"
 function Start-Server([string]$Name) {
     $process = Start-Process -FilePath $server -ArgumentList @('serve', '--listen', $address, '--data', "`"$data`"", '--turn-port', '0') -PassThru -WindowStyle Hidden -RedirectStandardOutput "$out\server_$Name.txt" -RedirectStandardError "$out\server_${Name}_err.txt"

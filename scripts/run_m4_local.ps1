@@ -63,11 +63,11 @@ $pin = ([regex]::Match(($init -join "`n"), 'fingerprint: ([0-9a-f]{64})')).Group
 if (-not $pin) { "RUN_FAIL no fingerprint from: $init"; return }
 $password1 = [guid]::NewGuid().ToString('N')
 $password2 = [guid]::NewGuid().ToString('N')
-& $server add-user alice $password1 --data $data | Out-Null
-& $server add-user bob $password2 --data $data | Out-Null
+$password1 | & $server add-user alice --data $data | Out-Null
+$password2 | & $server add-user bob --data $data | Out-Null
 # The help session's second account: the probe's lockout checks leave bob locked for 15 minutes.
 $password3 = [guid]::NewGuid().ToString('N')
-& $server add-user carol $password3 --data $data | Out-Null
+$password3 | & $server add-user carol --data $data | Out-Null
 $serveArgs = @('serve', '--listen', $listen, '--data', "`"$data`"", '--public-ip', $Address, '--relay-private', '--allow-signup')
 $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
 $failed = @()
@@ -98,6 +98,21 @@ try {
             try { $client.Connect($Address, 47100); $up = $true } catch { $up = $false } finally { $client.Dispose() }
         } while (-not $up -and (Get-Date) -lt $deadline)
         if (-not $up) { 'RUN_FAIL the server did not start again'; return }
+        # Sign-up and the account hardening (lockouts on purpose too), against the server just started: the checks
+        # above used up this address's tries.
+        $accounts = @(& (Join-Path $Bin 'examples\account_probe.exe') $listen $pin alice $password1 bob $password2 --signup-open --accounts)
+        $accounts
+        if ($accounts[-1] -ne 'PROBE_PASS') { $failed += 'probe accounts' }
+        Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+        $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out2b.txt" -RedirectStandardError "$Out\server_err2b.txt"
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 200
+            $client = New-Object Net.Sockets.TcpClient
+            try { $client.Connect($Address, 47100); $up = $true } catch { $up = $false } finally { $client.Dispose() }
+        } while (-not $up -and (Get-Date) -lt $deadline)
+        if (-not $up) { 'RUN_FAIL the server did not start for the burst'; return }
         # Ten wrong logins at once, against the server just started (nothing counted for this address yet).
         $burst = @(& (Join-Path $Bin 'examples\account_probe.exe') $listen $pin --burst)
         $burst

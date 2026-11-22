@@ -138,9 +138,12 @@ UU builds on WebRTC's standard pieces (`research\uu\STREAMER_FINDINGS.md`). We d
   queqiao-transport, a tokio TURN server in queqiao-server); no third-party TURN crate. Before the offer or answer each
   side gathers its host candidate, its public address (from the allocation, or a STUN Binding) and a relayed
   address, within 1.5 s. Relay credentials are issued over the account connection only, per device, valid an hour
-  for new allocations (username "<expiry>:<device>", password HMAC-SHA1 with a secret made at each server start).
-  The server relays only to peers with a permission, never to loopback, link-local, multicast or its own services,
-  to private and 100.64/10 addresses only with `--relay-private`; 4 allocations per device; every request after the
+  for new allocations (username "<expiry>:<account>:<device>:<program>", password HMAC-SHA1 with a secret made at
+  each server start); a logout, a removed device or a new password revokes them and ends their allocations.
+  The server relays only to peers with a permission, never to loopback, link-local, multicast or reserved addresses
+  or to this machine's own addresses and services, to private and 100.64/10 addresses only with `--relay-private`;
+  on its own public address a permission is for one relayed address, not the whole IP; 4 allocations per device
+  (16 per account); every request after the
   Allocate is checked against the allocation's key. str0m's controlled ICE side asks for its first timeout years away
   until it is given time, which deadlocks behind a TURN permission: the network thread starts with a timeout and
   waits at most 50 ms until connected (tests/relay_ice.rs reproduces both). `QUEQIAO_FORCE=network:relay` (or

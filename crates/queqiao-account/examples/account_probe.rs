@@ -280,17 +280,34 @@ fn main() {
         );
         std::process::exit(i32::from(probe.failed > 0));
     }
+    // --accounts: only sign-up and the account hardening, against a server started anew (both need tries for this
+    // address, which the other checks use up: they fail logins and codes on purpose).
+    let accounts_only = args.last().is_some_and(|last| last == "--accounts");
+    if accounts_only {
+        args.pop();
+    }
     let signup_open = args.last().is_some_and(|last| last == "--signup-open");
     if signup_open {
         args.pop();
     }
     let [server, pin, user1, password1, user2, password2] = &args[..] else {
         println!(
-            "usage: account_probe <host:port> <fingerprint> <user1> <password1> <user2> <password2>"
+            "usage: account_probe <host:port> <fingerprint> <user1> <password1> <user2> <password2> [--signup-open] [--accounts]"
         );
         std::process::exit(2);
     };
     let mut probe = Probe { failed: 0 };
+    if accounts_only {
+        // Before the hardening checks: they lock this address out of logins (and sign-ups) for a while.
+        signup(&mut probe, server, pin, signup_open);
+        hardening(
+            &mut probe,
+            server,
+            pin,
+            [(user1, password1), (user2, password2)],
+        );
+        finish(&probe);
+    }
     let (dev_a, dev_b, dev_c, dev_d) = (device("a"), device("b"), device("c"), device("d"));
 
     // The pinned certificate: any other fingerprint is refused before the password is sent.
@@ -588,7 +605,13 @@ fn main() {
                 .ice_servers();
             match servers {
                 Ok(servers) => match servers.turn {
-                    Some(turn) => relay::checks(&mut probe, &turn),
+                    Some(turn) => {
+                        relay::checks(&mut probe, &turn);
+                        // A logout ends the program's relay credentials as well as its saved login.
+                        viewer_d.send(queqiao_account::ClientMessage::Logout);
+                        std::thread::sleep(Duration::from_millis(500));
+                        relay::revoked(&mut probe, &turn);
+                    }
                     None => probe.check("server offers a relay", false, "no TURN server"),
                 },
                 Err(error) => probe.check("relay credentials for a logged-in device", false, error),
@@ -616,15 +639,12 @@ fn main() {
         pin,
         [(user1, password1), (user2, password2)],
     );
-    // Before the hardening checks: they lock this address out of logins (and sign-ups) for a while.
-    signup(&mut probe, server, pin, signup_open);
-    hardening(
-        &mut probe,
-        server,
-        pin,
-        [(user1, password1), (user2, password2)],
-    );
+    // Sign-up and the account hardening run apart (--accounts), against the server started anew.
+    finish(&probe);
+}
 
+/// PROBE_PASS or PROBE_FAIL, and the exit code.
+fn finish(probe: &Probe) -> ! {
     println!(
         "{}",
         if probe.failed == 0 {
@@ -957,6 +977,16 @@ mod relay {
                     .with(attr::LIFETIME, 0u32.to_be_bytes()),
             );
         }
+    }
+
+    /// After the program logged out: its credentials allocate no more.
+    pub fn revoked(probe: &mut Probe, turn: &TurnServer) {
+        let (_, reply) = Session::allocate(turn.address, &turn.username, &turn.password);
+        probe.check(
+            "relay credentials end with the logout (401)",
+            code(&reply) == "error 401",
+            code(&reply),
+        );
     }
 
     pub fn checks(probe: &mut Probe, turn: &TurnServer) {

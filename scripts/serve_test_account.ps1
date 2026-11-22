@@ -22,7 +22,7 @@ $init = & $server init --data $data @nameArgs
 $pin = ([regex]::Match(($init -join "`n"), 'fingerprint: ([0-9a-f]{64})')).Groups[1].Value
 if (-not $pin) { "SERVE_FAIL no fingerprint from: $init"; return }
 $password = [guid]::NewGuid().ToString('N')
-& $server add-user tester $password --data $data
+$password | & $server add-user tester --data $data
 $port = $Listen.Split(':')[-1]
 $address = if ($Name) { "${Name}:$port" } else { $Listen }
 @("server $address", "pin $pin", 'user tester', "password $password") | Set-Content -LiteralPath (Join-Path $Out 'account.txt') -Encoding ascii

@@ -3,7 +3,7 @@
 //! and pushes the account's device list whenever a program connects or leaves.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -224,6 +224,22 @@ fn guess(message: &str) -> Refusal {
     }
 }
 
+/// The address the limits count by (failures, new accounts, connections waiting, help asks), also kept for
+/// Wake-on-LAN: an IPv6 address by its /64, since one network hands out endless addresses of it (the security review
+/// of 2026-11-22), and IPv4 written as IPv6 as IPv4.
+fn network_of(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let [a, b, c, d, ..] = v6.segments();
+                IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+            }
+        },
+        v4 => v4,
+    }
+}
+
 /// To a connection's task: a message for its client, or the order to close (a newer connection of the
 /// same device and program took its place).
 enum Outgoing {
@@ -423,14 +439,14 @@ impl Hub {
                 .waiting
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .enter(peer.ip());
+                .enter(network_of(peer.ip()));
             if !entered {
                 // Too many connections waiting to log in (from there, or at all): this one is closed at once.
                 continue;
             }
             let turn = WaitingTurn {
                 hub: self.clone(),
-                address: peer.ip(),
+                address: network_of(peer.ip()),
             };
             let hub = self.clone();
             let acceptor = acceptor.clone();
@@ -449,7 +465,7 @@ impl Hub {
         waiting: WaitingTurn,
     ) -> Result<(), String> {
         let _ = tcp.set_nodelay(true);
-        let address = tcp.peer_addr().ok().map(|peer| peer.ip());
+        let address = tcp.peer_addr().ok().map(|peer| network_of(peer.ip()));
         let tls = timeout(Duration::from_secs(10), acceptor.accept(tcp))
             .await
             .map_err(|_| "TLS handshake timed out")?
@@ -1099,6 +1115,16 @@ impl Hub {
                     refresh_token,
                 }));
                 let this = (identity.device_id.clone(), identity.role);
+                // The relay credentials of the account's other programs end with their saved logins.
+                for device in self.device_list(identity.user_id) {
+                    for role in [Role::Agent, Role::Viewer] {
+                        if (device.id.as_str(), role)
+                            != (identity.device_id.as_str(), identity.role)
+                        {
+                            self.revoke_relay(&device.id, role);
+                        }
+                    }
+                }
                 self.disconnect_account(
                     identity.user_id,
                     Some(&this),
@@ -1112,6 +1138,13 @@ impl Hub {
                 }
                 let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
             }
+        }
+    }
+
+    /// The relay credentials `role` of `device` was given stop working (TurnConfig::revoke).
+    fn revoke_relay(&self, device: &str, role: Role) {
+        if let Some(turn) = &self.turn {
+            turn.revoke(device, &[role_name(role)]);
         }
     }
 
@@ -1207,12 +1240,16 @@ impl Hub {
             check_new_account(&user, &password)?;
             check_device_fields(&device_id, &device_name)?;
             check_device_key(&public_key)?;
+            // Both answers count as tries for the address (the security review of 2026-11-22: they told anyone which
+            // names and device ids exist, without limit).
             let taken = |store: &crate::store::Store| -> Result<(), Refusal> {
                 if store.device_owner(&device_id)?.is_some() {
-                    return Err("this device belongs to another account: remove it there first (More... in that account's device list)".to_string().into());
+                    return Err(guess(
+                        "this device belongs to another account: remove it there first (More... in that account's device list)",
+                    ));
                 }
                 if store.user_exists(&user)? {
-                    return Err("that user name is taken".to_string().into());
+                    return Err(guess("that user name is taken"));
                 }
                 Ok(())
             };
@@ -1224,10 +1261,10 @@ impl Hub {
                 let store = self.store.lock().map_err(|e| e.to_string())?;
                 taken(&store)?;
                 store.add_user_hashed(&user, &hash).map_err(|error| {
-                    if error.contains("UNIQUE") {
-                        "that user name is taken".to_string()
+                    if error.contains("UNIQUE") || error.contains("taken") {
+                        guess("that user name is taken")
                     } else {
-                        error
+                        Refusal::from(error)
                     }
                 })?;
             }
@@ -1250,17 +1287,25 @@ impl Hub {
                 role,
                 public_key,
             } => {
+                // The device's fields, and whether it may log in to this account, before the password: once that is
+                // right nothing refuses the login any more, and a new device is announced (the security review of
+                // 2026-11-22: a bad field after a right password had its own answer, neither counted nor announced,
+                // so a stolen password could be tried unseen).
+                check_device_fields(&device_id, &device_name)?;
+                check_device_key(&public_key)?;
                 // Argon2 without the store's lock: the hash read, checked, then the store locked again.
-                let record = self
-                    .store
-                    .lock()
-                    .map_err(|e| e.to_string())?
-                    .password_record(&user)?;
+                let record = {
+                    let store = self.store.lock().map_err(|e| e.to_string())?;
+                    let record = store.password_record(&user)?;
+                    store
+                        .device_admissible(record.id, &device_id)
+                        .map_err(|message| guess(&message))?;
+                    record
+                };
                 let row = record
                     .check(&password)
                     .ok_or_else(|| guess("wrong user name or password"))?;
                 let store = self.store.lock().map_err(|e| e.to_string())?;
-                check_device_fields(&device_id, &device_name)?;
                 // A password login may give a known device a new key: its other devices are told (the security review
                 // of 2026-11-22: it happened silently).
                 let earlier_key = store.public_key(&device_id).unwrap_or_default();
@@ -1367,8 +1412,11 @@ impl Hub {
                 // Relay credentials only ever go to a logged-in device, for itself.
                 let (stun, turn) = match &self.turn {
                     Some(config) => {
-                        let (username, password, expires) =
-                            config.credentials(identity.user_id, &identity.device_id);
+                        let (username, password, expires) = config.credentials(
+                            identity.user_id,
+                            &identity.device_id,
+                            role_name(identity.role),
+                        );
                         let access = TurnAccess {
                             address: config.address(),
                             username,
@@ -1388,6 +1436,9 @@ impl Hub {
                     .ok()
                     .map(|store| store.remove_device(identity.user_id, &device_id));
                 if let Some(Ok(true)) = removed {
+                    for role in [Role::Agent, Role::Viewer] {
+                        self.revoke_relay(&device_id, role);
+                    }
                     let user_id = identity.user_id;
                     self.disconnect(
                         |(device, _), connection| {
@@ -1494,6 +1545,7 @@ impl Hub {
                 if let Ok(store) = self.store.lock() {
                     let _ = store.revoke_token(&identity.device_id, role_name(identity.role));
                 }
+                self.revoke_relay(&identity.device_id, identity.role);
             }
             ClientMessage::Login { .. }
             | ClientMessage::Resume { .. }
@@ -1667,6 +1719,29 @@ mod failure_tests {
             })
             .count();
         assert_eq!(passed, ACCOUNT_TOTAL_FAILURES as usize);
+    }
+
+    #[test]
+    fn ipv6_counts_by_its_network() {
+        let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:bbbb::9".parse().unwrap();
+        let other: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(network_of(a), network_of(b));
+        assert_ne!(network_of(a), network_of(other));
+        let mapped: IpAddr = "::ffff:198.51.100.7".parse().unwrap();
+        let v4: IpAddr = "198.51.100.7".parse().unwrap();
+        assert_eq!(network_of(mapped), v4);
+        assert_eq!(network_of(v4), v4);
+        // Endless addresses of one /64 share one count.
+        let now = Instant::now();
+        let mut failures = Failures::default();
+        let passed = (0..ADDRESS_FAILURES * 2)
+            .filter(|i| {
+                let address = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, *i as u16));
+                failures.begin(now, Some(network_of(address)), None).is_ok()
+            })
+            .count();
+        assert_eq!(passed, ADDRESS_FAILURES as usize);
     }
 }
 

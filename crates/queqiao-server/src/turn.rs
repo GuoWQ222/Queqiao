@@ -3,20 +3,23 @@
 //!
 //! Security rules:
 //! - Relaying needs credentials, and only logged-in devices get them (`credentials`, asked for over the
-//!   account connection): username "<expiry>:<device id>", password HMAC-SHA1 of the username with a secret
-//!   made at each start, valid for an hour for new allocations.
+//!   account connection): username "<expiry>:<account>:<device id>:<program>", password HMAC-SHA1 of the
+//!   username with a secret made at each start, valid for an hour for new allocations. A logout, a removed
+//!   device or a new password revokes the program's credentials (`revoke`): no new allocations with them, and
+//!   its allocations end at the next sweep.
 //! - Every request after the Allocate must carry MESSAGE-INTEGRITY made with that allocation's key.
-//! - Data goes only to peers the client gave permission to, never to loopback, link-local, multicast or
-//!   unspecified addresses, never to this server's own services (on its public address only the relay
-//!   ports, for relay-to-relay sessions), and to private and shared (100.64/10) addresses only with
-//!   `--relay-private` (tests and LAN-only servers).
+//! - Data goes only to peers the client gave permission to, never to loopback, link-local, multicast,
+//!   unspecified or reserved addresses (0/8, 192.0.0/24, 198.18/15, 240/4, and the same written as IPv6),
+//!   never to this machine's own addresses (on its public address only the relay ports, for relay-to-relay
+//!   sessions, each permitted by port: a permission for one relayed address is not one for every allocation),
+//!   and to private and shared (100.64/10) addresses only with `--relay-private` (tests and LAN-only servers).
 //! - At most 4 allocations per device, a fixed port range, nonces that change every hour.
 //!
 //! STUN Binding requests (what is my public address?) are answered for anyone, as every STUN server does.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -42,6 +45,8 @@ const MAX_CHANNELS: usize = 32;
 /// picture), RELAY_BURST at once; more are dropped.
 const RELAY_RATE: f64 = 12.5e6;
 const RELAY_BURST: f64 = 4e6;
+/// Expired and revoked allocations are removed this often.
+const SWEEP: Duration = Duration::from_secs(10);
 
 pub struct TurnConfig {
     /// UDP address for STUN and TURN (port 3478 by default).
@@ -52,14 +57,18 @@ pub struct TurnConfig {
     pub relay_ports: (u16, u16),
     pub allow_private: bool,
     pub secret: [u8; 32],
+    /// When each device's program had its relay credentials revoked (Unix seconds): those made until then no longer
+    /// work. Kept for CREDENTIAL_SECONDS, after which they have expired anyway.
+    pub revoked: Mutex<HashMap<(String, String), u64>>,
 }
 
 impl TurnConfig {
-    /// Relay credentials for a logged-in device of an account: (username, password, expiry in Unix seconds). The
-    /// username names both (signed by the password), for the quotas per device and per account.
-    pub fn credentials(&self, account: i64, device: &str) -> (String, String, u64) {
+    /// Relay credentials for a logged-in program ("agent", "viewer") of a device of an account: (username, password,
+    /// expiry in Unix seconds). The username names all three (signed by the password), for the quotas per device and
+    /// per account, and for revoking them.
+    pub fn credentials(&self, account: i64, device: &str, program: &str) -> (String, String, u64) {
         let expires = unix_now() + CREDENTIAL_SECONDS;
-        let username = format!("{expires}:{account}:{device}");
+        let username = format!("{expires}:{account}:{device}:{program}");
         let password = hex(&stun::hmac_sha1(&self.secret, username.as_bytes()));
         (username, password, expires)
     }
@@ -67,6 +76,39 @@ impl TurnConfig {
     /// host:port of the STUN/TURN service for clients.
     pub fn address(&self) -> String {
         SocketAddr::new(self.public_ip, self.listen.port()).to_string()
+    }
+
+    /// The relay credentials `programs` ("agent", "viewer") of `device` were given until now stop working, and their
+    /// allocations end at the next sweep (the security review of 2026-11-22: a logout, a removed device or a new
+    /// password left them working for an hour, and the allocations made with them for as long as they were renewed).
+    pub fn revoke(&self, device: &str, programs: &[&str]) {
+        let now = unix_now();
+        let mut revoked = self
+            .revoked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for program in programs {
+            revoked.insert((device.to_string(), (*program).to_string()), now);
+        }
+    }
+
+    /// Whether `username`'s credentials were made before their program's were revoked.
+    fn is_revoked(&self, username: &str) -> bool {
+        let Some(expiry) = username
+            .split(':')
+            .next()
+            .and_then(|expiry| expiry.parse::<u64>().ok())
+        else {
+            return true;
+        };
+        let made = expiry.saturating_sub(CREDENTIAL_SECONDS);
+        let (_, device) = owner(username);
+        let key = (device.to_string(), program(username).to_string());
+        self.revoked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .is_some_and(|at| made <= *at)
     }
 
     fn nonce(&self, hour: u64) -> String {
@@ -89,32 +131,75 @@ impl TurnConfig {
         if ip == self.public_ip {
             return (self.relay_ports.0..=self.relay_ports.1).contains(&peer.port());
         }
-        match ip {
-            IpAddr::V4(v4) => {
-                if v4.is_loopback()
-                    || v4.is_unspecified()
-                    || v4.is_broadcast()
-                    || v4.is_multicast()
-                    || v4.is_link_local()
-                {
-                    return false;
-                }
-                let [a, b, ..] = v4.octets();
-                let shared = a == 100 && (b & 0xC0) == 64;
-                !(v4.is_private() || shared) || self.allow_private
+        address_allowed(ip, self.allow_private) && !this_machine(ip)
+    }
+}
+
+/// Whether relaying to `ip` may be allowed at all: not loopback, link-local, multicast, unspecified or reserved, and
+/// private or shared (100.64/10) only when `allow_private`. IPv4 written as IPv6 (::ffff:a.b.c.d, and NAT64's
+/// 64:ff9b::a.b.c.d) is judged as the IPv4 address it reaches (the security review of 2026-11-22: 0/8, 192.0.0/24,
+/// 198.18/15, which proxies also use for their made-up addresses, and 240/4 got through).
+fn address_allowed(ip: IpAddr, allow_private: bool) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            // 224/4 multicast, 240/4 reserved and the broadcast address: a >= 224.
+            let reserved = a == 0
+                || a >= 224
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 198 && (b & 0xFE) == 18);
+            if reserved || v4.is_loopback() || v4.is_link_local() {
+                return false;
             }
-            IpAddr::V6(v6) => {
-                let first = v6.segments()[0];
-                if v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_multicast()
-                    || (first & 0xFFC0) == 0xFE80
-                {
-                    return false;
-                }
-                (first & 0xFE00) != 0xFC00 || self.allow_private
-            }
+            let shared = a == 100 && (b & 0xC0) == 64;
+            !(v4.is_private() || shared) || allow_private
         }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return address_allowed(IpAddr::V4(v4), allow_private);
+            }
+            let segments = v6.segments();
+            if segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let v4 = Ipv4Addr::from((u32::from(segments[6]) << 16) | u32::from(segments[7]));
+                return address_allowed(IpAddr::V4(v4), allow_private);
+            }
+            let first = segments[0];
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xFFC0) == 0xFE80
+            {
+                return false;
+            }
+            (first & 0xFE00) != 0xFC00 || allow_private
+        }
+    }
+}
+
+/// Whether `ip` is one of this machine's own addresses (the security review of 2026-11-22: with `--relay-private` its
+/// LAN address, and every UDP service on it, could be reached through the relay). A UDP socket "connected" to an
+/// address of this machine sends from that very address; nothing is sent.
+fn this_machine(ip: IpAddr) -> bool {
+    let any: IpAddr = match ip {
+        IpAddr::V4(_) => Ipv4Addr::UNSPECIFIED.into(),
+        IpAddr::V6(_) => Ipv6Addr::UNSPECIFIED.into(),
+    };
+    std::net::UdpSocket::bind(SocketAddr::new(any, 0))
+        .and_then(|socket| {
+            socket.connect(SocketAddr::new(ip, 9))?;
+            socket.local_addr()
+        })
+        .is_ok_and(|local| local.ip() == ip)
+}
+
+/// What a permission is for: a peer's IP address (any port, as RFC 8656 has it), but on this server's public address
+/// the exact relayed address (the security review of 2026-11-22: every allocation is on that address, so a permission
+/// for one let every relay user send to the client).
+fn permission(public_ip: IpAddr, peer: SocketAddr) -> SocketAddr {
+    if peer.ip() == public_ip {
+        peer
+    } else {
+        SocketAddr::new(peer.ip(), 0)
     }
 }
 
@@ -123,7 +208,8 @@ struct Allocation {
     key: [u8; 16],
     relay: Arc<UdpSocket>,
     expires: Instant,
-    permissions: HashMap<IpAddr, Instant>,
+    /// By `permission`: an IP address with port 0, or an exact relayed address of this server.
+    permissions: HashMap<SocketAddr, Instant>,
     channels: HashMap<u16, (SocketAddr, Instant)>,
     by_peer: HashMap<SocketAddr, u16>,
     allocate_transaction: [u8; 12],
@@ -160,16 +246,21 @@ impl Budget {
     }
 }
 
-/// The account and the device a relay username was made for ("expiry:account:device"; no account in the earlier
-/// "expiry:device").
+/// The account and the device a relay username was made for ("expiry:account:device:program"; no account in the
+/// earlier "expiry:device").
 fn owner(username: &str) -> (&str, &str) {
-    let mut parts = username.splitn(3, ':');
+    let mut parts = username.splitn(4, ':');
     let _expiry = parts.next();
     match (parts.next(), parts.next()) {
         (Some(account), Some(device)) => (account, device),
         (Some(device), None) => ("", device),
         _ => ("", ""),
     }
+}
+
+/// The program ("agent", "viewer") a relay username was made for.
+fn program(username: &str) -> &str {
+    username.splitn(4, ':').nth(3).unwrap_or("")
 }
 
 /// Whether another allocation for `username` would pass PER_DEVICE of its device or PER_ACCOUNT of its account (the
@@ -187,8 +278,12 @@ fn quota_reached<'a>(taken: impl Iterator<Item = &'a str>, username: &str) -> bo
 
 /// Permissions for `peers` until `until`, unless the allocation would then hold more than MAX_PERMISSIONS: all or
 /// none (the security review of 2026-11-22: one CreatePermission could add thousands, until memory ran out).
-fn permit(permissions: &mut HashMap<IpAddr, Instant>, peers: Vec<IpAddr>, until: Instant) -> bool {
-    let mut new: Vec<IpAddr> = peers
+fn permit(
+    permissions: &mut HashMap<SocketAddr, Instant>,
+    peers: Vec<SocketAddr>,
+    until: Instant,
+) -> bool {
+    let mut new: Vec<SocketAddr> = peers
         .iter()
         .copied()
         .filter(|ip| !permissions.contains_key(ip))
@@ -205,9 +300,9 @@ fn permit(permissions: &mut HashMap<IpAddr, Instant>, peers: Vec<IpAddr>, until:
 }
 
 impl Allocation {
-    fn permitted(&self, peer: SocketAddr, now: Instant) -> bool {
+    fn permitted(&self, public_ip: IpAddr, peer: SocketAddr, now: Instant) -> bool {
         self.permissions
-            .get(&peer.ip())
+            .get(&permission(public_ip, peer))
             .is_some_and(|until| *until > now)
     }
 }
@@ -245,10 +340,11 @@ pub async fn serve(config: Arc<TurnConfig>) -> std::io::Result<()> {
     let socket = Arc::new(bind_udp(&config, config.listen.port()).await?);
     let state: State = Arc::new(Mutex::new(HashMap::new()));
     let sweeper = state.clone();
+    let sweep_config = config.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            sweep(&sweeper);
+            tokio::time::sleep(SWEEP).await;
+            sweep(&sweep_config, &sweeper);
         }
     });
     let mut next_port = config.relay_ports.0;
@@ -313,7 +409,7 @@ fn handle(
         let allocation = allocations.get_mut(&client)?;
         let (peer, until) = *allocation.channels.get(&number)?;
         let allowed = until > now
-            && allocation.permitted(peer, now)
+            && allocation.permitted(config.public_ip, peer, now)
             && allocation.budget.take(now, payload.len());
         return allowed.then(|| Action::Relay(allocation.relay.clone(), peer, payload.to_vec()));
     }
@@ -329,8 +425,9 @@ fn handle(
             let allocation = allocations.get_mut(&client)?;
             let peer = message.address(attr::XOR_PEER_ADDRESS)?;
             let data = message.get(attr::DATA)?;
-            (allocation.permitted(peer, now) && allocation.budget.take(now, data.len()))
-                .then(|| Action::Relay(allocation.relay.clone(), peer, data.to_vec()))
+            (allocation.permitted(config.public_ip, peer, now)
+                && allocation.budget.take(now, data.len()))
+            .then(|| Action::Relay(allocation.relay.clone(), peer, data.to_vec()))
         }
         (Class::Request, method::ALLOCATE) => Some(check_allocate(
             config,
@@ -409,7 +506,7 @@ fn check_allocate(
     }
     let password = hex(&stun::hmac_sha1(&config.secret, username.as_bytes()));
     let key = stun::long_term_key(&username, REALM, &password);
-    if !stun::check_integrity(packet, &key) {
+    if !stun::check_integrity(packet, &key) || config.is_revoked(&username) {
         return Action::Reply(challenge(config, message, 401, "Unauthorized"));
     }
     if message.get(attr::REQUESTED_TRANSPORT) != Some(&stun::TRANSPORT_UDP[..]) {
@@ -469,6 +566,7 @@ async fn allocate(
         main.clone(),
         state.clone(),
         client,
+        config.public_ip,
     ));
     if let Ok(mut allocations) = state.lock() {
         allocations.insert(
@@ -500,6 +598,16 @@ fn authenticated(
     packet: &[u8],
     now: Instant,
 ) -> Vec<u8> {
+    // Made with revoked credentials: gone (the sweep would end it in a few seconds anyway).
+    if allocations
+        .get(&client)
+        .is_some_and(|allocation| config.is_revoked(&allocation.username))
+    {
+        if let Some(gone) = allocations.remove(&client) {
+            gone.task.abort();
+        }
+        return error(message, 437, "Allocation Mismatch");
+    }
     let Some(allocation) = allocations.get_mut(&client) else {
         return error(message, 437, "Allocation Mismatch");
     };
@@ -548,7 +656,10 @@ fn authenticated(
             if all.iter().any(|peer| !config.peer_allowed(*peer)) {
                 return error(message, 403, "Forbidden");
             }
-            let peers = all.iter().map(|peer| peer.ip()).collect();
+            let peers = all
+                .iter()
+                .map(|peer| permission(config.public_ip, *peer))
+                .collect();
             if !permit(
                 &mut allocation.permissions,
                 peers,
@@ -588,7 +699,7 @@ fn authenticated(
             if !room
                 || !permit(
                     &mut allocation.permissions,
-                    vec![peer.ip()],
+                    vec![permission(config.public_ip, peer)],
                     now + PERMISSION_LIFETIME,
                 )
             {
@@ -624,6 +735,7 @@ async fn relay_to_client(
     main: Arc<UdpSocket>,
     state: State,
     client: SocketAddr,
+    public_ip: IpAddr,
 ) {
     let mut buffer = vec![0u8; 65536];
     loop {
@@ -640,7 +752,7 @@ async fn relay_to_client(
                 return;
             };
             let now = Instant::now();
-            if !allocation.permitted(peer, now) || !allocation.budget.take(now, length) {
+            if !allocation.permitted(public_ip, peer, now) || !allocation.budget.take(now, length) {
                 continue;
             }
             match allocation.by_peer.get(&peer) {
@@ -662,13 +774,20 @@ async fn relay_to_client(
     }
 }
 
-fn sweep(state: &State) {
+fn sweep(config: &TurnConfig, state: &State) {
     let now = Instant::now();
+    // Revocations older than any credentials they could still stop.
+    let oldest = unix_now().saturating_sub(CREDENTIAL_SECONDS);
+    config
+        .revoked
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|_, at| *at >= oldest);
     let Ok(mut allocations) = state.lock() else {
         return;
     };
     allocations.retain(|_, allocation| {
-        let alive = allocation.expires > now;
+        let alive = allocation.expires > now && !config.is_revoked(&allocation.username);
         if !alive {
             allocation.task.abort();
         }
@@ -708,6 +827,7 @@ mod tests {
             relay_ports: (47200, 47399),
             allow_private,
             secret: [9; 32],
+            revoked: Mutex::new(HashMap::new()),
         }
     }
 
@@ -730,6 +850,18 @@ mod tests {
             ("[fe80::1]:5000", false),
             ("[fd00::1]:5000", false),
             ("[2001:db8::1]:5000", true),
+            // Reserved ranges, and IPv4 written as IPv6.
+            ("0.1.2.3:5000", false),
+            ("192.0.0.8:5000", false),
+            ("198.18.0.1:5000", false),
+            ("198.19.255.1:5000", false),
+            ("198.20.0.1:5000", true),
+            ("240.0.0.1:5000", false),
+            ("255.255.255.255:5000", false),
+            ("[::ffff:127.0.0.1]:5000", false),
+            ("[::ffff:10.0.0.5]:5000", false),
+            ("[64:ff9b::a00:5]:5000", false),
+            ("[::ffff:203.0.113.9]:5000", true),
         ] {
             assert_eq!(
                 strict.peer_allowed(peer.parse().unwrap()),
@@ -741,14 +873,28 @@ mod tests {
         assert!(lan.peer_allowed("192.168.1.5:5000".parse().unwrap()));
         assert!(lan.peer_allowed("100.99.120.92:5000".parse().unwrap()));
         assert!(!lan.peer_allowed("127.0.0.1:5000".parse().unwrap()));
+        // This machine's own address (the one its default route leaves from), even where private ones may go.
+        let own = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|socket| {
+                socket.connect("203.0.113.9:9")?;
+                socket.local_addr()
+            })
+            .map(|local| local.ip());
+        if let Ok(own) = own
+            && !own.is_unspecified()
+        {
+            assert!(!lan.peer_allowed(SocketAddr::new(own, 5000)), "{own}");
+            assert!(!strict.peer_allowed(SocketAddr::new(own, 5000)), "{own}");
+        }
     }
 
     #[test]
     fn credentials_and_nonces() {
         let config = config(false);
-        let (username, password, expires) = config.credentials(7, "device1");
-        assert!(username.ends_with(":7:device1") && expires > unix_now());
+        let (username, password, expires) = config.credentials(7, "device1", "agent");
+        assert!(username.ends_with(":7:device1:agent") && expires > unix_now());
         assert_eq!(owner(&username), ("7", "device1"));
+        assert_eq!(program(&username), "agent");
         assert_eq!(
             password,
             hex(&stun::hmac_sha1(&config.secret, username.as_bytes()))
@@ -771,8 +917,8 @@ mod tests {
         // Permissions: all or none, MAX_PERMISSIONS at most; a known one is renewed.
         let now = Instant::now();
         let mut permissions = HashMap::new();
-        let peers: Vec<IpAddr> = (0..MAX_PERMISSIONS as u32 + 1)
-            .map(|i| IpAddr::from(i.to_be_bytes()))
+        let peers: Vec<SocketAddr> = (0..MAX_PERMISSIONS as u32 + 1)
+            .map(|i| SocketAddr::new(IpAddr::from(i.to_be_bytes()), 0))
             .collect();
         assert!(!permit(&mut permissions, peers.clone(), now));
         assert!(permissions.is_empty());
@@ -783,6 +929,19 @@ mod tests {
         ));
         assert!(permit(&mut permissions, vec![peers[0]], now));
         assert!(!permit(&mut permissions, vec![peers[MAX_PERMISSIONS]], now));
+        // On the server's public address a permission is for one relayed address, elsewhere for the whole IP.
+        let public: IpAddr = "198.51.100.1".parse().unwrap();
+        let mut permissions = HashMap::new();
+        let relayed: SocketAddr = "198.51.100.1:47210".parse().unwrap();
+        let peer: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+        assert!(permit(
+            &mut permissions,
+            vec![permission(public, relayed), permission(public, peer)],
+            now
+        ));
+        let allows = |to: &str| permissions.contains_key(&permission(public, to.parse().unwrap()));
+        assert!(allows("198.51.100.1:47210") && !allows("198.51.100.1:47211"));
+        assert!(allows("203.0.113.9:6000"));
         // Relayed bytes: RELAY_BURST at once, then RELAY_RATE a second.
         let mut budget = Budget::new(now);
         assert!(budget.take(now, RELAY_BURST as usize));
@@ -792,5 +951,23 @@ mod tests {
             (RELAY_RATE / 10.0) as usize - 1
         ));
         assert!(!budget.take(now + Duration::from_millis(100), 2));
+    }
+
+    #[test]
+    fn revoked_credentials_stop_working() {
+        let config = config(false);
+        let (agent, _, _) = config.credentials(7, "dev1", "agent");
+        let (viewer, _, _) = config.credentials(7, "dev1", "viewer");
+        assert!(!config.is_revoked(&viewer));
+        config.revoke("dev1", &["viewer"]);
+        assert!(config.is_revoked(&viewer), "made before the logout");
+        assert!(
+            !config.is_revoked(&agent),
+            "the device's other program keeps its own"
+        );
+        // Credentials made after the revocation work.
+        let later = format!("{}:7:dev1:viewer", unix_now() + 1 + CREDENTIAL_SECONDS);
+        assert!(!config.is_revoked(&later));
+        assert!(config.is_revoked("not a username"));
     }
 }

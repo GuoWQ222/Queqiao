@@ -70,7 +70,7 @@ goes into `crates\queqiao-update`), `queqiao-setup release --key <file> --instal
 
 Remote control with an account (M3):
 1. On the server PC: `queqiao-server init --name <its IP>` prints the certificate fingerprint,
-   `queqiao-server add-user <name> <password>` adds a user (or `serve --allow-signup` lets people make accounts from
+   `queqiao-server add-user <name>` adds a user (the password on standard input) (or `serve --allow-signup` lets people make accounts from
    the login form), `queqiao-server serve --name <its IP>` runs it: accounts
    on TCP 47100, STUN/TURN on UDP 3478, relayed addresses on UDP 47200-47399 (`--turn-port`, `--relay-ports`,
    `--public-ip`; `--relay-private` also relays to private addresses, for LAN-only servers). Its data, certificate

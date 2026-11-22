@@ -130,6 +130,31 @@ impl Store {
             .map_err(|e| e.to_string())
     }
 
+    /// Whether `device_id` may log in to the account `user_id`, asked before the password is checked: not a device of
+    /// another account, and not a new one past MAX_DEVICES.
+    pub fn device_admissible(&self, user_id: i64, device_id: &str) -> Result<(), String> {
+        match self.device_owner(device_id)? {
+            Some(owner) if owner != user_id => Err("this device belongs to another account".into()),
+            Some(_) => Ok(()),
+            None => {
+                let devices: i64 = self
+                    .db
+                    .query_row(
+                        "SELECT COUNT(*) FROM devices WHERE user_id = ?1",
+                        params![user_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if devices >= MAX_DEVICES {
+                    return Err(format!(
+                        "this account has {MAX_DEVICES} devices, the most it may have: remove one first"
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn user_exists(&self, name: &str) -> Result<bool, String> {
         self.db
             .prepare("SELECT 1 FROM users WHERE name = ?1 COLLATE NOCASE")
@@ -181,12 +206,19 @@ impl Store {
             )
             .optional()
             .map_err(|e| e.to_string())?;
+        // A row without a key (a database from before device keys) gets one only with the password: a saved login
+        // alone could otherwise set any key (the security review of 2026-11-22).
         if let Some(stored) = stored
-            && !stored.is_empty()
-            && !stored.eq_ignore_ascii_case(public_key)
             && !may_change_key
         {
-            return Err("this device has a new key: log in with the password".into());
+            if stored.is_empty() {
+                return Err(
+                    "the server has no key for this device yet: log in with the password".into(),
+                );
+            }
+            if !stored.eq_ignore_ascii_case(public_key) {
+                return Err("this device has a new key: log in with the password".into());
+            }
         }
         let owner: Option<i64> = self
             .db
@@ -495,7 +527,8 @@ pub const MAX_DEVICES: i64 = 64;
 /// tens of milliseconds, and every other connection waited for the lock meanwhile (the security review of 2026-11-22).
 /// An unknown user's never matches (and still costs one hash, so the answer takes the same time).
 pub struct PasswordRecord {
-    id: i64,
+    /// -1 for a name no account has (its check always fails).
+    pub id: i64,
     name: String,
     hash: String,
 }
@@ -845,10 +878,54 @@ mod tests {
         let refused =
             store.register_device(user.id, "one-more", "PC", &format!("{:064x}", 999), true);
         assert!(refused.is_err_and(|e| e.contains("most it may have")));
+        // Asked before the password: a new device past the most, another account's device.
+        assert!(store.device_admissible(user.id, "one-more").is_err());
+        assert!(store.device_admissible(user.id, "d0").is_ok());
+        assert!(store.device_admissible(user.id + 1, "d0").is_err());
+        assert!(store.device_admissible(-1, "brand-new").is_ok());
         // A known device still logs in.
         assert!(
             !store
                 .register_device(user.id, "d0", "PC", &format!("{:064x}", 0), true)
+                .unwrap()
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_device_without_a_key_gets_one_only_with_the_password() {
+        let dir =
+            std::env::temp_dir().join(format!("queqiao-store-keyless-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        store.add_user("erin", "correct horse").unwrap();
+        let user = store
+            .check_password("erin", "correct horse")
+            .unwrap()
+            .unwrap();
+        // As a database from before device keys has it.
+        store
+            .db
+            .execute(
+                "INSERT INTO devices (id, user_id, name, created, last_seen) VALUES ('old-device', ?1, 'PC', 0, 0)",
+                params![user.id],
+            )
+            .unwrap();
+        let key = format!("{:064x}", 7);
+        let resumed = store.register_device(user.id, "old-device", "PC", &key, false);
+        assert!(resumed.is_err_and(|e| e.contains("log in with the password")));
+        assert!(
+            !store
+                .register_device(user.id, "old-device", "PC", &key, true)
+                .unwrap()
+        );
+        assert_eq!(store.public_key("old-device").unwrap(), key);
+        assert!(
+            !store
+                .register_device(user.id, "old-device", "PC", &key, false)
                 .unwrap()
         );
         drop(store);

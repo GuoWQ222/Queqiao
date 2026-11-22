@@ -57,8 +57,8 @@ if (-not $pin) { "RUN_FAIL no fingerprint from: $init"; return }
 # Throw-away users with random passwords (the data folder is new each run).
 $password1 = [guid]::NewGuid().ToString('N')
 $password2 = [guid]::NewGuid().ToString('N')
-& $server add-user alice $password1 --data $data
-& $server add-user bob $password2 --data $data
+$password1 | & $server add-user alice --data $data
+$password2 | & $server add-user bob --data $data
 $serveArgs = @('serve', '--listen', $Listen, '--data', "`"$data`"", '--public-ip', $Listen.Split(':')[0], '--relay-private')
 $hostName, $port = $Listen.Split(':')
 function Start-TestServer([string]$Log) {
@@ -84,6 +84,13 @@ try {
     Start-Sleep -Milliseconds 500
     $serverProcess = Start-TestServer 'server_out2.txt'
     if (-not $serverProcess) { 'RUN_FAIL the server did not start again'; return }
+    # Sign-up and the account hardening apart, against the server just started (the checks above used up this
+    # address's tries); then once more anew for the sessions.
+    & (Join-Path $Bin 'examples\account_probe.exe') $Listen $pin alice $password1 bob $password2 --accounts
+    Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    $serverProcess = Start-TestServer 'server_out3.txt'
+    if (-not $serverProcess) { 'RUN_FAIL the server did not start a third time'; return }
 
     $device = $env:COMPUTERNAME
     $agentArgs = "--server $Listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent.txt`""

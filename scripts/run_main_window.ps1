@@ -45,7 +45,7 @@ $init = & $server init --data $data
 $pin = ([regex]::Match(($init -join "`n"), 'fingerprint: ([0-9a-f]{64})')).Groups[1].Value
 if (-not $pin) { "RUN_FAIL no fingerprint from: $init"; return }
 $password = [guid]::NewGuid().ToString('N')
-& $server add-user alice $password --data $data | Out-Null
+$password | & $server add-user alice --data $data | Out-Null
 $serveArgs = @('serve', '--listen', $Listen, '--data', "`"$data`"", '--public-ip', $Listen.Split(':')[0], '--relay-private')
 $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
 $hostName, $port = $Listen.Split(':')

@@ -11,7 +11,9 @@
 //!     addresses (tests, LAN-only servers).
 //! queqiao-server init [--data <folder>] [--name <host name or IP>]...
 //!     Makes the certificate if there is none yet and prints its fingerprint.
-//! queqiao-server add-user <name> <password> [--data <folder>]
+//! queqiao-server add-user <name> [--data <folder>]
+//!     Adds a user; the password is one line on standard input (never the command line, where process lists and
+//!     shell history show it).
 //! Without arguments it prints its version.
 
 mod cert;
@@ -41,7 +43,9 @@ fn main() {
                 "                            [--public-ip <IP>] [--turn-port 3478] [--relay-ports 47200-47399] [--relay-private]"
             );
             println!("       queqiao-server init [--data <folder>] [--name <host or IP>]...");
-            println!("       queqiao-server add-user <name> <password> [--data <folder>]");
+            println!(
+                "       queqiao-server add-user <name> [--data <folder>]   (the password on standard input)"
+            );
             return;
         }
     };
@@ -64,13 +68,36 @@ fn data_folder(args: &[String]) -> Result<PathBuf, String> {
         .pop()
         .map_or_else(|| PathBuf::from("queqiao-server-data"), PathBuf::from);
     std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    // Only its owner may read or enter it: the server's private key and the database are in it (on Linux a new folder
+    // is usually readable by every user; the security review of 2026-11-22).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("{}: {e}", folder.display()))?;
+    }
     Ok(folder)
 }
 
 fn add_user(args: &[String]) -> Result<(), String> {
-    let (Some(name), Some(password)) = (args.first(), args.get(1)) else {
-        return Err("usage: queqiao-server add-user <name> <password> [--data <folder>]".into());
+    let usage = "usage: queqiao-server add-user <name> [--data <folder>], the password as one line on standard input";
+    let Some(name) = args.first().filter(|name| !name.starts_with("--")) else {
+        return Err(usage.into());
     };
+    // Never on the command line, where process lists and shell history show it (the security review of 2026-11-22).
+    if args.get(1).is_some_and(|next| !next.starts_with("--")) {
+        return Err(format!(
+            "{usage} (a password on the command line is refused)"
+        ));
+    }
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprint!("password for {name}: ");
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    let password = line.trim_end_matches(['\r', '\n']);
     let store = Store::open(&data_folder(args)?.join("queqiao.db"))?;
     store.add_user(name, password)?;
     println!("user {name} added");
@@ -175,5 +202,6 @@ fn turn_config(args: &[String], names: &[String]) -> Result<Option<turn::TurnCon
         relay_ports,
         allow_private: args.iter().any(|arg| arg == "--relay-private"),
         secret,
+        revoked: std::sync::Mutex::new(std::collections::HashMap::new()),
     }))
 }

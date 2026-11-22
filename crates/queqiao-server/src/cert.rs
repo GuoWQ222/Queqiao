@@ -26,6 +26,13 @@ pub fn load_or_create(
         std::fs::write(&cert_path, generated.cert.pem()).map_err(|e| e.to_string())?;
         std::fs::write(&key_path, generated.signing_key.serialize_pem())
             .map_err(|e| e.to_string())?;
+        // Its owner's only on Linux, as the data folder is (the security review of 2026-11-22).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+        }
     }
     let cert = CertificateDer::from_pem_file(&cert_path)
         .map_err(|e| format!("{}: {e}", cert_path.display()))?;
