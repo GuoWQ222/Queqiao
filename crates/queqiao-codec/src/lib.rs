@@ -68,9 +68,22 @@ pub fn av1_obu_types(data: &[u8]) -> Vec<u8> {
     types
 }
 
-/// Whether this PC can encode `codec` on its GPU (through Media Foundation).
-pub fn can_encode(codec: VideoCodec) -> bool {
-    codec == VideoCodec::H264 || mf::has_hardware_encoder(codec)
+/// Whether this PC can encode `codec` (H.264 always: OpenH264 is built in; other codecs on `device`'s GPU, through
+/// Media Foundation). A registered encoder is not enough: one is opened (1280x720 at 60 fps) and closed again. Measured
+/// 2026-11-22 on a 12th-gen Intel Iris Xe: its driver registers "Intel Hardware Accelerated AV1 Encoder MFT", which
+/// refuses every format with E_FAIL, as that GPU has no AV1 encoding hardware. Takes about 30 ms where it works.
+pub fn can_encode(
+    codec: VideoCodec,
+    device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+) -> bool {
+    if codec == VideoCodec::H264 {
+        return true;
+    }
+    let config = EncoderConfig {
+        codec,
+        ..EncoderConfig::for_screen(1280, 720, 60)
+    };
+    mf::MfEncoder::open(device, &config, &mut Vec::new()).is_some()
 }
 
 /// Whether this PC can decode `codec` (H.264 always: OpenH264 is built in).

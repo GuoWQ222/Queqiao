@@ -2169,8 +2169,9 @@ fn session(
                         can_decode_av1,
                     })) => {
                         use queqiao_core::protocol::{CodecPreference, VideoCodec};
-                        let can_encode_av1 = *av1_encoder
-                            .get_or_insert_with(|| queqiao_codec::can_encode(VideoCodec::Av1));
+                        let can_encode_av1 = *av1_encoder.get_or_insert_with(|| {
+                            queqiao_codec::can_encode(VideoCodec::Av1, &device)
+                        });
                         let wanted = match prefer {
                             CodecPreference::Av1 if can_decode_av1 && can_encode_av1 => {
                                 VideoCodec::Av1

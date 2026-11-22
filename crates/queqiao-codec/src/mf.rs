@@ -320,15 +320,6 @@ pub(crate) fn subtype(codec: crate::VideoCodec) -> &'static GUID {
     }
 }
 
-/// Whether a hardware encoder for `codec` is registered.
-pub(crate) fn has_hardware_encoder(codec: crate::VideoCodec) -> bool {
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
-    }
-    hardware_encoders(codec).is_ok_and(|list| !list.is_empty())
-}
-
 /// Hardware encoders for `codec`, best first (Media Foundation's own order), with their names.
 fn hardware_encoders(codec: crate::VideoCodec) -> Result<Vec<(IMFActivate, String)>> {
     let output = MFT_REGISTER_TYPE_INFO {
