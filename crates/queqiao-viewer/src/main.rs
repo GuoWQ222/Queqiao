@@ -221,6 +221,8 @@ struct Options {
     help_go: bool,
     /// Tests: take this device (name or id) out of the account, then leave.
     remove_device: Option<String>,
+    /// Tests: the passwords given (in turn) when the PC asks for its Windows password.
+    test_passwords: Vec<String>,
     /// Press Connect in the help form once it is drawn (tests).
     test_submit_help: bool,
     /// With --user and --password: a new account (on a server that takes them) instead of a login.
@@ -544,6 +546,9 @@ fn test_switch(
         }),
         "--trust-new-key" => options.trust_new_key = args.next(),
         "--remove-device" => options.remove_device = Some(args.next()?),
+        "--test-password" => {
+            options.test_passwords = args.next()?.split(',').map(str::to_string).collect()
+        }
         _ => return Some(false),
     }
     Some(true)
@@ -1549,6 +1554,10 @@ fn run_session(
         .then(|| (Instant::now() + Duration::from_secs(1), 0, false));
     // The transfer list window, while open.
     let mut transfer_list: Option<PickList> = None;
+    // That PC's Windows password, while it asks for it (locked); the tests' passwords instead.
+    let mut password_form: Option<queqiao_display::PasswordForm> = None;
+    let mut test_passwords: std::collections::VecDeque<String> =
+        options.test_passwords.iter().cloned().collect();
     let mut cancel_test_done = false;
     // The secure-desktop test: when it started, its step, and the pictures shown when that step began.
     let mut secure_test: Option<(Instant, u8, u64)> = None;
@@ -2155,6 +2164,17 @@ fn run_session(
             lines.push(format!("cancelled {} after {} bytes", row.name, row.done));
             cancel_test_done = true;
         }
+        // The password form: what the person typed goes to that PC (encrypted), Windows checks it there.
+        if let Some(form) = &mut password_form {
+            match form.next(0) {
+                Some(queqiao_display::PasswordAction::Submit(password)) if !password.is_empty() => {
+                    peer.send_data(Message::Password(password).encode());
+                    form.set_status(tr("Checking..."));
+                }
+                Some(queqiao_display::PasswordAction::Cancel) => password_form = None,
+                _ => {}
+            }
+        }
         // The transfer list: progress, and what the person pressed.
         if let Some(list) = &mut transfer_list {
             let transfer_rows: Vec<TransferRow> = transfers.rows();
@@ -2435,6 +2455,46 @@ fn run_session(
                     Some(Message::Notice(text)) => {
                         lines.push(format!("notice from that PC: {text}"));
                         status.notice(&text);
+                    }
+                    Some(Message::PasswordNeeded { reason, tries_left }) => {
+                        use queqiao_core::protocol::PasswordReason;
+                        lines.push(format!("password: asked ({reason:?}, {tries_left} tries)"));
+                        let text = match reason {
+                            PasswordReason::Locked => tr(
+                                "That PC is locked. Type its Windows password to show that it is you (this does not unlock it: unlock it on its own screen then).",
+                            ),
+                            PasswordReason::SignedOut => tr(
+                                "Nobody is signed in on that PC. Type the password of its Windows account to show that it is you.",
+                            ),
+                            PasswordReason::OnlyTheOwner => {
+                                tr("That PC is locked: only the person there can unlock it.")
+                            }
+                        };
+                        if let Some(next) = test_passwords.pop_front() {
+                            peer.send_data(Message::Password(next).encode());
+                        } else if tries_left > 0 {
+                            let title = trf("Queqiao - {device} is locked", &[("device", agent)]);
+                            password_form = queqiao_display::PasswordForm::new(&title, text).ok();
+                        } else {
+                            status.notice(text);
+                        }
+                    }
+                    Some(Message::PasswordResult { ok, tries_left }) => {
+                        lines.push(format!(
+                            "password: {} ({tries_left} tries left)",
+                            if ok { "right" } else { "wrong" }
+                        ));
+                        if ok {
+                            password_form = None;
+                        } else if let Some(next) = test_passwords.pop_front() {
+                            peer.send_data(Message::Password(next).encode());
+                        } else if let Some(form) = &password_form {
+                            let tries = tries_left.to_string();
+                            form.set_status(&trf(
+                                "Wrong password: {tries} tries left.",
+                                &[("tries", &tries)],
+                            ));
+                        }
                     }
                     Some(Message::PointerShape(shape)) => {
                         pointer_shapes += 1;

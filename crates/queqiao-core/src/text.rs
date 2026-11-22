@@ -554,6 +554,24 @@ const CHINESE: &[(&str, &str)] = &[
         "这个界面（登录、UAC 或 Ctrl+Alt+Del）由那台电脑前的人自己操作，帮助者无法操作。",
     ),
     ("New help ID", "换一个帮助 ID"),
+    (
+        "That PC is locked. Type its Windows password to show that it is you (this does not unlock it: unlock it on its own screen then).",
+        "那台电脑已锁定。请输入它的 Windows 密码来验证身份（这不会解锁它：之后请在它的锁屏上解锁）。",
+    ),
+    (
+        "Nobody is signed in on that PC. Type the password of its Windows account to show that it is you.",
+        "那台电脑上没有人登录。请输入它的 Windows 账户密码来验证身份。",
+    ),
+    (
+        "That PC is locked: only the person there can unlock it.",
+        "那台电脑已锁定：只有那台电脑前的人才能解锁。",
+    ),
+    ("Queqiao - {device} is locked", "鹊桥 - {device} 已锁定"),
+    (
+        "Wrong password: {tries} tries left.",
+        "密码错误，还可以再试 {tries} 次。",
+    ),
+    ("Checking...", "正在验证……"),
 ];
 
 #[cfg(test)]

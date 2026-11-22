@@ -479,6 +479,28 @@ try {
         # Ended soon after the removal, not when the viewer's 60 s were up.
         if (((Get-Date) - $removedAt).TotalSeconds -gt 40) { $failed += 'removed (the session ended late)' }
     }
+    # The lock screen (as UU): a locked PC shows nothing until the viewer gives its Windows password. Simulated here
+    # (--test-locked, a test password): nothing is locked, and the person's real Windows account is never tried.
+    if ($Sessions -contains 'locked' -or $Sessions -contains 'all') {
+        $lockPassword = 'Lock-pass-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds 90 --test-locked --test-password $lockPassword --report `"$Out\agent_locked.txt`""
+        Start-SessionTask 'Queqiao-M4-Agent-locked' $agent $agentArgs ''
+        Start-Sleep -Seconds 4
+        $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds 15 --width 640 --mute --test-password wrong-one,$lockPassword --report `"$Out\viewer_locked.txt`""
+        Start-SessionTask 'Queqiao-M4-Viewer-locked' $viewer $viewerArgs ''
+        $viewerResult = Wait-SessionTask 'Queqiao-M4-Viewer-locked' 120
+        $agentResult = Wait-SessionTask 'Queqiao-M4-Agent-locked' 60
+        "=== session 'locked': agent exit $agentResult, viewer exit $viewerResult"
+        $agentText = @(if (Test-Path -LiteralPath "$Out\agent_locked.txt") { Get-Content -LiteralPath "$Out\agent_locked.txt" -Encoding UTF8 })
+        $viewerText = @(if (Test-Path -LiteralPath "$Out\viewer_locked.txt") { Get-Content -LiteralPath "$Out\viewer_locked.txt" -Encoding UTF8 })
+        $agentText | Where-Object { $_ -match '^(lock|ended|RESULT)' }
+        $viewerText | Where-Object { $_ -match '^(password|RESULT)' }
+        if (-not ($agentText | Where-Object { $_ -match '^lock: this PC is locked: .*\(5 tries\)$' })) { $failed += 'locked agent (did not ask)' }
+        if (-not ($agentText | Where-Object { $_ -eq 'lock: wrong password (4 tries left)' })) { $failed += 'locked agent (the wrong password was not refused)' }
+        if (-not ($agentText | Where-Object { $_ -eq "lock: the viewer gave this PC's Windows password (0 frames sent before)" })) { $failed += 'locked agent (pictures went before the password, or it was not taken)' }
+        if (-not ($viewerText | Where-Object { $_ -eq 'password: right (4 tries left)' })) { $failed += 'locked viewer (no right answer)' }
+        if ($viewerText[-1] -ne 'RESULT PASS') { $failed += 'locked viewer (no pictures after the password)' }
+    }
     # Several sessions at once: this PC's agent and a second one (a throwaway device of the same account), and one
     # viewer with a session to each, each on a thread and in a window of its own. No input test: two agents injecting
     # into one PC at once would spoil each other's checks.

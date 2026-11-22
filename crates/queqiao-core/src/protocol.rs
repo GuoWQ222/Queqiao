@@ -44,6 +44,17 @@ pub enum InputEvent {
     },
 }
 
+/// Why the controlled PC asks for its Windows password before it shows its screen (as UU Remote).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasswordReason {
+    /// The PC is locked.
+    Locked,
+    /// Nobody is signed in on it.
+    SignedOut,
+    /// Locked, and this viewer is not asked (someone helping from another account): the person there unlocks it.
+    OnlyTheOwner,
+}
+
 /// Everything sent on the data channel.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
@@ -79,7 +90,23 @@ pub enum Message {
     PointerShape(PointerShape),
     /// Agent -> viewer: that PC's pointer is hidden (false; games, videos) or shown again.
     PointerVisible(bool),
+    /// Agent -> viewer: the picture and input wait for that PC's Windows password; `tries_left` more tries (0: this
+    /// viewer is not asked, or has no tries left).
+    PasswordNeeded {
+        reason: PasswordReason,
+        tries_left: u8,
+    },
+    /// Viewer -> agent: the password the person typed (only in the encrypted session; Windows checks it there).
+    Password(String),
+    /// Agent -> viewer: right (picture and input go on) or wrong, `tries_left` more.
+    PasswordResult {
+        ok: bool,
+        tries_left: u8,
+    },
 }
+
+/// The longest password sent (UTF-8 bytes).
+pub const MAX_PASSWORD: usize = 256;
 
 /// A pointer shape as Windows gives it, rows tightly packed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,6 +257,9 @@ const NOTICE: u8 = 61;
 const SCREENS: u8 = 62;
 const POINTER_SHAPE: u8 = 63;
 const POINTER_VISIBLE: u8 = 64;
+const PASSWORD_NEEDED: u8 = 65;
+const PASSWORD: u8 = 66;
+const PASSWORD_RESULT: u8 = 67;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -353,6 +383,22 @@ impl Message {
                 out.extend_from_slice(&shape.data);
             }
             Message::PointerVisible(visible) => out.extend([POINTER_VISIBLE, u8::from(visible)]),
+            Message::PasswordNeeded { reason, tries_left } => out.extend([
+                PASSWORD_NEEDED,
+                match reason {
+                    PasswordReason::Locked => 1,
+                    PasswordReason::SignedOut => 2,
+                    PasswordReason::OnlyTheOwner => 3,
+                },
+                tries_left,
+            ]),
+            Message::Password(ref password) => {
+                out.push(PASSWORD);
+                out.extend_from_slice(password.as_bytes());
+            }
+            Message::PasswordResult { ok, tries_left } => {
+                out.extend([PASSWORD_RESULT, u8::from(ok), tries_left])
+            }
         }
         out
     }
@@ -511,6 +557,28 @@ impl Message {
                 [1] => true,
                 _ => return None,
             }),
+            PASSWORD_NEEDED => match rest {
+                [reason, tries_left] => Message::PasswordNeeded {
+                    reason: match reason {
+                        1 => PasswordReason::Locked,
+                        2 => PasswordReason::SignedOut,
+                        3 => PasswordReason::OnlyTheOwner,
+                        _ => return None,
+                    },
+                    tries_left: *tries_left,
+                },
+                _ => return None,
+            },
+            PASSWORD if rest.len() <= MAX_PASSWORD => {
+                Message::Password(String::from_utf8(rest.to_vec()).ok()?)
+            }
+            PASSWORD_RESULT => match rest {
+                [ok @ (0 | 1), tries_left] => Message::PasswordResult {
+                    ok: *ok == 1,
+                    tries_left: *tries_left,
+                },
+                _ => return None,
+            },
             _ => return None,
         })
     }
@@ -519,6 +587,31 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_messages_round_trip_and_long_ones_are_refused() {
+        for message in [
+            Message::PasswordNeeded {
+                reason: PasswordReason::Locked,
+                tries_left: 5,
+            },
+            Message::PasswordNeeded {
+                reason: PasswordReason::OnlyTheOwner,
+                tries_left: 0,
+            },
+            Message::Password("pässwörd 1".into()),
+            Message::PasswordResult {
+                ok: false,
+                tries_left: 3,
+            },
+        ] {
+            assert_eq!(Message::decode(&message.encode()), Some(message));
+        }
+        let long = Message::Password("x".repeat(MAX_PASSWORD + 1)).encode();
+        assert_eq!(Message::decode(&long), None);
+        assert_eq!(Message::decode(&[PASSWORD_NEEDED, 9, 1]), None);
+        assert_eq!(Message::decode(&[PASSWORD_RESULT, 2, 1]), None);
+    }
 
     #[test]
     fn pointer_shapes_round_trip_and_bad_ones_are_refused() {

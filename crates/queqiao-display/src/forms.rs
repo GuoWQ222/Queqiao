@@ -420,6 +420,47 @@ pub(crate) fn set_text(hwnd: HWND, text: &str) {
     let _ = unsafe { SetWindowTextW(hwnd, PCWSTR(text.as_ptr())) };
 }
 
+/// A password asked for while something else goes on (a session): polled with `next`.
+pub struct PasswordForm {
+    form: Form,
+    edit: HWND,
+    status: HWND,
+}
+
+/// What the person did in the password form.
+pub enum PasswordAction {
+    Submit(String),
+    Cancel,
+}
+
+impl PasswordForm {
+    pub fn new(title: &str, text: &str) -> Result<PasswordForm> {
+        let form = Form::create(title, 420, 210, Kind::Prompt)?;
+        form.text(text, [20, 14, 380, 62])?;
+        let edit = form.edit("", true, [20, 84, 380, 26])?;
+        let status = form.label("", [20, 118, 380, 22])?;
+        form.button(tr("OK"), ID_OK, true, [196, 160, 96, 30])?;
+        form.button(tr("Cancel"), ID_CANCEL, false, [304, 160, 96, 30])?;
+        form.show();
+        let _ = unsafe { SetFocus(Some(edit)) };
+        Ok(PasswordForm { form, edit, status })
+    }
+
+    /// A line under the field (the field is emptied).
+    pub fn set_status(&self, text: &str) {
+        set_text(self.status, text);
+        set_text(self.edit, "");
+    }
+
+    pub fn next(&mut self, wait_ms: u32) -> Option<PasswordAction> {
+        match self.form.next_command(wait_ms)? {
+            ID_OK => Some(PasswordAction::Submit(text_of(self.edit))),
+            ID_CANCEL | CLOSED => Some(PasswordAction::Cancel),
+            _ => None,
+        }
+    }
+}
+
 /// What the login form asks for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoginFields {

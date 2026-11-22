@@ -16,6 +16,7 @@
 #![windows_subsystem = "windows"]
 
 mod autostart;
+mod lock_gate;
 mod power;
 mod service_link;
 mod ui;
@@ -75,6 +76,10 @@ const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Options {
+    /// Tests: this PC counts as locked for the whole session (nothing is really locked).
+    test_locked: bool,
+    /// Tests: the Windows password the lock gate takes (instead of Windows' check of the real one).
+    test_password: Option<String>,
     /// Tests: the help mode for this run, never saved (the person's settings file is shared with the tests).
     help_mode: Option<queqiao_display::HelpMode>,
     /// Show the main window (the Start menu's shortcut): this one, or the one of the Queqiao already running.
@@ -288,6 +293,8 @@ fn test_switch(
         "--test-press-setting" => options.test_press_setting = true,
         "--test-tray-login" => options.test_tray_login = true,
         "--test-main-window" => options.test_main_window = true,
+        "--test-locked" => options.test_locked = true,
+        "--test-password" => options.test_password = Some(args.next()?),
         "--help-mode" => {
             options.help_mode = Some(match args.next()?.as_str() {
                 "code" => queqiao_display::HelpMode::CodeOnly,
@@ -2127,7 +2134,23 @@ fn session(
         }};
     }
     let mut trust_checked = Instant::now();
+    // The lock screen (as UU): the picture and input wait for this PC's Windows password.
+    let mut gate = lock_gate::LockGate::new(options.test_locked);
     'session: loop {
+        if gate.refresh() {
+            let (reason, tries_left) = if helper {
+                (queqiao_core::protocol::PasswordReason::OnlyTheOwner, 0)
+            } else {
+                (
+                    queqiao_core::protocol::PasswordReason::Locked,
+                    gate.tries_left(),
+                )
+            };
+            peer.send_data(Message::PasswordNeeded { reason, tries_left }.encode());
+            lines.push(format!(
+                "lock: this PC is locked: its picture and input wait for its Windows password ({tries_left} tries)"
+            ));
+        }
         if end.is_some_and(|end| Instant::now() > end) {
             break;
         }
@@ -2196,6 +2219,7 @@ fn session(
                     waiting.get_or_insert((0, qpc_now()));
                 }
                 PeerEvent::Data(bytes) => match Message::decode(&bytes) {
+                    Some(Message::Input(_)) if gate.closed() => {}
                     Some(Message::Input(event)) => {
                         stats.inputs += 1;
                         // On another desktop (sign-in, lock, Ctrl+Alt+Del, UAC) the desktop helper injects; never for
@@ -2240,6 +2264,33 @@ fn session(
                         closed = Some("the viewer left".to_string());
                         break 'session;
                     }
+                    // Only while asked for, and never from someone helping.
+                    Some(Message::Password(password)) if !helper && gate.closed() => {
+                        let right = gate.check(&password, options.test_password.as_deref());
+                        let tries_left = gate.tries_left();
+                        peer.send_data(
+                            Message::PasswordResult {
+                                ok: right,
+                                tries_left,
+                            }
+                            .encode(),
+                        );
+                        if right {
+                            lines.push(format!(
+                                "lock: the viewer gave this PC's Windows password ({} frames sent before)",
+                                stats.sent
+                            ));
+                            force_keyframe = true;
+                            waiting.get_or_insert((0, qpc_now()));
+                        } else {
+                            lines.push(format!("lock: wrong password ({tries_left} tries left)"));
+                            if tries_left == 0 {
+                                closed = Some("too many wrong passwords for this PC".to_string());
+                                break 'session;
+                            }
+                        }
+                    }
+                    Some(Message::Password(_)) => {}
                     Some(Message::Command(
                         Command::PrivacyOn
                         | Command::Restart
@@ -2993,6 +3044,7 @@ fn session(
         // Encode as soon as there is a change and the frame time has passed.
         if connected_after.is_some()
             && Instant::now() >= due
+            && !gate.closed()
             && let Some((screen_time, captured_time)) = waiting.take()
         {
             let frames = encoder
