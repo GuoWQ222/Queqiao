@@ -4,14 +4,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use queqiao_core::account::{ClientMessage, Device, Role, ServerMessage, TurnAccess};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::Notify;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
@@ -42,7 +43,7 @@ struct PendingAsk {
     viewer_device: String,
     viewer_name: String,
     viewer_user: String,
-    viewer_sender: UnboundedSender<Outgoing>,
+    viewer_sender: Outbox,
 }
 
 /// An agent's open help requests: the code's SHA-256 and the wrong tries so far.
@@ -194,11 +195,116 @@ enum Outgoing {
     Kick,
 }
 
+/// Most bytes waiting to go out to one connection: one that does not read them is closed, not given more memory (the
+/// security review of 2026-11-22: everything sent to a device that had stopped reading was kept, without limit).
+const MAX_QUEUED: usize = 4 << 20;
+/// How long one message may take to go out before the connection is given up (a stalled reader held it forever).
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What waits to go out to one connection: already as text, its bytes counted.
+enum Queued {
+    Text(String),
+    Kick,
+}
+
+/// The way to one connection: messages queue as text, MAX_QUEUED bytes at most; past that the connection is closed
+/// (`overflow`, which needs no room in the queue).
+#[derive(Clone)]
+struct Outbox {
+    sender: UnboundedSender<Queued>,
+    queued: Arc<AtomicUsize>,
+    overflow: Arc<Notify>,
+}
+
+impl Outbox {
+    fn new() -> (Outbox, UnboundedReceiver<Queued>) {
+        let (sender, receiver) = unbounded_channel();
+        let outbox = Outbox {
+            sender,
+            queued: Arc::new(AtomicUsize::new(0)),
+            overflow: Arc::new(Notify::new()),
+        };
+        (outbox, receiver)
+    }
+
+    /// Queues `item`; with MAX_QUEUED bytes waiting already, the connection is closed instead.
+    fn send(&self, item: Outgoing) -> Result<(), ()> {
+        match item {
+            Outgoing::Kick => self.sender.send(Queued::Kick).map_err(|_| ()),
+            Outgoing::Message(message) => {
+                let text = serde_json::to_string(&message).map_err(|_| ())?;
+                let size = text.len();
+                if self.queued.fetch_add(size, Ordering::Relaxed) + size > MAX_QUEUED {
+                    self.queued.fetch_sub(size, Ordering::Relaxed);
+                    self.overflow.notify_one();
+                    return Err(());
+                }
+                self.sender.send(Queued::Text(text)).map_err(|_| ())
+            }
+        }
+    }
+
+    /// `size` bytes went out (or were dropped with the connection).
+    fn sent(&self, size: usize) {
+        self.queued.fetch_sub(size, Ordering::Relaxed);
+    }
+}
+
+/// Connections not logged in yet: at most MAX_WAITING, and MAX_WAITING_PER_ADDRESS from one address (each may take
+/// 35 s before it logs in: without a limit, idle connections used up the server's sockets).
+const MAX_WAITING: usize = 2048;
+const MAX_WAITING_PER_ADDRESS: u32 = 32;
+
+#[derive(Default)]
+struct Waiting {
+    total: usize,
+    by_address: HashMap<IpAddr, u32>,
+}
+
+impl Waiting {
+    /// Whether a connection from `address` may wait to log in (counted if so).
+    fn enter(&mut self, address: IpAddr) -> bool {
+        let from_there = self.by_address.entry(address).or_default();
+        if self.total >= MAX_WAITING || *from_there >= MAX_WAITING_PER_ADDRESS {
+            return false;
+        }
+        *from_there += 1;
+        self.total += 1;
+        true
+    }
+
+    fn leave(&mut self, address: IpAddr) {
+        if let Some(from_there) = self.by_address.get_mut(&address) {
+            *from_there = from_there.saturating_sub(1);
+            if *from_there == 0 {
+                self.by_address.remove(&address);
+            }
+        }
+        self.total = self.total.saturating_sub(1);
+    }
+}
+
+/// One connection counted in Waiting until it logs in or ends.
+struct WaitingTurn {
+    hub: Arc<Hub>,
+    address: IpAddr,
+}
+
+impl Drop for WaitingTurn {
+    fn drop(&mut self) {
+        self.hub
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .leave(self.address);
+    }
+}
+
 struct Connection {
     id: u64,
     user_id: i64,
     device_name: String,
-    sender: UnboundedSender<Outgoing>,
+    sender: Outbox,
 }
 
 pub struct Hub {
@@ -208,6 +314,7 @@ pub struct Hub {
     signups: Mutex<HashMap<IpAddr, Vec<Instant>>>,
     store: Mutex<Store>,
     failures: Mutex<Failures>,
+    waiting: Mutex<Waiting>,
     turn: Option<Arc<TurnConfig>>,
     online: Mutex<HashMap<(String, Role), Connection>>,
     next_id: AtomicU64,
@@ -236,6 +343,7 @@ impl Hub {
             signups: Mutex::new(HashMap::new()),
             store: Mutex::new(store),
             failures: Mutex::new(Failures::default()),
+            waiting: Mutex::new(Waiting::default()),
             turn,
             online: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -252,11 +360,32 @@ impl Hub {
     ) -> std::io::Result<()> {
         let listener = TcpListener::bind(listen).await?;
         loop {
-            let (tcp, peer) = listener.accept().await?;
+            // A failed accept (no sockets left, a reset connection) is not the end of the server.
+            let (tcp, peer) = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    eprintln!("accept: {error}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            let entered = self
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .enter(peer.ip());
+            if !entered {
+                // Too many connections waiting to log in (from there, or at all): this one is closed at once.
+                continue;
+            }
+            let turn = WaitingTurn {
+                hub: self.clone(),
+                address: peer.ip(),
+            };
             let hub = self.clone();
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
-                if let Err(error) = hub.connection(tcp, acceptor).await {
+                if let Err(error) = hub.connection(tcp, acceptor, turn).await {
                     eprintln!("{peer}: {error}");
                 }
             });
@@ -267,6 +396,7 @@ impl Hub {
         self: Arc<Hub>,
         tcp: TcpStream,
         acceptor: TlsAcceptor,
+        waiting: WaitingTurn,
     ) -> Result<(), String> {
         let _ = tcp.set_nodelay(true);
         let address = tcp.peer_addr().ok().map(|peer| peer.ip());
@@ -345,16 +475,19 @@ impl Hub {
                     message: message.clone(),
                 })
                 .unwrap_or_default();
-                let _ = sink.send(Message::text(reply)).await;
+                let _ = timeout(SEND_TIMEOUT, sink.send(Message::text(reply))).await;
                 return Err(format!("login refused: {message}"));
             }
         };
 
+        // Logged in: no longer counted among the connections waiting to.
+        drop(waiting);
         // Where the device connects from: Wake-on-LAN looks for another device behind the same address.
         if let (Some(address), Ok(store)) = (address, self.store.lock()) {
             let _ = store.set_last_address(&identity.device_id, &address.to_string());
         }
-        let (sender, mut receiver) = unbounded_channel();
+        let (sender, mut receiver) = Outbox::new();
+        let overflow = sender.overflow.clone();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let key = (identity.device_id.clone(), identity.role);
         let replaced = self.online.lock().map_err(|e| e.to_string())?.insert(
@@ -399,7 +532,7 @@ impl Hub {
                         }
                     },
                     Ok(Some(Ok(Message::Ping(data)))) => {
-                        if sink.send(Message::Pong(data)).await.is_err() {
+                        if !matches!(timeout(SEND_TIMEOUT, sink.send(Message::Pong(data))).await, Ok(Ok(()))) {
                             break;
                         }
                     }
@@ -407,17 +540,23 @@ impl Hub {
                     Ok(Some(Ok(_))) => {}
                 },
                 outgoing = receiver.recv() => match outgoing {
-                    Some(Outgoing::Message(message)) => {
-                        let text = serde_json::to_string(&message).map_err(|e| e.to_string())?;
-                        if sink.send(Message::text(text)).await.is_err() {
+                    Some(Queued::Text(text)) => {
+                        let size = text.len();
+                        let sent = timeout(SEND_TIMEOUT, sink.send(Message::text(text))).await;
+                        sender.sent(size);
+                        if !matches!(sent, Ok(Ok(()))) {
                             break;
                         }
                     }
-                    Some(Outgoing::Kick) | None => {
-                        let _ = sink.close().await;
+                    Some(Queued::Kick) | None => {
+                        let _ = timeout(SEND_TIMEOUT, sink.close()).await;
                         break;
                     }
                 },
+                () = overflow.notified() => {
+                    eprintln!("{}: closed: it did not read what was sent to it ({MAX_QUEUED} bytes waiting)", identity.device_id);
+                    break;
+                }
             }
         }
 
@@ -587,7 +726,7 @@ impl Hub {
         identity: &Identity,
         help_id: &str,
         code: &str,
-        sender: &UnboundedSender<Outgoing>,
+        sender: &Outbox,
         address: Option<IpAddr>,
     ) {
         let refuse = |message: &str| {
@@ -783,7 +922,7 @@ impl Hub {
         identity: &Identity,
         old_password: String,
         new_password: String,
-        sender: &UnboundedSender<Outgoing>,
+        sender: &Outbox,
         address: Option<IpAddr>,
     ) {
         let account = identity.user.to_lowercase();
@@ -1011,7 +1150,7 @@ impl Hub {
         &self,
         identity: &Identity,
         message: ClientMessage,
-        sender: &UnboundedSender<Outgoing>,
+        sender: &Outbox,
         address: Option<IpAddr>,
     ) {
         match message {
@@ -1285,5 +1424,61 @@ mod failure_tests {
         );
         let later = now + ADDRESS_WINDOW + Duration::from_secs(1);
         assert!(failures.begin(later, Some(address), Some("x")).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    #[test]
+    fn a_connection_that_does_not_read_is_closed_not_fed() {
+        let (outbox, mut receiver) = Outbox::new();
+        let big = ServerMessage::Error {
+            message: "x".repeat(1 << 20),
+        };
+        // Four of 1 MB fit (a little over 4 MB with their quotes would not: three and a bit).
+        let mut queued = 0;
+        while outbox.send(Outgoing::Message(big.clone())).is_ok() {
+            queued += 1;
+            assert!(queued < 10, "the queue has no end");
+        }
+        assert!(queued >= 3);
+        assert!(outbox.queued.load(Ordering::Relaxed) <= MAX_QUEUED);
+        // The overflow closes the connection: its signal is there without room in the queue.
+        assert!(outbox.overflow.notified().now_or_never().is_some());
+        // What went out makes room again.
+        if let Ok(Queued::Text(text)) = receiver.try_recv() {
+            outbox.sent(text.len());
+        }
+        assert!(outbox.send(Outgoing::Message(big)).is_ok());
+        // A kick always gets in.
+        assert!(outbox.send(Outgoing::Kick).is_ok());
+    }
+
+    #[test]
+    fn connections_waiting_to_log_in_are_limited() {
+        let mut waiting = Waiting::default();
+        let one: IpAddr = "198.51.100.7".parse().unwrap();
+        let passed = (0..MAX_WAITING_PER_ADDRESS + 10)
+            .filter(|_| waiting.enter(one))
+            .count();
+        assert_eq!(passed, MAX_WAITING_PER_ADDRESS as usize);
+        waiting.leave(one);
+        assert!(waiting.enter(one));
+        // Many addresses: MAX_WAITING in all.
+        let mut waiting = Waiting::default();
+        let passed = (0..MAX_WAITING as u32 + 100)
+            .filter(|i| {
+                waiting.enter(IpAddr::from([
+                    10,
+                    (i >> 16) as u8,
+                    (i >> 8) as u8,
+                    *i as u8,
+                ]))
+            })
+            .count();
+        assert_eq!(passed, MAX_WAITING);
     }
 }

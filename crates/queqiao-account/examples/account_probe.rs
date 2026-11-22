@@ -136,6 +136,45 @@ fn wait_for(
     }
 }
 
+/// Connections that never log in: 32 from one address may wait for their handshake, the next are closed at once
+/// (without a limit, idle connections used up the server's sockets; the security review of 2026-11-22).
+fn waiting_limit(probe: &mut Probe, server: &str) {
+    use std::io::Read;
+    use std::time::Duration;
+    let Ok(address) = server.parse::<std::net::SocketAddr>() else {
+        return probe.check("40 connections that do not log in", false, "not an ip:port");
+    };
+    let mut held: Vec<std::net::TcpStream> = (0..40)
+        .filter_map(|_| std::net::TcpStream::connect_timeout(&address, Duration::from_secs(2)).ok())
+        .collect();
+    std::thread::sleep(Duration::from_millis(800));
+    // Closed by the server: a read ends at once (0 bytes or a reset); waiting ones time out.
+    let closed = held
+        .iter_mut()
+        .map(|stream| {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut byte = [0u8; 1];
+            match stream.read(&mut byte) {
+                Ok(0) => true,
+                Ok(_) => false,
+                Err(error) => !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ),
+            }
+        })
+        .filter(|closed| *closed)
+        .count();
+    probe.check(
+        "40 connections that do not log in: 32 wait, 8 are closed at once",
+        held.len() == 40 && closed == 8,
+        format!("{} connected, {closed} closed", held.len()),
+    );
+    // Gone, so that the logins after this get their turn.
+    drop(held);
+    std::thread::sleep(Duration::from_secs(1));
+}
+
 /// Ten wrong passwords at once on ten connections: only 5 reach the password check (until 2026-11-22 all were
 /// checked, and counted after). Run alone (`--burst`) against a server that has counted no failures for this address
 /// yet, or the address's own limit refuses them first. An account name nobody has: it counts all the same.
@@ -175,6 +214,7 @@ fn main() {
         && mode == "--burst"
     {
         let mut probe = Probe { failed: 0 };
+        waiting_limit(&mut probe, server);
         burst(&mut probe, server, pin);
         println!(
             "{}",

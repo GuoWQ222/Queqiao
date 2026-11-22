@@ -171,14 +171,21 @@ pub async fn serve(config: Arc<TurnConfig>) -> std::io::Result<()> {
     let mut next_port = config.relay_ports.0;
     let mut buffer = vec![0u8; 65536];
     loop {
+        // An error from one datagram (a reset, an ICMP message) is not the end of the relay, nor of the server.
         let (length, client) = match socket.recv_from(&mut buffer).await {
             Ok(received) => received,
             Err(error) if error.kind() == ErrorKind::ConnectionReset => continue,
-            Err(error) => return Err(error),
+            Err(error) => {
+                eprintln!("TURN: {error}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
         };
-        let action = match state.lock() {
-            Ok(mut allocations) => handle(&config, &mut allocations, client, &buffer[..length]),
-            Err(_) => return Err(std::io::Error::other("TURN state lock poisoned")),
+        let action = {
+            let mut allocations = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            handle(&config, &mut allocations, client, &buffer[..length])
         };
         match action {
             Some(Action::Reply(bytes)) => {

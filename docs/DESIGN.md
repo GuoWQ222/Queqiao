@@ -289,6 +289,9 @@ or the Ctrl+Alt+Del screen, and cannot copy files out.
   when it was right or no guess: tries at once on many connections count as many (before, all passed the check and
   were counted after). New accounts per address the same way. User names are one account in any case. Changing the
   password counts as a try too (a saved login could otherwise guess it without limit).
+- **The server's resources.** At most 4 MB waits to go out to one connection, and each write has 10 s: a client
+  that stops reading is closed, not fed. Connections not logged in yet: 32 per address, 2048 in all. An error from
+  accepting a connection or from one UDP datagram is logged; it no longer ends the server.
 
 ## Milestones
 
