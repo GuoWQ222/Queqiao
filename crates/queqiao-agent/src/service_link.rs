@@ -128,6 +128,8 @@ pub struct DesktopLink {
     pub closed: bool,
     /// The person pressed End on the helper's banner (taken by the session).
     pub end_pressed: bool,
+    /// The helper could not show its banner (taken by the session, which ends).
+    pub no_banner: Option<String>,
     /// The captured screen's place, as the helper last said.
     pub screen: Option<ScreenRect>,
 }
@@ -153,6 +155,7 @@ impl DesktopLink {
             capturing: false,
             closed: false,
             end_pressed: false,
+            no_banner: None,
             screen: None,
         })
     }
@@ -219,6 +222,10 @@ impl DesktopLink {
             Ok(FromHelper::EndPressed) => {
                 self.end_pressed = true;
                 Some(FromHelper::EndPressed)
+            }
+            Ok(FromHelper::NoBanner(reason)) => {
+                self.no_banner = Some(reason.clone());
+                Some(FromHelper::NoBanner(reason))
             }
             Ok(FromHelper::Screen {
                 left,

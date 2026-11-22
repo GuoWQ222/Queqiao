@@ -394,6 +394,21 @@ impl Presence {
         }
     }
 
+    /// Shows the session banner again if something hid or minimised it, above the other always-on-top windows (the
+    /// security review of 2026-11-22: a program of the person could hide it; at High integrity their ordinary programs
+    /// cannot reach it, elevated ones still could). True if it had to.
+    pub fn keep_banner_shown(&self) -> bool {
+        let Some(banner) = self.banner_window() else {
+            return false;
+        };
+        let hidden = unsafe { !IsWindowVisible(banner).as_bool() || IsIconic(banner).as_bool() };
+        if hidden {
+            let _ = unsafe { ShowWindow(banner, SW_SHOWNOACTIVATE) };
+            self.raise_banner();
+        }
+        hidden
+    }
+
     /// Whether the session banner is above `other` in the window order (true without a banner).
     pub fn banner_above(&self, other: HWND) -> bool {
         let Some(banner) = self.banner_window() else {

@@ -2274,6 +2274,17 @@ fn session(
             ended_here = true;
             break 'session;
         }
+        // The helper could not show its banner on the screen taking input (sign-in, lock, UAC): nothing goes on unseen.
+        if let Some(reason) = links
+            .desktop
+            .as_mut()
+            .and_then(|link| link.no_banner.take())
+        {
+            closed = Some(format!(
+                "the banner could not be shown on the screen in use ({reason}): ended"
+            ));
+            break 'session;
+        }
         if connected_after.is_none() && started.elapsed() > CONNECT_LIMIT {
             closed = Some(format!(
                 "could not connect within {} s",
@@ -3095,7 +3106,12 @@ fn session(
                             "{} ms: input desktop: {name}",
                             started.elapsed().as_millis()
                         )),
-                        Some(FromHelper::EndPressed | FromHelper::Screen { .. }) | None => {}
+                        Some(
+                            FromHelper::EndPressed
+                            | FromHelper::NoBanner(_)
+                            | FromHelper::Screen { .. },
+                        )
+                        | None => {}
                     }
                 }
             }
@@ -3394,7 +3410,12 @@ fn first_helper_picture(link: &mut service_link::DesktopLink) -> Result<BgraImag
                 });
             }
             Some(FromHelper::Failed(error)) => failure = error,
-            Some(FromHelper::Desktop(_) | FromHelper::EndPressed | FromHelper::Screen { .. }) => {}
+            Some(
+                FromHelper::Desktop(_)
+                | FromHelper::EndPressed
+                | FromHelper::NoBanner(_)
+                | FromHelper::Screen { .. },
+            ) => {}
             None if link.closed => break,
             None => {}
         }

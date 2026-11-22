@@ -51,6 +51,9 @@ pub enum FromHelper {
     Failed(String),
     /// The person at the PC pressed End on the helper's banner.
     EndPressed,
+    /// The helper could not show its banner on the desktop taking input for a few seconds: the session ends, so that
+    /// nothing goes on unseen on the sign-in, lock or UAC screen (the security review of 2026-11-22).
+    NoBanner(String),
     /// The captured screen's place on the desktop (sent as each capture starts, before its first picture).
     Screen {
         left: i32,
@@ -339,6 +342,11 @@ impl FromHelper {
                 out
             }
             FromHelper::EndPressed => vec![4],
+            FromHelper::NoBanner(error) => {
+                let mut out = vec![6];
+                text(&mut out, error);
+                out
+            }
             FromHelper::Screen {
                 left,
                 top,
@@ -376,6 +384,7 @@ impl FromHelper {
             }
             3 => read_text(rest).map(FromHelper::Failed),
             4 if rest.is_empty() => Some(FromHelper::EndPressed),
+            6 => read_text(rest).map(FromHelper::NoBanner),
             5 if rest.len() == 16 => {
                 let (left, top) = (i32_at(rest, 0)?, i32_at(rest, 4)?);
                 let (width, height) = (u32_at(rest, 8)?, u32_at(rest, 12)?);
@@ -529,6 +538,7 @@ mod tests {
             },
             FromHelper::Failed("DuplicateOutput: access denied".into()),
             FromHelper::EndPressed,
+            FromHelper::NoBanner("on Winlogon: CreateWindowExW: access denied".into()),
             FromHelper::Screen {
                 left: -2560,
                 top: 0,

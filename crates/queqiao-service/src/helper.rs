@@ -352,10 +352,17 @@ fn capture_round(
     Ok(())
 }
 
+/// How long the banner may fail on the desktop taking input before the session ends.
+const BANNER_GRACE: Duration = Duration::from_secs(3);
+
 /// Shows the session banner while a session runs and a desktop other than the person's own takes input; each
-/// round on a fresh thread attached to that desktop (a thread with a window cannot change desktops).
+/// round on a fresh thread attached to that desktop (a thread with a window cannot change desktops). If it cannot be
+/// shown for BANNER_GRACE, the agent is told and ends the session (FromHelper::NoBanner).
 fn banner_loop(shared: &Arc<Shared>) {
     let mut last_error = String::new();
+    // Since when the banner has failed in a row, and the showing (generation) the agent was told about.
+    let mut failing: Option<std::time::Instant> = None;
+    let mut told: Option<u64> = None;
     loop {
         let generation = shared.banner_generation.load(Ordering::SeqCst);
         let viewer = shared
@@ -374,13 +381,28 @@ fn banner_loop(shared: &Arc<Shared>) {
                     (attached, result)
                 })
             };
-            if let Ok((_, Err(error))) = worker.join() {
-                if error != last_error {
-                    log::line(&format!("desktop helper: banner: {error}"));
-                    last_error = error;
+            match worker.join() {
+                Ok((_, Err(error))) => {
+                    let since = *failing.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= BANNER_GRACE && told != Some(generation) {
+                        log::line(&format!(
+                            "desktop helper: no banner for {} s ({error}): the session ends",
+                            BANNER_GRACE.as_secs()
+                        ));
+                        let _ = shared.send(&FromHelper::NoBanner(error.clone()));
+                        told = Some(generation);
+                    }
+                    if error != last_error {
+                        log::line(&format!("desktop helper: banner: {error}"));
+                        last_error = error;
+                    }
+                    retry = true;
                 }
-                retry = true;
+                Ok((_, Ok(()))) => failing = None,
+                Err(_) => {}
             }
+        } else {
+            failing = None;
         }
         if retry {
             std::thread::sleep(Duration::from_millis(500));

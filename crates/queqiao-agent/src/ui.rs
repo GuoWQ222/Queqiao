@@ -299,6 +299,7 @@ fn run(
     // (when, file name) of a picture to take once the window has drawn itself.
     let mut picture: Option<(Instant, &str)> = None;
     let mut privacy: Option<PrivacyScreen> = None;
+    let mut banner_checked = Instant::now();
     loop {
         loop {
             match commands.try_recv() {
@@ -403,6 +404,11 @@ fn run(
                 let _ = queqiao_display::save_window_picture(window, &folder.join(name));
             }
             picture = None;
+        }
+        // The session banner stays in sight: shown again within a second if something hid or minimised it.
+        if banner_checked.elapsed() >= Duration::from_secs(1) {
+            banner_checked = Instant::now();
+            presence.keep_banner_shown();
         }
         if let Some(event) = presence.next(30)
             && events.send(event).is_err()
