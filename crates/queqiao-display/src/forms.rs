@@ -346,6 +346,24 @@ pub(crate) fn pump(wait_ms: u32) {
     }
 }
 
+/// As `pump`, with keyboard navigation (Tab, Enter, Esc) for `window` and its controls.
+pub(crate) fn pump_for(wait_ms: u32, window: Option<HWND>) {
+    let Some(window) = window else {
+        return pump(wait_ms);
+    };
+    unsafe { MsgWaitForMultipleObjects(None, false, wait_ms, QS_ALLINPUT) };
+    let mut message = MSG::default();
+    while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+        unsafe {
+            if IsDialogMessageW(window, &message).as_bool() {
+                continue;
+            }
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
 pub(crate) fn take_action(hwnd: HWND) -> Option<u16> {
     ACTIONS.with_borrow_mut(|actions| {
         let index = actions
@@ -391,7 +409,7 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-fn text_of(hwnd: HWND) -> String {
+pub(crate) fn text_of(hwnd: HWND) -> String {
     let mut buffer = vec![0u16; 1024];
     let length = unsafe { GetWindowTextW(hwnd, &mut buffer) }.max(0) as usize;
     String::from_utf16_lossy(&buffer[..length])

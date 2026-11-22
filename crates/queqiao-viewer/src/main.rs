@@ -217,6 +217,8 @@ struct Options {
     help_code: Option<String>,
     /// A help invitation link (queqiao://help/<help ID>/<code>): the help form, filled in from it.
     invite: Option<String>,
+    /// --help-connect: the help form, filled in from the link, connects at once (the main window's Help page).
+    help_go: bool,
     /// Press Connect in the help form once it is drawn (tests).
     test_submit_help: bool,
     /// With --user and --password: a new account (on a server that takes them) instead of a login.
@@ -385,7 +387,7 @@ fn main() {
             println!("       common: [--seconds N] [--width N] [--report <file>] [--input-test]");
         } else {
             println!(
-                "usage: queqiao-viewer (the device list) | queqiao-viewer --invite <queqiao: link>"
+                "usage: queqiao-viewer (the device list) | --invite <queqiao: link> | --open <device> | --help-connect <link>"
             );
         }
         // --version is answered by the banner; any other option is refused.
@@ -442,6 +444,13 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--force" => queqiao_core::set_forced(&args.next()?),
+            // The main window (the agent's): a device of the account, or helping someone with their help ID and
+            // code (as a link). Each does what a click there does.
+            "--open" => options.device = Some(args.next()?),
+            "--help-connect" => {
+                options.invite = Some(args.next()?);
+                options.help_go = true;
+            }
             _ => {
                 #[cfg(feature = "test-switches")]
                 if test_switch(&mut options, &arg, &mut args)? {
@@ -1271,6 +1280,9 @@ fn ask_for_help_target(
         if let Some(folder) = pictures {
             let _ = form.save_picture(&folder.join("help_form.bmp"));
         }
+        form.press_connect();
+    } else if options.help_go {
+        settle(|| form.next(20).is_some());
         form.press_connect();
     }
     loop {
@@ -2188,7 +2200,7 @@ fn run_session(
                 }
             }
         }
-        report_files(outcomes, lines);
+        report_files(outcomes, agent, lines);
         for message in images.take(peer.room(Stream::Clipboard)) {
             peer.send_stream(Stream::Clipboard, message);
         }
@@ -2254,7 +2266,9 @@ fn run_session(
                         secure_test = Some((Instant::now(), 0, u64::from(stats.shown)));
                     }
                 }
-                PeerEvent::StreamOpen(Stream::Files) => report_files(transfers.opened(), lines),
+                PeerEvent::StreamOpen(Stream::Files) => {
+                    report_files(transfers.opened(), agent, lines)
+                }
                 PeerEvent::StreamOpen(Stream::Clipboard) => {}
                 PeerEvent::StreamData(Stream::Clipboard, bytes) => {
                     if let Some(result) = image_in.handle(&bytes) {
@@ -3031,9 +3045,10 @@ fn clipboard_size(paths: &[PathBuf]) -> u64 {
     total
 }
 
-/// One report line per finished or failed file.
-fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
+/// One report line per finished or failed file; finished ones go into the list of transfers (main window).
+fn report_files(outcomes: Vec<Outcome>, peer: &str, lines: &mut Vec<String>) {
     for outcome in outcomes {
+        queqiao_files::history::record(&outcome, peer);
         lines.push(match outcome {
             Outcome::Sent { name, size } => {
                 format!("file sent: {name} ({size} bytes, checked by the agent)")

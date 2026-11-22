@@ -11,7 +11,9 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use queqiao_display::{AccountState, Presence, PresenceEvent, PrivacyScreen};
+use queqiao_display::{
+    AccountState, MainDevice, Page, Presence, PresenceEvent, PrivacyScreen, TransferRow,
+};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::RECT;
 
@@ -38,6 +40,15 @@ enum Command {
     Account(AccountState),
     /// A fixed help code is set or not.
     FixedCode(bool),
+    /// The main window, on that page if given.
+    ShowMain(Option<Page>),
+    /// The account's devices and name, for the main window.
+    Devices(Vec<MainDevice>),
+    User(String),
+    /// The files sent and received, for the main window.
+    Transfers(Vec<TransferRow>),
+    /// Tests: pictures of the main window's pages into the folder.
+    MainPictures(PathBuf, Sender<Result<(), String>>),
 }
 
 /// The privacy screen over all monitors (`area` None), or for tests a square of `color` (0x00BBGGRR).
@@ -199,6 +210,32 @@ impl Ui {
         self.send(Command::FixedCode(set));
     }
 
+    /// Opens the main window (on `page` if given).
+    pub fn show_main(&self, page: Option<Page>) {
+        self.send(Command::ShowMain(page));
+    }
+
+    pub fn set_devices(&self, devices: Vec<MainDevice>) {
+        self.send(Command::Devices(devices));
+    }
+
+    pub fn set_user(&self, user: &str) {
+        self.send(Command::User(user.to_string()));
+    }
+
+    pub fn set_transfers(&self, rows: Vec<TransferRow>) {
+        self.send(Command::Transfers(rows));
+    }
+
+    /// Tests: pictures of the main window's pages (main_devices.bmp ...) into `folder`.
+    pub fn save_main_pictures(&self, folder: &Path) -> Result<(), String> {
+        let (reply, answer) = mpsc::channel();
+        self.send(Command::MainPictures(folder.to_path_buf(), reply));
+        answer
+            .recv_timeout(Duration::from_secs(20))
+            .map_err(|_| "the UI did not answer".to_string())?
+    }
+
     pub fn try_event(&self) -> Option<PresenceEvent> {
         self.events.try_recv().ok()
     }
@@ -321,6 +358,19 @@ fn run(
                     if let Some(event) = presence.choose(item) {
                         let _ = events.send(event);
                     }
+                }
+                Ok(Command::ShowMain(page)) => {
+                    let _ = presence.show_main(page);
+                }
+                Ok(Command::Devices(devices)) => presence.set_devices(devices),
+                Ok(Command::User(user)) => presence.set_user(&user),
+                Ok(Command::Transfers(rows)) => presence.set_transfers(rows),
+                Ok(Command::MainPictures(folder, reply)) => {
+                    let _ = reply.send(
+                        presence
+                            .save_main_pictures(&folder)
+                            .map_err(|e| e.to_string()),
+                    );
                 }
                 Ok(Command::LockSettings(locked)) => presence.set_settings_locked(locked),
                 Ok(Command::Account(state)) => presence.set_account_state(state),

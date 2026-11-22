@@ -196,7 +196,8 @@ pub fn install(
     set_value(UNINSTALL_KEY, "NoRepair", Value::Number(1))?;
     lines.push("listed under Settings > Apps (uninstall there)".into());
 
-    make_shortcut(&shortcut(), &target.join(PROGRAMS[0]))?;
+    // The Start menu opens Queqiao's main window: the agent's (the one running already shows its own).
+    make_shortcut(&shortcut(), &target.join(PROGRAMS[1]), "--show")?;
     lines.push(format!("Start menu: {}", shortcut().display()));
 
     // Help invitation links: only fill in the help form (connecting is the person's click).
@@ -584,7 +585,7 @@ fn run_elevated(program: &Path, parameters: &str) -> Result<u32, String> {
     Ok(code)
 }
 
-fn make_shortcut(link: &Path, program: &Path) -> Result<(), String> {
+fn make_shortcut(link: &Path, program: &Path, arguments: &str) -> Result<(), String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let shell: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
@@ -599,7 +600,11 @@ fn make_shortcut(link: &Path, program: &Path) -> Result<(), String> {
         shell
             .SetWorkingDirectory(PCWSTR(folder.as_ptr()))
             .map_err(|e| e.message())?;
-        let description = wide("Queqiao: your devices");
+        let arguments = wide(arguments);
+        shell
+            .SetArguments(PCWSTR(arguments.as_ptr()))
+            .map_err(|e| e.message())?;
+        let description = wide("Queqiao");
         let _ = shell.SetDescription(PCWSTR(description.as_ptr()));
         let file: IPersistFile = shell.cast().map_err(|e| e.message())?;
         if let Some(parent) = link.parent() {

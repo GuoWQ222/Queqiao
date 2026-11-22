@@ -75,6 +75,10 @@ const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Options {
+    /// Show the main window (the Start menu's shortcut): this one, or the one of the Queqiao already running.
+    show: bool,
+    /// Tests: pictures of the main window's pages (into --ui-pictures) once logged in.
+    test_main_window: bool,
     /// A device whose new key the person confirmed (its old pin is dropped).
     trust_new_key: Option<String>,
     /// Ask the person at the PC before each session in this run (whatever the setting says).
@@ -226,6 +230,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
         match arg.as_str() {
             "--service-channel" => options.service_channel = Some(args.next()?),
             "--logon" => options.logon = true,
+            "--show" => options.show = true,
             "--desktop-channel" => options.desktop_channel = Some(args.next()?),
             "--force" => queqiao_core::set_forced(&args.next()?),
             _ => {
@@ -280,6 +285,7 @@ fn test_switch(
         "--lock-after-session" => options.lock_after_session = true,
         "--test-press-setting" => options.test_press_setting = true,
         "--test-tray-login" => options.test_tray_login = true,
+        "--test-main-window" => options.test_main_window = true,
         _ => return Some(false),
     }
     Some(true)
@@ -336,10 +342,20 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         // With the Queqiao service running, Queqiao for the person signed in is the one it starts (the Run key's
         // copy, started at sign-in as well, leaves).
         if options.service_channel.is_none() && autostart::service_runs() {
+            if options.show {
+                queqiao_display::show_running_main();
+            }
             lines.push("the Queqiao service runs Queqiao on this PC: this copy leaves".into());
             return Ok(true);
         }
-        autostart::claim_single_instance()?;
+        if let Err(error) = autostart::claim_single_instance() {
+            // Opened again (the Start menu): the Queqiao that runs already shows its window.
+            if options.show && queqiao_display::show_running_main() {
+                lines.push("Queqiao runs already here: its main window is shown".into());
+                return Ok(true);
+            }
+            return Err(error);
+        }
     }
     let end = options
         .seconds
@@ -365,6 +381,9 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     } else {
         ui::Ui::start(&shown, options.ui_pictures.clone())?
     };
+    if options.show && !options.logon {
+        ui.show_main(None);
+    }
     lines.push(format!(
         "tray icon {}; this account's devices may control this PC: {}; ask first: {}",
         if ui.tray_shown {
@@ -522,6 +541,7 @@ fn run_account(
     let mut trust_new_key = options.trust_new_key.as_deref();
     if let Some(online) = account.as_mut() {
         went_online(
+            ui,
             online,
             &login,
             &identity,
@@ -533,6 +553,12 @@ fn run_account(
         )?;
         offer_logon = keeps_login;
     }
+    // Tests: the main window, each page saved as a picture a few seconds on (once help is open, with --help-code).
+    let mut main_pictures_at = options.test_main_window.then(|| {
+        ui.set_transfers(transfer_rows());
+        ui.show_main(None);
+        Instant::now() + Duration::from_secs(3)
+    });
     if options.test_tray_login {
         ui.press_menu(queqiao_display::TEST_MENU_LOGIN);
     }
@@ -547,6 +573,15 @@ fn run_account(
             || options.sessions.is_some_and(|n| sessions >= n)
         {
             break;
+        }
+        if main_pictures_at.is_some_and(|at| Instant::now() >= at) {
+            main_pictures_at = None;
+            if let Some(folder) = &options.ui_pictures {
+                lines.push(match ui.save_main_pictures(folder) {
+                    Ok(()) => "main window: pictures of its pages saved".into(),
+                    Err(error) => format!("main window: pictures: {error}"),
+                });
+            }
         }
         // What the person did in the tray (also during the last session).
         deferred.extend(std::iter::from_fn(|| ui.try_event()));
@@ -670,7 +705,7 @@ fn run_account(
                 PresenceEvent::LogIn if account.is_none() && tolerant => {
                     if let Some((mut new, tried)) = tray_log_in(options, &login, &identity, lines) {
                         login = tried;
-                        went_online(&mut new, &login, &identity, keeps_login, trust_new_key.take(), &macs, help_code.as_deref(), lines)?;
+                        went_online(ui, &mut new, &login, &identity, keeps_login, trust_new_key.take(), &macs, help_code.as_deref(), lines)?;
                         lines.push("logged in from the tray".into());
                         account = Some(new);
                         // An attempt with the old login still running is let go (its connection closes when it ends).
@@ -721,6 +756,54 @@ fn run_account(
                         "the person at this PC {} the settings password",
                         if password.is_some() { "set" } else { "removed" }
                     ));
+                }
+                PresenceEvent::Connect(device) => open_viewer(&["--open", &device], lines),
+                PresenceEvent::HelpSomeone { help_id, code } => {
+                    let link = queqiao_core::invitation::link(&help_id, &code);
+                    open_viewer(&["--help-connect", &link], lines);
+                }
+                PresenceEvent::Wake(device) => match account.as_ref() {
+                    Some(online) => {
+                        online.send(ClientMessage::Wake { device_id: device.clone() });
+                        lines.push(format!("main window: wake {device}"));
+                    }
+                    None => lines.push("main window: wake: not online".into()),
+                },
+                PresenceEvent::RemoveDevice(device) => {
+                    if let Some(online) = account.as_ref() {
+                        online.remove_device(&device);
+                        lines.push(format!("main window: {device} taken out of the account"));
+                    }
+                }
+                PresenceEvent::LogOut => {
+                    if let Some(online) = account.take() {
+                        online.send(ClientMessage::Logout);
+                        // A moment for it to go out before the connection closes.
+                        std::thread::sleep(Duration::from_millis(300));
+                    }
+                    login.refresh_token = None;
+                    let _ = login.save(AccountRole::Agent);
+                    log_out_viewer(&identity);
+                    state = AccountState::LoggedOut;
+                    ui.set_account_state(state);
+                    ui.set_user("");
+                    ui.set_devices(Vec::new());
+                    lines.push("main window: logged out (this PC's saved logins are gone)".into());
+                }
+                PresenceEvent::OpenReceivedFiles => {
+                    let _ = std::process::Command::new("explorer.exe")
+                        .arg(queqiao_files::downloads_folder())
+                        .spawn();
+                }
+                PresenceEvent::ClearTransfers => {
+                    queqiao_files::history::clear();
+                    ui.set_transfers(Vec::new());
+                }
+                PresenceEvent::MainShown => {
+                    ui.set_transfers(transfer_rows());
+                    if let Some(online) = account.as_ref() {
+                        ui.set_devices(main_devices(&online.devices, &online.device_id));
+                    }
                 }
                 PresenceEvent::EndSession | PresenceEvent::Consent(_) => {}
             }
@@ -823,6 +906,7 @@ fn run_account(
                     Ok((Ok(mut new), tried)) => {
                         login = tried;
                         went_online(
+                            ui,
                             &mut new,
                             &login,
                             &identity,
@@ -1108,9 +1192,11 @@ fn run_account(
                     help_code = Some(code);
                 }
             }
+            Some(AccountEvent::Devices(devices)) => {
+                ui.set_devices(main_devices(&devices, &online.device_id));
+            }
             Some(
-                AccountEvent::Devices(_)
-                | AccountEvent::Signal { .. }
+                AccountEvent::Signal { .. }
                 | AccountEvent::IceServers { .. }
                 | AccountEvent::PasswordChanged(_)
                 | AccountEvent::HelpGranted(_),
@@ -1143,6 +1229,7 @@ fn needs_new_login(error: &str) -> bool {
 /// (so another device of the account can wake it), and help requests open again if they were.
 #[allow(clippy::too_many_arguments)]
 fn went_online(
+    ui: &ui::Ui,
     account: &mut Account,
     login: &SavedLogin,
     identity: &DeviceIdentity,
@@ -1159,6 +1246,9 @@ fn went_online(
         account.trust_new_key(device).map_err(|e| e.to_string())?;
         lines.push(format!("the key of device {device} will be pinned anew"));
     }
+    // The main window's account line and device list.
+    ui.set_user(&account.user);
+    ui.set_devices(main_devices(&account.devices, &account.device_id));
     lines.push(format!(
         "logged in as {} at {}; this device: {} ({}); {} devices on the account",
         account.user,
@@ -1277,6 +1367,21 @@ fn tray_log_in(
                             Some((&fields.user, &fields.password)),
                         )
                     };
+                    // One login for both: the viewer (Connect in the main window) gets its saved login as well.
+                    if result.is_ok() {
+                        let mut viewer = tried.clone();
+                        viewer.refresh_token = None;
+                        if Account::connect(
+                            &mut viewer,
+                            &identity,
+                            AccountRole::Viewer,
+                            Some((&fields.user, &fields.password)),
+                        )
+                        .is_ok()
+                        {
+                            let _ = viewer.save(AccountRole::Viewer);
+                        }
+                    }
                     (result.map_err(|error| error.0), tried)
                 });
                 while !worker.is_finished() {
@@ -1671,9 +1776,10 @@ fn clipboard_size(paths: &[PathBuf]) -> u64 {
     total
 }
 
-/// One report line per finished or failed file.
-fn report_files(outcomes: Vec<Outcome>, lines: &mut Vec<String>) {
+/// One report line per finished or failed file; finished ones go into the list of transfers (main window).
+fn report_files(outcomes: Vec<Outcome>, peer: &str, lines: &mut Vec<String>) {
     for outcome in outcomes {
+        queqiao_files::history::record(&outcome, peer);
         lines.push(match outcome {
             Outcome::Sent { name, size } => {
                 format!("file sent: {name} ({size} bytes, checked by the viewer)")
@@ -2510,7 +2616,9 @@ fn session(
                         peer.send_data(Message::Screens { current, sizes }.encode());
                     }
                 }
-                PeerEvent::StreamOpen(Stream::Files) => report_files(transfers.opened(), lines),
+                PeerEvent::StreamOpen(Stream::Files) => {
+                    report_files(transfers.opened(), viewer, lines)
+                }
                 PeerEvent::StreamOpen(Stream::Clipboard) => {}
                 PeerEvent::StreamData(Stream::Clipboard, bytes) => {
                     if let Some(result) = image_in.handle(&bytes) {
@@ -2581,7 +2689,7 @@ fn session(
                 }
             }
         }
-        report_files(outcomes, lines);
+        report_files(outcomes, viewer, lines);
         for message in images.take(peer.room(Stream::Clipboard)) {
             peer.send_stream(Stream::Clipboard, message);
         }
@@ -3146,6 +3254,101 @@ fn summary(values: &mut [f64]) -> String {
 
 fn describe(error: windows::core::Error) -> String {
     format!("0x{:08X} {}", error.code().0, error.message())
+}
+
+/// The account's devices as the main window lists them: this PC first, then those online, by name.
+fn main_devices(
+    devices: &[queqiao_core::account::Device],
+    this: &str,
+) -> Vec<queqiao_display::MainDevice> {
+    let mut rows: Vec<queqiao_display::MainDevice> = devices
+        .iter()
+        .map(|device| queqiao_display::MainDevice {
+            id: device.id.clone(),
+            name: device.name.clone(),
+            online: device.controllable || device.online,
+            this_pc: device.id == this,
+        })
+        .collect();
+    rows.sort_by_key(|row| (!row.this_pc, !row.online, row.name.to_lowercase()));
+    rows
+}
+
+/// The files sent and received (queqiao_files::history), as the main window lists them.
+fn transfer_rows() -> Vec<queqiao_display::TransferRow> {
+    queqiao_files::history::load()
+        .into_iter()
+        .map(|entry| {
+            let pattern = if entry.received {
+                "from {peer} · {size} · {when}"
+            } else {
+                "to {peer} · {size} · {when}"
+            };
+            let size = queqiao_files::history::size_text(entry.size);
+            queqiao_display::TransferRow {
+                received: entry.received,
+                detail: trf(
+                    pattern,
+                    &[
+                        ("peer", &entry.peer),
+                        ("size", &size),
+                        ("when", &entry.when),
+                    ],
+                ),
+                name: entry.name,
+            }
+        })
+        .collect()
+}
+
+/// The viewer beside this program, or the person's own installation's (the service's agent runs from Program Files,
+/// where the viewer is not).
+fn viewer_program() -> Option<PathBuf> {
+    let here = std::env::current_exe()
+        .ok()?
+        .with_file_name("queqiao-viewer.exe");
+    if here.is_file() {
+        return Some(here);
+    }
+    let theirs = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+        .join(r"Programs\Queqiao\queqiao-viewer.exe");
+    theirs.is_file().then_some(theirs)
+}
+
+/// Starts the viewer for the main window (a session to a device, or helping someone).
+fn open_viewer(arguments: &[&str], lines: &mut Vec<String>) {
+    let Some(program) = viewer_program() else {
+        queqiao_display::show_error(
+            queqiao_core::text::tr("Queqiao"),
+            queqiao_core::text::tr("The Queqiao viewer is not installed for you on this PC."),
+        );
+        return;
+    };
+    match std::process::Command::new(&program).args(arguments).spawn() {
+        Ok(child) => lines.push(format!("main window: the viewer started ({})", child.id())),
+        Err(error) => lines.push(format!("main window: the viewer did not start: {error}")),
+    }
+}
+
+/// The viewer logged out too: its saved login revoked on the server (as far as it can be reached) and gone here.
+fn log_out_viewer(identity: &DeviceIdentity) {
+    let Some(mut saved) = SavedLogin::load(AccountRole::Viewer) else {
+        return;
+    };
+    if saved.refresh_token.is_some() {
+        let mut revoking = saved.clone();
+        let identity = identity.clone();
+        std::thread::spawn(move || {
+            if let Ok(account) =
+                Account::connect(&mut revoking, &identity, AccountRole::Viewer, None)
+            {
+                account.send(ClientMessage::Logout);
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+    }
+    saved.refresh_token = None;
+    let _ = saved.save(AccountRole::Viewer);
 }
 
 #[cfg(test)]

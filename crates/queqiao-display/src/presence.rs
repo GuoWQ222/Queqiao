@@ -19,6 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::forms::{Form, Kind, set_text};
+use crate::main_window::{MainAction, MainDevice, MainWindow, Page, Shown, TransferRow};
 
 /// What the person did.
 /// Checks a typed settings password.
@@ -67,6 +68,22 @@ pub enum PresenceEvent {
     SetFixedHelpCode(Option<String>),
     /// "Wake-on-LAN check...".
     CheckWakeOnLan,
+    /// The main window: connect to this device of the account.
+    Connect(String),
+    /// The main window: wake this device up (Wake-on-LAN through a device of the account next to it).
+    Wake(String),
+    /// The main window: take this device out of the account (after the person confirmed it).
+    RemoveDevice(String),
+    /// The main window: help someone of another account with their help ID and code.
+    HelpSomeone { help_id: String, code: String },
+    /// The main window: log this PC's Queqiao out of the account.
+    LogOut,
+    /// The main window: open the folder received files go to.
+    OpenReceivedFiles,
+    /// The main window: forget the list of transfers.
+    ClearTransfers,
+    /// The main window was opened (the agent fills in what it shows).
+    MainShown,
 }
 
 /// How this PC stands with the account server (the tray menu's first line).
@@ -83,27 +100,27 @@ const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_ID: u32 = 1;
 // Menu and button ids.
 const MENU_END: u16 = 200;
-const MENU_ALLOW: u16 = 201;
-const MENU_ASK: u16 = 202;
+pub(crate) const MENU_ALLOW: u16 = 201;
+pub(crate) const MENU_ASK: u16 = 202;
 const MENU_QUIT: u16 = 203;
-const MENU_CLIPBOARD: u16 = 204;
-const MENU_FILES: u16 = 205;
-const MENU_TERMINAL: u16 = 206;
-const MENU_AUTOSTART: u16 = 207;
+pub(crate) const MENU_CLIPBOARD: u16 = 204;
+pub(crate) const MENU_FILES: u16 = 205;
+pub(crate) const MENU_TERMINAL: u16 = 206;
+pub(crate) const MENU_AUTOSTART: u16 = 207;
 const ID_END: u16 = 210;
-const ID_NEW_CODE: u16 = 213;
-const ID_HELP_CLOSE: u16 = 214;
+pub(crate) const ID_NEW_CODE: u16 = 213;
+pub(crate) const ID_HELP_CLOSE: u16 = 214;
 const ID_COPY_INVITATION: u16 = 218;
-const MENU_HELP: u16 = 208;
-const MENU_LOCK_AFTER: u16 = 209;
-const MENU_LOGIN: u16 = 215;
-const MENU_UPDATE_CHECK: u16 = 216;
-const MENU_AUTO_UPDATE: u16 = 217;
-const MENU_FIXED_CODE: u16 = 219;
-const MENU_WOL_CHECK: u16 = 222;
+pub(crate) const MENU_HELP: u16 = 208;
+pub(crate) const MENU_LOCK_AFTER: u16 = 209;
+pub(crate) const MENU_LOGIN: u16 = 215;
+pub(crate) const MENU_UPDATE_CHECK: u16 = 216;
+pub(crate) const MENU_AUTO_UPDATE: u16 = 217;
+pub(crate) const MENU_FIXED_CODE: u16 = 219;
+pub(crate) const MENU_WOL_CHECK: u16 = 222;
 /// The shortest fixed help code (letters and digits).
 pub const MIN_FIXED_CODE: usize = 8;
-const MENU_PASSWORD: u16 = 220;
+pub(crate) const MENU_PASSWORD: u16 = 220;
 /// Menu items tests can choose (the same path as a click).
 pub const TEST_MENU_TERMINAL: u16 = MENU_TERMINAL;
 pub const TEST_MENU_LOGIN: u16 = MENU_LOGIN;
@@ -112,6 +129,10 @@ const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
 /// The tray window asks for its menu (not a control id).
 const SHOW_MENU: u16 = 0xFFFE;
+/// A left click on the tray icon: the main window (not a control id).
+const SHOW_MAIN: u16 = 0xFFFC;
+/// "Open Queqiao" in the tray menu.
+const MENU_OPEN: u16 = 223;
 
 static REGISTER: std::sync::Once = std::sync::Once::new();
 const TRAY_CLASS: PCWSTR = w!("QueqiaoPresence");
@@ -152,6 +173,17 @@ pub struct Presence {
     account: AccountState,
     auto_update: bool,
     fixed_code: bool,
+    /// The main window, made when it is first opened.
+    main: Option<MainWindow>,
+    /// What it shows, kept also while it is closed.
+    user: String,
+    devices: Vec<MainDevice>,
+    transfers: Vec<TransferRow>,
+    /// This PC's help ID and code while help is open.
+    help_now: Option<(String, String)>,
+    version: String,
+    /// Queqiao's own icon, for the tray.
+    icon: HICON,
 }
 
 impl Presence {
@@ -218,6 +250,13 @@ impl Presence {
             account: AccountState::Online,
             auto_update: true,
             fixed_code: false,
+            main: None,
+            user: String::new(),
+            devices: Vec::new(),
+            transfers: Vec::new(),
+            help_now: None,
+            version: queqiao_core::VERSION.to_string(),
+            icon: crate::icon::app_icon(unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16)),
         };
         presence.update_tray();
         Ok(presence)
@@ -349,6 +388,19 @@ impl Presence {
     /// Shows the help ID and code to give to whoever helps (replacing an earlier window).
     pub fn show_help(&mut self, help_id: &str, code: &str) -> Result<()> {
         self.help = None;
+        self.help_now = Some((help_id.to_string(), code.to_string()));
+        self.help_invitation = queqiao_core::invitation::text(help_id, code);
+        // With the main window open, its Help page shows them (no second window).
+        if let Some(main) = self.main.as_mut()
+            && main.visible()
+        {
+            main.set_help(self.help_now.clone());
+            main.set_page(Page::Help);
+            return Ok(());
+        }
+        if let Some(main) = self.main.as_mut() {
+            main.set_help(self.help_now.clone());
+        }
         let form = Form::create(tr("Queqiao - let someone help you"), 420, 230, Kind::Dialog)?;
         form.text(
             tr("Give these to the person who helps you. They can ask once to control this PC; you decide in a prompt."),
@@ -377,6 +429,156 @@ impl Presence {
 
     pub fn hide_help(&mut self) {
         self.help = None;
+        self.help_now = None;
+        if let Some(main) = self.main.as_mut() {
+            main.set_help(None);
+        }
+    }
+
+    /// Opens the main window (made the first time), on `page` if given.
+    pub fn show_main(&mut self, page: Option<Page>) -> Result<()> {
+        if self.main.is_none() {
+            let mut main = MainWindow::new(&self.version)?;
+            main.set_account(&self.user, self.account);
+            main.set_devices(self.devices.clone());
+            main.set_transfers(self.transfers.clone());
+            main.set_help(self.help_now.clone());
+            main.set_settings(self.shown());
+            self.main = Some(main);
+        }
+        if let Some(main) = self.main.as_mut() {
+            if let Some(page) = page {
+                main.set_page(page);
+            }
+            main.show();
+        }
+        Ok(())
+    }
+
+    /// The main window's handle (tests).
+    pub fn main_window(&self) -> Option<HWND> {
+        self.main.as_ref().map(|main| main.hwnd)
+    }
+
+    /// Pictures of the main window's pages (tests): main_devices.bmp ... in `folder`.
+    pub fn save_main_pictures(&mut self, folder: &std::path::Path) -> std::io::Result<()> {
+        self.show_main(None).map_err(std::io::Error::other)?;
+        match self.main.as_mut() {
+            Some(main) => main.save_pages(folder),
+            None => Ok(()),
+        }
+    }
+
+    /// The account's name, as the main window shows it.
+    pub fn set_user(&mut self, user: &str) {
+        self.user = user.to_string();
+        if let Some(main) = self.main.as_mut() {
+            main.set_account(&self.user, self.account);
+        }
+    }
+
+    /// The account's devices, as the main window shows them.
+    pub fn set_devices(&mut self, devices: Vec<MainDevice>) {
+        if let Some(main) = self.main.as_mut() {
+            main.set_devices(devices.clone());
+        }
+        self.devices = devices;
+    }
+
+    /// The files sent and received, newest first, as the main window shows them.
+    pub fn set_transfers(&mut self, transfers: Vec<TransferRow>) {
+        if let Some(main) = self.main.as_mut() {
+            main.set_transfers(transfers.clone());
+        }
+        self.transfers = transfers;
+    }
+
+    fn shown(&self) -> Shown {
+        Shown {
+            allow: self.allow,
+            ask: self.ask,
+            clipboard: self.clipboard,
+            files: self.files,
+            terminal: self.terminal,
+            autostart: self.autostart,
+            lock_after: self.lock_after,
+            auto_update: self.auto_update,
+            password: self.password_check.is_some(),
+            fixed_code: self.fixed_code,
+        }
+    }
+
+    /// The main window's settings and account line again, after a change.
+    fn refresh_main(&mut self) {
+        let shown = self.shown();
+        if let Some(main) = self.main.as_mut() {
+            main.set_settings(shown);
+            main.set_account(&self.user, self.account);
+        }
+    }
+
+    /// What a main window action does: an event for the agent, or nothing (handled here).
+    fn main_event(&mut self, action: MainAction) -> Option<PresenceEvent> {
+        match action {
+            MainAction::Choose(item) => {
+                let event = self.choose(item);
+                self.refresh_main();
+                event
+            }
+            MainAction::Connect(id) => Some(PresenceEvent::Connect(id)),
+            MainAction::Wake(id) => Some(PresenceEvent::Wake(id)),
+            MainAction::More(id) => {
+                let owner = self.main.as_ref()?.hwnd;
+                let name = self
+                    .devices
+                    .iter()
+                    .find(|device| device.id == id)
+                    .map_or(id.clone(), |device| device.name.clone());
+                let chosen = crate::forms::popup_menu(
+                    owner,
+                    &[(1, tr("Remove from this account..."), false)],
+                )?;
+                let question = trf(
+                    "Take {name} out of your account? It can no longer control your devices or be controlled until it logs in again.",
+                    &[("name", &name)],
+                );
+                (chosen == 1 && crate::forms::confirm(owner, tr("Queqiao"), &question))
+                    .then_some(PresenceEvent::RemoveDevice(id))
+            }
+            MainAction::HelpSomeone { help_id, code } => {
+                Some(PresenceEvent::HelpSomeone { help_id, code })
+            }
+            MainAction::CopyInvitation => {
+                if let Some(main) = self.main.as_ref()
+                    && crate::forms::copy_text(main.hwnd, &self.help_invitation)
+                {
+                    crate::forms::show_info(
+                        tr("Queqiao"),
+                        tr("Copied: send it to the person who helps you."),
+                    );
+                }
+                None
+            }
+            MainAction::OpenReceived => Some(PresenceEvent::OpenReceivedFiles),
+            MainAction::ClearTransfers => Some(PresenceEvent::ClearTransfers),
+            MainAction::Account => match self.account {
+                AccountState::LoggedOut => {
+                    let event = self.choose(MENU_LOGIN);
+                    self.refresh_main();
+                    event
+                }
+                _ => {
+                    let owner = self.main.as_ref()?.hwnd;
+                    crate::forms::confirm(
+                        owner,
+                        tr("Queqiao"),
+                        tr("Log this PC out of your account? Your devices can no longer control it until it logs in again."),
+                    )
+                    .then_some(PresenceEvent::LogOut)
+                }
+            },
+            MainAction::Closed => None,
+        }
     }
 
     pub fn help_window(&self) -> Option<HWND> {
@@ -389,10 +591,16 @@ impl Presence {
             (Some(prompt), _) => prompt.form.next_command(wait_ms),
             (None, Some(banner)) => banner.next_command(wait_ms),
             (None, None) => {
-                crate::forms::pump(wait_ms);
+                // With keyboard navigation (Tab, Enter) for the main window.
+                crate::forms::pump_for(wait_ms, self.main.as_ref().map(|main| main.hwnd));
                 None
             }
         };
+        while let Some(action) = self.main.as_mut().and_then(MainWindow::take) {
+            if let Some(event) = self.main_event(action) {
+                return Some(event);
+            }
+        }
         // The help window's buttons (its closing too) are its own.
         if let Some(hwnd) = self.help.as_ref().map(|form| form.hwnd) {
             while let Some(command) = crate::forms::take_action(hwnd) {
@@ -461,6 +669,10 @@ impl Presence {
             }
             ID_END | MENU_END => Some(PresenceEvent::EndSession),
             SHOW_MENU => self.show_menu(),
+            SHOW_MAIN => match self.show_main(None) {
+                Ok(()) => Some(PresenceEvent::MainShown),
+                Err(_) => None,
+            },
             TASKBAR_RESTARTED => {
                 self.tray_shown = false;
                 self.update_tray();
@@ -516,7 +728,14 @@ impl Presence {
         } else {
             tr("A fixed help code for this PC...")
         });
+        let open = wide(tr("Open Queqiao"));
         unsafe {
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING | MF_DEFAULT,
+                usize::from(MENU_OPEN),
+                PCWSTR(open.as_ptr()),
+            );
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             if self.viewer.is_some() {
@@ -639,21 +858,25 @@ impl Presence {
     /// The settings password's check (None: no password).
     pub fn set_password_check(&mut self, check: Option<PasswordCheck>) {
         self.password_check = check;
+        self.refresh_main();
     }
 
     /// Whether a fixed help code is set (the menu offers to remove it).
     pub fn set_fixed_code(&mut self, set: bool) {
         self.fixed_code = set;
+        self.refresh_main();
     }
 
     /// Whether updates are installed by themselves (the menu's check mark).
     pub fn set_auto_update(&mut self, on: bool) {
         self.auto_update = on;
+        self.refresh_main();
     }
 
     /// How this PC stands with the account server (shown in the menu; "Log in..." while not online).
     pub fn set_account_state(&mut self, state: AccountState) {
         self.account = state;
+        self.refresh_main();
     }
 
     /// Locks the settings (true while someone of another account controls the PC) or unlocks them.
@@ -677,6 +900,9 @@ impl Presence {
         );
         let protected =
             setting || item == MENU_PASSWORD || item == MENU_LOGIN || item == MENU_FIXED_CODE;
+        if item == MENU_OPEN {
+            return self.show_main(None).ok().map(|()| PresenceEvent::MainShown);
+        }
         if self.settings_locked && protected {
             return Some(PresenceEvent::SettingsLocked);
         }
@@ -792,7 +1018,7 @@ impl Presence {
             uID: TRAY_ID,
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
             uCallbackMessage: TRAY_CALLBACK,
-            hIcon: unsafe { LoadIconW(None, IDI_SHIELD) }.unwrap_or_default(),
+            hIcon: self.icon,
             ..Default::default()
         };
         for (slot, unit) in data.szTip.iter_mut().zip(tip.encode_utf16().take(127)) {
@@ -814,13 +1040,19 @@ impl Drop for Presence {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &data);
             let _ = DestroyWindow(self.tray);
+            let _ = DestroyIcon(self.icon);
         }
     }
 }
 
 extern "system" fn tray_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let mouse = (lparam.0 & 0xFFFF) as u32;
-    if message == TRAY_CALLBACK && (mouse == WM_RBUTTONUP || mouse == WM_LBUTTONUP) {
+    // A left click opens the main window, a right click the menu.
+    if message == TRAY_CALLBACK && mouse == WM_LBUTTONUP {
+        crate::forms::push_action(hwnd, SHOW_MAIN);
+        return LRESULT(0);
+    }
+    if message == TRAY_CALLBACK && mouse == WM_RBUTTONUP {
         crate::forms::push_action(hwnd, SHOW_MENU);
         return LRESULT(0);
     }
@@ -830,6 +1062,27 @@ extern "system" fn tray_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: L
         return LRESULT(0);
     }
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// Asks the Queqiao already running in this session to show its main window (Queqiao opened again from the Start
+/// menu); false when none runs here.
+pub fn show_running_main() -> bool {
+    let Ok(tray) = (unsafe { FindWindowW(TRAY_CLASS, PCWSTR::null()) }) else {
+        return false;
+    };
+    let mut process = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(tray, Some(&mut process));
+        // It may come to the front: this program was just started by the person.
+        let _ = AllowSetForegroundWindow(process);
+        PostMessageW(
+            Some(tray),
+            TRAY_CALLBACK,
+            WPARAM(0),
+            LPARAM(WM_LBUTTONUP as isize),
+        )
+        .is_ok()
+    }
 }
 
 /// Explorer restarted (not a control id).

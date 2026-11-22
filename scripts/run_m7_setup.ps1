@@ -75,7 +75,8 @@ foreach ($program in 'queqiao-viewer.exe', 'queqiao-agent.exe', 'queqiao-service
 }
 $installed = Get-Installed
 Add-Check 'Settings > Apps entry with an uninstall command' ($installed.Entry -and $installed.Entry.UninstallString -like "*queqiao-setup.exe*--uninstall*")
-Add-Check 'Start menu shortcut to the viewer' ((Test-Path -LiteralPath $shortcut) -and ((New-Object -ComObject WScript.Shell).CreateShortcut($shortcut).TargetPath -like '*queqiao-viewer.exe'))
+$link = if (Test-Path -LiteralPath $shortcut) { (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut) } else { $null }
+Add-Check 'Start menu shortcut to the main window' ($link -and $link.TargetPath -like '*queqiao-agent.exe' -and $link.Arguments -eq '--show')
 Add-Check 'starts with Windows (Run entry to the agent)' ($installed.Run -like "*$target\queqiao-agent.exe*")
 $linkCommand = (Get-ItemProperty -LiteralPath "$userKey\Software\Classes\queqiao\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
 Add-Check 'queqiao: links open the viewer with --invite' ($linkCommand -eq ('"' + $target + '\queqiao-viewer.exe" --invite "%1"'))

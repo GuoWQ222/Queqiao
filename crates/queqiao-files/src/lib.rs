@@ -14,6 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 mod clip;
+pub mod history;
 
 pub use clip::{
     ClipMessage, ImageReceiver, ImageSender, MAX_IMAGE, image_fingerprint, test_picture,

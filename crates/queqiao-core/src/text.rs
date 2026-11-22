@@ -456,6 +456,90 @@ const CHINESE: &[(&str, &str)] = &[
         "鹊桥：与会话的连接已断开。",
     ),
     ("Queqiao: the viewer is not there.", "鹊桥：找不到控制端。"),
+    // The main window.
+    ("Devices", "设备"),
+    ("Help", "远程帮助"),
+    ("Transfers", "传输"),
+    ("Settings", "设置"),
+    (
+        "Devices logged in to your account can control each other.",
+        "登录同一账号的设备之间可以互相控制。",
+    ),
+    (
+        "Help across accounts: always with the help ID and code, and only after an Allow.",
+        "跨账号帮助：始终需要帮助 ID 和验证码，并且只有在对方点击“允许”之后。",
+    ),
+    (
+        "Files sent and received in sessions.",
+        "会话中发送和接收的文件。",
+    ),
+    (
+        "What may happen on this PC, and how Queqiao runs.",
+        "这台电脑上允许做什么，以及鹊桥如何运行。",
+    ),
+    ("Log in to see your devices.", "登录后即可看到你的设备。"),
+    ("Stop", "停止"),
+    ("Fixed help code...", "固定帮助码……"),
+    (
+        "Nothing yet: files sent in a session (drag them onto its window) and files received appear here.",
+        "还没有记录：会话中发送的文件（拖到会话窗口上）和接收的文件会显示在这里。",
+    ),
+    ("Open received files", "打开接收的文件"),
+    ("Clear the list", "清空列表"),
+    (
+        "This account's devices may control this PC",
+        "本账号的设备可以控制这台电脑",
+    ),
+    ("Ask before each session", "每次会话前询问"),
+    ("Allow command lines", "允许命令行"),
+    ("Lock this PC after a session", "会话结束后锁定这台电脑"),
+    ("Check for updates", "检查更新"),
+    ("Lock settings with a password...", "用密码锁定设置……"),
+    ("Remove the settings password", "移除设置密码"),
+    (
+        "Type the help ID and the code you were given.",
+        "请输入对方给你的帮助 ID 和验证码。",
+    ),
+    (
+        "No devices yet: log in to this account on another PC, and it appears here.",
+        "还没有其他设备：在另一台电脑上登录这个账号，它就会出现在这里。",
+    ),
+    ("Cannot reach the server", "无法连接服务器"),
+    ("Not logged in", "未登录"),
+    ("Let someone help this PC", "让别人帮助这台电脑"),
+    (
+        "Someone of another account can control this PC with its help ID and code, after you allow it each time. Command lines, files, restarting and the sign-in screen stay closed to them.",
+        "其他账号的人可以凭这台电脑的帮助 ID 和验证码控制它，每次都要你先允许。命令行、文件、重启和登录界面对他们保持关闭。",
+    ),
+    ("Help someone", "帮助别人"),
+    (
+        "Pasting an invitation into either field fills in both. The person there is asked before you see their screen.",
+        "把邀请粘贴到任一栏即可同时填好两栏。在你看到对方屏幕之前，对方会先被询问。",
+    ),
+    ("This PC", "这台电脑"),
+    ("Version {version}", "版本 {version}"),
+    ("Remove from this account...", "从本账号中移除……"),
+    (
+        "Take {name} out of your account? It can no longer control your devices or be controlled until it logs in again.",
+        "要把 {name} 从你的账号中移除吗？在它重新登录之前，它既不能控制你的设备，也不能被控制。",
+    ),
+    (
+        "Log this PC out of your account? Your devices can no longer control it until it logs in again.",
+        "要让这台电脑退出你的账号吗？在它重新登录之前，你的设备无法控制它。",
+    ),
+    ("Open Queqiao", "打开鹊桥"),
+    (
+        "from {peer} · {size} · {when}",
+        "来自 {peer} · {size} · {when}",
+    ),
+    (
+        "to {peer} · {size} · {when}",
+        "发往 {peer} · {size} · {when}",
+    ),
+    (
+        "The Queqiao viewer is not installed for you on this PC.",
+        "这台电脑上没有为你安装鹊桥查看器。",
+    ),
 ];
 
 #[cfg(test)]
