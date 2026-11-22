@@ -102,6 +102,18 @@ try {
         $burst = @(& (Join-Path $Bin 'examples\account_probe.exe') $listen $pin --burst)
         $burst
         if ($burst[-1] -ne 'PROBE_PASS') { $failed += 'probe burst' }
+        # The burst ends with this address locked out (a saved login still gets in, a password does not): once more
+        # anew, for the sessions' password logins.
+        Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+        $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out3.txt" -RedirectStandardError "$Out\server_err3.txt"
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            Start-Sleep -Milliseconds 200
+            $client = New-Object Net.Sockets.TcpClient
+            try { $client.Connect($Address, 47100); $up = $true } catch { $up = $false } finally { $client.Dispose() }
+        } while (-not $up -and (Get-Date) -lt $deadline)
+        if (-not $up) { 'RUN_FAIL the server did not start a third time'; return }
     }
 
     # Crash reports: a crash on purpose must leave a report with what panicked.

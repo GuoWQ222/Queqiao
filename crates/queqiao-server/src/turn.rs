@@ -33,6 +33,15 @@ const MAX_LIFETIME: u32 = 3600;
 const PERMISSION_LIFETIME: Duration = Duration::from_secs(300);
 const CHANNEL_LIFETIME: Duration = Duration::from_secs(600);
 const PER_DEVICE: usize = 4;
+/// Allocations an account may hold at once (its devices together).
+const PER_ACCOUNT: usize = 16;
+/// Permissions and channels an allocation may hold (a session needs a few).
+const MAX_PERMISSIONS: usize = 32;
+const MAX_CHANNELS: usize = 32;
+/// Bytes an allocation may relay, both ways together: RELAY_RATE a second (100 Mbit/s, well above a session's
+/// picture), RELAY_BURST at once; more are dropped.
+const RELAY_RATE: f64 = 12.5e6;
+const RELAY_BURST: f64 = 4e6;
 
 pub struct TurnConfig {
     /// UDP address for STUN and TURN (port 3478 by default).
@@ -46,10 +55,11 @@ pub struct TurnConfig {
 }
 
 impl TurnConfig {
-    /// Relay credentials for a logged-in device: (username, password, expiry in Unix seconds).
-    pub fn credentials(&self, device: &str) -> (String, String, u64) {
+    /// Relay credentials for a logged-in device of an account: (username, password, expiry in Unix seconds). The
+    /// username names both (signed by the password), for the quotas per device and per account.
+    pub fn credentials(&self, account: i64, device: &str) -> (String, String, u64) {
         let expires = unix_now() + CREDENTIAL_SECONDS;
-        let username = format!("{expires}:{device}");
+        let username = format!("{expires}:{account}:{device}");
         let password = hex(&stun::hmac_sha1(&self.secret, username.as_bytes()));
         (username, password, expires)
     }
@@ -119,6 +129,79 @@ struct Allocation {
     allocate_transaction: [u8; 12],
     allocate_response: Vec<u8>,
     task: tokio::task::JoinHandle<()>,
+    budget: Budget,
+}
+
+/// What an allocation may still relay (the security review of 2026-11-22: there was no limit, so one allocation was
+/// an anonymous UDP proxy at any rate).
+struct Budget {
+    bytes: f64,
+    at: Instant,
+}
+
+impl Budget {
+    fn new(now: Instant) -> Budget {
+        Budget {
+            bytes: RELAY_BURST,
+            at: now,
+        }
+    }
+
+    /// Whether `length` bytes may go now (they are taken off if so).
+    fn take(&mut self, now: Instant, length: usize) -> bool {
+        let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
+        self.bytes = (self.bytes + elapsed * RELAY_RATE).min(RELAY_BURST);
+        self.at = now;
+        if self.bytes < length as f64 {
+            return false;
+        }
+        self.bytes -= length as f64;
+        true
+    }
+}
+
+/// The account and the device a relay username was made for ("expiry:account:device"; no account in the earlier
+/// "expiry:device").
+fn owner(username: &str) -> (&str, &str) {
+    let mut parts = username.splitn(3, ':');
+    let _expiry = parts.next();
+    match (parts.next(), parts.next()) {
+        (Some(account), Some(device)) => (account, device),
+        (Some(device), None) => ("", device),
+        _ => ("", ""),
+    }
+}
+
+/// Whether another allocation for `username` would pass PER_DEVICE of its device or PER_ACCOUNT of its account (the
+/// security review of 2026-11-22: new device ids got around the quota per device, and filled the relay's ports).
+fn quota_reached<'a>(taken: impl Iterator<Item = &'a str>, username: &str) -> bool {
+    let (account, device) = owner(username);
+    let (mut by_device, mut by_account) = (0, 0);
+    for other in taken {
+        let (other_account, other_device) = owner(other);
+        by_device += usize::from(other_device == device);
+        by_account += usize::from(!account.is_empty() && other_account == account);
+    }
+    by_device >= PER_DEVICE || by_account >= PER_ACCOUNT
+}
+
+/// Permissions for `peers` until `until`, unless the allocation would then hold more than MAX_PERMISSIONS: all or
+/// none (the security review of 2026-11-22: one CreatePermission could add thousands, until memory ran out).
+fn permit(permissions: &mut HashMap<IpAddr, Instant>, peers: Vec<IpAddr>, until: Instant) -> bool {
+    let mut new: Vec<IpAddr> = peers
+        .iter()
+        .copied()
+        .filter(|ip| !permissions.contains_key(ip))
+        .collect();
+    new.sort();
+    new.dedup();
+    if permissions.len() + new.len() > MAX_PERMISSIONS {
+        return false;
+    }
+    for ip in peers {
+        permissions.insert(ip, until);
+    }
+    true
 }
 
 impl Allocation {
@@ -227,10 +310,12 @@ fn handle(
 ) -> Option<Action> {
     let now = Instant::now();
     if let Some((number, payload)) = stun::parse_channel_data(packet) {
-        let allocation = allocations.get(&client)?;
+        let allocation = allocations.get_mut(&client)?;
         let (peer, until) = *allocation.channels.get(&number)?;
-        return (until > now && allocation.permitted(peer, now))
-            .then(|| Action::Relay(allocation.relay.clone(), peer, payload.to_vec()));
+        let allowed = until > now
+            && allocation.permitted(peer, now)
+            && allocation.budget.take(now, payload.len());
+        return allowed.then(|| Action::Relay(allocation.relay.clone(), peer, payload.to_vec()));
     }
     let message = Message::decode(packet)?;
     match (message.class, message.method) {
@@ -241,11 +326,10 @@ fn handle(
             Some(Action::Reply(reply.encode(None, true)))
         }
         (Class::Indication, method::SEND) => {
-            let allocation = allocations.get(&client)?;
+            let allocation = allocations.get_mut(&client)?;
             let peer = message.address(attr::XOR_PEER_ADDRESS)?;
             let data = message.get(attr::DATA)?;
-            allocation
-                .permitted(peer, now)
+            (allocation.permitted(peer, now) && allocation.budget.take(now, data.len()))
                 .then(|| Action::Relay(allocation.relay.clone(), peer, data.to_vec()))
         }
         (Class::Request, method::ALLOCATE) => Some(check_allocate(
@@ -331,17 +415,12 @@ fn check_allocate(
     if message.get(attr::REQUESTED_TRANSPORT) != Some(&stun::TRANSPORT_UDP[..]) {
         return Action::Reply(error(message, 442, "Unsupported Transport Protocol"));
     }
-    let device = username.split_once(':').map_or("", |(_, device)| device);
-    let used = allocations
-        .values()
-        .filter(|allocation| {
-            allocation
-                .username
-                .split_once(':')
-                .is_some_and(|(_, d)| d == device)
-        })
-        .count();
-    if used >= PER_DEVICE {
+    if quota_reached(
+        allocations
+            .values()
+            .map(|allocation| allocation.username.as_str()),
+        &username,
+    ) {
         return Action::Reply(error(message, 486, "Allocation Quota Reached"));
     }
     Action::Allocate {
@@ -401,6 +480,7 @@ async fn allocate(
                 expires: Instant::now() + Duration::from_secs(u64::from(lifetime)),
                 permissions: HashMap::new(),
                 channels: HashMap::new(),
+                budget: Budget::new(Instant::now()),
                 by_peer: HashMap::new(),
                 allocate_transaction: request.transaction,
                 allocate_response: response.clone(),
@@ -468,10 +548,13 @@ fn authenticated(
             if all.iter().any(|peer| !config.peer_allowed(*peer)) {
                 return error(message, 403, "Forbidden");
             }
-            for peer in all {
-                allocation
-                    .permissions
-                    .insert(peer.ip(), now + PERMISSION_LIFETIME);
+            let peers = all.iter().map(|peer| peer.ip()).collect();
+            if !permit(
+                &mut allocation.permissions,
+                peers,
+                now + PERMISSION_LIFETIME,
+            ) {
+                return error(message, 508, "Insufficient Capacity");
             }
             success(message.reply(Class::Success))
         }
@@ -500,13 +583,21 @@ fn authenticated(
             if taken_by_other {
                 return error(message, 400, "Bad Request");
             }
+            let room = allocation.channels.contains_key(&number)
+                || allocation.channels.len() < MAX_CHANNELS;
+            if !room
+                || !permit(
+                    &mut allocation.permissions,
+                    vec![peer.ip()],
+                    now + PERMISSION_LIFETIME,
+                )
+            {
+                return error(message, 508, "Insufficient Capacity");
+            }
             allocation
                 .channels
                 .insert(number, (peer, now + CHANNEL_LIFETIME));
             allocation.by_peer.insert(peer, number);
-            allocation
-                .permissions
-                .insert(peer.ip(), now + PERMISSION_LIFETIME);
             success(message.reply(Class::Success))
         }
         _ => error(message, 400, "Bad Request"),
@@ -542,13 +633,14 @@ async fn relay_to_client(
             Err(_) => return,
         };
         let framed = {
-            let Ok(allocations) = state.lock() else {
+            let Ok(mut allocations) = state.lock() else {
                 return;
             };
-            let Some(allocation) = allocations.get(&client) else {
+            let Some(allocation) = allocations.get_mut(&client) else {
                 return;
             };
-            if !allocation.permitted(peer, Instant::now()) {
+            let now = Instant::now();
+            if !allocation.permitted(peer, now) || !allocation.budget.take(now, length) {
                 continue;
             }
             match allocation.by_peer.get(&peer) {
@@ -654,8 +746,9 @@ mod tests {
     #[test]
     fn credentials_and_nonces() {
         let config = config(false);
-        let (username, password, expires) = config.credentials("device1");
-        assert!(username.ends_with(":device1") && expires > unix_now());
+        let (username, password, expires) = config.credentials(7, "device1");
+        assert!(username.ends_with(":7:device1") && expires > unix_now());
+        assert_eq!(owner(&username), ("7", "device1"));
         assert_eq!(
             password,
             hex(&stun::hmac_sha1(&config.secret, username.as_bytes()))
@@ -663,5 +756,41 @@ mod tests {
         let nonce = config.nonce(unix_now() / 3600);
         assert!(config.nonce_valid(nonce.as_bytes()));
         assert!(!config.nonce_valid(b"made up"));
+    }
+
+    #[test]
+    fn quotas_permissions_and_rate_are_bounded() {
+        // Per device, and per account however many device ids.
+        let same: Vec<String> = (0..PER_DEVICE).map(|_| "1:7:dev".to_string()).collect();
+        assert!(quota_reached(same.iter().map(String::as_str), "1:7:dev"));
+        assert!(!quota_reached(same.iter().map(String::as_str), "1:7:other"));
+        let many: Vec<String> = (0..PER_ACCOUNT).map(|i| format!("1:7:dev{i}")).collect();
+        assert!(quota_reached(many.iter().map(String::as_str), "1:7:new"));
+        assert!(!quota_reached(many.iter().map(String::as_str), "1:8:new"));
+        assert_eq!(owner("1:dev"), ("", "dev"));
+        // Permissions: all or none, MAX_PERMISSIONS at most; a known one is renewed.
+        let now = Instant::now();
+        let mut permissions = HashMap::new();
+        let peers: Vec<IpAddr> = (0..MAX_PERMISSIONS as u32 + 1)
+            .map(|i| IpAddr::from(i.to_be_bytes()))
+            .collect();
+        assert!(!permit(&mut permissions, peers.clone(), now));
+        assert!(permissions.is_empty());
+        assert!(permit(
+            &mut permissions,
+            peers[..MAX_PERMISSIONS].to_vec(),
+            now
+        ));
+        assert!(permit(&mut permissions, vec![peers[0]], now));
+        assert!(!permit(&mut permissions, vec![peers[MAX_PERMISSIONS]], now));
+        // Relayed bytes: RELAY_BURST at once, then RELAY_RATE a second.
+        let mut budget = Budget::new(now);
+        assert!(budget.take(now, RELAY_BURST as usize));
+        assert!(!budget.take(now, 1));
+        assert!(budget.take(
+            now + Duration::from_millis(100),
+            (RELAY_RATE / 10.0) as usize - 1
+        ));
+        assert!(!budget.take(now + Duration::from_millis(100), 2));
     }
 }

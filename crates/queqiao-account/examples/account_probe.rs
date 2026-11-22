@@ -206,6 +206,60 @@ fn burst(probe: &mut Probe, server: &str, pin: &str) {
         unchecked == 5,
         format!("{unchecked} of 10 refused before the check"),
     );
+    // Once this address is locked out (wrong passwords for many names), a saved login still logs in; a password does
+    // not (an address many share is not cut off from its PCs).
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let name = format!("owner{stamp}");
+    let owner = device("burst-owner");
+    let mut saved = login(server, pin);
+    let made = Account::register(&mut saved, &owner, Role::Viewer, &name, "an-owner-password");
+    let made_ok = made.is_ok();
+    drop(made);
+    let mut locked = false;
+    for i in 0..40 {
+        let refused = Account::connect(
+            &mut login(server, pin),
+            &device(&format!("burst-other{i}")),
+            Role::Viewer,
+            Some((&format!("nobody{stamp}x{i}"), "guessing")),
+        )
+        .err()
+        .map(|e| e.0)
+        .unwrap_or_default();
+        if refused.contains("too many failed logins") {
+            locked = true;
+            break;
+        }
+    }
+    let resumed = Account::connect(&mut saved, &owner, Role::Viewer, None);
+    probe.check(
+        "a saved login logs in while its address is locked out",
+        made_ok && locked && resumed.is_ok(),
+        format!(
+            "account made: {made_ok}, address locked: {locked}, saved login: {}",
+            resumed
+                .as_ref()
+                .err()
+                .map_or("accepted".into(), |e| e.0.clone())
+        ),
+    );
+    drop(resumed);
+    let with_password = Account::connect(
+        &mut login(server, pin),
+        &device("burst-owner2"),
+        Role::Viewer,
+        Some((&name, "an-owner-password")),
+    );
+    probe.check(
+        "a password does not",
+        with_password
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.0.contains("too many failed logins")),
+        with_password.err().map_or("accepted".into(), |e| e.0),
+    );
 }
 
 fn main() {

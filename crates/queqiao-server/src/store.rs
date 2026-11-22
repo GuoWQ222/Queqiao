@@ -101,10 +101,14 @@ impl Store {
         if name.trim().is_empty() || password.len() < 8 {
             return Err("a user name and a password of at least 8 characters are needed".into());
         }
+        self.add_user_hashed(name, &hash_password(password)?)
+    }
+
+    /// A new user with a password hashed already (new_password_hash, without the store's lock).
+    pub fn add_user_hashed(&self, name: &str, hash: &str) -> Result<(), String> {
         if self.user_exists(name)? {
             return Err("that user name is taken".into());
         }
-        let hash = hash_password(password)?;
         self.db
             .execute(
                 "INSERT INTO users (name, password, created) VALUES (?1, ?2, ?3)",
@@ -134,7 +138,13 @@ impl Store {
     }
 
     /// The user if the password is right.
+    #[cfg(test)]
     pub fn check_password(&self, name: &str, password: &str) -> Result<Option<UserRow>, String> {
+        Ok(self.password_record(name)?.check(password))
+    }
+
+    /// A user's stored password, to be checked without the store's lock (PasswordRecord::check).
+    pub fn password_record(&self, name: &str) -> Result<PasswordRecord, String> {
         let row: Option<(i64, String, String)> = self
             .db
             .query_row(
@@ -144,13 +154,8 @@ impl Store {
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        // Hash even for an unknown user, so the answer takes the same time.
-        let (id, stored_name, stored) = row.unwrap_or((-1, String::new(), String::new()));
-        let ok = verify_password(password, &stored);
-        Ok((ok && id >= 0).then_some(UserRow {
-            id,
-            name: stored_name,
-        }))
+        let (id, name, hash) = row.unwrap_or((-1, String::new(), String::new()));
+        Ok(PasswordRecord { id, name, hash })
     }
 
     /// Records the device and its public key for the user; true if the device is new to the account. A
@@ -204,6 +209,21 @@ impl Store {
                 Ok(false)
             }
             None => {
+                // MAX_DEVICES an account at most (the security review of 2026-11-22: new device ids without end got
+                // around the relay's quota per device, and the device list sent on every connect grew with them).
+                let devices: i64 = self
+                    .db
+                    .query_row(
+                        "SELECT COUNT(*) FROM devices WHERE user_id = ?1",
+                        params![user_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if devices >= MAX_DEVICES {
+                    return Err(format!(
+                        "this account has {MAX_DEVICES} devices, the most it may have: remove one first"
+                    ));
+                }
                 self.db
                     .execute(
                         "INSERT INTO devices (id, user_id, name, created, last_seen, public_key) VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
@@ -290,6 +310,7 @@ impl Store {
     }
 
     /// Sets a new password after checking the old one, and revokes every refresh token of the account.
+    #[cfg(test)]
     pub fn change_password(
         &self,
         user_id: i64,
@@ -306,7 +327,11 @@ impl Store {
         {
             return Err("the current password is wrong".into());
         }
-        let hash = hash_password(new)?;
+        self.set_password_hash(user_id, &hash_password(new)?)
+    }
+
+    /// Sets a password hashed already (new_password_hash) and revokes every refresh token of the account.
+    pub fn set_password_hash(&self, user_id: i64, hash: &str) -> Result<(), String> {
         self.db
             .execute(
                 "UPDATE users SET password = ?2 WHERE id = ?1",
@@ -463,6 +488,32 @@ impl Store {
 }
 
 /// "argon2id$m=..,t=..,p=..$<salt hex>$<hash hex>" (the parameters are kept, so they can change later).
+/// Devices an account may have at most.
+pub const MAX_DEVICES: i64 = 64;
+
+/// A user's stored password (its Argon2 hash), read under the store's lock and checked without it: hashing takes
+/// tens of milliseconds, and every other connection waited for the lock meanwhile (the security review of 2026-11-22).
+/// An unknown user's never matches (and still costs one hash, so the answer takes the same time).
+pub struct PasswordRecord {
+    id: i64,
+    name: String,
+    hash: String,
+}
+
+impl PasswordRecord {
+    pub fn check(&self, password: &str) -> Option<UserRow> {
+        (verify_password(password, &self.hash) && self.id >= 0).then(|| UserRow {
+            id: self.id,
+            name: self.name.clone(),
+        })
+    }
+}
+
+/// A new password's hash, made without the store's lock (add_user_hashed, set_password_hash).
+pub fn new_password_hash(password: &str) -> Result<String, String> {
+    hash_password(password)
+}
+
 fn hash_password(password: &str) -> Result<String, String> {
     let salt = random_bytes(16)?;
     let hash = argon2(password, &salt, MEMORY_KIB, PASSES, LANES)?;
@@ -764,6 +815,42 @@ mod tests {
                 .is_none()
         );
         assert!(store.devices(user.id).unwrap().is_empty());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_account_has_at_most_max_devices_and_hashes_outside_the_lock() {
+        let dir = std::env::temp_dir().join(format!("queqiao-store-max-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        // Made and checked the way the server does: the hash made, the record read, each without the lock.
+        store
+            .add_user_hashed("dora", &new_password_hash("correct horse").unwrap())
+            .unwrap();
+        let record = store.password_record("dora").unwrap();
+        let user = record.check("correct horse").unwrap();
+        assert!(record.check("wrong horse").is_none());
+        assert!(store.password_record("nobody").unwrap().check("").is_none());
+        for i in 0..MAX_DEVICES {
+            let key = format!("{i:064x}");
+            assert!(
+                store
+                    .register_device(user.id, &format!("d{i}"), "PC", &key, true)
+                    .unwrap()
+            );
+        }
+        let refused =
+            store.register_device(user.id, "one-more", "PC", &format!("{:064x}", 999), true);
+        assert!(refused.is_err_and(|e| e.contains("most it may have")));
+        // A known device still logs in.
+        assert!(
+            !store
+                .register_device(user.id, "d0", "PC", &format!("{:064x}", 0), true)
+                .unwrap()
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

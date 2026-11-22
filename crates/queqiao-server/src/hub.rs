@@ -28,11 +28,13 @@ const MAX_MESSAGE: usize = 256 * 1024;
 /// A connection that sends nothing for this long is dropped (clients ping every 20 s).
 const IDLE: Duration = Duration::from_secs(60);
 /// Failed logins (wrong password, or a saved login that is not valid) allowed per address in a window, and
-/// wrong passwords per account name (counted the same way for names that do not exist, so a refusal says
-/// nothing about whether an account exists; saved logins keep working during an account's lockout).
+/// wrong passwords per account name from one address and from all together (counted the same way for names that
+/// do not exist, so a refusal says nothing about whether an account exists). A valid saved login is never held up:
+/// not by its address's lockout, nor by its account's.
 const ADDRESS_FAILURES: u32 = 20;
 const ADDRESS_WINDOW: Duration = Duration::from_secs(600);
 const ACCOUNT_FAILURES: u32 = 5;
+const ACCOUNT_TOTAL_FAILURES: u32 = 50;
 const ACCOUNT_WINDOW: Duration = Duration::from_secs(900);
 /// Wrong help codes for one device before its help requests close (the person opens them again for a new code).
 const HELP_FAILURES: u32 = 5;
@@ -61,7 +63,11 @@ struct Window {
 #[derive(Default)]
 struct Failures {
     by_address: HashMap<IpAddr, Window>,
-    by_account: HashMap<String, Window>,
+    /// Per account and address (ACCOUNT_FAILURES): one address cannot shut an account's password logins for everyone
+    /// else (the security review of 2026-11-22: 5 tries anywhere did).
+    by_account: HashMap<(String, Option<IpAddr>), Window>,
+    /// Per account from all addresses together (ACCOUNT_TOTAL_FAILURES): guessing from many.
+    by_account_total: HashMap<String, Window>,
 }
 
 impl Failures {
@@ -92,6 +98,8 @@ impl Failures {
             .retain(|_, w| now.saturating_duration_since(w.since) < ADDRESS_WINDOW);
         self.by_account
             .retain(|_, w| now.saturating_duration_since(w.since) < ACCOUNT_WINDOW);
+        self.by_account_total
+            .retain(|_, w| now.saturating_duration_since(w.since) < ACCOUNT_WINDOW);
         let wait = |window: Option<&Window>, limit: u32, length: Duration| {
             let window = window.filter(|w| w.count >= limit)?;
             let left = length.saturating_sub(now.saturating_duration_since(window.since));
@@ -99,9 +107,21 @@ impl Failures {
         };
         let by_address =
             address.and_then(|a| wait(self.by_address.get(&a), ADDRESS_FAILURES, ADDRESS_WINDOW));
-        let by_account =
-            account.and_then(|a| wait(self.by_account.get(a), ACCOUNT_FAILURES, ACCOUNT_WINDOW));
-        by_address.max(by_account)
+        let by_account = account.and_then(|a| {
+            wait(
+                self.by_account.get(&(a.to_string(), address)),
+                ACCOUNT_FAILURES,
+                ACCOUNT_WINDOW,
+            )
+        });
+        let by_total = account.and_then(|a| {
+            wait(
+                self.by_account_total.get(a),
+                ACCOUNT_TOTAL_FAILURES,
+                ACCOUNT_WINDOW,
+            )
+        });
+        by_address.max(by_account).max(by_total)
     }
 
     /// One more try for `address` and `account`.
@@ -115,6 +135,10 @@ impl Failures {
         }
         if let Some(account) = account {
             self.by_account
+                .entry((account.to_string(), address))
+                .or_insert_with(fresh)
+                .count += 1;
+            self.by_account_total
                 .entry(account.to_string())
                 .or_insert_with(fresh)
                 .count += 1;
@@ -127,9 +151,14 @@ impl Failures {
             window.count = window.count.saturating_sub(1);
         }
         if let Some(account) = account {
+            let key = (account.to_string(), address);
             if right {
-                self.by_account.remove(account);
-            } else if let Some(window) = self.by_account.get_mut(account) {
+                self.by_account.remove(&key);
+            } else if let Some(window) = self.by_account.get_mut(&key) {
+                window.count = window.count.saturating_sub(1);
+            }
+            // The total does not start again with a right one: tries from elsewhere still count.
+            if let Some(window) = self.by_account_total.get_mut(account) {
                 window.count = window.count.saturating_sub(1);
             }
         }
@@ -452,7 +481,23 @@ impl Hub {
         // Each try counts before it is checked, so that tries at once on many connections count as many (the security
         // review of 2026-11-22: they were all checked, then counted); a right one, or one that was no guess, is
         // forgiven after. New accounts likewise: at most SIGNUPS_PER_HOUR made from one address.
-        let counted = self.begin_try(address, account_name.as_deref());
+        // A saved login that is valid logs in whatever the address's lockout (the security review of 2026-11-22: 20
+        // wrong passwords from an address that many share, an office's or a school's, cut every PC behind it off).
+        // Only one that is not valid counts as a try.
+        let valid_resume = match &first {
+            ClientMessage::Resume {
+                refresh_token,
+                device_id,
+                role,
+                ..
+            } => self.resume_valid(refresh_token, device_id, *role),
+            _ => false,
+        };
+        let counted = if valid_resume {
+            Ok(())
+        } else {
+            self.begin_try(address, account_name.as_deref())
+        };
         let registering = matches!(first, ClientMessage::Register { .. });
         let signup = match (&counted, registering) {
             (Ok(()), true) => Some(self.begin_signup(address)),
@@ -475,6 +520,8 @@ impl Hub {
                     .await
                     .map_err(|e| e.to_string())?;
                 match &checked {
+                    // Nothing was counted for it.
+                    _ if valid_resume => {}
                     Ok(_) => self.forgive(address, account_name.as_deref(), true),
                     Err(refusal) if !refusal.guess => {
                         self.forgive(address, account_name.as_deref(), false)
@@ -965,6 +1012,17 @@ impl Hub {
             .count(Instant::now(), address, account);
     }
 
+    /// Whether a saved login is valid: a SHA-256 lookup, no password hashing.
+    fn resume_valid(&self, refresh_token: &str, device_id: &str, role: Role) -> bool {
+        self.store.lock().is_ok_and(|store| {
+            store
+                .check_refresh_token(refresh_token, device_id, role_name(role))
+                .ok()
+                .flatten()
+                .is_some()
+        })
+    }
+
     /// Counts a try (a password, or a saved login) for `address` and `account` before it is checked (Failures::begin).
     fn begin_try(&self, address: Option<IpAddr>, account: Option<&str>) -> Result<(), u64> {
         self.failures
@@ -1007,8 +1065,24 @@ impl Hub {
             identity.role,
         );
         let changed = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            if new_password.len() < 8 {
+                return Err("the new password needs at least 8 characters".into());
+            }
+            // Argon2 (the old password checked, the new one hashed) without the store's lock.
+            let record = hub
+                .store
+                .lock()
+                .map_err(|e| e.to_string())?
+                .password_record(&user)?;
+            if record
+                .check(&old_password)
+                .is_none_or(|row| row.id != user_id)
+            {
+                return Err("the current password is wrong".into());
+            }
+            let hash = crate::store::new_password_hash(&new_password)?;
             let store = hub.store.lock().map_err(|e| e.to_string())?;
-            store.change_password(user_id, &user, &old_password, &new_password)?;
+            store.set_password_hash(user_id, &hash)?;
             store.issue_refresh_token(user_id, &device_id, role_name(role))
         })
         .await
@@ -1111,7 +1185,6 @@ impl Hub {
         &self,
         first: ClientMessage,
     ) -> Result<(Identity, Option<String>, DeviceNews), Refusal> {
-        let store = self.store.lock().map_err(|e| e.to_string())?;
         if let ClientMessage::Register {
             user,
             password,
@@ -1134,20 +1207,30 @@ impl Hub {
             check_new_account(&user, &password)?;
             check_device_fields(&device_id, &device_name)?;
             check_device_key(&public_key)?;
-            if store.device_owner(&device_id)?.is_some() {
-                return Err("this device belongs to another account: remove it there first (More... in that account's device list)".to_string().into());
-            }
-            if store.user_exists(&user)? {
-                return Err("that user name is taken".to_string().into());
-            }
-            store.add_user(&user, &password).map_err(|error| {
-                if error.contains("UNIQUE") {
-                    "that user name is taken".to_string()
-                } else {
-                    error
+            let taken = |store: &crate::store::Store| -> Result<(), Refusal> {
+                if store.device_owner(&device_id)?.is_some() {
+                    return Err("this device belongs to another account: remove it there first (More... in that account's device list)".to_string().into());
                 }
-            })?;
-            drop(store);
+                if store.user_exists(&user)? {
+                    return Err("that user name is taken".to_string().into());
+                }
+                Ok(())
+            };
+            taken(&*self.store.lock().map_err(|e| e.to_string())?)?;
+            // Argon2 without the store's lock (the security review of 2026-11-22: every other connection waited for
+            // it); looked at again once it is made.
+            let hash = crate::store::new_password_hash(&password)?;
+            {
+                let store = self.store.lock().map_err(|e| e.to_string())?;
+                taken(&store)?;
+                store.add_user_hashed(&user, &hash).map_err(|error| {
+                    if error.contains("UNIQUE") {
+                        "that user name is taken".to_string()
+                    } else {
+                        error
+                    }
+                })?;
+            }
             // Logged in as with a password.
             return self.authenticate(ClientMessage::Login {
                 user,
@@ -1167,9 +1250,16 @@ impl Hub {
                 role,
                 public_key,
             } => {
-                let row = store
-                    .check_password(&user, &password)?
+                // Argon2 without the store's lock: the hash read, checked, then the store locked again.
+                let record = self
+                    .store
+                    .lock()
+                    .map_err(|e| e.to_string())?
+                    .password_record(&user)?;
+                let row = record
+                    .check(&password)
                     .ok_or_else(|| guess("wrong user name or password"))?;
+                let store = self.store.lock().map_err(|e| e.to_string())?;
                 check_device_fields(&device_id, &device_name)?;
                 // A password login may give a known device a new key: its other devices are told (the security review
                 // of 2026-11-22: it happened silently).
@@ -1201,6 +1291,7 @@ impl Hub {
                 role,
                 public_key,
             } => {
+                let store = self.store.lock().map_err(|e| e.to_string())?;
                 let row = store
                     .check_refresh_token(&refresh_token, &device_id, role_name(role))?
                     .ok_or_else(|| {
@@ -1276,7 +1367,8 @@ impl Hub {
                 // Relay credentials only ever go to a logged-in device, for itself.
                 let (stun, turn) = match &self.turn {
                     Some(config) => {
-                        let (username, password, expires) = config.credentials(&identity.device_id);
+                        let (username, password, expires) =
+                            config.credentials(identity.user_id, &identity.device_id);
                         let access = TurnAccess {
                             address: config.address(),
                             username,
@@ -1550,6 +1642,31 @@ mod failure_tests {
         );
         let later = now + ADDRESS_WINDOW + Duration::from_secs(1);
         assert!(failures.begin(later, Some(address), Some("x")).is_ok());
+    }
+
+    #[test]
+    fn one_address_does_not_lock_an_account_for_the_others() {
+        let now = Instant::now();
+        let mut failures = Failures::default();
+        let attacker: IpAddr = "198.51.100.7".parse().unwrap();
+        let owner: IpAddr = "203.0.113.9".parse().unwrap();
+        for _ in 0..ACCOUNT_FAILURES {
+            assert!(failures.begin(now, Some(attacker), Some("alice")).is_ok());
+        }
+        assert!(failures.begin(now, Some(attacker), Some("alice")).is_err());
+        assert!(
+            failures.begin(now, Some(owner), Some("alice")).is_ok(),
+            "the owner, elsewhere, may still try"
+        );
+        // From many addresses together: ACCOUNT_TOTAL_FAILURES at most.
+        let mut failures = Failures::default();
+        let passed = (0..ACCOUNT_TOTAL_FAILURES * 2)
+            .filter(|i| {
+                let address = IpAddr::from([10, 0, (*i / 250) as u8, (*i % 250) as u8]);
+                failures.begin(now, Some(address), Some("alice")).is_ok()
+            })
+            .count();
+        assert_eq!(passed, ACCOUNT_TOTAL_FAILURES as usize);
     }
 }
 
