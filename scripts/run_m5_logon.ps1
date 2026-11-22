@@ -106,7 +106,10 @@ try {
     Start-Sleep -Seconds 1
     '=== 1. install: the person''s agent hands the device to the service'
     $agentArgs = "--server $listen --pin $pin --user alice --password $password --sessions 3 --seconds 400 --dry-run-commands --report `"$Out\agent_person.txt`""
-    $logonArgs = "--sessions 1 --seconds 150 --dry-run-commands --report `"$logonOut\agent_logon.txt`""
+    # The sign-in screen asks for the Windows password of the one who set it up (as UU): a test password here, never
+    # the person's real one.
+    $signInPassword = 'Sign-in-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $logonArgs = "--sessions 1 --seconds 150 --dry-run-commands --test-password $signInPassword --report `"$logonOut\agent_logon.txt`""
     & { $ErrorActionPreference = 'Continue'; & $serviceExe install --agent-arguments $agentArgs --logon-arguments $logonArgs --no-restart 2>&1 | ForEach-Object { "$_" } }
     Add-Check 'service: the person''s agent started' (Wait-ServiceLog 'started the desktop helper \(\d+\) and the agent' 1 30)
     Add-Check 'service: the device kept for the sign-in screen' (Wait-ServiceLog 'the sign-in screen: device \S+ kept for it' 1 40)
@@ -130,7 +133,7 @@ try {
 
     '=== 3. a viewer connects to the sign-in screen'
     Start-Sleep -Seconds 4
-    Start-SessionTask 'Queqiao-M5-Logon-Viewer' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds $Seconds --secure-test --width 960 --report `"$Out\viewer_logon.txt`""
+    Start-SessionTask 'Queqiao-M5-Logon-Viewer' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds $Seconds --secure-test --width 960 --test-password $signInPassword --report `"$Out\viewer_logon.txt`""
     $viewerResult = Wait-SessionTask 'Queqiao-M5-Logon-Viewer' ($Seconds + 150)
     "viewer task: $viewerResult"
     $deadline = (Get-Date).AddSeconds(40)

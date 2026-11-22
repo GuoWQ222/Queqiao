@@ -53,6 +53,17 @@ pub fn load() -> Option<LogonIdentity> {
     }
 }
 
+/// Whether the Windows user `offering` (a SID) may hand over or take back the device kept for the sign-in screen:
+/// only the one who handed it over (any user when none is kept, or it was kept before owners were noted). The
+/// security review of 2026-11-22: a second user of the PC could replace the owner's device with one of their own
+/// account and so control the sign-in screen from it.
+pub fn may_hand_over(kept_owner: Option<&str>, offering: &str) -> bool {
+    match kept_owner {
+        None | Some("") => true,
+        Some(owner) => owner == offering,
+    }
+}
+
 pub fn forget() {
     let _ = std::fs::remove_file(path());
 }
@@ -140,4 +151,25 @@ fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
         unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
     unsafe { LocalFree(Some(HLOCAL(output.pbData.cast()))) };
     Ok(plain)
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::may_hand_over;
+
+    #[test]
+    fn only_the_one_who_set_it_up_may_change_it() {
+        let anna = "S-1-5-21-1-2-3-1001";
+        let bert = "S-1-5-21-1-2-3-1002";
+        assert!(may_hand_over(None, bert), "nothing kept: anyone");
+        assert!(
+            may_hand_over(Some(""), bert),
+            "kept before owners were noted: anyone"
+        );
+        assert!(may_hand_over(Some(anna), anna));
+        assert!(
+            !may_hand_over(Some(anna), bert),
+            "another user of the PC: refused"
+        );
+    }
 }

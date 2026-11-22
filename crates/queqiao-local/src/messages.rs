@@ -113,6 +113,11 @@ pub struct LogonIdentity {
     pub allow_account_control: bool,
     /// Device id -> public key (hex).
     pub pins: Vec<(String, String)>,
+    /// The Windows user who handed the device over (filled in by the service from the session it came from, never
+    /// taken from the agent): only they may replace or take it back, and the sign-in screen asks for their password.
+    pub owner_sid: String,
+    /// The same as "DOMAIN\user".
+    pub owner_account: String,
 }
 
 // Never printed: it holds the key and the login.
@@ -142,6 +147,11 @@ impl LogonIdentity {
             text(out, device);
             text(out, key);
         }
+        // Only when known: an identity without an owner is written as before owners were noted (one form each).
+        if !self.owner_sid.is_empty() || !self.owner_account.is_empty() {
+            text(out, &self.owner_sid);
+            text(out, &self.owner_account);
+        }
     }
 
     fn decode_from(bytes: &[u8]) -> Option<LogonIdentity> {
@@ -165,7 +175,20 @@ impl LogonIdentity {
         for _ in 0..count {
             pins.push((reader.text()?, reader.text()?));
         }
+        // Kept from before the owner was noted: no owner (the next handing over notes one).
+        let (owner_sid, owner_account) = if reader.0.is_empty() {
+            (String::new(), String::new())
+        } else {
+            let owner = (reader.text()?, reader.text()?);
+            // Written only when known: an empty pair is not a form this writes.
+            if owner.0.is_empty() && owner.1.is_empty() {
+                return None;
+            }
+            owner
+        };
         reader.0.is_empty().then_some(LogonIdentity {
+            owner_sid,
+            owner_account,
             device_id,
             device_name,
             key_pkcs8,
@@ -529,6 +552,8 @@ mod tests {
                 ("dev1".into(), "11".repeat(32)),
                 ("dev2".into(), "22".repeat(32)),
             ],
+            owner_sid: "S-1-5-21-1-2-3-1001".into(),
+            owner_account: "PC\\anna".into(),
         }
     }
 
@@ -539,8 +564,18 @@ mod tests {
         assert_eq!(ToService::decode(&bytes), Some(message));
         let handed = FromService::Identity(identity());
         assert_eq!(FromService::decode(&handed.encode()), Some(handed));
-        // Cut anywhere, or with anything after it: refused.
-        for cut in 1..bytes.len() {
+        // Kept from before the owner was noted (it ends after the pins): read, with no owner.
+        let owner_bytes = 2 + identity().owner_sid.len() + 2 + identity().owner_account.len();
+        let old_length = bytes.len() - owner_bytes;
+        match ToService::decode(&bytes[..old_length]) {
+            Some(ToService::LogonIdentity(old)) => {
+                assert!(old.owner_sid.is_empty() && old.owner_account.is_empty());
+                assert_eq!(old.device_id, identity().device_id);
+            }
+            other => panic!("the old form was not read: {other:?}"),
+        }
+        // Cut anywhere else, or with anything after it: refused.
+        for cut in (1..bytes.len()).filter(|cut| *cut != old_length) {
             assert_eq!(ToService::decode(&bytes[..cut]), None, "cut at {cut}");
         }
         let mut longer = bytes.clone();

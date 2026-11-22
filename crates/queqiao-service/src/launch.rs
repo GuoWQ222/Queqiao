@@ -149,6 +149,45 @@ pub fn user_sid(token: &Owned) -> Result<String, String> {
     sid
 }
 
+/// The token's user as "DOMAIN\user" (what LogonUserW takes).
+pub fn user_account(token: &Owned) -> Result<String, String> {
+    use windows::Win32::Security::{LookupAccountSidW, SID_NAME_USE};
+    let mut size = 0u32;
+    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut size) };
+    let mut buffer = vec![0u64; (size as usize).div_ceil(8).max(1)];
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            (buffer.len() * 8) as u32,
+            &mut size,
+        )
+    }
+    .map_err(|e| format!("GetTokenInformation(TokenUser): {e}"))?;
+    let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    let (mut name, mut domain) = (vec![0u16; 256], vec![0u16; 256]);
+    let (mut name_length, mut domain_length) = (name.len() as u32, domain.len() as u32);
+    let mut kind = SID_NAME_USE::default();
+    unsafe {
+        LookupAccountSidW(
+            PCWSTR::null(),
+            user.User.Sid,
+            Some(PWSTR(name.as_mut_ptr())),
+            &mut name_length,
+            Some(PWSTR(domain.as_mut_ptr())),
+            &mut domain_length,
+            &mut kind,
+        )
+    }
+    .map_err(|e| format!("LookupAccountSidW: {e}"))?;
+    Ok(format!(
+        "{}\\{}",
+        String::from_utf16_lossy(&domain[..domain_length as usize]),
+        String::from_utf16_lossy(&name[..name_length as usize])
+    ))
+}
+
 /// Everything started for one console session; `end` (or dropping it) ends all of it.
 pub struct Job(Owned);
 

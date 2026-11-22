@@ -342,6 +342,8 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             .as_mut()
             .ok_or("--logon is for the Queqiao service only")?;
         let identity = service.identity(Duration::from_secs(10))?;
+        // Nobody is signed in: a viewer gives the Windows password of the one who set this up (as UU).
+        lock_gate::set_sign_in_owner(&identity.owner_account);
         lines.push(format!(
             "the agent for the sign-in screen, as {} ({})",
             identity.device_name, identity.device_id
@@ -2134,12 +2136,22 @@ fn session(
         }};
     }
     let mut trust_checked = Instant::now();
-    // The lock screen (as UU): the picture and input wait for this PC's Windows password.
-    let mut gate = lock_gate::LockGate::new(options.test_locked);
+    // The lock screen (as UU): the picture and input wait for this PC's Windows password; at the sign-in screen (nobody
+    // signed in) for the password of the Windows user who set it up.
+    let mut gate = if options.logon {
+        lock_gate::LockGate::signed_out()
+    } else {
+        lock_gate::LockGate::new(options.test_locked)
+    };
     'session: loop {
         if gate.refresh() {
             let (reason, tries_left) = if helper {
                 (queqiao_core::protocol::PasswordReason::OnlyTheOwner, 0)
+            } else if gate.signed_out_mode() {
+                (
+                    queqiao_core::protocol::PasswordReason::SignedOut,
+                    gate.tries_left(),
+                )
             } else {
                 (
                     queqiao_core::protocol::PasswordReason::Locked,
@@ -3300,6 +3312,8 @@ fn logon_identity(
         refresh_token: login.refresh_token.clone()?,
         allow_account_control: true,
         pins: account.pins(),
+        owner_sid: String::new(),
+        owner_account: String::new(),
     })
 }
 

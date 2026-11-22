@@ -16,10 +16,19 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 
 /// When wrong passwords were given here (all sessions of this program).
 static FAILURES: Mutex<Vec<Instant>> = Mutex::new(Vec::new());
+/// The agent for the sign-in screen: the Windows account ("DOMAIN\user") of the one who set it up.
+static SIGN_IN_OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The agent for the sign-in screen: whose Windows password it asks for.
+pub fn set_sign_in_owner(account: &str) {
+    let _ = SIGN_IN_OWNER.set(account.to_string());
+}
 
 pub struct LockGate {
-    /// Tests: locked from the start (nothing is really locked).
+    /// Tests: locked from the start (nothing is really locked); the sign-in screen: always.
     simulated: bool,
+    /// The sign-in screen (nobody signed in): the account whose password opens it (empty: not known, nothing does).
+    owner: Option<String>,
     engaged: bool,
     verified: bool,
     told: bool,
@@ -28,8 +37,22 @@ pub struct LockGate {
 }
 
 impl LockGate {
+    /// The sign-in screen with nobody signed in: closed from the start, opened by the password of the one who set it
+    /// up.
+    pub fn signed_out() -> LockGate {
+        LockGate {
+            owner: Some(SIGN_IN_OWNER.get().cloned().unwrap_or_default()),
+            ..LockGate::new(true)
+        }
+    }
+
+    pub fn signed_out_mode(&self) -> bool {
+        self.owner.is_some()
+    }
+
     pub fn new(simulated: bool) -> LockGate {
         LockGate {
+            owner: None,
             simulated,
             engaged: false,
             verified: false,
@@ -68,6 +91,10 @@ impl LockGate {
 
     /// Tries left for this session (fewer when this PC had wrong passwords lately).
     pub fn tries_left(&self) -> u8 {
+        // At a sign-in screen set up before owners were noted: no password can be checked.
+        if self.owner.as_deref() == Some("") {
+            return 0;
+        }
         let session = SESSION_TRIES.saturating_sub(self.wrong) as usize;
         let pc = PC_TRIES.saturating_sub(recent_failures());
         session.min(pc) as u8
@@ -81,7 +108,7 @@ impl LockGate {
         }
         let right = match expected {
             Some(test) => password == test,
-            None => windows_password_ok(password),
+            None => windows_password_ok(password, self.owner.as_deref()),
         };
         if right {
             self.verified = true;
@@ -136,26 +163,32 @@ fn session_locked() -> Option<bool> {
     }
 }
 
-/// Whether `password` is the Windows password of the account signed in here (Windows checks it).
-fn windows_password_ok(password: &str) -> bool {
+/// Whether `password` is the Windows password of `account` ("DOMAIN\user"), or of the account signed in here
+/// (Windows checks it).
+fn windows_password_ok(password: &str, account: Option<&str>) -> bool {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::Authentication::Identity::{GetUserNameExW, NameSamCompatible};
     use windows::Win32::Security::{
         LOGON32_LOGON_INTERACTIVE, LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, LogonUserW,
     };
     use windows::core::{PCWSTR, PWSTR};
-    let mut buffer = vec![0u16; 512];
-    let mut size = buffer.len() as u32;
-    if !unsafe {
-        GetUserNameExW(
-            NameSamCompatible,
-            Some(PWSTR(buffer.as_mut_ptr())),
-            &mut size,
-        )
-    } {
-        return false;
-    }
-    let account = String::from_utf16_lossy(&buffer[..size as usize]);
+    let account = match account {
+        Some(account) => account.to_string(),
+        None => {
+            let mut buffer = vec![0u16; 512];
+            let mut size = buffer.len() as u32;
+            if !unsafe {
+                GetUserNameExW(
+                    NameSamCompatible,
+                    Some(PWSTR(buffer.as_mut_ptr())),
+                    &mut size,
+                )
+            } {
+                return false;
+            }
+            String::from_utf16_lossy(&buffer[..size as usize])
+        }
+    };
     let (domain, user) = account.split_once('\\').unwrap_or((".", account.as_str()));
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
     let (user, domain, password) = (wide(user), wide(domain), wide(password));
@@ -212,5 +245,16 @@ mod tests {
             "4 wrong in all: one left for this PC"
         );
         assert!(other.check("right", Some("right")));
+    }
+
+    #[test]
+    fn the_sign_in_screen_needs_a_known_owner() {
+        // Set up before owners were noted: nothing opens it.
+        let gate = LockGate {
+            owner: Some(String::new()),
+            ..LockGate::new(true)
+        };
+        assert!(gate.signed_out_mode());
+        assert_eq!(gate.tries_left(), 0);
     }
 }

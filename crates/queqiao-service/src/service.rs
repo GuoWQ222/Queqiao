@@ -244,6 +244,9 @@ struct Pair {
     session: u32,
     /// The agent for the sign-in screen (nobody signed in), not the person's.
     logon: bool,
+    /// Whose session it is: the SID and "DOMAIN\user" of the person signed in (empty for the sign-in screen's).
+    sid: String,
+    account: String,
     /// A job each: every process of a job must be in the job's session, and the agent for the sign-in screen
     /// (session 0) was refused the helper's (the console session's) with "access denied".
     helper_job: Job,
@@ -305,6 +308,12 @@ fn start_pair(
         }
     };
     let logon = logon_identity.is_some();
+    let account = if logon {
+        String::new()
+    } else {
+        launch::user_account(&token).unwrap_or_default()
+    };
+    let owner_sid = if logon { String::new() } else { sid.clone() };
     let (helper_job, agent_job) = (Job::new()?, Job::new()?);
     let (helper_ends, agent_desktop_ends) = queqiao_local::channel()?;
     let system = launch::system_token(session)?;
@@ -397,6 +406,8 @@ fn start_pair(
         id,
         session,
         logon,
+        sid: owner_sid,
+        account,
         helper_job,
         agent_job,
         helper,
@@ -446,13 +457,28 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
                         "the agent for the sign-in screen tried to change its device: ignored",
                     );
                 }
-                ToService::LogonIdentity(identity) => match logon::save(&identity) {
-                    Ok(()) => log::line(&format!(
-                        "session {}: the sign-in screen: device {} kept for it",
-                        current.session, identity.device_id
-                    )),
-                    Err(error) => log::line(&format!("the sign-in screen: not kept: {error}")),
-                },
+                ToService::LogonIdentity(mut identity) => {
+                    let kept_owner = logon::load().map(|kept| kept.owner_sid);
+                    if logon::may_hand_over(kept_owner.as_deref(), &current.sid) {
+                        // Whose it is: from the session it came from, not from what the agent says.
+                        identity.owner_sid = current.sid.clone();
+                        identity.owner_account = current.account.clone();
+                        match logon::save(&identity) {
+                            Ok(()) => log::line(&format!(
+                                "session {}: the sign-in screen: device {} kept for it, for {}",
+                                current.session, identity.device_id, identity.owner_account
+                            )),
+                            Err(error) => {
+                                log::line(&format!("the sign-in screen: not kept: {error}"))
+                            }
+                        }
+                    } else {
+                        log::line(&format!(
+                            "session {}: the sign-in screen stays with the Windows user who set it up: another user's device refused",
+                            current.session
+                        ));
+                    }
+                }
                 // Only the person's own agent asks for updates.
                 ToService::Update { .. } if current.logon => {
                     log::line("the agent for the sign-in screen asked for an update: ignored");
@@ -481,7 +507,14 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
                     let _ = current.to_agent.write(&FromService::Reply(reply).encode());
                 }
                 ToService::ForgetLogon => {
-                    if logon::stored() {
+                    let kept_owner = logon::load().map(|kept| kept.owner_sid);
+                    if logon::stored() && !logon::may_hand_over(kept_owner.as_deref(), &current.sid)
+                    {
+                        log::line(&format!(
+                            "session {}: the sign-in screen stays with the Windows user who set it up: another user cannot take it back",
+                            current.session
+                        ));
+                    } else if logon::stored() {
                         logon::forget();
                         log::line(&format!(
                             "session {}: the sign-in screen: the device was forgotten (the person does not allow it)",
