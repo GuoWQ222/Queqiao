@@ -98,6 +98,10 @@ try {
             try { $client.Connect($Address, 47100); $up = $true } catch { $up = $false } finally { $client.Dispose() }
         } while (-not $up -and (Get-Date) -lt $deadline)
         if (-not $up) { 'RUN_FAIL the server did not start again'; return }
+        # Ten wrong logins at once, against the server just started (nothing counted for this address yet).
+        $burst = @(& (Join-Path $Bin 'examples\account_probe.exe') $listen $pin --burst)
+        $burst
+        if ($burst[-1] -ne 'PROBE_PASS') { $failed += 'probe burst' }
     }
 
     # Crash reports: a crash on purpose must leave a report with what panicked.

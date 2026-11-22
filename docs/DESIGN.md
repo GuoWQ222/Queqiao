@@ -285,6 +285,10 @@ or the Ctrl+Alt+Del screen, and cannot copy files out.
   theirs may change. Every program is linked with `/DEPENDENTLOADFLAG:0x800` (imports from System32 only: a
   WTSAPI32.dll put next to the installer was loaded before), and the installer and the service load DLLs by name
   only from System32 (`SetDefaultDllDirectories`).
+- **Logins.** Each password or saved-login try is counted before it is checked, under one lock, and forgiven after
+  when it was right or no guess: tries at once on many connections count as many (before, all passed the check and
+  were counted after). New accounts per address the same way. User names are one account in any case. Changing the
+  password counts as a try too (a saved login could otherwise guess it without limit).
 
 ## Milestones
 

@@ -63,6 +63,78 @@ struct Failures {
     by_account: HashMap<String, Window>,
 }
 
+impl Failures {
+    /// Counts a try for `address` and `account` before it is checked: Err(minutes until either may try again) when
+    /// one of them has none left (ADDRESS_FAILURES in ADDRESS_WINDOW, ACCOUNT_FAILURES in ACCOUNT_WINDOW).
+    fn begin(
+        &mut self,
+        now: Instant,
+        address: Option<IpAddr>,
+        account: Option<&str>,
+    ) -> Result<(), u64> {
+        if let Some(minutes) = self.wait(now, address, account) {
+            return Err(minutes);
+        }
+        self.count(now, address, account);
+        Ok(())
+    }
+
+    /// Minutes until `address` or `account` may try again, when either has no tries left. Never panics (a panic
+    /// with the lock held would poison it, and every limit would be gone).
+    fn wait(
+        &mut self,
+        now: Instant,
+        address: Option<IpAddr>,
+        account: Option<&str>,
+    ) -> Option<u64> {
+        self.by_address
+            .retain(|_, w| now.saturating_duration_since(w.since) < ADDRESS_WINDOW);
+        self.by_account
+            .retain(|_, w| now.saturating_duration_since(w.since) < ACCOUNT_WINDOW);
+        let wait = |window: Option<&Window>, limit: u32, length: Duration| {
+            let window = window.filter(|w| w.count >= limit)?;
+            let left = length.saturating_sub(now.saturating_duration_since(window.since));
+            Some(left.as_secs().div_ceil(60).max(1))
+        };
+        let by_address =
+            address.and_then(|a| wait(self.by_address.get(&a), ADDRESS_FAILURES, ADDRESS_WINDOW));
+        let by_account =
+            account.and_then(|a| wait(self.by_account.get(a), ACCOUNT_FAILURES, ACCOUNT_WINDOW));
+        by_address.max(by_account)
+    }
+
+    /// One more try for `address` and `account`.
+    fn count(&mut self, now: Instant, address: Option<IpAddr>, account: Option<&str>) {
+        let fresh = || Window {
+            count: 0,
+            since: now,
+        };
+        if let Some(address) = address {
+            self.by_address.entry(address).or_insert_with(fresh).count += 1;
+        }
+        if let Some(account) = account {
+            self.by_account
+                .entry(account.to_string())
+                .or_insert_with(fresh)
+                .count += 1;
+        }
+    }
+
+    /// Takes back a try begin counted: it was `right` (the account starts again), or no guess at all.
+    fn forgive(&mut self, address: Option<IpAddr>, account: Option<&str>, right: bool) {
+        if let Some(window) = address.and_then(|a| self.by_address.get_mut(&a)) {
+            window.count = window.count.saturating_sub(1);
+        }
+        if let Some(account) = account {
+            if right {
+                self.by_account.remove(account);
+            } else if let Some(window) = self.by_account.get_mut(account) {
+                window.count = window.count.saturating_sub(1);
+            }
+        }
+    }
+}
+
 /// Why a login was refused, and whether it counts as a guess.
 struct Refusal {
     message: String,
@@ -226,38 +298,44 @@ impl Hub {
             }
             _ => None,
         };
-        let locked = self.locked(address, account_name.as_deref());
-        // New accounts: at most SIGNUPS_PER_HOUR made from one address.
+        // Each try counts before it is checked, so that tries at once on many connections count as many (the security
+        // review of 2026-11-22: they were all checked, then counted); a right one, or one that was no guess, is
+        // forgiven after. New accounts likewise: at most SIGNUPS_PER_HOUR made from one address.
+        let counted = self.begin_try(address, account_name.as_deref());
         let registering = matches!(first, ClientMessage::Register { .. });
-        let signup_wait = if locked.is_none() && registering {
-            self.signup_wait(address)
-        } else {
-            None
+        let signup = match (&counted, registering) {
+            (Ok(()), true) => Some(self.begin_signup(address)),
+            _ => None,
         };
         // Password hashing takes tens of milliseconds: off the network threads.
         let hub = self.clone();
-        let checked = match (locked, signup_wait) {
-            (Some(minutes), _) => Err(Refusal::from(format!(
+        let checked = match (counted, signup) {
+            (Err(minutes), _) => Err(Refusal::from(format!(
                 "too many failed logins: try again in {minutes} minutes"
             ))),
-            (None, Some(minutes)) => Err(Refusal::from(format!(
-                "too many new accounts from this address: try again in {minutes} minutes"
-            ))),
-            (None, None) => tokio::task::spawn_blocking(move || hub.authenticate(first))
-                .await
-                .map_err(|e| e.to_string())?,
+            (Ok(()), Some(Err(minutes))) => {
+                self.forgive(address, account_name.as_deref(), false);
+                Err(Refusal::from(format!(
+                    "too many new accounts from this address: try again in {minutes} minutes"
+                )))
+            }
+            (Ok(()), _) => {
+                let checked = tokio::task::spawn_blocking(move || hub.authenticate(first))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                match &checked {
+                    Ok(_) => self.forgive(address, account_name.as_deref(), true),
+                    Err(refusal) if !refusal.guess => {
+                        self.forgive(address, account_name.as_deref(), false)
+                    }
+                    Err(_) => {}
+                }
+                if registering && checked.is_err() {
+                    self.cancel_signup(address);
+                }
+                checked
+            }
         };
-        if registering && checked.is_ok() {
-            self.record_signup(address);
-        }
-        if checked.as_ref().is_err_and(|refusal| refusal.guess) {
-            self.record_failure(address, account_name.as_deref());
-        } else if checked.is_ok()
-            && let Some(name) = &account_name
-            && let Ok(mut failures) = self.failures.lock()
-        {
-            failures.by_account.remove(name);
-        }
         let (identity, new_token, new_device) = match checked {
             Ok(result) => result,
             Err(Refusal { message, .. }) => {
@@ -312,7 +390,7 @@ impl Hub {
                 incoming = timeout(IDLE, stream.next()) => match incoming {
                     Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<ClientMessage>(&text) {
                         Ok(ClientMessage::ChangePassword { old_password, new_password }) => {
-                            self.clone().change_password(&identity, old_password, new_password, &sender).await;
+                            self.clone().change_password(&identity, old_password, new_password, &sender, address).await;
                         }
                         Ok(message) => self.handle(&identity, message, &sender, address),
                         Err(error) => {
@@ -664,76 +742,56 @@ impl Hub {
         }
     }
 
-    /// Minutes until `address` or `account` may try again, if either is locked out.
+    /// Minutes until `address` may ask again (wrong help IDs and codes count against it; the codes have their own
+    /// limit as well, HELP_FAILURES).
     fn locked(&self, address: Option<IpAddr>, account: Option<&str>) -> Option<u64> {
-        let failures = self.failures.lock().ok()?;
-        let wait = |window: Option<&Window>, limit: u32, length: Duration| {
-            window
-                .filter(|w| w.count >= limit && w.since.elapsed() < length)
-                .map(|w| (length - w.since.elapsed()).as_secs().div_ceil(60).max(1))
-        };
-        let by_address = address.and_then(|a| {
-            wait(
-                failures.by_address.get(&a),
-                ADDRESS_FAILURES,
-                ADDRESS_WINDOW,
-            )
-        });
-        let by_account = account
-            .and_then(|a| wait(failures.by_account.get(a), ACCOUNT_FAILURES, ACCOUNT_WINDOW));
-        by_address.max(by_account)
+        self.failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wait(Instant::now(), address, account)
     }
 
     fn record_failure(&self, address: Option<IpAddr>, account: Option<&str>) {
-        let Ok(mut failures) = self.failures.lock() else {
-            return;
-        };
-        let count = |window: &mut Window, length: Duration| {
-            if window.since.elapsed() >= length {
-                *window = Window {
-                    count: 0,
-                    since: Instant::now(),
-                };
-            }
-            window.count += 1;
-        };
-        let fresh = || Window {
-            count: 0,
-            since: Instant::now(),
-        };
-        if let Some(address) = address {
-            count(
-                failures.by_address.entry(address).or_insert_with(fresh),
-                ADDRESS_WINDOW,
-            );
-        }
-        if let Some(account) = account {
-            count(
-                failures
-                    .by_account
-                    .entry(account.to_string())
-                    .or_insert_with(fresh),
-                ACCOUNT_WINDOW,
-            );
-        }
-        // Old entries go, so the maps stay small.
-        failures
-            .by_address
-            .retain(|_, w| w.since.elapsed() < ADDRESS_WINDOW);
-        failures
-            .by_account
-            .retain(|_, w| w.since.elapsed() < ACCOUNT_WINDOW);
+        self.failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .count(Instant::now(), address, account);
+    }
+
+    /// Counts a try (a password, or a saved login) for `address` and `account` before it is checked (Failures::begin).
+    fn begin_try(&self, address: Option<IpAddr>, account: Option<&str>) -> Result<(), u64> {
+        self.failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin(Instant::now(), address, account)
+    }
+
+    /// Takes a counted try back: it was right, or no guess (Failures::forgive).
+    fn forgive(&self, address: Option<IpAddr>, account: Option<&str>, right: bool) {
+        self.failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forgive(address, account, right);
     }
 
     /// Checks the current password, sets the new one, revokes every saved login of the account, gives this
     /// connection a new one and closes the account's other connections.
+    /// The current password counts as a try for the account and the address, as a login does (the security review of
+    /// 2026-11-22: a saved login, stolen with one device, could otherwise guess it without limit and take the account).
     async fn change_password(
         self: Arc<Hub>,
         identity: &Identity,
         old_password: String,
         new_password: String,
         sender: &UnboundedSender<Outgoing>,
+        address: Option<IpAddr>,
     ) {
+        let account = identity.user.to_lowercase();
+        if let Err(minutes) = self.begin_try(address, Some(&account)) {
+            let message = format!("too many wrong passwords: try again in {minutes} minutes");
+            let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
+            return;
+        }
         let hub = self.clone();
         let (user_id, user, device_id, role) = (
             identity.user_id,
@@ -748,6 +806,12 @@ impl Hub {
         })
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
+        let wrong = changed
+            .as_ref()
+            .is_err_and(|message| message.contains("current password is wrong"));
+        if !wrong {
+            self.forgive(address, Some(&account), changed.is_ok());
+        }
         match changed {
             Ok(refresh_token) => {
                 let _ = sender.send(Outgoing::Message(ServerMessage::PasswordChanged {
@@ -761,8 +825,9 @@ impl Hub {
                 );
             }
             Err(message) => {
-                if message.contains("current password is wrong") {
-                    self.record_failure(None, Some(&identity.user.to_lowercase()));
+                if wrong {
+                    // As a failed login: slower guessing.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
             }
@@ -805,23 +870,36 @@ impl Hub {
         }
     }
 
-    /// Minutes until `address` may make another account (None: now).
-    fn signup_wait(&self, address: Option<IpAddr>) -> Option<u64> {
-        let address = address?;
-        let mut signups = self.signups.lock().ok()?;
+    /// Takes one of the SIGNUPS_PER_HOUR new accounts `address` may make, before the account is made, so that
+    /// attempts at once (on many connections) count as many: Err(minutes to wait) when none is left.
+    fn begin_signup(&self, address: Option<IpAddr>) -> Result<(), u64> {
+        let Some(address) = address else {
+            return Ok(());
+        };
+        let mut signups = self
+            .signups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let recent = signups.entry(address).or_default();
         recent.retain(|at| at.elapsed() < Duration::from_secs(3600));
         if recent.len() >= SIGNUPS_PER_HOUR {
-            let oldest = recent.iter().min().copied()?;
-            return Some(((3600 - oldest.elapsed().as_secs()) / 60).max(1));
+            let oldest = recent.iter().min().map_or(0, |at| at.elapsed().as_secs());
+            return Err((3600u64.saturating_sub(oldest) / 60).max(1));
         }
-        None
+        recent.push(Instant::now());
+        Ok(())
     }
 
-    /// An account was made from `address` (only made ones count: a refused attempt costs little and makes nothing).
-    fn record_signup(&self, address: Option<IpAddr>) {
-        if let (Some(address), Ok(mut signups)) = (address, self.signups.lock()) {
-            signups.entry(address).or_default().push(Instant::now());
+    /// Gives back what begin_signup took: no account was made (everything is checked before one is).
+    fn cancel_signup(&self, address: Option<IpAddr>) {
+        if let Some(address) = address {
+            let mut signups = self
+                .signups
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(recent) = signups.get_mut(&address) {
+                recent.pop();
+            }
         }
     }
 
@@ -846,8 +924,12 @@ impl Hub {
                         .into(),
                 );
             }
-            // Everything cheap first: nothing is made (and no password hashed) for an attempt that cannot succeed.
+            // Everything first: nothing is made (and no password hashed) for an attempt that cannot succeed, and an
+            // account once made logs in (the security review of 2026-11-22: a bad device id made the account, then
+            // failed, and was not counted as a new account).
             check_new_account(&user, &password)?;
+            check_device_fields(&device_id, &device_name)?;
+            check_device_key(&public_key)?;
             if store.device_owner(&device_id)?.is_some() {
                 return Err("this device belongs to another account: remove it there first (More... in that account's device list)".to_string().into());
             }
@@ -1139,6 +1221,14 @@ fn is_mac(text: &str) -> bool {
             .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
+/// A device's public key as the clients send it: 64 hex digits (Ed25519).
+fn check_device_key(public_key: &str) -> Result<(), String> {
+    if public_key.len() != 64 || !public_key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("bad device key".into());
+    }
+    Ok(())
+}
+
 fn check_device_fields(device_id: &str, device_name: &str) -> Result<(), String> {
     let id_ok = (8..=64).contains(&device_id.len())
         && device_id
@@ -1148,4 +1238,52 @@ fn check_device_fields(device_id: &str, device_name: &str) -> Result<(), String>
         return Err("bad device id or name".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn tries_at_once_count_as_many() {
+        let now = Instant::now();
+        let address: IpAddr = "198.51.100.7".parse().unwrap();
+        // Ten tries for one account at once, as from ten connections: only ACCOUNT_FAILURES are checked.
+        let mut failures = Failures::default();
+        let results: Vec<_> = (0..10)
+            .map(|_| failures.begin(now, Some(address), Some("alice")))
+            .collect();
+        assert_eq!(
+            results.iter().filter(|r| r.is_ok()).count(),
+            ACCOUNT_FAILURES as usize
+        );
+        assert!(results[9].unwrap_err() >= 1);
+        // The right password (one of them): the account starts again.
+        failures.forgive(Some(address), Some("alice"), true);
+        assert!(failures.begin(now, Some(address), Some("alice")).is_ok());
+        // Tries that were no guess are taken back, however many.
+        let other: IpAddr = "203.0.113.9".parse().unwrap();
+        for _ in 0..ADDRESS_FAILURES * 3 {
+            assert!(failures.begin(now, Some(other), None).is_ok());
+            failures.forgive(Some(other), None, false);
+        }
+        // One address, many accounts: ADDRESS_FAILURES at most.
+        let mut failures = Failures::default();
+        let passed = (0..ADDRESS_FAILURES + 5)
+            .filter(|i| {
+                failures
+                    .begin(now, Some(address), Some(&format!("user{i}")))
+                    .is_ok()
+            })
+            .count();
+        assert_eq!(passed, ADDRESS_FAILURES as usize);
+        // At the window's very end and after it: no panic, and tries again.
+        assert!(
+            failures
+                .wait(now + ADDRESS_WINDOW, Some(address), None)
+                .is_none()
+        );
+        let later = now + ADDRESS_WINDOW + Duration::from_secs(1);
+        assert!(failures.begin(later, Some(address), Some("x")).is_ok());
+    }
 }

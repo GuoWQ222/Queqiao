@@ -136,8 +136,56 @@ fn wait_for(
     }
 }
 
+/// Ten wrong passwords at once on ten connections: only 5 reach the password check (until 2026-11-22 all were
+/// checked, and counted after). Run alone (`--burst`) against a server that has counted no failures for this address
+/// yet, or the address's own limit refuses them first. An account name nobody has: it counts all the same.
+fn burst(probe: &mut Probe, server: &str, pin: &str) {
+    let unchecked = std::thread::scope(|scope| {
+        let tries: Vec<_> = (0..10)
+            .map(|i| {
+                scope.spawn(move || {
+                    Account::connect(
+                        &mut login(server, pin),
+                        &device(&format!("burst{i}")),
+                        Role::Viewer,
+                        Some(("burst-target", "guessing")),
+                    )
+                    .err()
+                    .map(|e| e.0)
+                    .unwrap_or_default()
+                })
+            })
+            .collect();
+        tries
+            .into_iter()
+            .map(|t| t.join().unwrap_or_default())
+            .filter(|message| message.contains("too many failed logins"))
+            .count()
+    });
+    probe.check(
+        "ten wrong passwords at once: only 5 are checked",
+        unchecked == 5,
+        format!("{unchecked} of 10 refused before the check"),
+    );
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let [server, pin, mode] = &args[..]
+        && mode == "--burst"
+    {
+        let mut probe = Probe { failed: 0 };
+        burst(&mut probe, server, pin);
+        println!(
+            "{}",
+            if probe.failed == 0 {
+                "PROBE_PASS"
+            } else {
+                "PROBE_FAIL"
+            }
+        );
+        std::process::exit(i32::from(probe.failed > 0));
+    }
     let signup_open = args.last().is_some_and(|last| last == "--signup-open");
     if signup_open {
         args.pop();

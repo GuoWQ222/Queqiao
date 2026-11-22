@@ -47,6 +47,13 @@ impl Store {
                  user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);",
         )
         .map_err(|e| e.to_string())?;
+        // User names are one account whatever their upper and lower case ("Alice" is "alice"): the lockout counts by
+        // the name in lower case, and two accounts differing only in case could clear each other's count (the
+        // security review of 2026-11-22).
+        db.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS users_name_nocase ON users(name COLLATE NOCASE)")
+            .map_err(|e| {
+                format!("{e}: two user names in this database differ only in upper and lower case; rename one first")
+            })?;
         // Databases from before device keys (M3) get the column.
         let has_key: bool = db
             .prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'public_key'")
@@ -94,6 +101,9 @@ impl Store {
         if name.trim().is_empty() || password.len() < 8 {
             return Err("a user name and a password of at least 8 characters are needed".into());
         }
+        if self.user_exists(name)? {
+            return Err("that user name is taken".into());
+        }
         let hash = hash_password(password)?;
         self.db
             .execute(
@@ -118,28 +128,28 @@ impl Store {
 
     pub fn user_exists(&self, name: &str) -> Result<bool, String> {
         self.db
-            .prepare("SELECT 1 FROM users WHERE name = ?1")
+            .prepare("SELECT 1 FROM users WHERE name = ?1 COLLATE NOCASE")
             .and_then(|mut query| query.exists(params![name]))
             .map_err(|e| e.to_string())
     }
 
     /// The user if the password is right.
     pub fn check_password(&self, name: &str, password: &str) -> Result<Option<UserRow>, String> {
-        let row: Option<(i64, String)> = self
+        let row: Option<(i64, String, String)> = self
             .db
             .query_row(
-                "SELECT id, password FROM users WHERE name = ?1",
+                "SELECT id, name, password FROM users WHERE name = ?1 COLLATE NOCASE",
                 params![name],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(|e| e.to_string())?;
         // Hash even for an unknown user, so the answer takes the same time.
-        let (id, stored) = row.unwrap_or((-1, String::new()));
+        let (id, stored_name, stored) = row.unwrap_or((-1, String::new(), String::new()));
         let ok = verify_password(password, &stored);
-        Ok((ok && id >= 0).then(|| UserRow {
+        Ok((ok && id >= 0).then_some(UserRow {
             id,
-            name: name.to_string(),
+            name: stored_name,
         }))
     }
 
@@ -534,6 +544,32 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_names_are_one_whatever_their_case() {
+        let dir = std::env::temp_dir().join(format!("queqiao-store-case-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        store.add_user("alice", "correct horse").unwrap();
+        assert!(store.add_user("Alice", "another horse").is_err());
+        assert!(store.add_user("ALICE", "another horse").is_err());
+        assert!(store.user_exists("ALICE").unwrap());
+        let row = store
+            .check_password("ALICE", "correct horse")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.name, "alice");
+        assert!(
+            store
+                .check_password("Alice", "wrong horse")
+                .unwrap()
+                .is_none()
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn passwords_and_tokens() {
