@@ -496,6 +496,29 @@ impl Presence {
         }
     }
 
+    /// A notification from the tray icon (Windows shows it as a toast): something the person should know.
+    pub fn notify(&mut self, text: &str) {
+        let mut data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.tray,
+            uID: TRAY_ID,
+            uFlags: windows::Win32::UI::Shell::NIF_INFO,
+            dwInfoFlags: windows::Win32::UI::Shell::NIIF_WARNING,
+            ..Default::default()
+        };
+        for (slot, unit) in data
+            .szInfoTitle
+            .iter_mut()
+            .zip(tr("Queqiao").encode_utf16().take(63))
+        {
+            *slot = unit;
+        }
+        for (slot, unit) in data.szInfo.iter_mut().zip(text.encode_utf16().take(255)) {
+            *slot = unit;
+        }
+        let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
+    }
+
     /// The account's name, as the main window shows it.
     pub fn set_user(&mut self, user: &str) {
         self.user = user.to_string();

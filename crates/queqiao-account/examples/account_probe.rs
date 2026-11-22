@@ -610,13 +610,43 @@ fn hardening(probe: &mut Probe, server: &str, pin: &str, users: [(&str, &str); 2
     let notice = wait_for(
         &mut watching,
         wait,
-        |event| matches!(event, AccountEvent::Notice(message) if message.contains("probe-new")),
+        |event| matches!(event, AccountEvent::DeviceJoined(name) if name.contains("probe-new")),
     );
     probe.check(
         "a new device is announced to the account",
         notice.is_some(),
         format!("{notice:?}"),
     );
+    // A known device back with a new key (a password login may do that): announced too. A device of its own, so that
+    // the newcomer's connection (removed below) stays.
+    let keyed = device("keyed");
+    let keyed_account = Account::connect(
+        &mut login(server, pin),
+        &keyed,
+        Role::Viewer,
+        Some((user1, password1)),
+    );
+    let _ = wait_for(&mut watching, wait, |event| {
+        matches!(event, AccountEvent::DeviceJoined(_))
+    });
+    drop(keyed_account);
+    let mut rekeyed = device("rekeyed");
+    rekeyed.id = keyed.id.clone();
+    let rekeyed_account = Account::connect(
+        &mut login(server, pin),
+        &rekeyed,
+        Role::Viewer,
+        Some((user1, password1)),
+    );
+    let changed = wait_for(&mut watching, wait, |event| {
+        matches!(event, AccountEvent::DeviceKeyChanged(_))
+    });
+    probe.check(
+        "a known device with a new key is announced to the account",
+        rekeyed_account.is_ok() && changed.is_some(),
+        format!("{changed:?}"),
+    );
+    drop(rekeyed_account);
     // Removing it disconnects it (telling it why), takes it off the list and ends its saved login.
     match newcomer_account {
         Ok(mut newcomer_account) => {

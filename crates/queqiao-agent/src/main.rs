@@ -1167,7 +1167,28 @@ fn run_account(
                 ui.set_account_state(state);
             }
             Some(AccountEvent::Error(message)) => lines.push(format!("server: {message}")),
-            Some(AccountEvent::Notice(message)) => lines.push(format!("notice: {message}")),
+            Some(AccountEvent::Notice(message)) => {
+                lines.push(format!("notice: {message}"));
+                ui.notify(&message);
+            }
+            // A device joined the account, or one came back with a new key: the person is told (if it was not them,
+            // they change the password and take the device out).
+            Some(AccountEvent::DeviceJoined(name)) => {
+                let text = trf(
+                    "A new device, {name}, logged in to your account. If that was not you, change your password and take it out of the account.",
+                    &[("name", &clean_name(&name))],
+                );
+                lines.push(format!("notification: a new device, {name}"));
+                ui.notify(&text);
+            }
+            Some(AccountEvent::DeviceKeyChanged(name)) => {
+                let text = trf(
+                    "{name} logged in again with a new device key. If that was not you, change your password and take it out of the account.",
+                    &[("name", &clean_name(&name))],
+                );
+                lines.push(format!("notification: {name} has a new key"));
+                ui.notify(&text);
+            }
             Some(AccountEvent::HelpOpen(help_id)) => {
                 lines.push(format!("help: open, help ID {help_id}"));
                 if let Some(path) = &options.help_id_file {

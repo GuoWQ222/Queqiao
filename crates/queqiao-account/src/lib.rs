@@ -30,6 +30,10 @@ pub use queqiao_core::account::{ClientMessage, Device, Role};
 #[derive(Clone, Debug)]
 pub enum AccountEvent {
     Devices(Vec<Device>),
+    /// A device the account had not had logged in to it (its name).
+    DeviceJoined(String),
+    /// A device of the account logged in with a new key (its name).
+    DeviceKeyChanged(String),
     Signal {
         from: String,
         from_name: String,

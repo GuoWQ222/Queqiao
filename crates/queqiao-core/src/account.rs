@@ -145,9 +145,17 @@ pub enum ServerMessage {
         stun: Option<String>,
         turn: Option<TurnAccess>,
     },
-    /// Something the person should know, e.g. a new device logged in to the account.
+    /// Something the person should know.
     Notice {
         message: String,
+    },
+    /// A device the account has not had logged in to it (each device words this in its own language).
+    DeviceJoined {
+        name: String,
+    },
+    /// A device of the account logged in with a new key (its identity changed: a password login may do that).
+    DeviceKeyChanged {
+        name: String,
     },
     /// The password was changed: keep this refresh token (all earlier ones were revoked).
     PasswordChanged {

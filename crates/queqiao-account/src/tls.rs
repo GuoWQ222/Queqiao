@@ -186,6 +186,10 @@ pub(crate) fn run(
                     },
                     Ok(ServerMessage::Error { message }) => AccountEvent::Error(message),
                     Ok(ServerMessage::Notice { message }) => AccountEvent::Notice(message),
+                    Ok(ServerMessage::DeviceJoined { name }) => AccountEvent::DeviceJoined(name),
+                    Ok(ServerMessage::DeviceKeyChanged { name }) => {
+                        AccountEvent::DeviceKeyChanged(name)
+                    }
                     Ok(ServerMessage::PasswordChanged { refresh_token }) => {
                         AccountEvent::PasswordChanged(refresh_token)
                     }

@@ -572,6 +572,14 @@ const CHINESE: &[(&str, &str)] = &[
         "密码错误，还可以再试 {tries} 次。",
     ),
     ("Checking...", "正在验证……"),
+    (
+        "A new device, {name}, logged in to your account. If that was not you, change your password and take it out of the account.",
+        "新设备 {name} 登录了你的账号。如果不是你本人，请修改密码并把它从账号中移除。",
+    ),
+    (
+        "{name} logged in again with a new device key. If that was not you, change your password and take it out of the account.",
+        "{name} 用新的设备密钥重新登录了你的账号。如果不是你本人，请修改密码并把它从账号中移除。",
+    ),
 ];
 
 #[cfg(test)]

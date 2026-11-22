@@ -475,6 +475,8 @@ try {
         $agentText | Where-Object { $_ -match '^(session|ended|RESULT|ERROR)' }
         Get-Content -LiteralPath "$Out\remover.txt" -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -match 'removed|ERROR' }
         if (-not ($agentText | Where-Object { $_ -match '^session 1: viewer m4-removed' })) { $failed += 'removed (no session from the device)' }
+        # The device was new to the account: the agent told the person (a notification from its tray icon).
+        if (-not ($agentText | Where-Object { $_ -eq 'notification: a new device, m4-removed' })) { $failed += 'removed (no notification of the new device)' }
         if (-not ($agentText | Where-Object { $_ -eq "ended: the viewer's device is no longer on this account, or this PC's login ended" })) { $failed += 'removed (the session did not end on the removal)' }
         # Ended soon after the removal, not when the viewer's 60 s were up.
         if (((Get-Date) - $removedAt).TotalSeconds -gt 40) { $failed += 'removed (the session ended late)' }

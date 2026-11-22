@@ -49,6 +49,8 @@ enum Command {
     Transfers(Vec<TransferRow>),
     /// Tests: pictures of the main window's pages into the folder.
     MainPictures(PathBuf, Sender<Result<(), String>>),
+    /// A notification from the tray icon.
+    Notify(String),
 }
 
 /// The privacy screen over all monitors (`area` None), or for tests a square of `color` (0x00BBGGRR).
@@ -227,6 +229,11 @@ impl Ui {
         self.send(Command::Transfers(rows));
     }
 
+    /// A notification from the tray icon (a toast).
+    pub fn notify(&self, text: &str) {
+        self.send(Command::Notify(text.to_string()));
+    }
+
     /// Tests: pictures of the main window's pages (main_devices.bmp ...) into `folder`.
     pub fn save_main_pictures(&self, folder: &Path) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
@@ -366,6 +373,7 @@ fn run(
                 Ok(Command::Devices(devices)) => presence.set_devices(devices),
                 Ok(Command::User(user)) => presence.set_user(&user),
                 Ok(Command::Transfers(rows)) => presence.set_transfers(rows),
+                Ok(Command::Notify(text)) => presence.notify(&text),
                 Ok(Command::MainPictures(folder, reply)) => {
                     let _ = reply.send(
                         presence

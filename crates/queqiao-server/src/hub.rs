@@ -136,6 +136,13 @@ impl Failures {
     }
 }
 
+/// What a login tells the account's other devices.
+enum DeviceNews {
+    Known,
+    New,
+    KeyChanged,
+}
+
 /// Why a login was refused, and whether it counts as a guess.
 struct Refusal {
     message: String,
@@ -524,12 +531,20 @@ impl Hub {
         };
         let _ = sender.send(Outgoing::Message(welcome));
         self.push_devices(identity.user_id);
-        if new_device {
-            let message = format!(
-                "A new device, {}, logged in to your account.",
-                identity.device_name
-            );
-            self.notify_account(identity.user_id, Some(&key), &message);
+        // The account's other devices are told of a new device, or of a known one with a new key.
+        let name = identity.device_name.clone();
+        match new_device {
+            DeviceNews::New => self.notify_account(
+                identity.user_id,
+                Some(&key),
+                ServerMessage::DeviceJoined { name },
+            ),
+            DeviceNews::KeyChanged => self.notify_account(
+                identity.user_id,
+                Some(&key),
+                ServerMessage::DeviceKeyChanged { name },
+            ),
+            DeviceNews::Known => {}
         }
 
         loop {
@@ -1027,14 +1042,11 @@ impl Hub {
     }
 
     /// Tells the account's connections (all but `except`) `message`.
-    fn notify_account(&self, user_id: i64, except: Option<&(String, Role)>, message: &str) {
+    fn notify_account(&self, user_id: i64, except: Option<&(String, Role)>, notice: ServerMessage) {
         if let Ok(online) = self.online.lock() {
             for (key, connection) in online.iter() {
                 if connection.user_id == user_id && Some(key) != except {
-                    let notice = ServerMessage::Notice {
-                        message: message.to_string(),
-                    };
-                    let _ = connection.sender.send(Outgoing::Message(notice));
+                    let _ = connection.sender.send(Outgoing::Message(notice.clone()));
                 }
             }
         }
@@ -1098,7 +1110,7 @@ impl Hub {
     fn authenticate(
         &self,
         first: ClientMessage,
-    ) -> Result<(Identity, Option<String>, bool), Refusal> {
+    ) -> Result<(Identity, Option<String>, DeviceNews), Refusal> {
         let store = self.store.lock().map_err(|e| e.to_string())?;
         if let ClientMessage::Register {
             user,
@@ -1159,8 +1171,19 @@ impl Hub {
                     .check_password(&user, &password)?
                     .ok_or_else(|| guess("wrong user name or password"))?;
                 check_device_fields(&device_id, &device_name)?;
+                // A password login may give a known device a new key: its other devices are told (the security review
+                // of 2026-11-22: it happened silently).
+                let earlier_key = store.public_key(&device_id).unwrap_or_default();
                 let new_device =
                     store.register_device(row.id, &device_id, &device_name, &public_key, true)?;
+                let news = if new_device {
+                    DeviceNews::New
+                } else if !earlier_key.is_empty() && !earlier_key.eq_ignore_ascii_case(&public_key)
+                {
+                    DeviceNews::KeyChanged
+                } else {
+                    DeviceNews::Known
+                };
                 let token = store.issue_refresh_token(row.id, &device_id, role_name(role))?;
                 let identity = Identity {
                     user_id: row.id,
@@ -1169,7 +1192,7 @@ impl Hub {
                     device_name,
                     role,
                 };
-                Ok((identity, Some(token), new_device))
+                Ok((identity, Some(token), news))
             }
             ClientMessage::Resume {
                 refresh_token,
@@ -1184,8 +1207,17 @@ impl Hub {
                         guess("the saved login has expired or was revoked: log in again")
                     })?;
                 check_device_fields(&device_id, &device_name)?;
-                let new_device =
-                    store.register_device(row.id, &device_id, &device_name, &public_key, false)?;
+                let news = if store.register_device(
+                    row.id,
+                    &device_id,
+                    &device_name,
+                    &public_key,
+                    false,
+                )? {
+                    DeviceNews::New
+                } else {
+                    DeviceNews::Known
+                };
                 let identity = Identity {
                     user_id: row.id,
                     user: row.name,
@@ -1193,7 +1225,7 @@ impl Hub {
                     device_name,
                     role,
                 };
-                Ok((identity, None, new_device))
+                Ok((identity, None, news))
             }
             _ => Err("log in first".into()),
         }

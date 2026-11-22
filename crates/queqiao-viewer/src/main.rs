@@ -1134,6 +1134,14 @@ fn device_list(
                     AccountEvent::Error(message) | AccountEvent::Notice(message) => {
                         list.set_status(&message)
                     }
+                    AccountEvent::DeviceJoined(name) => list.set_status(&trf(
+                        "A new device, {name}, logged in to your account. If that was not you, change your password and take it out of the account.",
+                        &[("name", &name)],
+                    )),
+                    AccountEvent::DeviceKeyChanged(name) => list.set_status(&trf(
+                        "{name} logged in again with a new device key. If that was not you, change your password and take it out of the account.",
+                        &[("name", &name)],
+                    )),
                     AccountEvent::Signal { .. }
                     | AccountEvent::IceServers { .. }
                     | AccountEvent::PasswordChanged(_)
