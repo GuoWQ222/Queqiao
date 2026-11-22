@@ -34,6 +34,54 @@ pub(crate) struct MfDecoder {
     packed: Vec<u8>,
 }
 
+/// Decoders registered for `codec` (Store packages like the AV1 Video Extension included), with their names.
+fn decoders(codec: crate::VideoCodec) -> Result<Vec<(IMFActivate, String)>> {
+    let input = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: *crate::mf::subtype(codec),
+    };
+    let flags = MFT_ENUM_FLAG(
+        MFT_ENUM_FLAG_SYNCMFT.0 | MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0,
+    );
+    let mut list: *mut Option<IMFActivate> = null_mut();
+    let mut count = 0;
+    unsafe {
+        MFTEnumEx(
+            MFT_CATEGORY_VIDEO_DECODER,
+            flags,
+            Some(&input),
+            None,
+            &mut list,
+            &mut count,
+        )
+    }
+    .map_err(at("MFTEnumEx"))?;
+    let mut found = Vec::new();
+    if !list.is_null() {
+        let slots = unsafe { std::slice::from_raw_parts_mut(list, count as usize) };
+        for slot in slots.iter_mut() {
+            if let Some(activate) = slot.take() {
+                let name = crate::mf::friendly_name(&activate);
+                found.push((activate, name));
+            }
+        }
+        unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(list as *const _)) };
+    }
+    Ok(found)
+}
+
+/// Whether a decoder for `codec` is registered on this PC.
+pub(crate) fn has_decoder(codec: crate::VideoCodec) -> bool {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+    }
+    decoders(codec).is_ok_and(|list| !list.is_empty())
+}
+
 enum Output {
     Frame(DecodedFrame),
     NeedInput,
@@ -41,17 +89,31 @@ enum Output {
 }
 
 impl MfDecoder {
-    pub(crate) fn open(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self> {
+    pub(crate) fn open(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        codec: crate::VideoCodec,
+    ) -> Result<Self> {
         start_media_foundation(device).map_err(at("Media Foundation"))?;
-        let transform: IMFTransform =
-            unsafe { CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER) }
-                .map_err(at("Windows H.264 decoder"))?;
+        let (transform, name): (IMFTransform, String) = match codec {
+            crate::VideoCodec::H264 => (
+                unsafe { CoCreateInstance(&CLSID_MSH264DecoderMFT, None, CLSCTX_INPROC_SERVER) }
+                    .map_err(at("Windows H.264 decoder"))?,
+                "Windows H.264 decoder (D3D11 video)".into(),
+            ),
+            _ => {
+                let (activate, name) = decoders(codec)?.into_iter().next().ok_or_else(|| {
+                    Error::new(E_FAIL, format!("no {} decoder is registered", codec.name()))
+                })?;
+                (
+                    unsafe { activate.ActivateObject() }.map_err(at("activate"))?,
+                    format!("{name} (D3D11 video)"),
+                )
+            }
+        };
         let attributes = unsafe { transform.GetAttributes() }?;
         if unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.unwrap_or(0) == 0 {
-            return Err(Error::new(
-                E_FAIL,
-                "the Windows H.264 decoder is not D3D11-aware",
-            ));
+            return Err(Error::new(E_FAIL, format!("{name}: not D3D11-aware")));
         }
         let _ = unsafe { attributes.SetUINT32(&MF_LOW_LATENCY, 1) };
         if let Ok(codec) = transform.cast::<ICodecAPI>() {
@@ -73,10 +135,18 @@ impl MfDecoder {
         let input_type = unsafe { MFCreateMediaType() }?;
         unsafe {
             input_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            input_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            input_type.SetGUID(&MF_MT_SUBTYPE, crate::mf::subtype(codec))?;
+            // The AV1 decoder wants a size and frame rate with the type; any will do, the stream's own sequence
+            // header replaces them (a stream change). Windows' H.264 decoder takes the type without them.
+            if codec != crate::VideoCodec::H264 {
+                input_type.SetUINT64(&MF_MT_FRAME_SIZE, (1920u64 << 32) | 1080)?;
+                input_type.SetUINT64(&MF_MT_FRAME_RATE, (60u64 << 32) | 1)?;
+                input_type
+                    .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+            }
             transform
                 .SetInputType(0, &input_type, 0)
-                .map_err(at("H.264 input type"))?;
+                .map_err(at("input type"))?;
         }
         let mut decoder = Self {
             transform,
@@ -89,7 +159,7 @@ impl MfDecoder {
             frame_height: 0,
             provides_samples: false,
             output_size: 0,
-            name: "Windows H.264 decoder (D3D11 video)".into(),
+            name,
             cpu_frames: 0,
             packed: Vec::new(),
         };

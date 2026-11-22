@@ -128,6 +128,32 @@ impl PointerShape {
     }
 }
 
+/// The video codec of a stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VideoCodec {
+    #[default]
+    H264,
+    Av1,
+}
+
+impl VideoCodec {
+    pub fn name(self) -> &'static str {
+        match self {
+            VideoCodec::H264 => "H.264",
+            VideoCodec::Av1 => "AV1",
+        }
+    }
+}
+
+/// The codec the viewer asks for: Automatic (the controlled PC picks), or one of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CodecPreference {
+    #[default]
+    Automatic,
+    H264,
+    Av1,
+}
+
 /// What the viewer can ask the controlled PC to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -158,6 +184,11 @@ pub enum Command {
     MaxBitrate(u32),
     /// End Queqiao on that PC and start it again (through its service).
     RestartQueqiao,
+    /// The picture's codec as the viewer wants it, and whether it can decode AV1 (H.264 it always can).
+    VideoCodec {
+        prefer: CodecPreference,
+        can_decode_av1: bool,
+    },
 }
 
 /// How the bitrate is spent: fewer bits (slow networks), the size-based amount, or twice that (sharp text).
@@ -257,6 +288,18 @@ impl Message {
                     Command::CtrlAltDel => out.push(1),
                     Command::Lock => out.push(2),
                     Command::RestartQueqiao => out.push(13),
+                    Command::VideoCodec {
+                        prefer,
+                        can_decode_av1,
+                    } => out.extend([
+                        14,
+                        match prefer {
+                            CodecPreference::Automatic => 0,
+                            CodecPreference::H264 => 1,
+                            CodecPreference::Av1 => 2,
+                        },
+                        u8::from(can_decode_av1),
+                    ]),
                     Command::Restart => out.push(3),
                     Command::SoundOn => out.push(4),
                     Command::SoundOff => out.push(5),
@@ -376,6 +419,19 @@ impl Message {
                 1 => Command::CtrlAltDel,
                 2 => Command::Lock,
                 13 => Command::RestartQueqiao,
+                14 => Command::VideoCodec {
+                    prefer: match rest.get(1)? {
+                        0 => CodecPreference::Automatic,
+                        1 => CodecPreference::H264,
+                        2 => CodecPreference::Av1,
+                        _ => return None,
+                    },
+                    can_decode_av1: match rest.get(2)? {
+                        0 => false,
+                        1 => true,
+                        _ => return None,
+                    },
+                },
                 3 => Command::Restart,
                 4 => Command::SoundOn,
                 5 => Command::SoundOff,
@@ -549,6 +605,14 @@ mod tests {
             Message::ClipboardText("copied text, ä 中文".into()),
             Message::Command(Command::Lock),
             Message::Command(Command::RestartQueqiao),
+            Message::Command(Command::VideoCodec {
+                prefer: CodecPreference::Av1,
+                can_decode_av1: true,
+            }),
+            Message::Command(Command::VideoCodec {
+                prefer: CodecPreference::Automatic,
+                can_decode_av1: false,
+            }),
             Message::Command(Command::Restart),
             Message::Command(Command::CtrlAltDel),
             Message::Command(Command::SoundOn),

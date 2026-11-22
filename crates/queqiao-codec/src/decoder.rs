@@ -60,11 +60,34 @@ impl H264Decoder {
         context: &ID3D11DeviceContext,
         choice: DecoderChoice,
     ) -> Result<Self> {
+        Self::with_codec(crate::VideoCodec::H264, device, context, choice)
+    }
+
+    /// A decoder for `codec`: H.264 as `new`; AV1 through Windows' AV1 decoder only (no software fallback built in).
+    pub fn with_codec(
+        codec: crate::VideoCodec,
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        choice: DecoderChoice,
+    ) -> Result<Self> {
         let mut skipped = Vec::new();
+        if codec != crate::VideoCodec::H264 {
+            return MfDecoder::open(device, context, codec)
+                .map(|decoder| Self {
+                    backend: Backend::Hardware(Box::new(decoder)),
+                    skipped: Vec::new(),
+                })
+                .map_err(|error| {
+                    Error::new(
+                        E_FAIL,
+                        format!("{} decoding: {}", codec.name(), error.message()),
+                    )
+                });
+        }
         if choice == DecoderChoice::Software {
             skipped.push("GPU decoding: not tried (software forced)".into());
         } else {
-            match MfDecoder::open(device, context) {
+            match MfDecoder::open(device, context, codec) {
                 Ok(decoder) => {
                     return Ok(Self {
                         backend: Backend::Hardware(Box::new(decoder)),

@@ -140,7 +140,9 @@ try {
         @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
         @('allowed', '', "--ask --answer allow --privacy-test --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
         @('declined', '', '--ask --answer deny --seconds 45', 'the person at this PC declined', 'the person at that PC declined', $false),
-        @('ended-here', '', '--end-after 6 --lock-after-session --dry-run-commands', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true)
+        @('ended-here', '', '--end-after 6 --lock-after-session --dry-run-commands', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true),
+        # AV1 asked for: the agent switches to its AV1 encoder, the viewer to Windows' AV1 decoder (needs both).
+        @('av1', '', '', 'command from the viewer: picture: AV1 \(', 'the picture is AV1 now', $true)
     )
     foreach ($run in $runs) {
         $label, $mode, $extra, $agentExpects, $viewerExpects, $bothPass = $run
@@ -154,6 +156,9 @@ try {
         if ($label -eq 'ended-here') { $viewerArgs += " --full-screen --picture 30,sharp --resolution 720 --send-file `"$fileToAgent`" --cancel-test" }
         # A command line on that PC, in a window of its own that closes by itself.
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0 --opacity 60 --boss-key-test' }
+        if ($label -eq 'av1') { $viewerArgs += ' --codec av1' }
+        # H.264 asked for (Automatic picks AV1 where both PCs have it on their GPUs): the H.264 path stays tested.
+        if ($label -eq 'direct') { $viewerArgs += ' --codec h264' }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`" --clipboard-files-test `"$clipFile`"" }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice

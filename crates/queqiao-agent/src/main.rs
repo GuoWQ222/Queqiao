@@ -1275,6 +1275,17 @@ fn ask_consent(ui: &ui::Ui, question: &str, answer: Option<bool>) -> Result<bool
     }
 }
 
+/// The codec "Automatic" picks: AV1 when this PC encodes it on its GPU and the viewer decodes it on its GPU (as
+/// fast as H.264 and fewer bits for the same picture: measured 2026-11-22, 13.8 ms median screen change -> shown
+/// against 14.9 ms), otherwise H.264.
+fn automatic_codec(viewer_av1: bool, agent_av1: bool) -> queqiao_core::protocol::VideoCodec {
+    if viewer_av1 && agent_av1 {
+        queqiao_core::protocol::VideoCodec::Av1
+    } else {
+        queqiao_core::protocol::VideoCodec::H264
+    }
+}
+
 /// The largest pointer shape sent each way (a 128 x 128 colour shape is 64 KB: one data channel message).
 const POINTER_LIMIT: u32 = 128;
 
@@ -1496,6 +1507,7 @@ fn run_command(command: Command, dry_run: bool) -> String {
         | Command::Screen(_)
         | Command::MaxBitrate(_)
         | Command::RestartQueqiao
+        | Command::VideoCodec { .. }
         | Command::Picture { .. } => "changed".into(),
     }
 }
@@ -1519,6 +1531,7 @@ fn open_screen(
     fps: u32,
     fixed_fps: bool,
     limit: Option<(u32, u32)>,
+    codec: queqiao_core::protocol::VideoCodec,
 ) -> Result<OpenedScreen, String> {
     let duplicator = Duplicator::new(index).map_err(describe)?;
     let info = duplicator.info().clone();
@@ -1526,8 +1539,9 @@ fn open_screen(
     let snapshot = duplicator.snapshot_image().map_err(describe)?;
     let latest = upload(&device, &snapshot)?;
     let screen = (snapshot.width, snapshot.height);
-    let encoder = ScreenEncoder::with_limit(&device, &context, screen, fps, fixed_fps, limit)
-        .map_err(|e| format!("encoder: {}", describe(e)))?;
+    let encoder =
+        ScreenEncoder::with_codec(&device, &context, screen, fps, fixed_fps, limit, codec)
+            .map_err(|e| format!("encoder: {}", describe(e)))?;
     let injector = Injector::new(ScreenRect {
         left: info.left,
         top: info.top,
@@ -1810,6 +1824,8 @@ fn session(
     };
     let mut sound_report = Vec::new();
     let mut privacy_check_due = false;
+    // Whether this PC has an AV1 encoder (asked once, when the viewer first says which codec it wants).
+    let mut av1_encoder: Option<bool> = None;
     // That PC's pointer shape as last sent, and how many were sent or left out.
     let mut last_pointer: Option<queqiao_core::protocol::PointerShape> = None;
     let (mut pointer_shapes, mut pointer_skipped) = (0u32, 0u32);
@@ -2103,13 +2119,14 @@ fn session(
                         let limit =
                             (short > 0).then(|| (u32::from(short) * 16 / 9, u32::from(short)));
                         resolution_limit = limit;
-                        let notice = match ScreenEncoder::with_limit(
+                        let notice = match ScreenEncoder::with_codec(
                             &device,
                             &context,
                             screen,
                             fps,
                             options.fps.is_some(),
                             limit,
+                            encoder.codec(),
                         ) {
                             Ok(new) => {
                                 encoder = new;
@@ -2136,6 +2153,79 @@ fn session(
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
                     }
+                    Some(Message::Command(Command::VideoCodec {
+                        prefer,
+                        can_decode_av1,
+                    })) => {
+                        use queqiao_core::protocol::{CodecPreference, VideoCodec};
+                        let can_encode_av1 = *av1_encoder
+                            .get_or_insert_with(|| queqiao_codec::can_encode(VideoCodec::Av1));
+                        let wanted = match prefer {
+                            CodecPreference::Av1 if can_decode_av1 && can_encode_av1 => {
+                                VideoCodec::Av1
+                            }
+                            CodecPreference::Automatic => {
+                                automatic_codec(can_decode_av1, can_encode_av1)
+                            }
+                            _ => VideoCodec::H264,
+                        };
+                        let making = Instant::now();
+                        let mut notice = if wanted == encoder.codec() {
+                            format!("picture: {} ({})", wanted.name(), encoder.encoder().name())
+                        } else {
+                            match ScreenEncoder::with_codec(
+                                &device,
+                                &context,
+                                screen,
+                                fps,
+                                options.fps.is_some(),
+                                resolution_limit,
+                                wanted,
+                            ) {
+                                Ok(new) => {
+                                    encoder = new;
+                                    force_keyframe = true;
+                                    size_bitrate = encoder.config().bitrate;
+                                    max_bitrate = custom_bitrate.unwrap_or(
+                                        ((f64::from(size_bitrate) * quality_factor) as u32)
+                                            .max(MIN_BITRATE),
+                                    );
+                                    peer.set_bitrate_range(
+                                        u64::from(MIN_BITRATE),
+                                        u64::from(max_bitrate),
+                                    );
+                                    let _ = encoder
+                                        .set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
+                                    lines.push(format!(
+                                        "{} ms: the encoder for {} took {} ms to make",
+                                        started.elapsed().as_millis(),
+                                        wanted.name(),
+                                        making.elapsed().as_millis()
+                                    ));
+                                    format!(
+                                        "picture: {} ({})",
+                                        wanted.name(),
+                                        encoder.encoder().name()
+                                    )
+                                }
+                                Err(error) => format!(
+                                    "picture: {} did not start ({}); {} stays",
+                                    wanted.name(),
+                                    describe(error),
+                                    encoder.codec().name()
+                                ),
+                            }
+                        };
+                        if prefer == CodecPreference::Av1 && wanted != VideoCodec::Av1 {
+                            notice.push_str(if can_encode_av1 {
+                                " (AV1 asked for, but the viewer cannot decode it)"
+                            } else {
+                                " (AV1 asked for, but this PC has no AV1 encoder)"
+                            });
+                        }
+                        lines.push(format!("command from the viewer: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
                     Some(Message::Command(Command::Screen(_))) if duplicator.is_none() => {
                         let notice =
                             "the screen can be changed once this PC's own desktop takes input again"
@@ -2153,6 +2243,7 @@ fn session(
                             fps,
                             fixed,
                             resolution_limit,
+                            encoder.codec(),
                         ) {
                             Ok(opened) => (opened, true),
                             Err(error) => {
@@ -2160,8 +2251,18 @@ fn session(
                                     "screen {} cannot be shown: {error}",
                                     usize::from(index) + 1
                                 ));
-                                let back = open_screen(screen_index, fps, fixed, resolution_limit)
-                                    .map_err(|again| format!("the screen before cannot be shown again either: {again}"))?;
+                                let back = open_screen(
+                                    screen_index,
+                                    fps,
+                                    fixed,
+                                    resolution_limit,
+                                    encoder.codec(),
+                                )
+                                .map_err(|again| {
+                                    format!(
+                                        "the screen before cannot be shown again either: {again}"
+                                    )
+                                })?;
                                 (back, false)
                             }
                         };
@@ -2487,7 +2588,7 @@ fn session(
             Some(Err(error)) if needs_restart(&error) => {
                 // The desktop switched (sign-in, lock, Ctrl+Alt+Del or UAC screen) or the display changed.
                 duplicator = None;
-                match open_screen(screen_index, fps, fixed, resolution_limit) {
+                match open_screen(screen_index, fps, fixed, resolution_limit, encoder.codec()) {
                     Ok(opened) => {
                         adopt!(opened);
                         lines.push(format!(
@@ -2540,7 +2641,9 @@ fn session(
                     || gap >= Duration::from_secs(3);
                 if back {
                     last_own_try = Instant::now();
-                    if let Ok(opened) = open_screen(screen_index, fps, fixed, resolution_limit) {
+                    if let Ok(opened) =
+                        open_screen(screen_index, fps, fixed, resolution_limit, encoder.codec())
+                    {
                         link.stop_capture();
                         adopt!(opened);
                         lines.push(format!(
@@ -2622,7 +2725,7 @@ fn session(
                 stats.sent += 1;
                 stats.bytes += frame.data.len();
                 stats.keyframes += u32::from(frame.keyframe);
-                peer.send_video(frame.data, time_90khz);
+                peer.send_video(frame.data, time_90khz, encoder.codec());
                 let origin = if screen_time != 0 {
                     screen_time
                 } else {
@@ -2783,19 +2886,39 @@ fn verify_delta(event: &InputEvent, before: (i32, i32), stats: &mut Stats) {
     }
 }
 
+/// Windows applies injected input asynchronously (SendInput returns before the key state or the pointer has
+/// changed, later still when another program has a low-level hook): a check waits up to this long for it.
+const VERIFY_WAIT: Duration = Duration::from_millis(50);
+
+/// Whether `done` turns true within [`VERIFY_WAIT`].
+fn within_verify_wait(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + VERIFY_WAIT;
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn verify(injector: &Injector, event: &InputEvent, stats: &mut Stats) {
     match *event {
         InputEvent::MouseMove { x, y } => {
             let expected = injector.screen().desktop_point(x, y);
-            let actual = cursor_position();
             stats.moves_checked += 1;
-            if (expected.0 - actual.0).abs() <= 2 && (expected.1 - actual.1).abs() <= 2 {
+            if within_verify_wait(|| {
+                let actual = cursor_position();
+                (expected.0 - actual.0).abs() <= 2 && (expected.1 - actual.1).abs() <= 2
+            }) {
                 stats.moves_ok += 1;
             }
         }
         InputEvent::Key { scancode, down, .. } if scancode == TEST_SCANCODE => {
             stats.keys_checked += 1;
-            if key_is_down(VK_F24) == down {
+            if within_verify_wait(|| key_is_down(VK_F24) == down) {
                 stats.keys_ok += 1;
             }
         }

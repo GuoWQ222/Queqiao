@@ -5,7 +5,7 @@
 //! coloured boxes, moved up a few rows per frame. Each frame is converted to NV12, encoded and decoded; the
 //! decoded luma (Y) is compared with the encoder's input (PSNR).
 //!
-//! Usage: codec_probe [width=1920] [height=1080] [frames=120] [fps=60] [force=STAGE:CHOICE,...]
+//! Usage: codec_probe [width=1920] [height=1080] [frames=120] [fps=60] [codec=h264|av1] [force=STAGE:CHOICE,...]
 //!   force: encode:software|hardware, decode:software|hardware, convert:cpu, adapter:warp
 //! Prints the report; exit code 0 = PASS.
 
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use queqiao_codec::{
     DecodedFrame, DecoderChoice, EncodedFrame, EncoderChoice, EncoderConfig, H264Decoder,
-    H264Encoder, Nv12Converter, nal_types,
+    H264Encoder, Nv12Converter, VideoCodec, nal_types,
 };
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
@@ -58,7 +58,11 @@ fn main() {
     let (width, height) = (number("width", 1920) & !1, number("height", 1080) & !1);
     let (frames, fps) = (number("frames", 120), number("fps", 60).max(1));
     let mut lines = Vec::new();
-    let passed = match run(width, height, frames, fps, &mut lines) {
+    let codec = match options.get("codec").map(String::as_str) {
+        Some("av1") => VideoCodec::Av1,
+        _ => VideoCodec::H264,
+    };
+    let passed = match run(width, height, frames, fps, codec, &mut lines) {
         Ok(passed) => passed,
         Err(error) => {
             lines.push(format!("ERROR {error}"));
@@ -77,8 +81,10 @@ fn run(
     height: u32,
     frames: u32,
     fps: u32,
+    codec: VideoCodec,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
+    lines.push(format!("codec: {}", codec.name()));
     let force = std::env::var("QUEQIAO_FORCE").unwrap_or_default();
     lines.push(format!(
         "forced: {}; {width}x{height}, {frames} frames at {fps} fps",
@@ -98,10 +104,13 @@ fn run(
         .map(|_| converter.create_output(&device))
         .collect::<windows::core::Result<Vec<_>>>()
         .map_err(|e| format!("NV12 textures: {}", describe(e)))?;
-    let config = EncoderConfig::for_screen(width, height, fps);
+    let config = EncoderConfig {
+        codec,
+        ..EncoderConfig::for_screen(width, height, fps)
+    };
     let mut encoder = H264Encoder::new(&device, &context, &config, EncoderChoice::from_env())
         .map_err(|e| format!("encoder: {}", describe(e)))?;
-    let mut decoder = H264Decoder::new(&device, &context, DecoderChoice::from_env())
+    let mut decoder = H264Decoder::with_codec(codec, &device, &context, DecoderChoice::from_env())
         .map_err(|e| format!("decoder: {}", describe(e)))?;
     lines.push(format!("convert: {}", converter.description()));
     lines.push(format!(
@@ -200,6 +209,13 @@ fn run(
     let keeps_up = percentile(&stats.decode_ms, 0.95) < 1000.0 / f64::from(fps);
     lines.push(format!(
         "checks: every frame decoded {all_decoded}, lowest PSNR >= {MIN_PSNR_DB} dB {quality}, p95 decode < frame time {keeps_up}"
+    ));
+    // How long letting the decoder go takes (a viewer switching codecs does it on its window's thread).
+    let dropping = Instant::now();
+    drop(decoder);
+    lines.push(format!(
+        "decoder released in {:.1} ms",
+        dropping.elapsed().as_secs_f64() * 1e3
     ));
     Ok(all_decoded && quality && keeps_up)
 }

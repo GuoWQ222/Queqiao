@@ -22,6 +22,7 @@ use std::sync::{Arc, Once};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use queqiao_core::protocol::VideoCodec;
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::channel::ChannelId;
@@ -71,12 +72,14 @@ pub enum PeerEvent {
     Connected,
     /// The data channel is open: messages can be sent.
     ChannelOpen,
-    /// One whole H.264 frame (Annex B). `contiguous` is false after a loss: a keyframe was requested.
+    /// One whole frame: H.264 (Annex B) or an AV1 temporal unit, as `codec` says. `contiguous` is false after a
+    /// loss: a keyframe was requested.
     Video {
         data: Arc<[u8]>,
         time_90khz: u64,
         contiguous: bool,
         received: Instant,
+        codec: VideoCodec,
     },
     Data(Vec<u8>),
     /// A stream's channel is open (sending on it may start).
@@ -101,12 +104,22 @@ pub enum PeerEvent {
 }
 
 enum Command {
-    Video { data: Vec<u8>, time_90khz: u64 },
-    Audio { data: Vec<u8>, time_48khz: u64 },
+    Video {
+        data: Vec<u8>,
+        time_90khz: u64,
+        codec: VideoCodec,
+    },
+    Audio {
+        data: Vec<u8>,
+        time_48khz: u64,
+    },
     Data(Vec<u8>),
     StreamData(Stream, Vec<u8>),
     RequestKeyframe,
-    BitrateRange { minimum: u64, desired: u64 },
+    BitrateRange {
+        minimum: u64,
+        desired: u64,
+    },
     Close,
 }
 
@@ -246,6 +259,7 @@ impl Peer {
             RtcConfig::new()
                 .clear_codecs()
                 .enable_h264(true)
+                .enable_av1(true)
                 .enable_opus(true, false),
             Bitrate::bps(START_BITRATE),
         )
@@ -359,8 +373,13 @@ impl Peer {
     }
 
     /// Sends one encoded frame (Annex-B H.264). Dropped while not connected yet.
-    pub fn send_video(&self, data: Vec<u8>, time_90khz: u64) {
-        self.command(Command::Video { data, time_90khz });
+    /// Sends one frame of `codec` (both sides offer H.264 and AV1; the viewer says which it can decode).
+    pub fn send_video(&self, data: Vec<u8>, time_90khz: u64, codec: VideoCodec) {
+        self.command(Command::Video {
+            data,
+            time_90khz,
+            codec,
+        });
     }
 
     /// Sends a message on the data channel (kept until the channel is open and has room; in order).
@@ -827,11 +846,16 @@ impl Network {
                 if !data.contiguous {
                     self.ask_keyframe(data.mid);
                 }
+                let codec = match data.params.spec().codec {
+                    str0m::format::Codec::Av1 => VideoCodec::Av1,
+                    _ => VideoCodec::H264,
+                };
                 Some(PeerEvent::Video {
                     data: data.data,
                     time_90khz: data.time.numer(),
                     contiguous: data.contiguous,
                     received: Instant::now(),
+                    codec,
                 })
             }
             Event::ChannelOpen(id, label) => match Stream::from_label(&label) {
@@ -867,7 +891,11 @@ impl Network {
 
     fn apply(&mut self, command: Command) -> Result<bool, Error> {
         match command {
-            Command::Video { data, time_90khz } => {
+            Command::Video {
+                data,
+                time_90khz,
+                codec,
+            } => {
                 let Some(mid) = self.mid else {
                     return Ok(true);
                 };
@@ -875,7 +903,15 @@ impl Network {
                 let Some(writer) = self.rtc.writer(mid) else {
                     return Ok(true);
                 };
-                let Some(pt) = writer.payload_params().next().map(|params| params.pt()) else {
+                let wanted = match codec {
+                    VideoCodec::H264 => str0m::format::Codec::H264,
+                    VideoCodec::Av1 => str0m::format::Codec::Av1,
+                };
+                let Some(pt) = writer
+                    .payload_params()
+                    .find(|params| params.spec().codec == wanted)
+                    .map(|params| params.pt())
+                else {
                     return Ok(true);
                 };
                 let time = MediaTime::from_90khz(time_90khz);

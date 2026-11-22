@@ -56,6 +56,24 @@ const MENU_COMMAND_LINES: u16 = 0x10E0;
 const MENU_ACTUAL_SIZE: u16 = 0x1640;
 const MENU_HOTKEYS: u16 = 0x1650;
 const MENU_POINTER_SHAPE: u16 = 0x1660;
+/// The picture's codec: (menu id, preference, label).
+const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 3] = [
+    (
+        0x16A0,
+        queqiao_core::protocol::CodecPreference::Automatic,
+        "Automatic",
+    ),
+    (
+        0x16B0,
+        queqiao_core::protocol::CodecPreference::H264,
+        "H.264",
+    ),
+    (
+        0x16C0,
+        queqiao_core::protocol::CodecPreference::Av1,
+        "AV1 (both PCs need it)",
+    ),
+];
 /// The game mouse's speed: (menu id, percent, label).
 const MENU_MOUSE_SPEED: [(u16, u32, &str); 3] = [
     (0x1670, 50, "Slow (x0.5)"),
@@ -205,6 +223,8 @@ struct Options {
     signup: bool,
     /// A throwaway device with this name instead of this PC's own (tests); its login is not kept.
     test_device: Option<String>,
+    /// The picture's codec to ask for (as the Picture codec menu does): auto, h264 or av1.
+    codec: Option<queqiao_core::protocol::CodecPreference>,
     /// The session window's opacity in percent (as the Opacity menu sets it).
     opacity: Option<u8>,
     /// Boss key test: Ctrl+Alt+F11 for this run, pressed (as Windows would report it) to hide and show the window.
@@ -405,6 +425,14 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--sound-device" => options.sound_device = Some(args.next()?),
             "--sound-test" => options.sound_test = true,
             "--mute" => options.mute = true,
+            "--codec" => {
+                use queqiao_core::protocol::CodecPreference;
+                options.codec = Some(match args.next()?.as_str() {
+                    "h264" => CodecPreference::H264,
+                    "av1" => CodecPreference::Av1,
+                    _ => CodecPreference::Automatic,
+                });
+            }
             "--full-screen" => options.full_screen = true,
             "--privacy" => options.privacy = true,
             "--terminal-test" => options.terminal_test = true,
@@ -1301,6 +1329,40 @@ fn run_session(
     let mut decoder = H264Decoder::new(device, context, DecoderChoice::from_env())
         .map_err(|e| format!("decoder: {}", describe(e)))?;
     lines.push(format!("decoder: {}", decoder.name()));
+    // The codec the frames come in (the decoder is made anew when it changes), what to ask for, what this PC can
+    // decode, and the frames of each.
+    let mut decoder_codec = queqiao_core::protocol::VideoCodec::H264;
+    let mut codec_choice = options.codec.unwrap_or_default();
+    // AV1 at all (asked for by hand), and on the GPU (what "Automatic" needs: the CPU is too slow for a big screen).
+    let can_decode_av1 = queqiao_codec::can_decode(queqiao_core::protocol::VideoCodec::Av1);
+    let av1_on_gpu = can_decode_av1 && queqiao_codec::av1_decodes_on_gpu(device);
+    let av1_for = |choice: queqiao_core::protocol::CodecPreference| match choice {
+        queqiao_core::protocol::CodecPreference::Automatic => av1_on_gpu,
+        _ => can_decode_av1,
+    };
+    // A decoder for the other codec, made before it is needed: making Windows' AV1 decoder takes a while, and doing
+    // it when the first AV1 frame comes would hold this window (and its keyboard hook) just after the first picture.
+    let mut spare_decoder: Option<(queqiao_core::protocol::VideoCodec, H264Decoder)> = None;
+    if codec_choice != queqiao_core::protocol::CodecPreference::H264 && av1_for(codec_choice) {
+        let making = Instant::now();
+        match H264Decoder::with_codec(
+            queqiao_core::protocol::VideoCodec::Av1,
+            device,
+            context,
+            DecoderChoice::from_env(),
+        ) {
+            Ok(made) => {
+                lines.push(format!(
+                    "decoder for AV1 ready: {} (made in {} ms)",
+                    made.name(),
+                    making.elapsed().as_millis()
+                ));
+                spare_decoder = Some((queqiao_core::protocol::VideoCodec::Av1, made));
+            }
+            Err(error) => lines.push(format!("decoder for AV1: {}", describe(error))),
+        }
+    }
+    let mut frames_by_codec = [0u32; 2];
     lines.extend(peer.candidates().iter().cloned());
     let end = options.seconds.map(|s| started + Duration::from_secs(s));
     let mut stats = Stats::default();
@@ -1438,6 +1500,14 @@ fn run_session(
         .map(|(id, _, text)| (*id, tr(text)))
         .collect();
     window.add_submenu(tr("Game mouse speed"), &speed_items);
+    let codec_items: Vec<(u16, &str)> = MENU_CODEC
+        .iter()
+        .map(|(id, _, text)| (*id, tr(text)))
+        .collect();
+    window.add_submenu(tr("Picture codec"), &codec_items);
+    for (item, choice, _) in MENU_CODEC {
+        window.check_menu_item(item, choice == options.codec.unwrap_or_default());
+    }
     // That PC's pointer shape as this window's cursor (the last one, to show again when turned back on).
     let mut pointer_shape_on = true;
     window.check_menu_item(MENU_POINTER_SHAPE, true);
@@ -1628,6 +1698,16 @@ fn run_session(
                         );
                         window.set_pointer_hidden(pointer_shape_on && pointer_hidden);
                         None
+                    }
+                    id if MENU_CODEC.iter().any(|(item, _, _)| *item == id) => {
+                        codec_choice = MENU_CODEC.iter().find(|(item, _, _)| *item == id).map_or_else(Default::default, |(_, choice, _)| *choice);
+                        for (item, choice, _) in MENU_CODEC {
+                            window.check_menu_item(item, choice == codec_choice);
+                        }
+                        Some(Command::VideoCodec {
+                            prefer: codec_choice,
+                            can_decode_av1: av1_for(codec_choice),
+                        })
                     }
                     id if MENU_MOUSE_SPEED.iter().any(|(item, _, _)| *item == id) => {
                         mouse_speed = MENU_MOUSE_SPEED.iter().find(|(item, _, _)| *item == id).map_or(100, |(_, speed, _)| *speed);
@@ -2045,6 +2125,14 @@ fn run_session(
                     if privacy_on {
                         peer.send_data(Message::Command(Command::PrivacyOn).encode());
                     }
+                    // Which codec to send (and whether this PC can decode AV1).
+                    peer.send_data(
+                        Message::Command(Command::VideoCodec {
+                            prefer: codec_choice,
+                            can_decode_av1: av1_for(codec_choice),
+                        })
+                        .encode(),
+                    );
                     if speakers_muted {
                         peer.send_data(Message::Command(Command::MuteSpeakers(true)).encode());
                     }
@@ -2114,7 +2202,35 @@ fn run_session(
                     time_90khz,
                     contiguous,
                     received,
+                    codec,
                 } => {
+                    // Another codec (the agent switched): a decoder for it.
+                    if codec != decoder_codec {
+                        let ready = spare_decoder.take_if(|(spare, _)| *spare == codec);
+                        let next = match ready {
+                            Some((_, made)) => made,
+                            None => H264Decoder::with_codec(
+                                codec,
+                                device,
+                                context,
+                                DecoderChoice::from_env(),
+                            )
+                            .map_err(|e| {
+                                format!("decoder for {}: {}", codec.name(), describe(e))
+                            })?,
+                        };
+                        // The one in use stays ready, for a switch back.
+                        let previous = std::mem::replace(&mut decoder, next);
+                        spare_decoder = Some((decoder_codec, previous));
+                        decoder_codec = codec;
+                        lines.push(format!(
+                            "decoder: {} (the picture is {} now)",
+                            decoder.name(),
+                            codec.name()
+                        ));
+                    }
+                    frames_by_codec
+                        [usize::from(codec == queqiao_core::protocol::VideoCodec::Av1)] += 1;
                     stats.pickup_ms.push(received.elapsed().as_secs_f64() * 1e3);
                     stats.received += 1;
                     stats.lost += u32::from(!contiguous);
@@ -2123,7 +2239,7 @@ fn run_session(
                     // over the internet it finished connecting seconds before this side, and its first keyframe was
                     // dropped here (2026-11-21: the first picture after 19 s). Ask for one (the transport spaces the
                     // requests 600 ms apart).
-                    if stats.shown == 0 && !queqiao_codec::nal_types(&data).contains(&5) {
+                    if stats.shown == 0 && !queqiao_codec::is_keyframe(codec, &data) {
                         stats.waiting_for_keyframe += 1;
                         peer.request_keyframe();
                     }
@@ -2312,6 +2428,10 @@ fn run_session(
         summary(&mut total)
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
+    lines.push(format!(
+        "frames by codec: H.264 {}, AV1 {} (this PC decodes AV1: {can_decode_av1}, on its GPU: {av1_on_gpu})",
+        frames_by_codec[0], frames_by_codec[1]
+    ));
     lines.push(format!(
         "pointer: {pointer_shapes} shapes from that PC{}",
         last_pointer.as_ref().map_or(String::new(), |shape| format!(
@@ -2951,6 +3071,7 @@ mod tests {
             MENU_POINTER_SHAPE,
         ];
         ids.extend(MENU_MOUSE_SPEED.iter().map(|(id, _, _)| *id));
+        ids.extend(MENU_CODEC.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_FPS.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_QUALITY.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_RESOLUTION.iter().map(|(id, _, _)| *id));

@@ -48,6 +48,27 @@ impl ScreenEncoder {
         fixed_fps: bool,
         limit: Option<(u32, u32)>,
     ) -> Result<Self> {
+        Self::with_codec(
+            device,
+            context,
+            screen,
+            fps,
+            fixed_fps,
+            limit,
+            crate::VideoCodec::H264,
+        )
+    }
+
+    /// As `with_limit`, in `codec` (AV1: the GPU's encoder only, no software fallback).
+    pub fn with_codec(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        screen: (u32, u32),
+        fps: u32,
+        fixed_fps: bool,
+        limit: Option<(u32, u32)>,
+        codec: crate::VideoCodec,
+    ) -> Result<Self> {
         let mut notes = Vec::new();
         let mut choice = EncoderChoice::from_env();
         let mut limit = limit.unwrap_or((u32::MAX, u32::MAX));
@@ -58,7 +79,10 @@ impl ScreenEncoder {
                 if w.max(h) > limit.0 || w.min(h) > limit.1 {
                     continue;
                 }
-                let config = EncoderConfig::for_screen(w, h, fps);
+                let config = EncoderConfig {
+                    codec,
+                    ..EncoderConfig::for_screen(w, h, fps)
+                };
                 match H264Encoder::new(device, context, &config, choice) {
                     Ok(encoder) if encoder.is_hardware() || limit.0 != u32::MAX => {
                         opened = Some((encoder, config));
@@ -94,6 +118,10 @@ impl ScreenEncoder {
             index: 0,
             notes,
         })
+    }
+
+    pub fn codec(&self) -> crate::VideoCodec {
+        self.config.codec
     }
 
     pub fn config(&self) -> &EncoderConfig {

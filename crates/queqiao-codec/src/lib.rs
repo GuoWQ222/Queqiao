@@ -24,6 +24,77 @@ pub use decoder::{DecodedFrame, DecoderChoice, H264Decoder, RING};
 pub use encoder::{EncodedFrame, EncoderChoice, EncoderConfig, H264Encoder, SoftwareTiming};
 pub use screen::{SOFTWARE_START, ScreenEncoder};
 
+/// The video codec of a stream. H.264 everywhere (hardware of any vendor, OpenH264 on the CPU); AV1 where the GPU
+/// has an AV1 encoder (sending) and Windows has an AV1 decoder (receiving: the AV1 Video Extension).
+pub use queqiao_core::protocol::VideoCodec;
+
+/// Whether `data` (one frame as the encoder made it) starts a decodable stream: an H.264 IDR picture, or an AV1
+/// temporal unit with a sequence header (encoders send one with every keyframe).
+pub fn is_keyframe(codec: VideoCodec, data: &[u8]) -> bool {
+    match codec {
+        VideoCodec::H264 => nal_types(data).contains(&5),
+        VideoCodec::Av1 => av1_obu_types(data).contains(&1),
+    }
+}
+
+/// The OBU types in an AV1 temporal unit (low-overhead format: each OBU with its size), in order.
+pub fn av1_obu_types(data: &[u8]) -> Vec<u8> {
+    let mut types = Vec::new();
+    let mut at = 0usize;
+    while at < data.len() {
+        let header = data[at];
+        let kind = (header >> 3) & 0x0F;
+        let extension = header & 0x04 != 0;
+        let has_size = header & 0x02 != 0;
+        types.push(kind);
+        at += 1 + usize::from(extension);
+        if !has_size {
+            break;
+        }
+        // LEB128 size.
+        let mut size = 0usize;
+        for byte in 0..8 {
+            let Some(&value) = data.get(at) else {
+                return types;
+            };
+            at += 1;
+            size |= usize::from(value & 0x7F) << (7 * byte);
+            if value & 0x80 == 0 {
+                break;
+            }
+        }
+        at = at.saturating_add(size);
+    }
+    types
+}
+
+/// Whether this PC can encode `codec` on its GPU (through Media Foundation).
+pub fn can_encode(codec: VideoCodec) -> bool {
+    codec == VideoCodec::H264 || mf::has_hardware_encoder(codec)
+}
+
+/// Whether this PC can decode `codec` (H.264 always: OpenH264 is built in).
+pub fn can_decode(codec: VideoCodec) -> bool {
+    codec == VideoCodec::H264 || mf_decode::has_decoder(codec)
+}
+
+/// Whether `device`'s GPU decodes AV1 itself (Direct3D's AV1 decoder profile): without it Windows' AV1 decoder
+/// works on the CPU, too slow for a large screen at 60 frames per second.
+pub fn av1_decodes_on_gpu(device: &windows::Win32::Graphics::Direct3D11::ID3D11Device) -> bool {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, ID3D11VideoDevice,
+    };
+    use windows::core::Interface;
+    let Ok(video) = device.cast::<ID3D11VideoDevice>() else {
+        return false;
+    };
+    let count = unsafe { video.GetVideoDecoderProfileCount() };
+    (0..count).any(|index| {
+        unsafe { video.GetVideoDecoderProfile(index) }
+            .is_ok_and(|profile| profile == D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0)
+    })
+}
+
 /// Encode sizes to try for a screen, largest first: the screen itself (rounded down to even numbers, as
 /// NV12 needs), then the same picture scaled down to fit common encoder limits (4096, 4K, 1440p, 1080p,
 /// 720p boxes, turned for portrait screens). Never larger than the screen; the aspect ratio is kept.
@@ -74,6 +145,25 @@ pub fn nal_types(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn av1_keyframes_carry_a_sequence_header() {
+        // Temporal delimiter (type 2, size 0), sequence header (type 1, 3 bytes), frame (type 6, 2 bytes).
+        let key = [0x12, 0x00, 0x0A, 0x03, 1, 2, 3, 0x32, 0x02, 9, 9];
+        assert_eq!(av1_obu_types(&key), vec![2, 1, 6]);
+        assert!(is_keyframe(VideoCodec::Av1, &key));
+        // A frame alone (after a temporal delimiter): not a keyframe.
+        let delta = [0x12, 0x00, 0x32, 0x02, 9, 9];
+        assert_eq!(av1_obu_types(&delta), vec![2, 6]);
+        assert!(!is_keyframe(VideoCodec::Av1, &delta));
+        // A size over 127 (two LEB128 bytes), and data cut short: no panic.
+        let mut long = vec![0x32, 0x80, 0x01];
+        long.extend(vec![0u8; 128]);
+        long.extend([0x0A, 0x00]);
+        assert_eq!(av1_obu_types(&long), vec![6, 1]);
+        assert_eq!(av1_obu_types(&[0x32, 0xFF]), vec![6]);
+        assert!(av1_obu_types(&[]).is_empty());
+    }
 
     #[test]
     fn finds_nal_types_after_3_and_4_byte_start_codes() {

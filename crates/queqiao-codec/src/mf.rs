@@ -45,7 +45,7 @@ impl MfEncoder {
             skipped.push(format!("Media Foundation unavailable: {}", error.message()));
             return None;
         }
-        let encoders = match hardware_encoders() {
+        let encoders = match hardware_encoders(config.codec) {
             Ok(encoders) => encoders,
             Err(error) => {
                 skipped.push(format!("hardware encoder list: {}", error.message()));
@@ -53,7 +53,10 @@ impl MfEncoder {
             }
         };
         if encoders.is_empty() {
-            skipped.push("no hardware H.264 encoder is registered".into());
+            skipped.push(format!(
+                "no hardware {} encoder is registered",
+                config.codec.name()
+            ));
         }
         for (activate, name) in encoders {
             match Self::open_one(&activate, name.clone(), device, config) {
@@ -131,13 +134,15 @@ impl MfEncoder {
             }
         }
 
-        let output_type = video_type(&MFVideoFormat_H264, config)?;
+        let output_type = video_type(subtype(config.codec), config)?;
         unsafe {
             output_type.SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate)?;
-            output_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)?;
+            if config.codec == crate::VideoCodec::H264 {
+                output_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)?;
+            }
             transform
                 .SetOutputType(0, &output_type, 0)
-                .map_err(at("H.264 output type"))?;
+                .map_err(at("output type"))?;
         }
         let input_type = video_type(&MFVideoFormat_NV12, config)?;
         unsafe { transform.SetInputType(0, &input_type, 0) }.map_err(at("NV12 input type"))?;
@@ -307,11 +312,28 @@ pub(crate) fn start_media_foundation(device: &ID3D11Device) -> Result<()> {
     Ok(())
 }
 
-/// Hardware H.264 encoders, best first (Media Foundation's own order), with their names.
-fn hardware_encoders() -> Result<Vec<(IMFActivate, String)>> {
+/// Media Foundation's subtype for `codec`.
+pub(crate) fn subtype(codec: crate::VideoCodec) -> &'static GUID {
+    match codec {
+        crate::VideoCodec::H264 => &MFVideoFormat_H264,
+        crate::VideoCodec::Av1 => &MFVideoFormat_AV1,
+    }
+}
+
+/// Whether a hardware encoder for `codec` is registered.
+pub(crate) fn has_hardware_encoder(codec: crate::VideoCodec) -> bool {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+    }
+    hardware_encoders(codec).is_ok_and(|list| !list.is_empty())
+}
+
+/// Hardware encoders for `codec`, best first (Media Foundation's own order), with their names.
+fn hardware_encoders(codec: crate::VideoCodec) -> Result<Vec<(IMFActivate, String)>> {
     let output = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_H264,
+        guidSubtype: *subtype(codec),
     };
     let flags = MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0);
     let mut list: *mut Option<IMFActivate> = null_mut();
@@ -333,7 +355,7 @@ fn hardware_encoders() -> Result<Vec<(IMFActivate, String)>> {
     Ok(found)
 }
 
-fn friendly_name(activate: &IMFActivate) -> String {
+pub(crate) fn friendly_name(activate: &IMFActivate) -> String {
     let mut text = PWSTR::null();
     let mut length = 0;
     let key = &MFT_FRIENDLY_NAME_Attribute;

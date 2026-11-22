@@ -19,6 +19,8 @@ pub struct EncoderConfig {
     pub fps: u32,
     /// Target bitrate in bits per second (constant bitrate).
     pub bitrate: u32,
+    /// H.264 (every encoder), or AV1 (hardware encoders through Media Foundation only).
+    pub codec: crate::VideoCodec,
 }
 
 impl EncoderConfig {
@@ -32,13 +34,14 @@ impl EncoderConfig {
             height,
             fps,
             bitrate: bits.clamp(2e6, 50e6) as u32,
+            codec: crate::VideoCodec::H264,
         }
     }
 }
 
 /// One encoded frame.
 pub struct EncodedFrame {
-    /// Annex-B H.264: NAL units, each after a 00 00 00 01 or 00 00 01 start code.
+    /// Annex-B H.264 (NAL units, each after a 00 00 00 01 or 00 00 01 start code), or an AV1 temporal unit (OBUs).
     pub data: Vec<u8>,
     /// The sample time given to [`H264Encoder::encode`], in 100 ns units.
     pub time: i64,
@@ -102,6 +105,15 @@ impl H264Encoder {
         choice: EncoderChoice,
     ) -> Result<Self> {
         let mut skipped = Vec::new();
+        // AV1: only the GPU's encoder through Media Foundation.
+        if config.codec != crate::VideoCodec::H264 {
+            return MfEncoder::open(device, config, &mut skipped)
+                .map(|encoder| Self {
+                    backend: Backend::Hardware(encoder),
+                    skipped: Vec::new(),
+                })
+                .ok_or_else(|| Error::new(E_FAIL, skipped.join("; ")));
+        }
         if choice == EncoderChoice::Nvenc {
             let encoder = NvencEncoder::open(device, config)?;
             return Ok(Self {
