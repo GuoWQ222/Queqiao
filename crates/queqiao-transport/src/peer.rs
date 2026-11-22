@@ -279,9 +279,9 @@ impl Peer {
             Role::Viewer => {
                 let mut api = rtc.sdp_api();
                 mid = Some(api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None));
-                // The controlled PC's sound (Opus).
+                // The controlled PC's sound (Opus), and this PC's microphone the other way when it is sent.
                 audio_mid =
-                    Some(api.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None));
+                    Some(api.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None));
                 channel = Some(api.add_channel("control".to_string()));
                 // A channel for each stream, so a large transfer never delays input or control.
                 for stream in Stream::ALL {

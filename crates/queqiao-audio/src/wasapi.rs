@@ -6,8 +6,8 @@ use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE,
-    IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, WAVEFORMATEX, eConsole, eRender,
+    EDataFlow, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
+    IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, eCapture, eConsole, eRender,
 };
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
@@ -45,6 +45,7 @@ enum Client {
 pub struct Stream {
     pub name: String,
     id: String,
+    flow: EDataFlow,
     client: IAudioClient,
     service: Client,
     buffer_frames: u32,
@@ -53,15 +54,20 @@ pub struct Stream {
 impl Stream {
     /// What a render device (speakers, headphones) plays.
     pub fn loopback(device: Option<&str>) -> Result<Stream, String> {
-        Stream::open(device, true)
+        Stream::open(device, eRender, true)
     }
 
     pub fn render(device: Option<&str>) -> Result<Stream, String> {
-        Stream::open(device, false)
+        Stream::open(device, eRender, false)
     }
 
-    fn open(device: Option<&str>, loopback: bool) -> Result<Stream, String> {
-        let (device, name) = find_device(device)?;
+    /// What a microphone (a capture device; the default one with None) hears.
+    pub fn microphone(device: Option<&str>) -> Result<Stream, String> {
+        Stream::open(device, eCapture, false)
+    }
+
+    fn open(device: Option<&str>, flow: EDataFlow, loopback: bool) -> Result<Stream, String> {
+        let (device, name) = find_device(flow, device)?;
         let id = device_id(&device);
         let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
             .map_err(|e| format!("{name}: {}", e.message()))?;
@@ -83,7 +89,7 @@ impl Stream {
             .map_err(|e| format!("{name}: {}", e.message()))?;
         let buffer_frames =
             unsafe { client.GetBufferSize() }.map_err(|e| format!("{name}: {}", e.message()))?;
-        let service = if loopback {
+        let service = if loopback || flow == eCapture {
             Client::Capture(
                 unsafe { client.GetService() }.map_err(|e| format!("{name}: {}", e.message()))?,
             )
@@ -96,6 +102,7 @@ impl Stream {
         Ok(Stream {
             name,
             id,
+            flow,
             client,
             service,
             buffer_frames,
@@ -151,11 +158,11 @@ impl Stream {
         unsafe { render.ReleaseBuffer(frames, 0) }.map_err(|e| e.message())
     }
 
-    /// Whether this is still the default render device.
+    /// Whether this is still the default device of its kind (render or capture).
     pub fn is_default(&self) -> bool {
         enumerator()
             .and_then(|enumerator| {
-                unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+                unsafe { enumerator.GetDefaultAudioEndpoint(self.flow, eConsole) }
                     .map_err(|e| e.message())
             })
             .is_ok_and(|device| device_id(&device) == self.id)
@@ -170,7 +177,7 @@ impl Drop for Stream {
 
 /// Mutes or unmutes a render device (the default one with None); returns whether it was muted before.
 pub fn set_mute(device: Option<&str>, mute: bool) -> Result<bool, String> {
-    let (device, name) = find_device(device)?;
+    let (device, name) = find_device(eRender, device)?;
     let volume: IAudioEndpointVolume = unsafe { device.Activate(CLSCTX_ALL, None) }
         .map_err(|e| format!("{name}: {}", e.message()))?;
     let before = unsafe { volume.GetMute() }
@@ -186,12 +193,20 @@ fn enumerator() -> Result<IMMDeviceEnumerator, String> {
 
 /// The names of the active render devices (speakers, headphones, virtual devices).
 pub fn render_devices() -> Vec<String> {
+    devices(eRender)
+}
+
+/// The names of the active capture devices (microphones, virtual microphones).
+pub fn capture_devices() -> Vec<String> {
+    devices(eCapture)
+}
+
+fn devices(flow: EDataFlow) -> Vec<String> {
     let _com = Com::init();
     let Ok(enumerator) = enumerator() else {
         return Vec::new();
     };
-    let Ok(devices) = (unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) })
-    else {
+    let Ok(devices) = (unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }) else {
         return Vec::new();
     };
     let count = unsafe { devices.GetCount() }.unwrap_or(0);
@@ -201,16 +216,22 @@ pub fn render_devices() -> Vec<String> {
         .collect()
 }
 
-/// The render device whose name contains `wanted` (any case), or the default one.
-fn find_device(wanted: Option<&str>) -> Result<(IMMDevice, String), String> {
+/// The device of `flow` (render or capture) whose name contains `wanted` (any case), or the default one.
+fn find_device(flow: EDataFlow, wanted: Option<&str>) -> Result<(IMMDevice, String), String> {
     let enumerator = enumerator()?;
     let Some(wanted) = wanted else {
-        let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
-            .map_err(|e| format!("no speakers or headphones ({})", e.message()))?;
+        let device =
+            unsafe { enumerator.GetDefaultAudioEndpoint(flow, eConsole) }.map_err(|e| {
+                if flow == eCapture {
+                    format!("no microphone ({})", e.message())
+                } else {
+                    format!("no speakers or headphones ({})", e.message())
+                }
+            })?;
         let name = friendly_name(&device);
         return Ok((device, name));
     };
-    let devices = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }
+    let devices = unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }
         .map_err(|e| e.message())?;
     let count = unsafe { devices.GetCount() }.map_err(|e| e.message())?;
     let wanted_lower = wanted.to_lowercase();

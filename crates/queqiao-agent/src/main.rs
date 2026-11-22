@@ -97,6 +97,8 @@ struct Options {
     sound_device: Option<String>,
     /// Play a test tone into the sound device during the session (tests: use a virtual device).
     sound_test: bool,
+    /// Listen to the virtual microphone for the viewer's test tone once its microphone comes (tests).
+    mic_check: bool,
     /// The privacy screen as a small square of a test colour, checked against what capture sees (tests).
     privacy_test: bool,
     /// Take help requests from the start with this code (tests; people use the tray menu).
@@ -152,6 +154,8 @@ struct Stats {
     deltas_ok: u32,
     keys_checked: u32,
     keys_ok: u32,
+    /// Each test key check: down or up, how long the state took (or that it never came).
+    key_notes: Vec<String>,
     agent_ms: Vec<f64>,
 }
 
@@ -229,6 +233,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--dry-run-commands" => options.dry_run_commands = true,
             "--sound-device" => options.sound_device = Some(args.next()?),
             "--sound-test" => options.sound_test = true,
+            "--mic-check" => options.mic_check = true,
             "--privacy-test" => options.privacy_test = true,
             "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
             "--help-id-file" => options.help_id_file = Some(PathBuf::from(args.next()?)),
@@ -1507,6 +1512,7 @@ fn run_command(command: Command, dry_run: bool) -> String {
         | Command::Screen(_)
         | Command::MaxBitrate(_)
         | Command::RestartQueqiao
+        | Command::Microphone(_)
         | Command::VideoCodec { .. }
         | Command::Picture { .. } => "changed".into(),
     }
@@ -1824,6 +1830,11 @@ fn session(
     };
     let mut sound_report = Vec::new();
     let mut privacy_check_due = false;
+    // The viewer's microphone: played into a virtual microphone while it comes; the test listens to that.
+    let mut microphone: Option<(queqiao_audio::Player, queqiao_audio::VirtualMicrophone)> = None;
+    let mut microphone_packets = 0u64;
+    type ToneCheck = std::thread::JoinHandle<Result<(u32, u32), String>>;
+    let mut microphone_check: Option<ToneCheck> = None;
     // Whether this PC has an AV1 encoder (asked once, when the viewer first says which codec it wants).
     let mut av1_encoder: Option<bool> = None;
     // That PC's pointer shape as last sent, and how many were sent or left out.
@@ -2226,6 +2237,43 @@ fn session(
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
                     }
+                    Some(Message::Command(Command::Microphone(on))) if helper => {
+                        let _ = on;
+                        let notice =
+                            "someone helping from another account cannot send a microphone to this PC"
+                                .to_string();
+                        lines.push(format!("command from the helper refused: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::Microphone(on))) => {
+                        let notice = if !on {
+                            microphone = None;
+                            "the microphone from you stopped".to_string()
+                        } else {
+                            match queqiao_audio::virtual_microphone() {
+                                Some(cable) => {
+                                    let player = queqiao_audio::Player::start(Some(cable.speaker.clone()), false);
+                                    // Tests: listen to the virtual microphone for the viewer's test tone.
+                                    if options.mic_check && microphone_check.is_none() {
+                                        let listen_to = cable.microphone.clone();
+                                        microphone_check = Some(std::thread::spawn(move || {
+                                            std::thread::sleep(Duration::from_millis(1500));
+                                            queqiao_audio::listen_for_tone(&listen_to, Duration::from_secs(3))
+                                        }));
+                                    }
+                                    let text = format!(
+                                        "your microphone plays into \"{}\" on that PC; its programs hear it on the microphone \"{}\"",
+                                        cable.speaker, cable.microphone
+                                    );
+                                    microphone = Some((player, cable));
+                                    text
+                                }
+                                None => "that PC has no virtual microphone (VB-CABLE, for example, gives it one)".to_string(),
+                            }
+                        };
+                        lines.push(format!("command from the viewer: microphone: {notice}"));
+                        peer.send_data(Message::Notice(notice).encode());
+                    }
                     Some(Message::Command(Command::Screen(_))) if duplicator.is_none() => {
                         let notice =
                             "the screen can be changed once this PC's own desktop takes input again"
@@ -2462,7 +2510,14 @@ fn session(
                         peer.send_stream(Stream::Files, reply);
                     }
                 }
-                PeerEvent::Video { .. } | PeerEvent::Audio { .. } => {}
+                // The viewer's microphone, into the virtual microphone.
+                PeerEvent::Audio { data, time_48khz } => {
+                    if let Some((player, _)) = &microphone {
+                        player.push(data, time_48khz);
+                        microphone_packets += 1;
+                    }
+                }
+                PeerEvent::Video { .. } => {}
             }
         }
 
@@ -2811,6 +2866,21 @@ fn session(
     }
     drop(terminals);
     sound_report.extend(sound.as_ref().map(sound_line));
+    if microphone.is_some() || microphone_packets > 0 {
+        lines.push(format!(
+            "microphone from the viewer: {microphone_packets} packets played"
+        ));
+    }
+    if let Some(check) = microphone_check.take() {
+        lines.push(match check.join() {
+            Ok(Ok((heard, tone))) => format!(
+                "microphone check: {} (the test tone on the virtual microphone in {tone} of {heard} frames with sound)",
+                if tone >= 50 { "PASS" } else { "FAIL" }
+            ),
+            Ok(Err(error)) => format!("microphone check: FAIL ({error})"),
+            Err(_) => "microphone check: FAIL (its thread failed)".into(),
+        });
+    }
     lines.extend(sound_report);
     if transfers.busy() {
         lines.push("files: a transfer was cut off when the session ended".into());
@@ -2856,6 +2926,7 @@ fn session(
                 String::new()
             }
         ));
+        lines.push(format!("test key checks: {}", stats.key_notes.join(", ")));
     }
     let ended = closed.unwrap_or_else(|| "time is up".into());
     lines.push(format!("ended: {ended}"));
@@ -2918,7 +2989,18 @@ fn verify(injector: &Injector, event: &InputEvent, stats: &mut Stats) {
         }
         InputEvent::Key { scancode, down, .. } if scancode == TEST_SCANCODE => {
             stats.keys_checked += 1;
-            if within_verify_wait(|| key_is_down(VK_F24) == down) {
+            let checking = Instant::now();
+            let ok = within_verify_wait(|| key_is_down(VK_F24) == down);
+            stats.key_notes.push(format!(
+                "{} {}",
+                if down { "down" } else { "up" },
+                if ok {
+                    format!("in {} ms", checking.elapsed().as_millis())
+                } else {
+                    format!("NOT within {} ms", VERIFY_WAIT.as_millis())
+                }
+            ));
+            if ok {
                 stats.keys_ok += 1;
             }
         }

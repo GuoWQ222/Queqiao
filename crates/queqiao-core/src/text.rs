@@ -357,6 +357,7 @@ const CHINESE: &[(&str, &str)] = &[
     ("That PC's pointer shape", "使用对方电脑的指针形状"),
     ("Game mouse speed", "游戏鼠标速度"),
     ("Picture codec", "画面编码"),
+    ("Send my microphone", "发送我的麦克风"),
     ("Automatic", "自动"),
     ("AV1 (both PCs need it)", "AV1（两台电脑都需支持）"),
     ("Slow (x0.5)", "慢（×0.5）"),

@@ -56,6 +56,7 @@ const MENU_COMMAND_LINES: u16 = 0x10E0;
 const MENU_ACTUAL_SIZE: u16 = 0x1640;
 const MENU_HOTKEYS: u16 = 0x1650;
 const MENU_POINTER_SHAPE: u16 = 0x1660;
+const MENU_MICROPHONE: u16 = 0x16D0;
 /// The picture's codec: (menu id, preference, label).
 const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 3] = [
     (
@@ -225,6 +226,8 @@ struct Options {
     test_device: Option<String>,
     /// The picture's codec to ask for (as the Picture codec menu does): auto, h264 or av1.
     codec: Option<queqiao_core::protocol::CodecPreference>,
+    /// Send a test tone as this PC's microphone from the start (tests).
+    mic_test: bool,
     /// The session window's opacity in percent (as the Opacity menu sets it).
     opacity: Option<u8>,
     /// Boss key test: Ctrl+Alt+F11 for this run, pressed (as Windows would report it) to hide and show the window.
@@ -424,6 +427,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
             "--sound-device" => options.sound_device = Some(args.next()?),
             "--sound-test" => options.sound_test = true,
+            "--mic-test" => options.mic_test = true,
             "--mute" => options.mute = true,
             "--codec" => {
                 use queqiao_core::protocol::CodecPreference;
@@ -1494,7 +1498,10 @@ fn run_session(
         (MENU_ACTUAL_SIZE, tr("Actual size (1:1)")),
         (MENU_HOTKEYS, tr("Hotkeys...")),
         (MENU_POINTER_SHAPE, tr("That PC's pointer shape")),
+        (MENU_MICROPHONE, tr("Send my microphone")),
     ]);
+    // This PC's microphone to that PC (off until the person turns it on).
+    let mut microphone: Option<queqiao_audio::Capture> = None;
     let speed_items: Vec<(u16, &str)> = MENU_MOUSE_SPEED
         .iter()
         .map(|(id, _, text)| (*id, tr(text)))
@@ -1686,6 +1693,27 @@ fn run_session(
                     MENU_ACTUAL_SIZE => {
                         window.set_client_size(picture_size.0, picture_size.1);
                         None
+                    }
+                    MENU_MICROPHONE => {
+                        if microphone.take().is_some() {
+                            window.check_menu_item(MENU_MICROPHONE, false);
+                            Some(Command::Microphone(false))
+                        } else {
+                            match peer.audio_sender() {
+                                Ok(sender) => {
+                                    microphone = Some(queqiao_audio::Capture::from_source(
+                                        queqiao_audio::Source::Microphone(None),
+                                        Box::new(move |packet, time| sender.send(packet, time)),
+                                    ));
+                                    window.check_menu_item(MENU_MICROPHONE, true);
+                                    Some(Command::Microphone(true))
+                                }
+                                Err(error) => {
+                                    lines.push(format!("microphone: not sent ({error})"));
+                                    None
+                                }
+                            }
+                        }
                     }
                     MENU_POINTER_SHAPE => {
                         pointer_shape_on = !pointer_shape_on;
@@ -2125,6 +2153,17 @@ fn run_session(
                     if privacy_on {
                         peer.send_data(Message::Command(Command::PrivacyOn).encode());
                     }
+                    // Tests: a test tone as this PC's microphone.
+                    if options.mic_test
+                        && microphone.is_none()
+                        && let Ok(sender) = peer.audio_sender()
+                    {
+                        microphone = Some(queqiao_audio::Capture::from_source(
+                            queqiao_audio::Source::Tone,
+                            Box::new(move |packet, time| sender.send(packet, time)),
+                        ));
+                        peer.send_data(Message::Command(Command::Microphone(true)).encode());
+                    }
                     // Which codec to send (and whether this PC can decode AV1).
                     peer.send_data(
                         Message::Command(Command::VideoCodec {
@@ -2428,6 +2467,13 @@ fn run_session(
         summary(&mut total)
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
+    if let Some(microphone) = &microphone {
+        let sent = microphone.stats();
+        lines.push(format!(
+            "microphone to that PC: {} packets from {}",
+            sent.packets, sent.device
+        ));
+    }
     lines.push(format!(
         "frames by codec: H.264 {}, AV1 {} (this PC decodes AV1: {can_decode_av1}, on its GPU: {av1_on_gpu})",
         frames_by_codec[0], frames_by_codec[1]
@@ -3069,6 +3115,7 @@ mod tests {
             MENU_ACTUAL_SIZE,
             MENU_HOTKEYS,
             MENU_POINTER_SHAPE,
+            MENU_MICROPHONE,
         ];
         ids.extend(MENU_MOUSE_SPEED.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_CODEC.iter().map(|(id, _, _)| *id));

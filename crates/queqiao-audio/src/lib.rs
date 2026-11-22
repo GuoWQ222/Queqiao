@@ -48,10 +48,26 @@ pub struct CaptureStats {
     pub silent: u64,
 }
 
+/// Where captured sound comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// What a render device plays (part of its name; None: the default speakers, followed when that changes).
+    Loopback(Option<String>),
+    /// A microphone (part of its name; None: the default one, followed).
+    Microphone(Option<String>),
+    /// The test tone (TEST_TONE_HZ), for tests.
+    Tone,
+}
+
 impl Capture {
     /// `device`: part of a render device's name, or None for the default speakers or headphones (followed when
     /// the default changes).
     pub fn start(device: Option<String>, send: Box<dyn FnMut(Vec<u8>, u64) + Send>) -> Capture {
+        Self::from_source(Source::Loopback(device), send)
+    }
+
+    /// Sound from `source`, as Opus packets to `send`.
+    pub fn from_source(source: Source, send: Box<dyn FnMut(Vec<u8>, u64) + Send>) -> Capture {
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Mutex::new(CaptureStats::default()));
         let (note_sender, notes) = mpsc::channel();
@@ -59,7 +75,7 @@ impl Capture {
             let (stop, stats) = (stop.clone(), stats.clone());
             std::thread::Builder::new()
                 .name("queqiao-sound-capture".into())
-                .spawn(move || capture_thread(device, send, &stop, &stats, &note_sender))
+                .spawn(move || capture_thread(source, send, &stop, &stats, &note_sender))
                 .ok()
         };
         Capture {
@@ -93,12 +109,16 @@ impl Drop for Capture {
 }
 
 fn capture_thread(
-    device: Option<String>,
+    source: Source,
     mut send: Box<dyn FnMut(Vec<u8>, u64) + Send>,
     stop: &AtomicBool,
     stats: &Mutex<CaptureStats>,
     notes: &Sender<String>,
 ) {
+    let device = match &source {
+        Source::Loopback(device) | Source::Microphone(device) => device.clone(),
+        Source::Tone => None,
+    };
     let _com = wasapi::Com::init();
     let mut encoder = match opus::Encoder::new(BITRATE) {
         Ok(encoder) => encoder,
@@ -112,8 +132,16 @@ fn capture_thread(
     let mut position = 0u64;
     let mut pending: Vec<f32> = Vec::new();
     let mut fresh: Vec<f32> = Vec::new();
+    if source == Source::Tone {
+        tone_source(&mut encoder, &mut send, stop, stats, notes);
+        return;
+    }
     while !stop.load(Ordering::Relaxed) {
-        let stream = match wasapi::Stream::loopback(device.as_deref()) {
+        let opened = match &source {
+            Source::Microphone(_) => wasapi::Stream::microphone(device.as_deref()),
+            _ => wasapi::Stream::loopback(device.as_deref()),
+        };
+        let stream = match opened {
             Ok(stream) => stream,
             Err(error) => {
                 let _ = notes.send(format!("sound: not captured ({error}); trying again"));
@@ -177,6 +205,120 @@ fn capture_thread(
             }
         }
     }
+}
+
+/// The test tone as the sound source: 10 ms frames on the wall clock, encoded and sent.
+fn tone_source(
+    encoder: &mut opus::Encoder,
+    send: &mut Box<dyn FnMut(Vec<u8>, u64) + Send>,
+    stop: &AtomicBool,
+    stats: &Mutex<CaptureStats>,
+    notes: &Sender<String>,
+) {
+    let _ = notes.send(format!("sound from: a {TEST_TONE_HZ} Hz test tone"));
+    if let Ok(mut stats) = stats.lock() {
+        stats.device = "test tone".into();
+    }
+    let step = 2.0 * std::f32::consts::PI * TEST_TONE_HZ / SAMPLE_RATE as f32;
+    let started = Instant::now();
+    let mut position = 0u64;
+    while !stop.load(Ordering::Relaxed) {
+        let due = Duration::from_micros(position * 1_000_000 / u64::from(SAMPLE_RATE));
+        if started.elapsed() < due {
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
+        }
+        let mut frame = Vec::with_capacity(FRAME * CHANNELS);
+        for at in 0..FRAME as u64 {
+            let value = 0.25 * ((position + at) as f32 * step).sin();
+            frame.extend([value; CHANNELS]);
+        }
+        if let Ok(packet) = encoder.encode(&frame) {
+            if let Ok(mut stats) = stats.lock() {
+                stats.packets += 1;
+                stats.bytes += packet.len() as u64;
+            }
+            send(packet, position);
+        }
+        position += FRAME as u64;
+    }
+}
+
+/// A virtual cable on this PC: what is played into `speaker` comes out of `microphone`, which programs can use as
+/// their microphone. VB-Audio's VB-CABLE (its speaker "CABLE Input", or "Speakers (VB-Audio Virtual Cable)" in the
+/// display language, its microphone "CABLE Output"), VoiceMeeter's, or Virtual Audio Cable's. Not Steam Streaming
+/// Microphone: measured 2026-11-22, what is played into its speaker comes out of its microphone at another rate and in
+/// another sample format (a 1 kHz tone as 450 Hz noise), as Steam feeds it its own way. Queqiao never installs one
+/// (VB-CABLE's licence does not allow bundling it): it says where to get one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualMicrophone {
+    pub speaker: String,
+    pub microphone: String,
+}
+
+pub fn virtual_microphone() -> Option<VirtualMicrophone> {
+    pair_virtual_microphone(&wasapi::render_devices(), &wasapi::capture_devices())
+}
+
+fn pair_virtual_microphone(
+    speakers: &[String],
+    microphones: &[String],
+) -> Option<VirtualMicrophone> {
+    let has = |name: &str, part: &str| name.to_lowercase().contains(&part.to_lowercase());
+    // (speaker names, microphone name), first match wins; among speakers, an ordinary one before VB-CABLE's
+    // 16-channel one.
+    let pairs: [(&[&str], &str); 3] = [
+        (&["CABLE Input", "VB-Audio Virtual Cable"], "CABLE Output"),
+        (&["VoiceMeeter Input"], "VoiceMeeter Output"),
+        (&["Virtual Audio Cable"], "Virtual Audio Cable"),
+    ];
+    pairs.iter().find_map(|(speaker_parts, microphone_part)| {
+        let speaker = speakers
+            .iter()
+            .filter(|name| speaker_parts.iter().any(|part| has(name, part)))
+            // "CABLE In 16 Ch" in the device list, "CABLE In 16ch" as an endpoint.
+            .min_by_key(|name| name.to_lowercase().replace(' ', "").contains("16ch"))?;
+        let microphone = microphones.iter().find(|name| has(name, microphone_part))?;
+        Some(VirtualMicrophone {
+            speaker: speaker.clone(),
+            microphone: microphone.clone(),
+        })
+    })
+}
+
+/// What a microphone hears for `duration` (48 kHz, interleaved stereo), for checks.
+pub fn record(microphone: &str, duration: Duration) -> Result<Vec<f32>, String> {
+    let _com = wasapi::Com::init();
+    let stream = wasapi::Stream::microphone(Some(microphone))?;
+    let until = Instant::now() + duration;
+    let (mut all, mut fresh) = (Vec::new(), Vec::new());
+    while Instant::now() < until {
+        stream.read(&mut fresh)?;
+        all.extend_from_slice(&fresh);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(all)
+}
+
+/// Listens to a microphone for `duration`: (10 ms frames with sound, frames that were mostly the test tone).
+pub fn listen_for_tone(microphone: &str, duration: Duration) -> Result<(u32, u32), String> {
+    let _com = wasapi::Com::init();
+    let stream = wasapi::Stream::microphone(Some(microphone))?;
+    let until = Instant::now() + duration;
+    let (mut heard, mut tone) = (0u32, 0u32);
+    let (mut pending, mut fresh) = (Vec::new(), Vec::new());
+    while Instant::now() < until {
+        stream.read(&mut fresh)?;
+        pending.extend_from_slice(&fresh);
+        while pending.len() >= FRAME * CHANNELS {
+            let frame: Vec<f32> = pending.drain(..FRAME * CHANNELS).collect();
+            let (sound, is_tone) = tone_check(&frame);
+            heard += u32::from(sound);
+            tone += u32::from(is_tone);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok((heard, tone))
 }
 
 fn sleep_unless(stop: &AtomicBool, duration: Duration) {
@@ -487,6 +629,47 @@ impl Drop for Tone {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod microphone_tests {
+    use super::*;
+
+    #[test]
+    fn virtual_cables_are_paired_by_their_names() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // As on the test PC (Chinese Windows): Steam's pair, a headset.
+        let speakers = names(&[
+            "\u{626c}\u{58f0}\u{5668} (Steam Streaming Speakers)",
+            "\u{626c}\u{58f0}\u{5668} (Steam Streaming Microphone)",
+            "Headphones (Feaulle SHINE)",
+        ]);
+        let microphones = names(&[
+            "\u{9ea6}\u{514b}\u{98ce} (Steam Streaming Microphone)",
+            "Microphone (Feaulle SHINE)",
+        ]);
+        // Steam's pair is not a cable (it changes the sound): not taken.
+        assert_eq!(pair_virtual_microphone(&speakers, &microphones), None);
+        // VB-CABLE as installed on the test PC (2026-11-22, pack 46): its speaker in the display language and a
+        // 16-channel one; the ordinary one is taken.
+        let mut with_cable = speakers.clone();
+        with_cable.push("CABLE In 16ch (VB-Audio Virtual Cable)".into());
+        with_cable.push("CABLE In 16 Ch (VB-Audio Virtual Cable)".into());
+        with_cable.push("\u{626c}\u{58f0}\u{5668} (VB-Audio Virtual Cable)".into());
+        let mut cable_mics = microphones.clone();
+        cable_mics.push("CABLE Output (VB-Audio Virtual Cable)".into());
+        let found = pair_virtual_microphone(&with_cable, &cable_mics).unwrap();
+        assert!(
+            found.speaker.starts_with('\u{626c}') && found.microphone.starts_with("CABLE Output")
+        );
+        // An older VB-CABLE: "CABLE Input".
+        let older = names(&["CABLE Input (VB-Audio Virtual Cable)"]);
+        let found = pair_virtual_microphone(&older, &cable_mics).unwrap();
+        assert!(found.speaker.starts_with("CABLE Input"));
+        // A speaker without its microphone side: none.
+        let headset = names(&["Microphone (Feaulle SHINE)"]);
+        assert_eq!(pair_virtual_microphone(&with_cable, &headset), None);
     }
 }
 

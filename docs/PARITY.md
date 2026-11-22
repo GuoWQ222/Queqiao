@@ -64,7 +64,7 @@ Status: **done**, **partly**, **planned** (with the milestone), **later** (after
 |---|---|
 | The controlled PC's sound on the controlling PC (Opus, 10 ms packets, follows the default device); turn it off from the session window menu | done (2026-11-21) |
 | Mute the controlled PC's speakers during the session, put back after (its sound still comes to the viewer) | done (2026-11-21, "Mute that PC's speakers" in the session window menu) |
-| The controlling PC's microphone on the controlled PC (virtual microphone) | planned (M6; a virtual audio device needs a driver) |
+| The controlling PC's microphone on the controlled PC (virtual microphone) | done (2026-11-22): "Send my microphone" in the session menu (off until turned on); the viewer's default microphone as Opus on the session's audio channel; the controlled PC plays it into a virtual cable's speaker, and its programs hear it on the cable's microphone. A cable must be installed there (VB-CABLE, VoiceMeeter, Virtual Audio Cable; VB-CABLE's licence does not allow bundling it, so Queqiao says where to get one); Steam Streaming Microphone is not used (measured: it changes the sound). Tested in `run_m4_local.ps1` (av1 session: a test tone as the microphone, heard on VB-CABLE's microphone in 295 of 296 frames) |
 
 ## Files and clipboard
 

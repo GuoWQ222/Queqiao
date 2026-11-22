@@ -184,6 +184,8 @@ pub enum Command {
     MaxBitrate(u32),
     /// End Queqiao on that PC and start it again (through its service).
     RestartQueqiao,
+    /// The viewer's microphone comes (true) or stops: the controlled PC plays it into a virtual microphone.
+    Microphone(bool),
     /// The picture's codec as the viewer wants it, and whether it can decode AV1 (H.264 it always can).
     VideoCodec {
         prefer: CodecPreference,
@@ -288,6 +290,7 @@ impl Message {
                     Command::CtrlAltDel => out.push(1),
                     Command::Lock => out.push(2),
                     Command::RestartQueqiao => out.push(13),
+                    Command::Microphone(on) => out.extend([15, u8::from(on)]),
                     Command::VideoCodec {
                         prefer,
                         can_decode_av1,
@@ -419,6 +422,11 @@ impl Message {
                 1 => Command::CtrlAltDel,
                 2 => Command::Lock,
                 13 => Command::RestartQueqiao,
+                15 => Command::Microphone(match rest.get(1)? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                }),
                 14 => Command::VideoCodec {
                     prefer: match rest.get(1)? {
                         0 => CodecPreference::Automatic,
@@ -605,6 +613,8 @@ mod tests {
             Message::ClipboardText("copied text, ä 中文".into()),
             Message::Command(Command::Lock),
             Message::Command(Command::RestartQueqiao),
+            Message::Command(Command::Microphone(true)),
+            Message::Command(Command::Microphone(false)),
             Message::Command(Command::VideoCodec {
                 prefer: CodecPreference::Av1,
                 can_decode_av1: true,
