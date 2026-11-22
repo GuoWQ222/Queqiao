@@ -78,6 +78,8 @@ pub enum PresenceEvent {
     HelpSomeone { help_id: String, code: String },
     /// The main window: log this PC's Queqiao out of the account.
     LogOut,
+    /// The main window: a new help ID for this PC (the old one stops working).
+    NewHelpId,
     /// The main window: open the folder received files go to.
     OpenReceivedFiles,
     /// The main window: forget the list of transfers.
@@ -593,6 +595,7 @@ impl Presence {
                 }
                 None
             }
+            MainAction::NewHelpId => Some(PresenceEvent::NewHelpId),
             MainAction::OpenReceived => Some(PresenceEvent::OpenReceivedFiles),
             MainAction::ClearTransfers => Some(PresenceEvent::ClearTransfers),
             MainAction::Account => match self.account {

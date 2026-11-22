@@ -410,6 +410,11 @@ impl Account {
         self.send(ClientMessage::CloseHelp);
     }
 
+    /// Agent: a new help ID (the old one stops working at once).
+    pub fn refresh_help_id(&self) {
+        self.send(ClientMessage::RefreshHelpId);
+    }
+
     /// Agent: the person's answer to `AccountEvent::HelpAsked`.
     pub fn answer_help(&self, request: u64, allow: bool) {
         self.send(ClientMessage::HelpAnswer { request, allow });

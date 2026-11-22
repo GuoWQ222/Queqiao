@@ -91,6 +91,7 @@ const ID_HELP_ID: u16 = 320;
 const ID_HELP_CODE: u16 = 321;
 const ID_HELP_GO: u16 = 322;
 const ID_HELP_COPY: u16 = 323;
+const ID_NEW_HELP_ID: u16 = 324;
 const ID_TRANSFERS: u16 = 330;
 const ID_OPEN_RECEIVED: u16 = 331;
 const ID_CLEAR_TRANSFERS: u16 = 332;
@@ -189,6 +190,8 @@ pub(crate) enum MainAction {
         code: String,
     },
     CopyInvitation,
+    /// A new help ID (the old one stops working).
+    NewHelpId,
     OpenReceived,
     ClearTransfers,
     /// The account line: log in (or out).
@@ -430,6 +433,7 @@ impl MainWindow {
         for (index, (text, id)) in [
             (tr("Copy invitation"), ID_HELP_COPY),
             (tr("New code"), crate::presence::ID_NEW_CODE),
+            (tr("New help ID"), ID_NEW_HELP_ID),
             (tr("Stop"), crate::presence::ID_HELP_CLOSE),
         ]
         .into_iter()
@@ -828,6 +832,7 @@ impl MainWindow {
                 None
             }
             ID_HELP_COPY => Some(MainAction::CopyInvitation),
+            ID_NEW_HELP_ID => Some(MainAction::NewHelpId),
             ID_OPEN_RECEIVED => Some(MainAction::OpenReceived),
             ID_CLEAR_TRANSFERS => Some(MainAction::ClearTransfers),
             other => Some(MainAction::Choose(other)),

@@ -90,6 +90,9 @@ pub enum ClientMessage {
     OpenHelp { code: String },
     /// Agent: no more help requests.
     CloseHelp,
+    /// Agent: a new help ID for this device (the old one stops working at once). While help is open, answered by
+    /// `HelpOpen` with the new ID.
+    RefreshHelpId,
     /// Viewer: help the device with this help ID, with the code its person read out (empty: ask the person to
     /// allow it). Answered by `HelpGranted` (the device to start a session with) or an error.
     RequestHelp { help_id: String, code: String },

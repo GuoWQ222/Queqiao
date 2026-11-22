@@ -369,6 +369,14 @@ impl Store {
         Err("no free help ID".into())
     }
 
+    /// A new help ID for the device: the old one is given up (it no longer finds the device) and a new one made.
+    pub fn new_help_id(&self, device_id: &str) -> Result<String, String> {
+        self.db
+            .execute("UPDATE devices SET help_id = '' WHERE id = ?1", [device_id])
+            .map_err(|e| e.to_string())?;
+        self.help_id(device_id)
+    }
+
     /// (device id, user id, name, public key) of the device with this help ID.
     pub fn device_by_help_id(
         &self,

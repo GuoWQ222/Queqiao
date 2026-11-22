@@ -1286,4 +1286,38 @@ fn help_ask(probe: &mut Probe, server: &str, pin: &str, users: [(&str, &str); 2]
         matches!(declined, Err(ref e) if e.0.contains("declined")),
         format!("{declined:?}"),
     );
+    // Right after a no, not again (as UU: "too frequent, please wait"): refused before the person is asked.
+    open(&mut helped, "ASKCODE4");
+    let again = helper.request_help(&help_id, "");
+    probe.check(
+        "asking again right after a no: too many requests",
+        matches!(again, Err(ref e) if e.0.contains("too many requests")),
+        format!("{again:?}"),
+    );
+    // A new help ID: shown at once while help is open; the old one no longer finds the PC.
+    helped.refresh_help_id();
+    let renewed = match wait_for(&mut helped, wait, |e| {
+        matches!(e, AccountEvent::HelpOpen(_))
+    }) {
+        Some(AccountEvent::HelpOpen(id)) => id,
+        _ => String::new(),
+    };
+    let old = helper.request_help(&help_id, "ASKCODE4");
+    probe.check(
+        "a new help ID: the old one no longer works",
+        !renewed.is_empty()
+            && renewed != help_id
+            && matches!(old, Err(ref e) if e.0.contains("wrong help ID or code")),
+        format!("new {renewed}, old {help_id}: {old:?}"),
+    );
+    // Names with a line break or a direction mark are refused (they could hide what a prompt says after them).
+    let mut odd = device("odd-name");
+    odd.name = "Anna\u{202E}gnp.exe".into();
+    let mut saved = login(server, pin);
+    let refused = Account::connect(&mut saved, &odd, Role::Viewer, Some((user1, password1)));
+    probe.check(
+        "a device name with a direction mark is refused",
+        matches!(refused, Err(ref e) if e.0.contains("bad device id or name")),
+        refused.err().map_or("accepted".into(), |e| e.0),
+    );
 }

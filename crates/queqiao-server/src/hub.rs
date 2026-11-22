@@ -2,7 +2,7 @@
 //! or viewer of a device) gets a channel; the hub forwards signals between the programs of one account only
 //! and pushes the account's device list whenever a program connects or leaves.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -195,6 +195,14 @@ enum Outgoing {
     Kick,
 }
 
+/// How long a help grant lets the helper start a session (the security review of 2026-11-22: grants stayed).
+const GRANT_LIFETIME: Duration = Duration::from_secs(300);
+/// After a no, the same viewer may ask that PC again only after this.
+const ASK_AFTER_NO: Duration = Duration::from_secs(30);
+/// Requests without a code: at most ASKS_PER_WINDOW to one PC in ASK_WINDOW.
+const ASKS_PER_WINDOW: usize = 6;
+const ASK_WINDOW: Duration = Duration::from_secs(600);
+
 /// Most bytes waiting to go out to one connection: one that does not read them is closed, not given more memory (the
 /// security review of 2026-11-22: everything sent to a device that had stopped reading was kept, without limit).
 const MAX_QUEUED: usize = 4 << 20;
@@ -322,7 +330,11 @@ pub struct Hub {
     help: Mutex<HashMap<String, HelpOffer>>,
     /// (viewer device, agent device) of different accounts that may signal each other: the viewer gave the
     /// agent's help code. Ends when the agent closes help or leaves.
-    grants: Mutex<HashSet<(String, String)>>,
+    /// (viewer, agent) pairs a help code or an allowed ask let in, with when: for GRANT_LIFETIME.
+    grants: Mutex<HashMap<(String, String), Instant>>,
+    /// Requests without a code per agent (when, which viewer), and the declined ones (viewer, agent): when.
+    ask_log: Mutex<HashMap<String, Vec<(Instant, String)>>>,
+    declined: Mutex<HashMap<(String, String), Instant>>,
     /// Asks without a code, by agent device: one at a time each.
     asks: Mutex<HashMap<String, PendingAsk>>,
 }
@@ -348,7 +360,9 @@ impl Hub {
             online: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             help: Mutex::new(HashMap::new()),
-            grants: Mutex::new(HashSet::new()),
+            grants: Mutex::new(HashMap::new()),
+            ask_log: Mutex::new(HashMap::new()),
+            declined: Mutex::new(HashMap::new()),
             asks: Mutex::new(HashMap::new()),
         })
     }
@@ -641,7 +655,7 @@ impl Hub {
                 .send(Outgoing::Message(ServerMessage::Error { message }));
         }
         if let Ok(mut grants) = self.grants.lock() {
-            grants.retain(|(_, agent)| agent != device_id);
+            grants.retain(|(_, agent), _| agent != device_id);
         }
     }
 
@@ -658,6 +672,14 @@ impl Hub {
             return;
         };
         if !allow {
+            // The same viewer may ask again only after ASK_AFTER_NO (as UU: "too frequent, please wait").
+            if let Ok(mut declined) = self.declined.lock() {
+                declined.retain(|_, at| at.elapsed() < ASK_AFTER_NO);
+                declined.insert(
+                    (ask.viewer_device.clone(), identity.device_id.clone()),
+                    Instant::now(),
+                );
+            }
             let message = "the person at that PC declined".into();
             let _ = ask
                 .viewer_sender
@@ -668,7 +690,11 @@ impl Hub {
             help.remove(&identity.device_id);
         }
         if let Ok(mut grants) = self.grants.lock() {
-            grants.insert((ask.viewer_device.clone(), identity.device_id.clone()));
+            grants.retain(|_, at| at.elapsed() < GRANT_LIFETIME);
+            grants.insert(
+                (ask.viewer_device.clone(), identity.device_id.clone()),
+                Instant::now(),
+            );
         }
         let (viewer_key, agent_key) = self
             .store
@@ -710,11 +736,15 @@ impl Hub {
             }));
     }
 
-    /// Whether `from` may signal `to` across accounts (a help grant in either direction).
+    /// Whether `from` may signal `to` across accounts (a help grant in either direction, for GRANT_LIFETIME: it no
+    /// longer stays until the agent goes or closes help, as the security review of 2026-11-22 found).
     fn granted(&self, from: &str, to: &str) -> bool {
         self.grants.lock().is_ok_and(|grants| {
-            grants.contains(&(from.to_string(), to.to_string()))
-                || grants.contains(&(to.to_string(), from.to_string()))
+            [(from, to), (to, from)].iter().any(|(a, b)| {
+                grants
+                    .get(&(a.to_string(), b.to_string()))
+                    .is_some_and(|at| at.elapsed() < GRANT_LIFETIME)
+            })
         })
     }
 
@@ -772,6 +802,25 @@ impl Hub {
             };
             if asks.contains_key(&agent_id) {
                 return refuse("that PC is answering another request: try again in a minute");
+            }
+            // Not again and again (as UU: "too frequent, please wait"): after a no, the same viewer waits ASK_AFTER_NO;
+            // a PC is asked ASKS_PER_WINDOW times in ASK_WINDOW at most.
+            let declined_lately = self.declined.lock().is_ok_and(|declined| {
+                declined
+                    .get(&(identity.device_id.clone(), agent_id.clone()))
+                    .is_some_and(|at| at.elapsed() < ASK_AFTER_NO)
+            });
+            let crowded = self.ask_log.lock().is_ok_and(|mut log| {
+                let recent = log.entry(agent_id.clone()).or_default();
+                recent.retain(|(at, _)| at.elapsed() < ASK_WINDOW);
+                let full = recent.len() >= ASKS_PER_WINDOW;
+                if !full && !declined_lately {
+                    recent.push((Instant::now(), identity.device_id.clone()));
+                }
+                full
+            });
+            if declined_lately || crowded {
+                return refuse("too many requests: please wait a moment, then ask again");
             }
             let request = self.next_id.fetch_add(1, Ordering::Relaxed);
             let viewer_key = self
@@ -837,7 +886,11 @@ impl Hub {
         match verdict {
             Ok(()) => {
                 if let Ok(mut grants) = self.grants.lock() {
-                    grants.insert((identity.device_id.clone(), agent_id.clone()));
+                    grants.retain(|_, at| at.elapsed() < GRANT_LIFETIME);
+                    grants.insert(
+                        (identity.device_id.clone(), agent_id.clone()),
+                        Instant::now(),
+                    );
                 }
                 let viewer_key = self
                     .store
@@ -1260,6 +1313,34 @@ impl Hub {
                 }
             }
             ClientMessage::CloseHelp => self.close_help(&identity.device_id),
+            ClientMessage::RefreshHelpId => {
+                // Only an agent has a help ID.
+                if identity.role != Role::Agent {
+                    return;
+                }
+                let renewed = self
+                    .store
+                    .lock()
+                    .ok()
+                    .map(|store| store.new_help_id(&identity.device_id));
+                match renewed {
+                    Some(Ok(help_id)) => {
+                        // While help is open the agent shows the new ID at once; otherwise the next opening does.
+                        let open = self
+                            .help
+                            .lock()
+                            .is_ok_and(|help| help.contains_key(&identity.device_id));
+                        if open {
+                            let _ =
+                                sender.send(Outgoing::Message(ServerMessage::HelpOpen { help_id }));
+                        }
+                    }
+                    _ => {
+                        let message = "no new help ID for this device".into();
+                        let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
+                    }
+                }
+            }
             ClientMessage::HelpAnswer { request, allow } => {
                 self.answer_help(identity, request, allow)
             }
@@ -1368,7 +1449,20 @@ fn check_device_key(public_key: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Characters that change the direction of text (a right-to-left mark and the like): never in a name.
+fn direction_mark(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
 fn check_device_fields(device_id: &str, device_name: &str) -> Result<(), String> {
+    // Names are shown in prompts and banners: no line breaks or direction marks that could hide what follows (the
+    // security review of 2026-11-22).
+    if device_name
+        .chars()
+        .any(|c| c.is_control() || direction_mark(c))
+    {
+        return Err("bad device id or name".into());
+    }
     let id_ok = (8..=64).contains(&device_id.len())
         && device_id
             .chars()

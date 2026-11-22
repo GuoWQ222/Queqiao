@@ -553,6 +553,7 @@ const CHINESE: &[(&str, &str)] = &[
         "The person at that PC answers this screen (sign-in, UAC or Ctrl+Alt+Del) themselves: someone helping cannot operate it.",
         "这个界面（登录、UAC 或 Ctrl+Alt+Del）由那台电脑前的人自己操作，帮助者无法操作。",
     ),
+    ("New help ID", "换一个帮助 ID"),
 ];
 
 #[cfg(test)]

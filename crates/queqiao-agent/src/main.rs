@@ -810,6 +810,13 @@ fn run_account(
                     queqiao_files::history::clear();
                     ui.set_transfers(Vec::new());
                 }
+                PresenceEvent::NewHelpId => match account.as_ref() {
+                    Some(online) => {
+                        online.refresh_help_id();
+                        lines.push("help: a new help ID asked for".into());
+                    }
+                    None => lines.push("help: a new help ID needs the server".into()),
+                },
                 PresenceEvent::SetHelpMode(mode) => {
                     settings.set_help_mode(mode);
                     let _ = settings.save();
