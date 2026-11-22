@@ -35,9 +35,7 @@ use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{Command, InputEvent, Message};
 use queqiao_core::text::trf;
-use queqiao_display::{
-    AccountState, LoginAction, LoginFields, LoginForm, PresenceEvent, normalize_code,
-};
+use queqiao_display::{AccountState, LoginAction, LoginFields, LoginForm, PresenceEvent};
 use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{
@@ -162,18 +160,27 @@ struct Stats {
 fn main() {
     queqiao_core::platform::install_crash_log("queqiao-agent");
     // Tests: a crash on purpose, to see the report written.
+    #[cfg(feature = "test-switches")]
     if std::env::args().any(|arg| arg == "--crash-test") {
         panic!("crash test (asked for with --crash-test)");
     }
     let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
     let Some(options) = parse(std::env::args().skip(1)) else {
         println!("{banner}");
-        println!(
-            "usage: queqiao-agent [--server <host:port> --pin <fingerprint> --user <name> --password <password>] [--sessions N]"
-        );
-        println!("       queqiao-agent --connect <viewer-ip:port> | --listen <ip:port>");
-        println!("       common: [--seconds N] [--fps N] [--report <file>] [--verify-input]");
-        return;
+        if cfg!(feature = "test-switches") {
+            println!(
+                "usage: queqiao-agent [--server <host:port> --pin <fingerprint> --user <name> --password <password>] [--sessions N]"
+            );
+            println!("       queqiao-agent --connect <viewer-ip:port> | --listen <ip:port>");
+            println!("       common: [--seconds N] [--fps N] [--report <file>] [--verify-input]");
+        } else {
+            println!(
+                "usage: queqiao-agent (started at sign-in, or by the Queqiao service; it takes no options)"
+            );
+        }
+        // --version is answered by the banner; any other option is refused.
+        let asked_version = std::env::args().nth(1).as_deref() == Some("--version");
+        std::process::exit(if asked_version { 0 } else { 2 });
     };
     let mut lines = vec![banner];
     let mut not_logged_in = false;
@@ -208,49 +215,74 @@ fn main() {
     std::process::exit(code);
 }
 
+/// The command line. A shipping build reads only what the Queqiao service passes (`--service-channel`,
+/// `--desktop-channel`, `--logon`) and `--force`, which only chooses among the media paths. Every other option is
+/// for the tests and exists only in builds with the `test-switches` feature (`cargo build-test`): found by the
+/// security review of 2026-11-22, a program running as the person could otherwise start the signed agent as a
+/// remote-control tool of its own (`--connect` without any account, `--answer allow`, another account's login).
 fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
     let mut options = Options::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--connect" => options.connect = args.next(),
-            "--listen" => options.listen = args.next(),
-            "--server" => options.server = args.next(),
-            "--pin" => options.pin = args.next(),
-            "--user" => options.user = args.next(),
-            "--password" => options.password = args.next(),
-            "--sessions" => options.sessions = args.next().and_then(|v| v.parse().ok()),
-            "--seconds" => options.seconds = args.next().and_then(|v| v.parse().ok()),
-            "--fps" => options.fps = args.next().and_then(|v| v.parse().ok()),
-            "--report" => options.report = args.next().map(PathBuf::from),
-            "--verify-input" => options.verify_input = true,
-            "--trust-new-key" => options.trust_new_key = args.next(),
-            "--ask" => options.ask = true,
-            "--answer" => options.answer = Some(args.next()? == "allow"),
-            "--end-after" => options.end_after = args.next().and_then(|v| v.parse().ok()),
-            "--ui-pictures" => options.ui_pictures = args.next().map(PathBuf::from),
-            "--clipboard-test" => options.clipboard_test = true,
-            "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
-            "--dry-run-commands" => options.dry_run_commands = true,
-            "--sound-device" => options.sound_device = Some(args.next()?),
-            "--sound-test" => options.sound_test = true,
-            "--mic-check" => options.mic_check = true,
-            "--privacy-test" => options.privacy_test = true,
-            "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
-            "--help-id-file" => options.help_id_file = Some(PathBuf::from(args.next()?)),
-            "--fixed-help-code" => options.fixed_help_code = Some(normalize_code(&args.next()?)),
-            "--wol-check" => options.wol_check = true,
-            "--test-device" => options.test_device = Some(args.next()?),
-            "--lock-after-session" => options.lock_after_session = true,
-            "--test-press-setting" => options.test_press_setting = true,
-            "--test-tray-login" => options.test_tray_login = true,
             "--service-channel" => options.service_channel = Some(args.next()?),
             "--logon" => options.logon = true,
             "--desktop-channel" => options.desktop_channel = Some(args.next()?),
             "--force" => queqiao_core::set_forced(&args.next()?),
-            _ => return None,
+            _ => {
+                #[cfg(feature = "test-switches")]
+                if test_switch(&mut options, &arg, &mut args)? {
+                    continue;
+                }
+                return None;
+            }
         }
     }
     Some(options)
+}
+
+/// The options for the tests (builds with the `test-switches` feature only): whether `arg` is one.
+#[cfg(feature = "test-switches")]
+fn test_switch(
+    options: &mut Options,
+    arg: &str,
+    args: &mut impl Iterator<Item = String>,
+) -> Option<bool> {
+    use queqiao_display::normalize_code;
+    match arg {
+        "--connect" => options.connect = args.next(),
+        "--listen" => options.listen = args.next(),
+        "--server" => options.server = args.next(),
+        "--pin" => options.pin = args.next(),
+        "--user" => options.user = args.next(),
+        "--password" => options.password = args.next(),
+        "--sessions" => options.sessions = args.next().and_then(|v| v.parse().ok()),
+        "--seconds" => options.seconds = args.next().and_then(|v| v.parse().ok()),
+        "--fps" => options.fps = args.next().and_then(|v| v.parse().ok()),
+        "--report" => options.report = args.next().map(PathBuf::from),
+        "--verify-input" => options.verify_input = true,
+        "--trust-new-key" => options.trust_new_key = args.next(),
+        "--ask" => options.ask = true,
+        "--answer" => options.answer = Some(args.next()? == "allow"),
+        "--end-after" => options.end_after = args.next().and_then(|v| v.parse().ok()),
+        "--ui-pictures" => options.ui_pictures = args.next().map(PathBuf::from),
+        "--clipboard-test" => options.clipboard_test = true,
+        "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
+        "--dry-run-commands" => options.dry_run_commands = true,
+        "--sound-device" => options.sound_device = Some(args.next()?),
+        "--sound-test" => options.sound_test = true,
+        "--mic-check" => options.mic_check = true,
+        "--privacy-test" => options.privacy_test = true,
+        "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
+        "--help-id-file" => options.help_id_file = Some(PathBuf::from(args.next()?)),
+        "--fixed-help-code" => options.fixed_help_code = Some(normalize_code(&args.next()?)),
+        "--wol-check" => options.wol_check = true,
+        "--test-device" => options.test_device = Some(args.next()?),
+        "--lock-after-session" => options.lock_after_session = true,
+        "--test-press-setting" => options.test_press_setting = true,
+        "--test-tray-login" => options.test_tray_login = true,
+        _ => return Some(false),
+    }
+    Some(true)
 }
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
@@ -273,6 +305,12 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         );
     }
     let handed = if options.logon {
+        // The service starts this agent as LocalService, which no program of a person can do: started otherwise,
+        // a program could hand it a login of its own over pipes it made and have it run unseen (no tray icon, no
+        // banner), as found by the security review of 2026-11-22.
+        if !queqiao_core::platform::runs_as_local_service() {
+            return Err("--logon is for the Queqiao service only".into());
+        }
         let service = links
             .service
             .as_mut()
@@ -3105,4 +3143,68 @@ fn summary(values: &mut [f64]) -> String {
 
 fn describe(error: windows::core::Error) -> String {
     format!("0x{:08X} {}", error.code().0, error.message())
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> std::vec::IntoIter<String> {
+        list.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn the_service_options_are_read() {
+        let options = parse(args(&[
+            "--logon",
+            "--service-channel",
+            "1:2",
+            "--desktop-channel",
+            "3:4",
+        ]))
+        .unwrap();
+        assert!(options.logon);
+        assert_eq!(options.service_channel.as_deref(), Some("1:2"));
+        assert_eq!(options.desktop_channel.as_deref(), Some("3:4"));
+        assert!(parse(args(&["--service-channel"])).is_none());
+    }
+
+    #[cfg(not(feature = "test-switches"))]
+    #[test]
+    fn a_shipping_build_refuses_the_test_options() {
+        for option in [
+            "--connect",
+            "--listen",
+            "--server",
+            "--pin",
+            "--user",
+            "--password",
+            "--answer",
+            "--report",
+            "--send-file",
+            "--fixed-help-code",
+            "--help-code",
+            "--trust-new-key",
+            "--ui-pictures",
+            "--sessions",
+        ] {
+            assert!(parse(args(&[option, "x"])).is_none(), "{option}");
+        }
+    }
+
+    #[cfg(feature = "test-switches")]
+    #[test]
+    fn a_test_build_reads_the_test_options() {
+        let options = parse(args(&["--listen", "127.0.0.1:1", "--answer", "allow"])).unwrap();
+        assert_eq!(options.listen.as_deref(), Some("127.0.0.1:1"));
+        assert_eq!(options.answer, Some(true));
+    }
+
+    #[test]
+    fn a_test_process_is_not_local_service() {
+        assert!(!queqiao_core::platform::runs_as_local_service());
+    }
 }

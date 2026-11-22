@@ -313,18 +313,26 @@ fn restore_sas() -> Result<Option<String>, String> {
 }
 
 pub fn install(args: &[String]) -> Result<(), String> {
+    // Extra options for the agents, from the tests only (builds with the `test-switches` feature): a shipping
+    // service stores none, and a shipping agent would refuse them.
+    #[cfg_attr(not(feature = "test-switches"), allow(unused_mut))]
     let mut agent_arguments = String::new();
+    #[cfg_attr(not(feature = "test-switches"), allow(unused_mut))]
     let mut logon_arguments = String::new();
     let mut restart_agent = true;
     let mut rest = args.iter();
+    // The test options read their value from `rest` inside the loop.
+    #[cfg_attr(not(feature = "test-switches"), allow(clippy::while_let_on_iterator))]
     while let Some(arg) = rest.next() {
         match arg.as_str() {
+            #[cfg(feature = "test-switches")]
             "--agent-arguments" => {
                 agent_arguments = rest
                     .next()
                     .ok_or("--agent-arguments needs a value")?
                     .clone()
             }
+            #[cfg(feature = "test-switches")]
             "--logon-arguments" => {
                 logon_arguments = rest
                     .next()

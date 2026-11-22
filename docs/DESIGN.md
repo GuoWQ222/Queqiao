@@ -257,6 +257,23 @@ Open, in this order, all before any release:
    disk space less 1 GB. Still to do: `cargo audit` / `cargo deny` (installing them on the build PC is the
    user's call), coverage-guided fuzzing, signed binaries.
 
+**Security review, 2026-11-22.** Four reviews of the whole code (server and accounts, the service's privilege
+boundary, installing and updating, a session in both directions) found about 35 weaknesses; they are fixed in order
+of severity. The user's decisions: the account's own devices still connect without a prompt (as UU Remote), but every
+PC shows when a device joins the account or a device's key changes; Help stays the only way in from another account
+(help ID and code, or an invitation, and the person's Allow each time); someone helping can never operate UAC prompts
+or the Ctrl+Alt+Del screen, and cannot copy files out.
+
+- **Test builds and shipping builds.** The options the tests need (`--connect` / `--listen` without any account,
+  `--answer allow`, a login on the command line, `--report`, `--send-file`, the update feed in the registry, the
+  service's stored agent options ...) exist only with the `test-switches` features: `cargo build-test`,
+  `clippy-test` and `run-tests` (.cargo\config.toml) are what `scripts\check.ps1` and the test scripts use. A shipping
+  build is a plain `cargo build`: the agent reads only what the service passes, the viewer only a queqiao: link.
+  `scripts\package.ps1 -Ship` makes it in target\ship and checks that each program refuses those options;
+  `check.ps1` lints and unit-tests the shipping configuration too. `--logon` (the agent for the sign-in screen,
+  which shows nothing on the screen) is refused unless the agent runs as LocalService, as only the service can start it.
+- **queqiao: links** take exactly the one value after `--invite`: a link with a quote in it cannot add options.
+
 ## Milestones
 
 | # | Result | Check |

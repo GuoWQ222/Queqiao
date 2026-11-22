@@ -175,6 +175,16 @@ struct Settings {
     logon_arguments: String,
 }
 
+/// Extra options for the agents, stored by the tests (`install --agent-arguments ...`): read only in builds with the
+/// `test-switches` feature. A shipping service starts its agents with nothing but their channels.
+fn test_arguments(value: &str) -> String {
+    if cfg!(feature = "test-switches") {
+        read_string(PARAMETERS, value).unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
 fn read_string(key: &str, value: &str) -> Option<String> {
     let (key, value) = (wide(key), wide(value));
     let mut buffer = vec![0u16; 4096];
@@ -221,9 +231,9 @@ pub fn read_dword(key: &str, value: &str) -> Option<u32> {
 impl Settings {
     fn read() -> Settings {
         Settings {
-            agent_arguments: read_string(PARAMETERS, "AgentArguments").unwrap_or_default(),
+            agent_arguments: test_arguments("AgentArguments"),
             restart_agent: read_dword(PARAMETERS, "RestartAgent").is_none_or(|v| v != 0),
-            logon_arguments: read_string(PARAMETERS, "LogonArguments").unwrap_or_default(),
+            logon_arguments: test_arguments("LogonArguments"),
         }
     }
 }

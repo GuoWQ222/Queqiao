@@ -59,9 +59,13 @@ impl Updater {
         let (requests, wanted) = mpsc::channel::<()>();
         let (found, results) = mpsc::channel();
         let feed = feed();
-        let first = Duration::from_secs(u64::from(
-            read_number("UpdateFirstCheckSeconds").unwrap_or(120),
-        ));
+        // Tests look sooner (builds with the `test-switches` feature only).
+        let first_check = if cfg!(feature = "test-switches") {
+            read_number("UpdateFirstCheckSeconds")
+        } else {
+            None
+        };
+        let first = Duration::from_secs(u64::from(first_check.unwrap_or(120)));
         lines.push(format!(
             "updates: from {feed}, first look in {} s",
             first.as_secs()
@@ -207,7 +211,13 @@ pub fn apply_through_service(
     Ok(())
 }
 
+/// The update feed: Queqiao's own; tests point it elsewhere (builds with the `test-switches` feature only, so that a
+/// program of the person cannot steer or stall the updates of a shipped Queqiao, as the security review of
+/// 2026-11-22 found).
 fn feed() -> String {
+    if !cfg!(feature = "test-switches") {
+        return queqiao_update::FEED.to_string();
+    }
     read_text("UpdateFeed")
         .filter(|feed| queqiao_update::check_feed(feed).is_ok())
         .unwrap_or_else(|| queqiao_update::FEED.to_string())

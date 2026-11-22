@@ -43,11 +43,16 @@ $scriptProblems = @(Get-ChildItem -LiteralPath (Join-Path $Root 'scripts'), (Joi
 '{0,-8} {1}' -f 'scripts', $(if ($scriptProblems.Count) { 'non-ASCII without a byte-order mark: ' + (($scriptProblems | ForEach-Object Name) -join ', ') } else { 'ascii ok' })
 if ($scriptProblems.Count) { $failedStep = 'scripts' }
 
+# The programs with options for the tests are a test build (cargo build-test, .cargo\config.toml); the shipping
+# configuration of the three programs that have them is linted and unit-tested too (they refuse those options).
+$shipping = @('-p', 'queqiao-agent', '-p', 'queqiao-viewer', '-p', 'queqiao-service')
 $steps = @(
     @{ Name = 'fmt'; CargoArgs = @('fmt', '--all', '--check') },
-    @{ Name = 'clippy'; CargoArgs = @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings') },
-    @{ Name = 'build'; CargoArgs = @('build', '--workspace', '--all-targets') },
-    @{ Name = 'test'; CargoArgs = @('test', '--workspace') }
+    @{ Name = 'clippy-s'; CargoArgs = @('clippy') + $shipping + @('--all-targets', '--', '-D', 'warnings') },
+    @{ Name = 'test-s'; CargoArgs = @('test') + $shipping },
+    @{ Name = 'clippy'; CargoArgs = @('clippy-test', '--workspace', '--all-targets', '--', '-D', 'warnings') },
+    @{ Name = 'build'; CargoArgs = @('build-test', '--workspace', '--all-targets') },
+    @{ Name = 'test'; CargoArgs = @('run-tests', '--workspace') }
 )
 foreach ($step in $steps) {
     $started = Get-Date

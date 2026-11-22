@@ -2,3 +2,10 @@
 # Visual C++ Redistributable installed. (The cc crate builds OpenH264's C++ with /MT to match.)
 [target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Test builds: the programs with their options for the tests (the `test-switches` features). scripts\check.ps1 and
+# the test scripts use these; a shipping build (scripts\package.ps1 -Ship) is a plain `cargo build` without them.
+[alias]
+build-test = ["build", "--features", "queqiao-agent/test-switches,queqiao-viewer/test-switches,queqiao-service/test-switches"]
+clippy-test = ["clippy", "--features", "queqiao-agent/test-switches,queqiao-viewer/test-switches,queqiao-service/test-switches"]
+run-tests = ["test", "--features", "queqiao-agent/test-switches,queqiao-viewer/test-switches,queqiao-service/test-switches"]

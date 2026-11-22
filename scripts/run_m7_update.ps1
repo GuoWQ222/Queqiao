@@ -46,7 +46,8 @@ if (-not $SkipBuild) {
         if ($vsRoot) { $env:Path = (Join-Path $vsRoot 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin') + ";$env:Path" }
     }
     $env:QUEQIAO_VERSION = '0.1.1'
-    $build = & "$env:USERPROFILE\.cargo\bin\cargo.exe" build --release --target-dir (Join-Path $root 'target\v011') -p queqiao-agent -p queqiao-viewer -p queqiao-service -p queqiao-setup 2>&1 | ForEach-Object { "$_" }
+    # A test build (cargo build-test, .cargo\config.toml), as target\release: a shipping 0.1.1 would ignore the test feed.
+    $build = & "$env:USERPROFILE\.cargo\bin\cargo.exe" build-test --release --target-dir (Join-Path $root 'target\v011') -p queqiao-agent -p queqiao-viewer -p queqiao-service -p queqiao-setup 2>&1 | ForEach-Object { "$_" }
     $buildExit = $LASTEXITCODE
     Remove-Item Env:\QUEQIAO_VERSION
     $build | Select-Object -Last 2

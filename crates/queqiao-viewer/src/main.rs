@@ -32,8 +32,7 @@ use queqiao_core::protocol::{
 };
 use queqiao_core::text::{tr, trf};
 use queqiao_display::{
-    HelpAction, HelpForm, PICK_CLOSED, PickList, ask_secret, ask_text, confirm, normalize_code,
-    popup_menu,
+    HelpAction, HelpForm, PICK_CLOSED, PickList, ask_secret, ask_text, confirm, popup_menu,
 };
 
 /// The session window's menu items for the controlled PC (system-menu ids: multiples of 16).
@@ -351,6 +350,7 @@ impl TitleStatus {
 
 fn main() {
     queqiao_core::platform::install_crash_log("queqiao-viewer");
+    #[cfg(feature = "test-switches")]
     if std::env::args().any(|arg| arg == "--crash-test") {
         panic!("crash test (asked for with --crash-test)");
     }
@@ -363,21 +363,34 @@ fn main() {
             Some(at) => args.get(at + 1).cloned().unwrap_or_default(),
             None => String::new(),
         };
-        let test = args.iter().any(|arg| arg == "--terminal-test");
+        let test =
+            cfg!(feature = "test-switches") && args.iter().any(|arg| arg == "--terminal-test");
         std::process::exit(queqiao_terminal::run_helper(pipe, &title, test));
     }
     let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
-    let Some(options) = parse(std::env::args().skip(1)) else {
+    let parsed = match args.get(1).map(String::as_str) {
+        Some("--invite") => Some(invitation_options(&args[2..])),
+        _ => parse(args.iter().skip(1).cloned()),
+    };
+    let Some(options) = parsed else {
         println!("{banner}");
-        println!(
-            "usage: queqiao-viewer [--server <host:port> --pin <fingerprint> --user <name> --password <password>]"
-        );
-        println!(
-            "                      [--device <name or id> | --list | --logout | --ui-test <name or id>]"
-        );
-        println!("       queqiao-viewer --listen <ip:port> | --connect <agent-ip:port>");
-        println!("       common: [--seconds N] [--width N] [--report <file>] [--input-test]");
-        return;
+        if cfg!(feature = "test-switches") {
+            println!(
+                "usage: queqiao-viewer [--server <host:port> --pin <fingerprint> --user <name> --password <password>]"
+            );
+            println!(
+                "                      [--device <name or id> | --list | --logout | --ui-test <name or id>]"
+            );
+            println!("       queqiao-viewer --listen <ip:port> | --connect <agent-ip:port>");
+            println!("       common: [--seconds N] [--width N] [--report <file>] [--input-test]");
+        } else {
+            println!(
+                "usage: queqiao-viewer (the device list) | queqiao-viewer --invite <queqiao: link>"
+            );
+        }
+        // --version is answered by the banner; any other option is refused.
+        let asked_version = args.get(1).map(String::as_str) == Some("--version");
+        std::process::exit(if asked_version { 0 } else { 2 });
     };
     let mut lines = vec![banner];
     let mut failure = None;
@@ -404,84 +417,124 @@ fn main() {
     std::process::exit(if passed { 0 } else { 1 });
 }
 
+/// A queqiao: link: Windows starts the viewer with `--invite "<link>"` (the handler the installer registers). Only
+/// the one value after `--invite` is read, nothing else: a link with a `"` in it cannot add options of its own (the
+/// security review of 2026-11-22 found links that could otherwise log in to another server, send files or write
+/// files). Anything else is kept as an invalid link, so the person is told it is not a Queqiao help link.
+fn invitation_options(rest: &[String]) -> Options {
+    let link = match rest {
+        [link] => link.clone(),
+        _ => rest.join(" "),
+    };
+    Options {
+        invite: Some(link),
+        ..Options::default()
+    }
+}
+
+/// The command line. A shipping build reads only `--force`, which only chooses among the media paths (the device
+/// list needs no options, a queqiao: link goes through `invitation_options`). Every other option is for the tests
+/// and exists only in builds with the `test-switches` feature (`cargo build-test`).
 fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
+    // Only the test options change `options`.
+    #[cfg_attr(not(feature = "test-switches"), allow(unused_mut))]
     let mut options = Options::default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--connect" => options.connect = args.next(),
-            "--listen" => options.listen = args.next(),
-            "--server" => options.server = args.next(),
-            "--pin" => options.pin = args.next(),
-            "--user" => options.user = args.next(),
-            "--password" => options.password = args.next(),
-            "--device" => options.device = args.next(),
-            "--also-device" => options.also_device = args.next(),
-            "--list" => options.list = true,
-            "--logout" => options.logout = true,
-            "--ui-test" => options.ui_test = args.next(),
-            "--seconds" => options.seconds = args.next().and_then(|v| v.parse().ok()),
-            "--width" => options.width = args.next().and_then(|v| v.parse().ok()),
-            "--report" => options.report = args.next().map(PathBuf::from),
-            "--input-test" => options.input_test = true,
-            "--clipboard-test" => options.clipboard_test = true,
-            "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
-            "--sound-device" => options.sound_device = Some(args.next()?),
-            "--sound-test" => options.sound_test = true,
-            "--mic-test" => options.mic_test = true,
-            "--mute" => options.mute = true,
-            "--codec" => {
-                use queqiao_core::protocol::CodecPreference;
-                options.codec = Some(match args.next()?.as_str() {
-                    "h264" => CodecPreference::H264,
-                    "av1" => CodecPreference::Av1,
-                    _ => CodecPreference::Automatic,
-                });
-            }
-            "--full-screen" => options.full_screen = true,
-            "--privacy" => options.privacy = true,
-            "--terminal-test" => options.terminal_test = true,
-            "--game-mouse-test" => options.game_mouse_test = true,
-            "--mute-speakers" => options.mute_speakers = true,
-            "--cancel-test" => options.cancel_test = true,
-            "--secure-test" => options.secure_test = true,
-            "--clipboard-files-test" => {
-                options.clipboard_files_test = Some(PathBuf::from(args.next()?))
-            }
-            "--resolution" => options.resolution = Some(args.next()?.parse().ok()?),
-            "--screen" => options.screen = Some(args.next()?.parse().ok()?),
-            "--max-bitrate" => options.max_bitrate = Some(args.next()?.parse().ok()?),
-            "--help-id" => options.help_id = Some(args.next()?),
-            "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
-            "--invite" => options.invite = Some(args.next()?),
-            "--test-submit-help" => options.test_submit_help = true,
-            "--signup" => options.signup = true,
-            "--test-device" => options.test_device = Some(args.next()?),
-            "--opacity" => options.opacity = args.next().and_then(|v| v.parse().ok()),
-            "--boss-key-test" => options.boss_key_test = true,
-            "--picture" => {
-                let value = args.next()?;
-                let (fps, quality) = value.split_once(',')?;
-                let quality = match quality {
-                    "smooth" => Quality::Smooth,
-                    "balanced" => Quality::Balanced,
-                    "sharp" => Quality::Sharp,
-                    _ => return None,
-                };
-                options.picture = Some((fps.parse().ok()?, quality));
-            }
-            "--command" => options.commands.push(match args.next()?.as_str() {
-                "lock" => Command::Lock,
-                "restart" => Command::Restart,
-                "ctrl-alt-del" => Command::CtrlAltDel,
-                "restart-queqiao" => Command::RestartQueqiao,
-                _ => return None,
-            }),
-            "--trust-new-key" => options.trust_new_key = args.next(),
             "--force" => queqiao_core::set_forced(&args.next()?),
-            _ => return None,
+            _ => {
+                #[cfg(feature = "test-switches")]
+                if test_switch(&mut options, &arg, &mut args)? {
+                    continue;
+                }
+                return None;
+            }
         }
     }
     Some(options)
+}
+
+/// The options for the tests (builds with the `test-switches` feature only): whether `arg` is one.
+#[cfg(feature = "test-switches")]
+fn test_switch(
+    options: &mut Options,
+    arg: &str,
+    args: &mut impl Iterator<Item = String>,
+) -> Option<bool> {
+    use queqiao_display::normalize_code;
+    match arg {
+        "--connect" => options.connect = args.next(),
+        "--listen" => options.listen = args.next(),
+        "--server" => options.server = args.next(),
+        "--pin" => options.pin = args.next(),
+        "--user" => options.user = args.next(),
+        "--password" => options.password = args.next(),
+        "--device" => options.device = args.next(),
+        "--also-device" => options.also_device = args.next(),
+        "--list" => options.list = true,
+        "--logout" => options.logout = true,
+        "--ui-test" => options.ui_test = args.next(),
+        "--seconds" => options.seconds = args.next().and_then(|v| v.parse().ok()),
+        "--width" => options.width = args.next().and_then(|v| v.parse().ok()),
+        "--report" => options.report = args.next().map(PathBuf::from),
+        "--input-test" => options.input_test = true,
+        "--clipboard-test" => options.clipboard_test = true,
+        "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
+        "--sound-device" => options.sound_device = Some(args.next()?),
+        "--sound-test" => options.sound_test = true,
+        "--mic-test" => options.mic_test = true,
+        "--mute" => options.mute = true,
+        "--codec" => {
+            use queqiao_core::protocol::CodecPreference;
+            options.codec = Some(match args.next()?.as_str() {
+                "h264" => CodecPreference::H264,
+                "av1" => CodecPreference::Av1,
+                _ => CodecPreference::Automatic,
+            });
+        }
+        "--full-screen" => options.full_screen = true,
+        "--privacy" => options.privacy = true,
+        "--terminal-test" => options.terminal_test = true,
+        "--game-mouse-test" => options.game_mouse_test = true,
+        "--mute-speakers" => options.mute_speakers = true,
+        "--cancel-test" => options.cancel_test = true,
+        "--secure-test" => options.secure_test = true,
+        "--clipboard-files-test" => {
+            options.clipboard_files_test = Some(PathBuf::from(args.next()?))
+        }
+        "--resolution" => options.resolution = Some(args.next()?.parse().ok()?),
+        "--screen" => options.screen = Some(args.next()?.parse().ok()?),
+        "--max-bitrate" => options.max_bitrate = Some(args.next()?.parse().ok()?),
+        "--help-id" => options.help_id = Some(args.next()?),
+        "--help-code" => options.help_code = Some(normalize_code(&args.next()?)),
+        "--invite" => options.invite = Some(args.next()?),
+        "--test-submit-help" => options.test_submit_help = true,
+        "--signup" => options.signup = true,
+        "--test-device" => options.test_device = Some(args.next()?),
+        "--opacity" => options.opacity = args.next().and_then(|v| v.parse().ok()),
+        "--boss-key-test" => options.boss_key_test = true,
+        "--picture" => {
+            let value = args.next()?;
+            let (fps, quality) = value.split_once(',')?;
+            let quality = match quality {
+                "smooth" => Quality::Smooth,
+                "balanced" => Quality::Balanced,
+                "sharp" => Quality::Sharp,
+                _ => return None,
+            };
+            options.picture = Some((fps.parse().ok()?, quality));
+        }
+        "--command" => options.commands.push(match args.next()?.as_str() {
+            "lock" => Command::Lock,
+            "restart" => Command::Restart,
+            "ctrl-alt-del" => Command::CtrlAltDel,
+            "restart-queqiao" => Command::RestartQueqiao,
+            _ => return None,
+        }),
+        "--trust-new-key" => options.trust_new_key = args.next(),
+        _ => return Some(false),
+    }
+    Some(true)
 }
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
@@ -3086,6 +3139,87 @@ fn scaled_move(value: i32, percent: u32, rest: &mut i32) -> i32 {
 
 fn describe(error: windows::core::Error) -> String {
     format!("0x{:08X} {}", error.code().0, error.message())
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_link_cannot_add_options() {
+        // As Windows passes a link with a quote in it: "%1" ends early and the rest become options.
+        let injected = args(&[
+            "queqiao://help/123456789/ABCDEFGH\"",
+            "--connect",
+            "198.51.100.7:9",
+            "--send-file",
+            "C:\\Users",
+            "--report",
+            "x.cmd",
+        ]);
+        let options = invitation_options(&injected);
+        assert!(
+            options.connect.is_none() && options.report.is_none() && options.send_files.is_empty()
+        );
+        // The text after the quote is no option; as with a pasted invitation, only the help ID and code are read
+        // from it, to fill in the help form.
+        let link = options.invite.unwrap();
+        assert_eq!(
+            queqiao_core::invitation::parse(&link),
+            Some(("123456789".to_string(), "ABCDEFGH".to_string()))
+        );
+        // A plain link is taken as it is.
+        let plain = invitation_options(&args(&["queqiao://help/123456789/ABCDEFGH"]));
+        assert_eq!(
+            plain.invite.as_deref(),
+            Some("queqiao://help/123456789/ABCDEFGH")
+        );
+        assert!(
+            invitation_options(&[])
+                .invite
+                .is_some_and(|link| link.is_empty())
+        );
+    }
+
+    #[cfg(not(feature = "test-switches"))]
+    #[test]
+    fn a_shipping_build_refuses_the_test_options() {
+        for option in [
+            "--connect",
+            "--listen",
+            "--server",
+            "--pin",
+            "--user",
+            "--password",
+            "--report",
+            "--send-file",
+            "--invite",
+            "--test-submit-help",
+            "--trust-new-key",
+            "--device",
+            "--command",
+            "--signup",
+        ] {
+            assert!(
+                parse(args(&[option, "x"]).into_iter()).is_none(),
+                "{option}"
+            );
+        }
+        assert!(parse(std::iter::empty()).is_some());
+    }
+
+    #[cfg(feature = "test-switches")]
+    #[test]
+    fn a_test_build_reads_the_test_options() {
+        let options =
+            parse(args(&["--connect", "127.0.0.1:1", "--report", "r.txt"]).into_iter()).unwrap();
+        assert_eq!(options.connect.as_deref(), Some("127.0.0.1:1"));
+        assert!(options.report.is_some());
+    }
 }
 
 #[cfg(test)]

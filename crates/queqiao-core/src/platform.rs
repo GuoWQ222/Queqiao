@@ -58,6 +58,39 @@ pub fn install_crash_log(program: &'static str) {
     }));
 }
 
+/// Whether this process runs as LocalService (S-1-5-19). The Queqiao service starts the agent for the sign-in
+/// screen so; no program of a person can.
+pub fn runs_as_local_service() -> bool {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{
+        GetTokenInformation, IsWellKnownSid, TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalServiceSid,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token = HANDLE::default();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
+        return false;
+    }
+    let mut size = 0u32;
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut size) };
+    // u64s: TOKEN_USER holds a pointer.
+    let mut buffer = vec![0u64; (size as usize).div_ceil(8).max(1)];
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            (buffer.len() * 8) as u32,
+            &mut size,
+        )
+    };
+    let _ = unsafe { CloseHandle(token) };
+    if read.is_err() {
+        return false;
+    }
+    let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    unsafe { IsWellKnownSid(user.User.Sid, WinLocalServiceSid) }.as_bool()
+}
+
 /// Where crash reports go: %APPDATA%\Queqiao\crashes.
 pub fn crash_folder() -> Option<std::path::PathBuf> {
     std::env::var_os("APPDATA").map(|folder| {
