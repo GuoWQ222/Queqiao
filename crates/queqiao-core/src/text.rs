@@ -540,6 +540,19 @@ const CHINESE: &[(&str, &str)] = &[
         "The Queqiao viewer is not installed for you on this PC.",
         "这台电脑上没有为你安装鹊桥查看器。",
     ),
+    ("Remote help", "远程帮助"),
+    (
+        "Someone of another account starts helping with:",
+        "其他账号的人开始帮助时需要：",
+    ),
+    ("The code, then I allow it", "验证码，再由我允许"),
+    ("The code alone", "只需验证码"),
+    ("No code: I allow each request", "无需验证码，由我逐次允许"),
+    ("Allow files while someone helps", "被帮助时允许传输文件"),
+    (
+        "The person at that PC answers this screen (sign-in, UAC or Ctrl+Alt+Del) themselves: someone helping cannot operate it.",
+        "这个界面（登录、UAC 或 Ctrl+Alt+Del）由那台电脑前的人自己操作，帮助者无法操作。",
+    ),
 ];
 
 #[cfg(test)]

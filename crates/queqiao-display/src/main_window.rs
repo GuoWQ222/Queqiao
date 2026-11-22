@@ -74,6 +74,7 @@ const EN_CHANGE: u16 = 0x0300;
 const BN_CLICKED: u16 = 0;
 const BS_DEFPUSHBUTTON: u32 = 0x1;
 const BS_CHECKBOX: u32 = 0x2;
+const BS_RADIOBUTTON: u32 = 0x4;
 const BM_SETCHECK: u32 = 0x00F1;
 const SS_NOPREFIX: u32 = 0x80;
 const ODS_SELECTED: u32 = 0x1;
@@ -160,6 +161,8 @@ pub struct TransferRow {
 /// The settings as the Settings page shows them (the tray menu's own copy is in Presence).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Shown {
+    pub help_mode: crate::presence::HelpMode,
+    pub help_files: bool,
     pub allow: bool,
     pub ask: bool,
     pub clipboard: bool,
@@ -543,10 +546,46 @@ impl MainWindow {
                 tab | BS_CHECKBOX,
                 WINDOW_EX_STYLE(0),
                 id,
-                [LEFT + 4, y, CONTENT - 8, 26],
+                [LEFT + 4, y, 300, 26],
             )?;
             checks.push((id, place(Page::Settings, hwnd)));
         }
+        // Remote help: how someone of another account may start (UU's three ways), and files while they help.
+        let ways = [
+            (
+                crate::presence::MENU_HELP_BOTH,
+                tr("The code, then I allow it"),
+            ),
+            (crate::presence::MENU_HELP_CODE_ONLY, tr("The code alone")),
+            (
+                crate::presence::MENU_HELP_ASK_ONLY,
+                tr("No code: I allow each request"),
+            ),
+        ];
+        for (index, (id, text)) in ways.into_iter().enumerate() {
+            let y = 154 + index as i32 * 30;
+            let hwnd = make(
+                w!("BUTTON"),
+                text,
+                tab | BS_RADIOBUTTON,
+                WINDOW_EX_STYLE(0),
+                id,
+                [LEFT + 320, y, CONTENT - 324, 26],
+            )?;
+            checks.push((id, place(Page::Settings, hwnd)));
+        }
+        let files_while_helping = make(
+            w!("BUTTON"),
+            tr("Allow files while someone helps"),
+            tab | BS_CHECKBOX,
+            WINDOW_EX_STYLE(0),
+            crate::presence::MENU_HELP_FILES,
+            [LEFT + 320, 250, CONTENT - 324, 26],
+        )?;
+        checks.push((
+            crate::presence::MENU_HELP_FILES,
+            place(Page::Settings, files_while_helping),
+        ));
         let program = [
             (crate::presence::MENU_AUTOSTART, tr("Start with Windows")),
             (
@@ -703,6 +742,16 @@ impl MainWindow {
                 crate::presence::MENU_LOCK_AFTER => shown.lock_after,
                 crate::presence::MENU_AUTOSTART => shown.autostart,
                 crate::presence::MENU_AUTO_UPDATE => shown.auto_update,
+                crate::presence::MENU_HELP_BOTH => {
+                    shown.help_mode == crate::presence::HelpMode::CodeAndAsk
+                }
+                crate::presence::MENU_HELP_CODE_ONLY => {
+                    shown.help_mode == crate::presence::HelpMode::CodeOnly
+                }
+                crate::presence::MENU_HELP_ASK_ONLY => {
+                    shown.help_mode == crate::presence::HelpMode::AskOnly
+                }
+                crate::presence::MENU_HELP_FILES => shown.help_files,
                 _ => false,
             };
             unsafe { SendMessageW(*hwnd, BM_SETCHECK, Some(WPARAM(usize::from(on))), None) };
@@ -1233,6 +1282,22 @@ fn paint(hwnd: HWND, dc: HDC, state: &State) {
                 rect(LEFT, 98, CONTENT, 24, s),
                 f.section,
                 TEXT_COLOR,
+                LINE,
+            );
+            text(
+                dc,
+                tr("Remote help"),
+                rect(LEFT + 320, 98, CONTENT - 320, 24, s),
+                f.section,
+                TEXT_COLOR,
+                LINE,
+            );
+            text(
+                dc,
+                tr("Someone of another account starts helping with:"),
+                rect(LEFT + 320, 126, CONTENT - 320, 22, s),
+                f.small,
+                SECONDARY,
                 LINE,
             );
             text(

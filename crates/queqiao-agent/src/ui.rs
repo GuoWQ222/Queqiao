@@ -287,6 +287,7 @@ fn run(
     presence.set_password_check(password_check(password));
     presence.set_auto_update(settings.auto_update);
     presence.set_fixed_code(!settings.fixed_help_code.is_empty());
+    presence.set_help_settings(settings.help_mode(), settings.help_files);
     let _ = ready.send(Ok(presence.tray_shown()));
     // (when, file name) of a picture to take once the window has drawn itself.
     let mut picture: Option<(Instant, &str)> = None;
@@ -432,6 +433,14 @@ pub struct Settings {
     /// code may ask to help; the person here is asked every time all the same.
     #[serde(default)]
     pub fixed_help_code: String,
+    /// How someone of another account may start helping (as UU's three ways): "both" (the help code, then the person
+    /// at this PC allows it), "code" (the help code alone), "ask" (no code, the person allows each request).
+    #[serde(default = "help_mode_both")]
+    pub help_mode: String,
+    /// Files, also copied on the clipboard, while someone of another account helps (as UU's "allow file transfer
+    /// while being assisted"; off: they go neither way).
+    #[serde(default)]
+    pub help_files: bool,
 }
 
 /// The check for the settings password's stored form.
@@ -446,7 +455,28 @@ fn yes() -> bool {
     true
 }
 
+fn help_mode_both() -> String {
+    "both".into()
+}
+
 impl Settings {
+    pub fn help_mode(&self) -> queqiao_display::HelpMode {
+        match self.help_mode.as_str() {
+            "code" => queqiao_display::HelpMode::CodeOnly,
+            "ask" => queqiao_display::HelpMode::AskOnly,
+            _ => queqiao_display::HelpMode::CodeAndAsk,
+        }
+    }
+
+    pub fn set_help_mode(&mut self, mode: queqiao_display::HelpMode) {
+        self.help_mode = match mode {
+            queqiao_display::HelpMode::CodeOnly => "code",
+            queqiao_display::HelpMode::AskOnly => "ask",
+            queqiao_display::HelpMode::CodeAndAsk => "both",
+        }
+        .into();
+    }
+
     /// The fixed help code, decrypted (None: none, or it cannot be read).
     pub fn fixed_help_code(&self) -> Option<String> {
         let sealed = unhex(&self.fixed_help_code)?;
@@ -492,6 +522,8 @@ impl Default for Settings {
             settings_password: String::new(),
             auto_update: true,
             fixed_help_code: String::new(),
+            help_mode: help_mode_both(),
+            help_files: false,
         }
     }
 }

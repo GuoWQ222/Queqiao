@@ -329,7 +329,7 @@ try {
         $idFile = Join-Path $Out 'help_id.txt'
         Remove-Item -LiteralPath $idFile -ErrorAction SilentlyContinue
         $helpCode = 'M4HELPCODE'
-        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 1 --seconds $($Seconds + 90) --verify-input --dry-run-commands --test-press-setting --answer allow --help-code $helpCode --help-id-file `"$idFile`" --report `"$Out\agent_help.txt`""
+        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 1 --seconds $($Seconds + 90) --verify-input --dry-run-commands --test-press-setting --answer allow --help-mode ask --help-code $helpCode --help-id-file `"$idFile`" --report `"$Out\agent_help.txt`""
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_help.txt`""
         if ($AgentSoundDevice -and $ViewerSoundDevice) {
             $agentArgs += " --sound-device `"$AgentSoundDevice`""
@@ -342,8 +342,8 @@ try {
         while (-not (Test-Path -LiteralPath $idFile) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
         $helpId = if (Test-Path -LiteralPath $idFile) { (Get-Content -LiteralPath $idFile -Raw).Trim() } else { '' }
         if (-not $helpId) { $failed += 'help agent (no help ID within 30 s)' }
-        # What a helper may not do: restart, darken the screen, command lines, sending files.
-        $viewerArgs += " --command restart --privacy --terminal-test --send-file `"$fileToAgent`""
+        # What a helper may not do: restart, Ctrl+Alt+Del, darken the screen, command lines, sending files.
+        $viewerArgs += " --command restart --command ctrl-alt-del --privacy --terminal-test --send-file `"$fileToAgent`""
         # The viewer asks without the code: the person at the helped PC allows it (--answer allow).
         Start-SessionTask 'Queqiao-M4-Viewer-help' $viewer "$viewerArgs --help-id $helpId" ''
         $viewerResult = Wait-SessionTask 'Queqiao-M4-Viewer-help' ($Seconds + 120)
@@ -405,7 +405,7 @@ try {
         $idFile = Join-Path $Out 'help_fixed_id.txt'
         Remove-Item -LiteralPath $idFile -ErrorAction SilentlyContinue
         $fixedCode = 'M4FIXEDCODE'
-        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 2 --seconds $(2 * $Seconds + 150) --verify-input --answer allow --fixed-help-code $fixedCode --help-id-file `"$idFile`" --report `"$Out\agent_help_fixed.txt`""
+        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 2 --seconds $(2 * $Seconds + 150) --verify-input --help-mode code --fixed-help-code $fixedCode --help-id-file `"$idFile`" --report `"$Out\agent_help_fixed.txt`""
         Start-SessionTask 'Queqiao-M4-Agent-help-fixed' $agent $agentArgs ''
         $until = (Get-Date).AddSeconds(30)
         while (-not (Test-Path -LiteralPath $idFile) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
@@ -429,6 +429,33 @@ try {
         if ($text[-1] -ne 'RESULT PASS') { $failed += 'help-fixed agent' }
         if (@($text | Where-Object { $_ -match 'of account alice was let in \(code given or ask allowed\)$' }).Count -ne 2) { $failed += 'help-fixed agent (expected two helpers let in)' }
         if (-not ($text | Where-Object { $_ -eq 'help: open again with the fixed code' })) { $failed += 'help-fixed agent (the fixed code did not take requests again)' }
+        # The code alone (as UU's "code only"): no prompt (none is answered here), no "allowed" line.
+        if ($text | Where-Object { $_ -match '^the person at this PC allowed ' }) { $failed += 'help-fixed agent (asked although the code alone lets in)' }
+    }
+    # The default way in (the code, then the person allows it): a request without the code is declined at once, with no
+    # prompt (none is answered here).
+    if ($Sessions -contains 'help-noask' -or $Sessions -contains 'all') {
+        $idFile = Join-Path $Out 'help_noask_id.txt'
+        Remove-Item -LiteralPath $idFile -ErrorAction SilentlyContinue
+        $agentArgs = "--server $listen --pin $pin --user carol --password $password3 --test-device m4-helped --sessions 1 --seconds 40 --help-code M4NOASKCODE --help-id-file `"$idFile`" --report `"$Out\agent_help_noask.txt`""
+        Start-SessionTask 'Queqiao-M4-Agent-help-noask' $agent $agentArgs ''
+        $until = (Get-Date).AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $idFile) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
+        $helpId = if (Test-Path -LiteralPath $idFile) { (Get-Content -LiteralPath $idFile -Raw).Trim() } else { '' }
+        if (-not $helpId) { $failed += 'help-noask agent (no help ID within 30 s)' }
+        $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --seconds 10 --width 640 --mute --help-id $helpId --report `"$Out\viewer_help_noask.txt`""
+        Start-SessionTask 'Queqiao-M4-Viewer-help-noask' $viewer $viewerArgs ''
+        $viewerResult = Wait-SessionTask 'Queqiao-M4-Viewer-help-noask' 90
+        $agentResult = Wait-SessionTask 'Queqiao-M4-Agent-help-noask' 90
+        "=== session 'help-noask' (help ID $helpId): agent exit $agentResult, viewer exit $viewerResult"
+        $agentText = @(if (Test-Path -LiteralPath "$Out\agent_help_noask.txt") { Get-Content -LiteralPath "$Out\agent_help_noask.txt" -Encoding UTF8 })
+        $viewerText = @(if (Test-Path -LiteralPath "$Out\viewer_help_noask.txt") { Get-Content -LiteralPath "$Out\viewer_help_noask.txt" -Encoding UTF8 })
+        $agentText | Where-Object { $_ -match '^help' }
+        $viewerText | Where-Object { $_ -match 'help|declined|ERROR' }
+        if (-not ($agentText | Where-Object { $_ -eq 'help: this PC takes help requests with the help code only' })) { $failed += 'help-noask agent (no code-only line)' }
+        if (-not ($agentText | Where-Object { $_ -match 'asked without a code: declined$' })) { $failed += 'help-noask agent (the request was not declined)' }
+        if ($agentText | Where-Object { $_ -match '^session 1: ' }) { $failed += 'help-noask agent (a session started)' }
+        if (-not ($viewerText | Where-Object { $_ -match 'declined' })) { $failed += 'help-noask viewer (not told it was declined)' }
     }
     # Several sessions at once: this PC's agent and a second one (a throwaway device of the same account), and one
     # viewer with a session to each, each on a thread and in a window of its own. No input test: two agents injecting

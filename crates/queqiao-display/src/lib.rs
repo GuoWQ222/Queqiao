@@ -22,7 +22,7 @@ pub use forms::{
 pub use icon::app_icon;
 pub use main_window::{MainDevice, Page, TransferRow};
 pub use presence::{
-    AccountState, PasswordCheck, Presence, PresenceEvent, SessionBanner, TEST_MENU_LOGIN,
+    AccountState, HelpMode, PasswordCheck, Presence, PresenceEvent, SessionBanner, TEST_MENU_LOGIN,
     TEST_MENU_TERMINAL, TEST_MENU_UPDATE_CHECK, show_running_main,
 };
 pub use present::{Presenter, fit};

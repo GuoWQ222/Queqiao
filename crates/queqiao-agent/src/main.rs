@@ -75,6 +75,8 @@ const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Default)]
 struct Options {
+    /// Tests: the help mode for this run, never saved (the person's settings file is shared with the tests).
+    help_mode: Option<queqiao_display::HelpMode>,
     /// Show the main window (the Start menu's shortcut): this one, or the one of the Queqiao already running.
     show: bool,
     /// Tests: pictures of the main window's pages (into --ui-pictures) once logged in.
@@ -286,6 +288,14 @@ fn test_switch(
         "--test-press-setting" => options.test_press_setting = true,
         "--test-tray-login" => options.test_tray_login = true,
         "--test-main-window" => options.test_main_window = true,
+        "--help-mode" => {
+            options.help_mode = Some(match args.next()?.as_str() {
+                "code" => queqiao_display::HelpMode::CodeOnly,
+                "ask" => queqiao_display::HelpMode::AskOnly,
+                "both" => queqiao_display::HelpMode::CodeAndAsk,
+                _ => return None,
+            })
+        }
         _ => return Some(false),
     }
     Some(true)
@@ -537,7 +547,8 @@ fn run_account(
     // After five wrong codes the server closes help: a fixed code opens it again after a while (guessing stays slow).
     let mut fixed_reopen_at: Option<Instant> = None;
     // A helper the person allowed when it asked without a code (its next session request needs no prompt).
-    let mut helper_allowed: Option<String> = None;
+    // Only for HELPER_ALLOWED_FOR: an allowed ask does not stay open (the security review of 2026-11-22).
+    let mut helper_allowed: Option<(String, Instant)> = None;
     let mut trust_new_key = options.trust_new_key.as_deref();
     if let Some(online) = account.as_mut() {
         went_online(
@@ -799,6 +810,16 @@ fn run_account(
                     queqiao_files::history::clear();
                     ui.set_transfers(Vec::new());
                 }
+                PresenceEvent::SetHelpMode(mode) => {
+                    settings.set_help_mode(mode);
+                    let _ = settings.save();
+                    lines.push(format!("help mode: {}", settings.help_mode));
+                }
+                PresenceEvent::SetHelpFiles(on) => {
+                    settings.help_files = on;
+                    let _ = settings.save();
+                    lines.push(format!("files while someone helps: {on}"));
+                }
                 PresenceEvent::MainShown => {
                     ui.set_transfers(transfer_rows());
                     if let Some(online) = account.as_ref() {
@@ -1021,20 +1042,28 @@ fn run_account(
                     ));
                     continue;
                 }
-                // Someone of another account is always asked about, whatever the settings.
-                let asked_already =
-                    helper.is_some() && helper_allowed.as_deref() == Some(from.as_str());
+                // Someone of another account is asked about, unless this PC lets the help code alone in (as UU) or the
+                // person allowed their request a moment ago.
+                let asked_already = helper.is_some()
+                    && helper_allowed
+                        .as_ref()
+                        .is_some_and(|(id, at)| *id == from && at.elapsed() < HELPER_ALLOWED_FOR);
+                let ask_helper = helper.is_some()
+                    && help_mode(options, &settings) != queqiao_display::HelpMode::CodeOnly;
                 if asked_already {
                     helper_allowed = None;
-                } else if helper.is_some() || options.ask || settings.ask_before_session {
+                } else if ask_helper || options.ask || settings.ask_before_session {
                     let question = match &helper {
                         Some(user) => trf(
                             "{viewer} (account {user}) wants to control this PC to help you.",
-                            &[("viewer", &from_name), ("user", user)],
+                            &[
+                                ("viewer", &clean_name(&from_name)),
+                                ("user", &clean_name(user)),
+                            ],
                         ),
                         None => trf(
                             "{viewer}, a device of your account, wants to control this PC.",
-                            &[("viewer", &from_name)],
+                            &[("viewer", &clean_name(&from_name))],
                         ),
                     };
                     match ask_consent(ui, &question, options.answer) {
@@ -1081,7 +1110,7 @@ fn run_account(
                     ui,
                     Permissions {
                         clipboard: settings.share_clipboard,
-                        files: settings.receive_files && helper.is_none(),
+                        files: settings.receive_files && (helper.is_none() || settings.help_files),
                         terminal: settings.allow_terminal && helper.is_none(),
                         helper: helper.is_some(),
                     },
@@ -1141,14 +1170,23 @@ fn run_account(
                 device,
                 user,
             }) => {
-                // Only while this PC takes help requests; the person decides.
-                let allowed = help_code.is_some() && {
+                // A request without a code: only while this PC takes help requests, only when it lets them in without a
+                // code (as UU's "no code, this PC agrees"), and the person decides.
+                let takes_asks =
+                    help_mode(options, &settings) == queqiao_display::HelpMode::AskOnly;
+                let allowed = help_code.is_some() && takes_asks && {
                     let question = trf(
                         "{viewer} (account {user}) asks to help you on this PC. Allow it?",
-                        &[("viewer", &device.name), ("user", &user)],
+                        &[
+                            ("viewer", &clean_name(&device.name)),
+                            ("user", &clean_name(&user)),
+                        ],
                     );
                     matches!(ask_consent(ui, &question, options.answer), Ok(true))
                 };
+                if help_code.is_some() && !takes_asks {
+                    lines.push("help: this PC takes help requests with the help code only".into());
+                }
                 online.answer_help(request, allowed);
                 lines.push(format!(
                     "help: {} of account {user} asked without a code: {}",
@@ -1157,13 +1195,14 @@ fn run_account(
                 ));
                 if allowed {
                     lines.push(format!("the person at this PC allowed {}", device.name));
-                    // Its session request that follows is not asked about again.
-                    helper_allowed = Some(device.id.clone());
+                    // Its session request that follows (soon) is not asked about again.
+                    helper_allowed = Some((device.id.clone(), Instant::now()));
                 }
             }
             Some(AccountEvent::HelpClosed(reason)) => {
                 lines.push(format!("help: closed: {reason}"));
                 help_code = None;
+                helper_allowed = None;
                 help_window = false;
                 ui.show_help(None);
                 if fixed_code.is_some() {
@@ -1863,6 +1902,8 @@ fn session(
         terminal: allow_terminal,
         helper,
     } = permissions;
+    // Told once per secure desktop that someone helping cannot operate it.
+    let mut secure_refused_told = false;
     ui.session_started(viewer)
         .map_err(|e| format!("the banner could not be shown, so the session is refused: {e}"))?;
     let _banner = BannerGuard(ui);
@@ -2137,14 +2178,25 @@ fn session(
                 PeerEvent::Data(bytes) => match Message::decode(&bytes) {
                     Some(Message::Input(event)) => {
                         stats.inputs += 1;
-                        // On another desktop (sign-in, lock, Ctrl+Alt+Del, UAC) the desktop helper injects.
+                        // On another desktop (sign-in, lock, Ctrl+Alt+Del, UAC) the desktop helper injects; never for
+                        // someone helping from another account: the person at this PC answers those screens.
                         if duplicator.is_none()
                             && let Some(link) = links.desktop.as_mut()
                         {
+                            if helper {
+                                if !secure_refused_told {
+                                    secure_refused_told = true;
+                                    let notice = queqiao_core::text::tr("The person at that PC answers this screen (sign-in, UAC or Ctrl+Alt+Del) themselves: someone helping cannot operate it.").to_string();
+                                    peer.send_data(Message::Notice(notice).encode());
+                                    lines.push("helper: input on a secure desktop refused".into());
+                                }
+                                continue;
+                            }
                             link.input(event, injector.screen());
                             secure_inputs += 1;
                             continue;
                         }
+                        secure_refused_told = false;
                         let before = cursor_position();
                         match injector.inject(&event) {
                             Ok(())
@@ -2169,7 +2221,10 @@ fn session(
                         break 'session;
                     }
                     Some(Message::Command(
-                        Command::PrivacyOn | Command::Restart | Command::RestartQueqiao,
+                        Command::PrivacyOn
+                        | Command::Restart
+                        | Command::RestartQueqiao
+                        | Command::CtrlAltDel,
                     )) if helper => {
                         let notice =
                             "someone helping from another account cannot do that on this PC"
@@ -2721,7 +2776,7 @@ fn session(
                     clipboard_stats.sent += 1;
                 }
                 // Files copied here go over at once (not those that came from the other side).
-                Some(ClipContent::Files(paths)) => {
+                Some(ClipContent::Files(paths)) if !helper || receive_files => {
                     let own = downloads_folder();
                     let paths: Vec<PathBuf> = paths
                         .into_iter()
@@ -3351,6 +3406,31 @@ fn log_out_viewer(identity: &DeviceIdentity) {
     let _ = saved.save(AccountRole::Viewer);
 }
 
+/// How someone of another account may start helping: the setting, or for tests --help-mode.
+fn help_mode(options: &Options, settings: &ui::Settings) -> queqiao_display::HelpMode {
+    options.help_mode.unwrap_or_else(|| settings.help_mode())
+}
+
+/// How long an allowed request without a code lets its session in without a second prompt.
+const HELPER_ALLOWED_FOR: Duration = Duration::from_secs(60);
+
+/// A device or account name as prompts and banners show it: no control or direction characters (a name with line
+/// breaks or a right-to-left mark could push the account out of sight: the security review of 2026-11-22), at most
+/// 40 characters.
+fn clean_name(name: &str) -> String {
+    let direction = |c: char| matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}');
+    let kept: String = name
+        .chars()
+        .filter(|c| !c.is_control() && !direction(*c))
+        .collect();
+    let kept = kept.trim();
+    if kept.chars().count() > 40 {
+        format!("{}…", kept.chars().take(39).collect::<String>())
+    } else {
+        kept.to_string()
+    }
+}
+
 #[cfg(test)]
 mod option_tests {
     use super::*;
@@ -3407,6 +3487,16 @@ mod option_tests {
         let options = parse(args(&["--listen", "127.0.0.1:1", "--answer", "allow"])).unwrap();
         assert_eq!(options.listen.as_deref(), Some("127.0.0.1:1"));
         assert_eq!(options.answer, Some(true));
+    }
+
+    #[test]
+    fn names_in_prompts_are_cleaned() {
+        assert_eq!(
+            clean_name("Anna's laptop\r\n\r\n(account x)"),
+            "Anna's laptop(account x)"
+        );
+        assert_eq!(clean_name("evil\u{202E}gnp.exe"), "evilgnp.exe");
+        assert_eq!(clean_name(&"a".repeat(60)).chars().count(), 40);
     }
 
     #[test]

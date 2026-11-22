@@ -84,6 +84,22 @@ pub enum PresenceEvent {
     ClearTransfers,
     /// The main window was opened (the agent fills in what it shows).
     MainShown,
+    /// How someone of another account may start helping (Settings).
+    SetHelpMode(HelpMode),
+    /// Files also while someone of another account helps (true) or not.
+    SetHelpFiles(bool),
+}
+
+/// How someone of another account may start helping this PC with its help ID: UU Remote's three ways.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HelpMode {
+    /// The help code, then the person at this PC allows it (the default).
+    #[default]
+    CodeAndAsk,
+    /// The help code alone: no prompt.
+    CodeOnly,
+    /// No code: the person at this PC allows each request.
+    AskOnly,
 }
 
 /// How this PC stands with the account server (the tray menu's first line).
@@ -133,6 +149,11 @@ const SHOW_MENU: u16 = 0xFFFE;
 const SHOW_MAIN: u16 = 0xFFFC;
 /// "Open Queqiao" in the tray menu.
 const MENU_OPEN: u16 = 223;
+/// The help modes and files while someone helps (the main window's Settings page).
+pub(crate) const MENU_HELP_BOTH: u16 = 224;
+pub(crate) const MENU_HELP_CODE_ONLY: u16 = 225;
+pub(crate) const MENU_HELP_ASK_ONLY: u16 = 226;
+pub(crate) const MENU_HELP_FILES: u16 = 227;
 
 static REGISTER: std::sync::Once = std::sync::Once::new();
 const TRAY_CLASS: PCWSTR = w!("QueqiaoPresence");
@@ -184,6 +205,8 @@ pub struct Presence {
     version: String,
     /// Queqiao's own icon, for the tray.
     icon: HICON,
+    help_mode: HelpMode,
+    help_files: bool,
 }
 
 impl Presence {
@@ -257,6 +280,8 @@ impl Presence {
             help_now: None,
             version: queqiao_core::VERSION.to_string(),
             icon: crate::icon::app_icon(unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16)),
+            help_mode: HelpMode::default(),
+            help_files: false,
         };
         presence.update_tray();
         Ok(presence)
@@ -493,8 +518,17 @@ impl Presence {
         self.transfers = transfers;
     }
 
+    /// The help mode and whether files go while someone helps (Settings).
+    pub fn set_help_settings(&mut self, mode: HelpMode, files: bool) {
+        self.help_mode = mode;
+        self.help_files = files;
+        self.refresh_main();
+    }
+
     fn shown(&self) -> Shown {
         Shown {
+            help_mode: self.help_mode,
+            help_files: self.help_files,
             allow: self.allow,
             ask: self.ask,
             clipboard: self.clipboard,
@@ -897,6 +931,10 @@ impl Presence {
                 | MENU_LOCK_AFTER
                 | MENU_AUTO_UPDATE
                 | MENU_QUIT
+                | MENU_HELP_BOTH
+                | MENU_HELP_CODE_ONLY
+                | MENU_HELP_ASK_ONLY
+                | MENU_HELP_FILES
         );
         let protected =
             setting || item == MENU_PASSWORD || item == MENU_LOGIN || item == MENU_FIXED_CODE;
@@ -981,6 +1019,18 @@ impl Presence {
                 MENU_UPDATE_CHECK => Some(PresenceEvent::CheckUpdates),
                 MENU_WOL_CHECK => Some(PresenceEvent::CheckWakeOnLan),
                 MENU_QUIT => Some(PresenceEvent::Quit),
+                MENU_HELP_BOTH | MENU_HELP_CODE_ONLY | MENU_HELP_ASK_ONLY => {
+                    self.help_mode = match item {
+                        MENU_HELP_CODE_ONLY => HelpMode::CodeOnly,
+                        MENU_HELP_ASK_ONLY => HelpMode::AskOnly,
+                        _ => HelpMode::CodeAndAsk,
+                    };
+                    Some(PresenceEvent::SetHelpMode(self.help_mode))
+                }
+                MENU_HELP_FILES => {
+                    self.help_files = !self.help_files;
+                    Some(PresenceEvent::SetHelpFiles(self.help_files))
+                }
                 _ => None,
             }
         }
