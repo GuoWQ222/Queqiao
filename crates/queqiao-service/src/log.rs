@@ -5,9 +5,9 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+/// `ProgramData\Queqiao`, the machine's folder from the registry (never from environment variables).
 pub fn folder() -> PathBuf {
-    let base = std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
-    PathBuf::from(base).join("Queqiao")
+    queqiao_core::platform::program_data().join("Queqiao")
 }
 
 pub fn line(text: &str) {

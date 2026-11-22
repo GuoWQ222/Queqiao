@@ -15,6 +15,7 @@ mod install;
 mod launch;
 mod log;
 mod logon;
+mod secure_folder;
 mod service;
 mod update;
 

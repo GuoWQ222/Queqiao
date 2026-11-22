@@ -49,8 +49,9 @@ function Wait-SessionTask([string]$Name, [int]$TimeoutSec) {
     $result
 }
 $serviceLog = Join-Path $env:ProgramData 'Queqiao\service.log'
-$logSkip = if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog).Count } else { 0 }
-function Get-ServiceLog { if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog | Select-Object -Skip $logSkip) } else { @() } }
+# This run's lines, by their time stamps (installing the service starts its folder, and so the log, anew).
+$logSince = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+function Get-ServiceLog { if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog | Where-Object { $_.Length -ge 23 -and $_.Substring(0, 23) -ge $logSince }) } else { @() } }
 function Wait-ServiceLog([string]$Pattern, [int]$Count, [int]$TimeoutSec) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     do {

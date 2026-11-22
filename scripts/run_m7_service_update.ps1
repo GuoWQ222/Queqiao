@@ -34,7 +34,8 @@ $uninstallKey = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVer
 $programFiles = Join-Path $env:ProgramFiles 'Queqiao'
 $serviceUpdates = Join-Path $env:ProgramData 'Queqiao\updates'
 $serviceLog = Join-Path $env:ProgramData 'Queqiao\service.log'
-$logSkip = if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog).Count } else { 0 }
+# This run's lines, by their time stamps (installing the service starts its folder, and so the log, anew).
+$logSince = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
 
 $v1 = Join-Path $root 'target\release'
 $v2 = Join-Path $root 'target\v011\release'
@@ -106,7 +107,7 @@ function Wait-ServiceReport([datetime]$After, [int]$TimeoutSec) {
     @('no service update report')
 }
 function Get-ServiceAgents { @(Get-Process queqiao-agent -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$programFiles\*" }) }
-function Get-ServiceLog { if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog | Select-Object -Skip $logSkip) } else { @() } }
+function Get-ServiceLog { if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog | Where-Object { $_.Length -ge 23 -and $_.Substring(0, 23) -ge $logSince }) } else { @() } }
 
 try {
     '=== 1. 0.1.0 with the service, 0.1.1 on the feed'

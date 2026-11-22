@@ -94,8 +94,10 @@ fn shortcut() -> PathBuf {
         .join(r"Microsoft\Windows\Start Menu\Programs\Queqiao.lnk")
 }
 
+/// `Program Files\Queqiao`, the machine's folder from the registry: never from environment variables, which an
+/// elevated program inherits from the person, and any program of theirs can change (HKCU\Environment).
 pub(crate) fn program_files() -> PathBuf {
-    known("ProgramFiles", r"C:\Program Files").join("Queqiao")
+    queqiao_core::platform::program_files().join("Queqiao")
 }
 
 pub fn install(
@@ -422,7 +424,7 @@ pub fn remove_service(lines: &mut Vec<String>) -> Result<(), String> {
     }
     lines.push(format!("{} is removed", folder.display()));
     // Installers the service kept for its updates.
-    let updates = known("ProgramData", r"C:\ProgramData").join(r"Queqiao\updates");
+    let updates = queqiao_core::platform::program_data().join(r"Queqiao\updates");
     if updates.exists() && std::fs::remove_dir_all(&updates).is_ok() {
         lines.push(format!("{} is removed", updates.display()));
     }

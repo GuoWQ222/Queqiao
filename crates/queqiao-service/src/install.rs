@@ -10,15 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_SERVICE_EXISTS, ERROR_SERVICE_NOT_ACTIVE, HLOCAL, LocalFree,
-};
-use windows::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
-    SetNamedSecurityInfoW,
-};
-use windows::Win32::Security::{
-    DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
-    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    ERROR_FILE_NOT_FOUND, ERROR_SERVICE_EXISTS, ERROR_SERVICE_NOT_ACTIVE,
 };
 use windows::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
@@ -191,9 +183,10 @@ enum Value<'a> {
     Number(u32),
 }
 
+/// `Program Files\Queqiao`, the machine's folder from the registry: never from environment variables, which an
+/// elevated program inherits from the person, and any program of theirs can change (HKCU\Environment).
 fn program_files() -> PathBuf {
-    let base = std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into());
-    PathBuf::from(base).join("Queqiao")
+    queqiao_core::platform::program_files().join("Queqiao")
 }
 
 /// Copies the programs next to this one into the protected folder (unless they are there already).
@@ -222,51 +215,6 @@ fn place_programs(target: &Path) -> Result<(), String> {
             .map_err(|e| format!("copying {program} to {}: {e}", target.display()))?;
     }
     Ok(())
-}
-
-/// The log folder: owned by Administrators; SYSTEM and Administrators may change it, users may read it.
-fn secure_log_folder() -> Result<(), String> {
-    let folder = crate::log::folder();
-    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
-    let sddl = wide("O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)");
-    let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            PCWSTR(sddl.as_ptr()),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            None,
-        )
-    }
-    .map_err(|e| format!("security descriptor: {}", e.message()))?;
-    let mut owner = PSID::default();
-    let mut owner_defaulted = false.into();
-    let mut dacl = std::ptr::null_mut();
-    let mut present = false.into();
-    let mut dacl_defaulted = false.into();
-    let result = unsafe {
-        GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted)
-            .and_then(|()| {
-                GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut dacl_defaulted)
-            })
-            .and_then(|()| {
-                let path = wide(&folder.display().to_string());
-                SetNamedSecurityInfoW(
-                    PCWSTR(path.as_ptr()),
-                    SE_FILE_OBJECT,
-                    OWNER_SECURITY_INFORMATION
-                        | DACL_SECURITY_INFORMATION
-                        | PROTECTED_DACL_SECURITY_INFORMATION,
-                    Some(owner),
-                    None,
-                    Some(dacl),
-                    None,
-                )
-                .ok()
-            })
-    };
-    unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
-    result.map_err(|e| format!("securing {}: {}", folder.display(), e.message()))
 }
 
 /// Lets services send Ctrl+Alt+Del, keeping what the policy was.
@@ -351,7 +299,13 @@ pub fn install(args: &[String]) -> Result<(), String> {
         stop(service)?;
     }
     place_programs(&target)?;
-    secure_log_folder()?;
+    // %ProgramData%\Queqiao made new, for SYSTEM and administrators (users may read the log): see secure_folder.
+    // The sign-in screen's device kept there goes with it; the person's agent hands it over again when it is online.
+    if let Some(note) =
+        crate::secure_folder::fresh(&crate::log::folder(), crate::secure_folder::DATA)?
+    {
+        println!("{note}");
+    }
     let binary = wide(&format!("\"{}\"", target.join(PROGRAMS[0]).display()));
     let (name, display) = (wide(crate::NAME), wide(DISPLAY_NAME));
     let service = match existing {

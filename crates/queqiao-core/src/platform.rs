@@ -91,6 +91,78 @@ pub fn runs_as_local_service() -> bool {
     unsafe { IsWellKnownSid(user.User.Sid, WinLocalServiceSid) }.as_bool()
 }
 
+/// The machine's Program Files folder (HKLM ...\CurrentVersion\ProgramFilesDir). Never from environment variables:
+/// an elevated program inherits the person's environment, which any program of theirs can change
+/// (HKCU\Environment), as the security review of 2026-11-22 noted.
+pub fn program_files() -> std::path::PathBuf {
+    machine_folder(
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+        "ProgramFilesDir",
+    )
+    .unwrap_or_else(|| system_drive().join("Program Files"))
+}
+
+/// The machine's ProgramData folder (HKLM ...\ProfileList\ProgramData, "%SystemDrive%\ProgramData" there, the drive
+/// taken from Windows' own folder), never from environment variables.
+pub fn program_data() -> std::path::PathBuf {
+    machine_folder(
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList",
+        "ProgramData",
+    )
+    .unwrap_or_else(|| system_drive().join("ProgramData"))
+}
+
+/// The drive Windows is on ("C:\"), from Windows itself (GetSystemWindowsDirectoryW).
+fn system_drive() -> std::path::PathBuf {
+    use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    let mut buffer = [0u16; 260];
+    let length = unsafe { GetSystemWindowsDirectoryW(Some(&mut buffer)) } as usize;
+    let windows = String::from_utf16_lossy(&buffer[..length.min(buffer.len())]);
+    match windows.get(..2) {
+        Some(drive) if drive.ends_with(':') => std::path::PathBuf::from(format!("{drive}\\")),
+        _ => std::path::PathBuf::from("C:\\"),
+    }
+}
+
+/// A folder path from HKLM, "%SystemDrive%" in it replaced by the drive Windows is on; None for anything else
+/// with a variable in it, or a value that is not there.
+fn machine_folder(key: &str, value: &str) -> Option<std::path::PathBuf> {
+    use windows::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
+    };
+    use windows::core::PCWSTR;
+    let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+    let value: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
+    let mut buffer = [0u16; 520];
+    let mut size = (buffer.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status.is_err() {
+        return None;
+    }
+    let length = (size as usize / 2).min(buffer.len());
+    let text = String::from_utf16_lossy(&buffer[..length]);
+    let text = text.trim_end_matches('\0');
+    let drive = system_drive();
+    let drive = drive.to_string_lossy();
+    let text = match text.get(..13) {
+        Some(start) if start.eq_ignore_ascii_case("%SystemDrive%") => {
+            format!("{}{}", drive.trim_end_matches('\\'), &text[13..])
+        }
+        _ => text.to_string(),
+    };
+    (!text.contains('%') && text.len() > 3).then(|| std::path::PathBuf::from(text))
+}
+
 /// Where crash reports go: %APPDATA%\Queqiao\crashes.
 pub fn crash_folder() -> Option<std::path::PathBuf> {
     std::env::var_os("APPDATA").map(|folder| {
@@ -112,5 +184,33 @@ fn keep_newest(folder: &std::path::Path, count: usize) {
     let extra = reports.len().saturating_sub(count);
     for (_, path) in reports.into_iter().take(extra) {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    #[test]
+    fn machine_folders_come_from_the_registry_not_the_environment() {
+        let (files, data) = (program_files(), program_data());
+        assert!(
+            files.ends_with("Program Files") && files.is_dir(),
+            "{}",
+            files.display()
+        );
+        assert!(
+            data.ends_with("ProgramData") && data.is_dir(),
+            "{}",
+            data.display()
+        );
+        // A program of the person can set these for an elevated program it starts: they must not count.
+        unsafe {
+            std::env::set_var("ProgramFiles", r"C:\Users\Public\fake");
+            std::env::set_var("ProgramData", r"C:\Users\Public\fake");
+            std::env::set_var("SystemDrive", "Z:");
+        }
+        assert_eq!(program_files(), files);
+        assert_eq!(program_data(), data);
     }
 }

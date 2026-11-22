@@ -309,7 +309,10 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         // a program could hand it a login of its own over pipes it made and have it run unseen (no tray icon, no
         // banner), as found by the security review of 2026-11-22.
         if !queqiao_core::platform::runs_as_local_service() {
-            return Err("--logon is for the Queqiao service only".into());
+            return Err(
+                "the agent for the sign-in screen runs as LocalService only (the Queqiao service starts it)"
+                    .into(),
+            );
         }
         let service = links
             .service

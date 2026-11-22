@@ -44,8 +44,9 @@ function Wait-SessionTask([string]$Name, [int]$TimeoutSec) {
 }
 
 $serviceLog = Join-Path $env:ProgramData 'Queqiao\service.log'
-$logSkip = if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog).Count } else { 0 }
-function Get-ServiceLog { if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog | Select-Object -Skip $logSkip) } else { @() } }
+# This run's lines, by their time stamps (installing the service starts its folder, and so the log, anew).
+$logSince = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+function Get-ServiceLog { if (Test-Path -LiteralPath $serviceLog) { @(Get-Content -LiteralPath $serviceLog | Where-Object { $_.Length -ge 23 -and $_.Substring(0, 23) -ge $logSince }) } else { @() } }
 function Wait-ServiceLog([string]$Pattern, [int]$Count, [int]$TimeoutSec) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     do {
@@ -92,7 +93,39 @@ try {
     } while (-not $up -and (Get-Date) -lt $deadline)
     if (-not $up) { 'RUN_FAIL the server did not start'; return }
 
+    '=== 0. the agent for the sign-in screen (no tray icon, no banner) only as LocalService'
+    # Started by a program of a person, --logon is refused; as LocalService (which only the service, or an
+    # administrator's task as here, can arrange) it gets past that and stops only for want of the service's channel.
+    $agentExe = Join-Path $Bin 'queqiao-agent.exe'
+    $probeDir = Join-Path $env:SystemRoot 'Temp\queqiao-logon-probe'
+    if (Test-Path -LiteralPath $probeDir) { Remove-Item -Recurse -Force -LiteralPath $probeDir }
+    New-Item -ItemType Directory -Force $probeDir | Out-Null
+    & icacls.exe $probeDir /grant '*S-1-5-19:(OI)(CI)M' | Out-Null
+    $asPerson = @(& $agentExe --logon 2>&1 | ForEach-Object { "$_" }) -join ' '
+    Add-Check 'agent --logon refused outside LocalService' ($asPerson -match 'runs as LocalService only')
+    # LocalService may not read the build in an administrator's profile: a copy runs from the probe folder.
+    Copy-Item -LiteralPath $agentExe -Destination $probeDir
+    $action = New-ScheduledTaskAction -Execute (Join-Path $probeDir 'queqiao-agent.exe') -Argument "--logon --report `"$probeDir\local_service.txt`""
+    $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\LOCALSERVICE' -LogonType ServiceAccount
+    Register-ScheduledTask -TaskName 'Queqiao-M5-LogonProbe' -Action $action -Principal $principal -Force | Out-Null
+    Start-ScheduledTask -TaskName 'Queqiao-M5-LogonProbe'
+    $probeFile = Join-Path $probeDir 'local_service.txt'
+    $deadline = (Get-Date).AddSeconds(30)
+    while (-not (Test-Path -LiteralPath $probeFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    Start-Sleep -Milliseconds 500
+    if (-not (Test-Path -LiteralPath $probeFile)) { "the task's result: $((Get-ScheduledTaskInfo -TaskName 'Queqiao-M5-LogonProbe').LastTaskResult)" }
+    Unregister-ScheduledTask -TaskName 'Queqiao-M5-LogonProbe' -Confirm:$false
+    $asLocalService = if (Test-Path -LiteralPath $probeFile) { (Get-Content -LiteralPath $probeFile -Encoding UTF8) -join ' ' } else { 'no report' }
+    "as LocalService: $(($asLocalService -split 'ERROR ')[-1])"
+    Add-Check 'agent --logon as LocalService: past that check' ($asLocalService -match '--logon is for the Queqiao service only' -and $asLocalService -notmatch 'runs as LocalService only')
+    Remove-Item -Recurse -Force -LiteralPath $probeDir -ErrorAction SilentlyContinue
+
     '=== 1. install: the service starts the desktop helper and the agent'
+    # Something left in the service's folder before it is installed (as a person may make there) must not survive.
+    $dataFolder = Join-Path $env:ProgramData 'Queqiao'
+    $planted = Join-Path $dataFolder 'planted-before-install\version.dll'
+    New-Item -ItemType Directory -Force (Split-Path $planted) | Out-Null
+    Set-Content -LiteralPath $planted -Value 'not Queqiao' -Encoding ascii
     $agentArgs = "--server $listen --pin $pin --user alice --password $password --sessions 1 --seconds 150 --dry-run-commands --report `"$Out\agent_secure.txt`""
     & { $ErrorActionPreference = 'Continue'; & $serviceExe install --agent-arguments $agentArgs --no-restart 2>&1 | ForEach-Object { "$_" } }
     if (-not (Wait-ServiceLog 'started the desktop helper \(\d+\) and the agent \(\d+\)' 1 30)) {
@@ -108,6 +141,10 @@ try {
     $helperOwner = Invoke-CimMethod -InputObject $helperProcess -MethodName GetOwner
     "agent $($agentProcess.Id) in session $($agentProcess.SessionId); helper $($helperProcess.ProcessId) in session $($helperProcess.SessionId) as $($helperOwner.Domain)\$($helperOwner.User)"
     if ($helperOwner.User -ne 'SYSTEM') { $failed += 'helper account' }
+    Add-Check 'install: what was in its folder before is gone' (-not (Test-Path -LiteralPath (Split-Path $planted)))
+    $dataAcl = Get-Acl -LiteralPath $dataFolder
+    Add-Check 'install: its folder has its own access, not inherited' $dataAcl.AreAccessRulesProtected
+    Add-Check 'install: users may not write in its folder' (-not @($dataAcl.Access | Where-Object { $_.IdentityReference -match 'Users|Everyone|Authenticated' -and $_.FileSystemRights -match 'Write|Modify|FullControl|CreateFiles|AppendData' }).Count)
 
     '=== 2. the agent''s process, opened by its own user'
     # An administrator's elevated programs (SeDebugPrivilege enabled) may open any process; the protection is for
@@ -170,7 +207,9 @@ try {
 
     '=== 4. Restart Queqiao on that PC: the service starts the agent again'
     $agentArgs2 = "--server $listen --pin $pin --user alice --password $password --sessions 2 --seconds 150 --report `"$Out\agent_restart.txt`""
-    $startsBefore = @(Get-ServiceLog | Where-Object { $_ -match 'started the desktop helper' }).Count
+    # Installing again starts the service's folder, and so its log, anew: count from here.
+    $logSince = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+    $startsBefore = 0
     & { $ErrorActionPreference = 'Continue'; & $serviceExe install --agent-arguments $agentArgs2 --no-restart 2>&1 | ForEach-Object { "$_" } }
     if (-not (Wait-ServiceLog 'started the desktop helper' ($startsBefore + 1) 30)) { $failed += 'service start 2' }
     Start-Sleep -Seconds 3

@@ -23,12 +23,18 @@ pub fn start(manifest: &[u8], signature: &str, installer: &[u8]) -> Result<Strin
             queqiao_core::VERSION
         ));
     }
+    // Made new for each update, for SYSTEM and administrators only: nobody else can have put a DLL beside the
+    // installer, or swap it, before it runs as SYSTEM (secure_folder).
     let folder: PathBuf = crate::log::folder().join("updates");
-    std::fs::create_dir_all(&folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    crate::secure_folder::fresh(&folder, crate::secure_folder::PRIVATE)?;
     let path = folder.join(&manifest.installer);
-    std::fs::write(&path, installer).map_err(|e| format!("{}: {e}", path.display()))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, installer))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let report = folder.join("service_update.txt");
-    let _ = std::fs::remove_file(&report);
     std::process::Command::new(&path)
         .arg("--service-update")
         .arg("--report")
