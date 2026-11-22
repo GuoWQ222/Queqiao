@@ -4,9 +4,12 @@
 //!   shared by the device's agent and viewer.
 //! - `known_devices.json`: device id -> public key, pinned on first contact (as SSH does with host keys). A
 //!   device whose key later differs is refused until the pin is removed on purpose (`forget`): the server, or
-//!   someone who took it over, cannot slip in its own key.
+//!   someone who took it over, cannot slip in its own key. The agent and the viewer share it: each reads and
+//!   changes it under `known_devices.lock` (pins kept in memory and written whole were lost: the last one to
+//!   write dropped the other's new pins, which the next contact then pinned again, from the server's word).
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use queqiao_transport::Error;
@@ -112,9 +115,10 @@ pub fn verify(public_key: &str, message: &[u8], signature: &str) -> bool {
 
 /// The keys of other devices as first seen from this PC.
 pub struct KnownDevices {
+    /// As last read or written here (the file is what counts: the other program may have changed it).
     keys: BTreeMap<String, String>,
     /// None: in memory only (tests, probes).
-    path: Option<std::path::PathBuf>,
+    path: Option<PathBuf>,
 }
 
 /// What a device's key is compared with its pin.
@@ -129,15 +133,19 @@ pub enum Pin {
 
 impl KnownDevices {
     pub fn load() -> Result<KnownDevices, Error> {
-        let path = folder()?.join("known_devices.json");
-        let keys = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        Ok(KnownDevices {
+        Ok(KnownDevices::at(folder()?.join("known_devices.json")))
+    }
+
+    /// The pins in `path` (another folder: tests).
+    fn at(path: PathBuf) -> KnownDevices {
+        let keys = {
+            let _lock = lock(&path);
+            read_pins(&path).unwrap_or_default()
+        };
+        KnownDevices {
             keys,
             path: Some(path),
-        })
+        }
     }
 
     pub fn in_memory() -> KnownDevices {
@@ -155,47 +163,85 @@ impl KnownDevices {
         }
     }
 
-    /// All pins (device id, public key hex).
+    /// All pins (device id, public key hex), as the file has them now.
     pub fn pins(&self) -> Vec<(String, String)> {
-        self.keys
-            .iter()
-            .map(|(device, key)| (device.clone(), key.clone()))
-            .collect()
+        let keys = match &self.path {
+            Some(path) => {
+                let _lock = lock(path);
+                read_pins(path).unwrap_or_else(|| self.keys.clone())
+            }
+            None => self.keys.clone(),
+        };
+        keys.into_iter().collect()
     }
 
     /// Compares `public_key` with the pin for `device`, pinning it the first time.
     pub fn check(&mut self, device: &str, public_key: &str) -> Pin {
         let key = public_key.to_ascii_lowercase();
-        match self.keys.get(device) {
-            Some(pinned) if *pinned == key => Pin::Same,
-            Some(pinned) => Pin::Changed(pinned.clone()),
+        // Not written (the folder refused it): it holds for this contact, the next one pins again.
+        let (pin, _written) = self.change(|keys| match keys.get(device) {
+            Some(pinned) if *pinned == key => (Pin::Same, false),
+            Some(pinned) => (Pin::Changed(pinned.clone()), false),
             None => {
-                self.keys.insert(device.to_string(), key);
-                let _ = self.save();
-                Pin::New
+                keys.insert(device.to_string(), key);
+                (Pin::New, true)
             }
-        }
+        });
+        pin
     }
 
     /// Removes the pin of `device` (the person confirmed its new key); the next contact pins again.
     pub fn forget(&mut self, device: &str) -> Result<(), Error> {
-        self.keys.remove(device);
-        self.save()
+        self.change(|keys| ((), keys.remove(device).is_some())).1
     }
 
-    fn save(&self) -> Result<(), Error> {
-        let Some(path) = &self.path else {
-            return Ok(());
+    /// Applies `edit` (which says whether it changed anything) to the pins as the file has them now, and
+    /// writes them back if it did, all under the file's lock: the other program's pins and removals stay.
+    fn change<R>(
+        &mut self,
+        edit: impl FnOnce(&mut BTreeMap<String, String>) -> (R, bool),
+    ) -> (R, Result<(), Error>) {
+        let Some(path) = self.path.clone() else {
+            return (edit(&mut self.keys).0, Ok(()));
         };
-        // Written whole to a temporary file and renamed: a half-written pin file would lose pins.
-        let temporary = path.with_extension("json.tmp");
-        std::fs::write(
-            &temporary,
-            serde_json::to_string_pretty(&self.keys).map_err(err)?,
-        )?;
-        std::fs::rename(&temporary, path)?;
-        Ok(())
+        let _lock = lock(&path);
+        // Missing or damaged: what this program knows.
+        if let Some(keys) = read_pins(&path) {
+            self.keys = keys;
+        }
+        let (result, changed) = edit(&mut self.keys);
+        let written = if changed {
+            write_pins(&path, &self.keys)
+        } else {
+            Ok(())
+        };
+        (result, written)
     }
+}
+
+/// The pin file's lock, held while the value lives (released when its handle closes). None if the folder refused
+/// the lock file: then unlocked, as before the lock.
+fn lock(path: &Path) -> Option<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
+fn read_pins(path: &Path) -> Option<BTreeMap<String, String>> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn write_pins(path: &Path, keys: &BTreeMap<String, String>) -> Result<(), Error> {
+    // Written whole to a temporary file and renamed: a half-written pin file would lose pins.
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_string_pretty(keys).map_err(err)?)?;
+    std::fs::rename(&temporary, path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -228,5 +274,55 @@ mod tests {
         );
         known.forget("dev").unwrap();
         assert_eq!(known.check("dev", other.public_hex()), Pin::New);
+    }
+
+    /// The agent and the viewer of one PC: both loaded before either pinned anything.
+    #[test]
+    fn two_programs_keep_each_others_pins() {
+        let folder = std::env::temp_dir().join(format!("queqiao_pins_{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("known_devices.json");
+        let _ = std::fs::remove_file(&path);
+        let (one, two, three) = ("1".repeat(64), "2".repeat(64), "3".repeat(64));
+        let mut agent = KnownDevices::at(path.clone());
+        let mut viewer = KnownDevices::at(path.clone());
+        assert_eq!(agent.check("a", &one), Pin::New);
+        assert_eq!(viewer.check("b", &two), Pin::New);
+        // The viewer sees the agent's pin: another key for "a" is refused there too.
+        assert_eq!(viewer.check("a", &three), Pin::Changed(one.clone()));
+        let pins = KnownDevices::at(path.clone()).pins();
+        assert_eq!(
+            pins,
+            vec![
+                ("a".to_string(), one.clone()),
+                ("b".to_string(), two.clone())
+            ]
+        );
+        // A pin removed in one stays removed when the other pins next.
+        agent.forget("a").unwrap();
+        assert_eq!(viewer.check("c", &three), Pin::New);
+        assert_eq!(agent.pins(), viewer.pins());
+        assert_eq!(viewer.check("a", &three), Pin::New);
+        assert_eq!(agent.check("a", &one), Pin::Changed(three.clone()));
+
+        // Four programs pinning at once: all their pins are in the file.
+        std::fs::remove_file(&path).unwrap();
+        let threads: Vec<_> = (0..4)
+            .map(|program| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut known = KnownDevices::at(path);
+                    for device in 0..20 {
+                        let key = format!("{program:02}{device:062}");
+                        assert_eq!(known.check(&format!("{program}-{device}"), &key), Pin::New);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(KnownDevices::at(path.clone()).pins().len(), 80);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }

@@ -199,6 +199,9 @@ Open, in this order, all before any release:
    saved-login resume may not) and published in the device list; every signal (hello, offer, answer) is signed over
    session, kind, sender, receiver and body, and the receiving device checks it against the key it pinned at first
    contact (`known_devices.json`); a changed key is refused until confirmed (`--trust-new-key <device id>`).
+   The agent and the viewer share that file and change it one at a time under `known_devices.lock`, each starting
+   from what the other wrote (the security review of 2026-11-22: pins kept in memory were lost to the other's
+   write, and the next contact pinned again on the server's word).
    Checked from outside by `account_probe` (keys in the list, signature checks out, a forged one is refused).
    Was: Today the DTLS fingerprints in the offer and answer
    pass through the server, so a compromised server could sit in the middle of a session. Each device gets its
@@ -244,8 +247,8 @@ Open, in this order, all before any release:
    a Medium program), nor open its later threads; what it starts (the viewer, Explorer, command lines) runs at
    Medium again. An administrator's full token is High already: there the protection is the descriptor alone. The programs are copied to `%ProgramFiles%\Queqiao` (administrators only) and the
    log folder `%ProgramData%\Queqiao` is set so that only SYSTEM and administrators may change it.
-   What remains: threads the agent starts later get the person's default descriptor (same-user code could open
-   them); an administrator's elevated programs have debug rights and may open any process anyway; and Microsoft
+   What remains: threads the agent starts later get the person's default descriptor (the person's programs at
+   High could open them, Medium ones no longer); an administrator's elevated programs have debug rights and may open any process anyway; and Microsoft
    does not count UAC as a security boundary for administrators. For a standard user, a UAC prompt asks for an
    administrator's password, which input alone cannot give.
 5. **The code and the release:** `cargo audit` / `cargo deny` on every build, fuzzing of everything that parses
