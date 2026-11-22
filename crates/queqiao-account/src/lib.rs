@@ -90,6 +90,8 @@ pub struct Account {
     /// Devices of other accounts joined by a help code (their keys came with the server's answer), with the
     /// account they belong to.
     helpers: Vec<(Device, String)>,
+    /// The connection to the server ended (seen by `still_trusted`).
+    closed: bool,
     role: Role,
 }
 
@@ -236,6 +238,7 @@ impl Account {
             known,
             role,
             helpers: Vec::new(),
+            closed: false,
         })
     }
 
@@ -358,6 +361,33 @@ impl Account {
     }
 
     /// The next event, waiting at most `timeout`. Device list updates are also kept in `devices`.
+    /// During a session (while the main loop does not read events): what arrived is taken in and stays queued for
+    /// `next_event`. Whether `device` may go on: still on the account, or a helper let in, and this login still on
+    /// (as UU: a device taken out of the account is logged out; a changed password closes the account's other
+    /// connections, this one too).
+    pub fn still_trusted(&mut self, device: &str) -> bool {
+        loop {
+            match self.events.try_recv() {
+                Ok(event) => {
+                    match &event {
+                        AccountEvent::Devices(devices) => self.devices = devices.clone(),
+                        AccountEvent::Closed(_) => self.closed = true,
+                        _ => {}
+                    }
+                    self.pending.push_back(event);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.closed = true;
+                    break;
+                }
+            }
+        }
+        !self.closed
+            && (self.devices.iter().any(|d| d.id == device)
+                || self.helpers.iter().any(|(d, _)| d.id == device))
+    }
+
     pub fn next_event(&mut self, timeout: Duration) -> Option<AccountEvent> {
         let event = match self.pending.pop_front() {
             Some(event) => Some(event),
@@ -486,6 +516,10 @@ pub struct SessionSignal<'a> {
 }
 
 impl Signaling for SessionSignal<'_> {
+    fn peer_trusted(&mut self) -> bool {
+        self.account.still_trusted(&self.device)
+    }
+
     fn send(&mut self, kind: &str, body: &str) -> Result<(), Error> {
         let signature = self
             .account

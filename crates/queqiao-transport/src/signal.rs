@@ -120,6 +120,12 @@ pub trait Signaling {
         Ok(IceServers::default())
     }
 
+    /// Whether the other side may go on (asked during a session, once a second; false ends it). An account's
+    /// session says false once the other device is taken out of the account, or this device's login ended.
+    fn peer_trusted(&mut self) -> bool {
+        true
+    }
+
     /// Exchanges hellos: both sides must speak the same protocol version and have different roles.
     /// Returns the other side's role.
     fn hello(&mut self, role: &str) -> Result<String, Error> {

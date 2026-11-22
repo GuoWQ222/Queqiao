@@ -2126,9 +2126,22 @@ fn session(
             waiting = Some((0, qpc_now()));
         }};
     }
+    let mut trust_checked = Instant::now();
     'session: loop {
         if end.is_some_and(|end| Instant::now() > end) {
             break;
+        }
+        // Once a second: a viewer taken out of the account, or this PC's login ended (the password was changed), ends
+        // the session (as UU: a device taken out of the account is logged out).
+        if trust_checked.elapsed() >= Duration::from_secs(1) {
+            trust_checked = Instant::now();
+            if !signal.peer_trusted() {
+                closed = Some(
+                    "the viewer's device is no longer on this account, or this PC's login ended"
+                        .to_string(),
+                );
+                break 'session;
+            }
         }
         if !end_pressed
             && options

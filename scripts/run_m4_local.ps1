@@ -457,6 +457,28 @@ try {
         if ($agentText | Where-Object { $_ -match '^session 1: ' }) { $failed += 'help-noask agent (a session started)' }
         if (-not ($viewerText | Where-Object { $_ -match 'declined' })) { $failed += 'help-noask viewer (not told it was declined)' }
     }
+    # A device taken out of the account during its session (as UU: it is logged out): this PC's agent ends the session
+    # at once, though the session itself runs directly between the two programs.
+    if ($Sessions -contains 'removed' -or $Sessions -contains 'all') {
+        $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds 120 --report `"$Out\agent_removed.txt`""
+        Start-SessionTask 'Queqiao-M4-Agent-removed' $agent $agentArgs ''
+        Start-Sleep -Seconds 4
+        $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --test-device m4-removed --device $device --seconds 60 --width 640 --mute --report `"$Out\viewer_removed.txt`""
+        Start-SessionTask 'Queqiao-M4-Viewer-removed' $viewer $viewerArgs ''
+        Start-Sleep -Seconds 12
+        $removedAt = Get-Date
+        & $viewer --server $listen --pin $pin --user alice --password $password1 --test-device m4-remover --remove-device m4-removed --report "$Out\remover.txt" | Out-Null
+        $agentResult = Wait-SessionTask 'Queqiao-M4-Agent-removed' 90
+        $viewerResult = Wait-SessionTask 'Queqiao-M4-Viewer-removed' 90
+        "=== session 'removed': agent exit $agentResult, viewer exit $viewerResult"
+        $agentText = @(if (Test-Path -LiteralPath "$Out\agent_removed.txt") { Get-Content -LiteralPath "$Out\agent_removed.txt" -Encoding UTF8 })
+        $agentText | Where-Object { $_ -match '^(session|ended|RESULT|ERROR)' }
+        Get-Content -LiteralPath "$Out\remover.txt" -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { $_ -match 'removed|ERROR' }
+        if (-not ($agentText | Where-Object { $_ -match '^session 1: viewer m4-removed' })) { $failed += 'removed (no session from the device)' }
+        if (-not ($agentText | Where-Object { $_ -eq "ended: the viewer's device is no longer on this account, or this PC's login ended" })) { $failed += 'removed (the session did not end on the removal)' }
+        # Ended soon after the removal, not when the viewer's 60 s were up.
+        if (((Get-Date) - $removedAt).TotalSeconds -gt 40) { $failed += 'removed (the session ended late)' }
+    }
     # Several sessions at once: this PC's agent and a second one (a throwaway device of the same account), and one
     # viewer with a session to each, each on a thread and in a window of its own. No input test: two agents injecting
     # into one PC at once would spoil each other's checks.

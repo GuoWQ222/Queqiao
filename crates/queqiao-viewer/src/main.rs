@@ -219,6 +219,8 @@ struct Options {
     invite: Option<String>,
     /// --help-connect: the help form, filled in from the link, connects at once (the main window's Help page).
     help_go: bool,
+    /// Tests: take this device (name or id) out of the account, then leave.
+    remove_device: Option<String>,
     /// Press Connect in the help form once it is drawn (tests).
     test_submit_help: bool,
     /// With --user and --password: a new account (on a server that takes them) instead of a login.
@@ -541,6 +543,7 @@ fn test_switch(
             _ => return None,
         }),
         "--trust-new-key" => options.trust_new_key = args.next(),
+        "--remove-device" => options.remove_device = Some(args.next()?),
         _ => return Some(false),
     }
     Some(true)
@@ -618,6 +621,18 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
             login.save(AccountRole::Viewer).map_err(|e| e.to_string())?;
         }
         lines.push("logged out: the saved login is deleted here and revoked on the server".into());
+        return Ok(true);
+    }
+    if let Some(key) = &options.remove_device {
+        let found = account
+            .devices
+            .iter()
+            .find(|d| d.id == *key || d.name.eq_ignore_ascii_case(key))
+            .map(|d| d.id.clone())
+            .ok_or_else(|| format!("{key} is not on the account"))?;
+        account.remove_device(&found);
+        std::thread::sleep(Duration::from_millis(800));
+        lines.push(format!("removed {found} from the account"));
         return Ok(true);
     }
     if options.list {
