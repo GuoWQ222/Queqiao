@@ -14,6 +14,9 @@
 //! forwards is handed to str0m as received on the relayed address.
 
 use std::collections::VecDeque;
+
+/// Control messages waiting for the channel at most (a few seconds of input and commands).
+const MAX_CONTROL_PENDING: usize = 4096;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -932,7 +935,10 @@ impl Network {
                 writer.write(pt, now, time, data).map_err(err)?;
             }
             Command::Data(bytes) => {
-                self.control_pending.push_back(bytes);
+                // A side that does not read is not given more memory: past MAX_CONTROL_PENDING, messages are dropped.
+                if self.control_pending.len() < MAX_CONTROL_PENDING {
+                    self.control_pending.push_back(bytes);
+                }
                 self.flush_channels();
             }
             Command::StreamData(stream, bytes) => {

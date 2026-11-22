@@ -100,6 +100,12 @@ impl Clipboard {
 
     /// Puts text or an image on this PC's clipboard (from the other side).
     pub fn set(&self, content: ClipContent) {
+        // An image from the other side goes on the clipboard only as a well-formed bitmap.
+        if let ClipContent::Image(bytes) = &content
+            && !dib_ok(bytes)
+        {
+            return;
+        }
         if self.texts.send(content).is_ok() {
             let _ = unsafe {
                 PostMessageW(
@@ -207,6 +213,10 @@ extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_CLIPBOARDUPDATE => {
+            // What asks not to be shared (a password manager's copied password) stays here.
+            if private_content(Some(hwnd)) {
+                return LRESULT(0);
+            }
             // Files first: Explorer's copy may carry other formats too.
             let content = read_files(Some(hwnd))
                 .map(ClipContent::Files)
@@ -276,6 +286,105 @@ fn open(owner: Option<HWND>) -> bool {
 }
 
 /// The clipboard's text, if it holds text (`owner`: the window opening it; None for the calling task).
+/// Whether what is on the clipboard asks not to be shared: password managers mark a copied password with
+/// "ExcludeClipboardContentFromMonitorProcessing", or set "CanUploadToCloudClipboard" or "CanIncludeInClipboardHistory"
+/// to 0 (the security review of 2026-11-22: it went to the other side like anything else).
+fn private_content(owner: Option<HWND>) -> bool {
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    use windows::core::w;
+    let exclude =
+        unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) };
+    if exclude != 0 && unsafe { IsClipboardFormatAvailable(exclude) }.is_ok() {
+        return true;
+    }
+    for name in [
+        w!("CanUploadToCloudClipboard"),
+        w!("CanIncludeInClipboardHistory"),
+    ] {
+        let format = unsafe { RegisterClipboardFormatW(name) };
+        if format == 0 || unsafe { IsClipboardFormatAvailable(format) }.is_err() || !open(owner) {
+            continue;
+        }
+        let value = (|| {
+            let handle = unsafe { GetClipboardData(format) }.ok()?;
+            let memory = HGLOBAL(handle.0);
+            let pointer = unsafe { GlobalLock(memory) } as *const u32;
+            if pointer.is_null() {
+                return None;
+            }
+            let value =
+                (unsafe { GlobalSize(memory) } >= 4).then(|| unsafe { pointer.read_unaligned() });
+            let _ = unsafe { GlobalUnlock(memory) };
+            value
+        })();
+        let _ = unsafe { CloseClipboard() };
+        if value == Some(0) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `bytes` is a well-formed device-independent bitmap (CF_DIB): a known header, a sane size, 1 plane, a
+/// usual bit depth, no compression but bit fields, and as many bytes as its header says (the security review of
+/// 2026-11-22: images from the other side went on the clipboard unchecked).
+pub fn dib_ok(bytes: &[u8]) -> bool {
+    let u32_at = |at: usize| {
+        bytes
+            .get(at..at + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap_or_default()))
+    };
+    let u16_at = |at: usize| {
+        bytes
+            .get(at..at + 2)
+            .map(|b| u16::from_le_bytes(b.try_into().unwrap_or_default()))
+    };
+    let (Some(header), Some(width), Some(height), Some(planes), Some(bits), Some(compression)) = (
+        u32_at(0),
+        u32_at(4).map(|v| v as i32),
+        u32_at(8).map(|v| v as i32),
+        u16_at(12),
+        u16_at(14),
+        u32_at(16),
+    ) else {
+        return false;
+    };
+    let used_colors = u32_at(32).unwrap_or(0);
+    if !matches!(header, 40 | 52 | 56 | 108 | 124)
+        || !(1..=16384).contains(&width)
+        || height == 0
+        || height.unsigned_abs() > 16384
+        || planes != 1
+        || !matches!(bits, 1 | 4 | 8 | 16 | 24 | 32)
+        || !matches!(compression, 0 | 3)
+    {
+        return false;
+    }
+    let palette = if bits <= 8 {
+        let most = 1u64 << bits;
+        let count = if used_colors == 0 {
+            most
+        } else {
+            u64::from(used_colors)
+        };
+        if count > most {
+            return false;
+        }
+        count * 4
+    } else {
+        0
+    };
+    // Bit fields after a 40-byte header: three masks.
+    let masks = if compression == 3 && header == 40 {
+        12
+    } else {
+        0
+    };
+    let stride = (u64::from(width as u32) * u64::from(bits)).div_ceil(32) * 4;
+    let needed = u64::from(header) + palette + masks + stride * u64::from(height.unsigned_abs());
+    needed <= bytes.len() as u64
+}
+
 pub fn read_text(owner: Option<HWND>) -> Option<String> {
     if unsafe { IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT.0)) }.is_err() || !open(owner) {
         return None;
@@ -411,4 +520,40 @@ fn write_global(owner: HWND, format: u32, bytes: &[u8]) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod dib_tests {
+    use super::dib_ok;
+
+    fn dib(width: i32, height: i32, bits: u16, extra: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; 40];
+        bytes[0..4].copy_from_slice(&40u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&width.to_le_bytes());
+        bytes[8..12].copy_from_slice(&height.to_le_bytes());
+        bytes[12..14].copy_from_slice(&1u16.to_le_bytes());
+        bytes[14..16].copy_from_slice(&bits.to_le_bytes());
+        let stride = (width as usize * bits as usize).div_ceil(32) * 4;
+        bytes.resize(40 + stride * height.unsigned_abs() as usize + extra, 0x7F);
+        bytes
+    }
+
+    #[test]
+    fn only_well_formed_bitmaps_pass() {
+        assert!(dib_ok(&dib(2, 2, 32, 0)));
+        assert!(dib_ok(&dib(3, -5, 24, 0)), "top-down rows");
+        let short = dib(64, 64, 32, 0);
+        assert!(!dib_ok(&short[..short.len() - 1]), "cut short");
+        assert!(!dib_ok(&dib(2, 2, 7, 0)), "an odd bit depth");
+        let mut huge = dib(2, 2, 32, 0);
+        huge[4..8].copy_from_slice(&100_000i32.to_le_bytes());
+        assert!(!dib_ok(&huge), "a size it does not have");
+        let mut header = dib(2, 2, 32, 0);
+        header[0..4].copy_from_slice(&41u32.to_le_bytes());
+        assert!(!dib_ok(&header), "an unknown header");
+        // 8 bits need their palette.
+        assert!(!dib_ok(&dib(4, 4, 8, 0)));
+        assert!(dib_ok(&dib(4, 4, 8, 1024)));
+        assert!(!dib_ok(&[]));
+    }
 }

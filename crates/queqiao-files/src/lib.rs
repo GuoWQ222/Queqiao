@@ -477,6 +477,15 @@ const MAX_INCOMING: usize = 16;
 const DISK_RESERVE: u64 = 1 << 30;
 
 /// Bytes free for this user on the disk of `folder`.
+/// The mark Windows puts on downloaded files (the Internet zone): SmartScreen and Office's Protected View then treat
+/// a received file as one from elsewhere (the security review of 2026-11-22). Left out on drives without alternate
+/// data streams (FAT).
+fn mark_from_elsewhere(path: &Path) {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    let _ = std::fs::write(PathBuf::from(stream), "[ZoneTransfer]\r\nZoneId=3\r\n");
+}
+
 fn free_space(folder: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     let wide: Vec<u16> = folder.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -570,6 +579,7 @@ impl Inbox {
                 let target = unique(&incoming.target);
                 match std::fs::rename(&incoming.part, &target) {
                     Ok(()) => {
+                        mark_from_elsewhere(&target);
                         // What goes on the clipboard: the file itself, or the folder it came in.
                         let relative = safe_relative_path(&incoming.name);
                         let top = match relative.components().next() {
@@ -633,8 +643,15 @@ impl Inbox {
             return Err(format!("at most {MAX_INCOMING} files can come at once"));
         }
         std::fs::create_dir_all(&self.folder).map_err(|e| e.to_string())?;
+        // The files still arriving count too: many at once could otherwise fill the disk (the security review of
+        // 2026-11-22: the check was per file).
+        let arriving: u64 = self
+            .files
+            .values()
+            .map(|file| file.size.saturating_sub(file.received))
+            .sum();
         if let Some(free) = free_space(&self.folder)
-            && size.saturating_add(DISK_RESERVE) > free
+            && size.saturating_add(arriving).saturating_add(DISK_RESERVE) > free
         {
             return Err("there is not enough free disk space on that PC".into());
         }
@@ -1018,6 +1035,12 @@ mod tests {
             };
             assert_eq!(*size, content.len() as u64);
             assert_eq!(std::fs::read(path).unwrap(), content);
+            // Marked as from elsewhere, as a download is.
+            let mut stream = path.as_os_str().to_owned();
+            stream.push(":Zone.Identifier");
+            let mark =
+                std::fs::read_to_string(std::path::PathBuf::from(stream)).unwrap_or_default();
+            assert!(mark.contains("ZoneId=3"), "{mark:?}");
         }
         let names: Vec<String> = std::fs::read_dir(&inbox_dir)
             .unwrap()

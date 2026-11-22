@@ -354,6 +354,9 @@ impl TitleStatus {
     }
 }
 
+/// Delay samples kept for a session's report at most (a long session, or a side that floods them).
+const MAX_SAMPLES: usize = 200_000;
+
 fn main() {
     queqiao_core::platform::install_crash_log("queqiao-viewer");
     #[cfg(feature = "test-switches")]
@@ -2402,11 +2405,14 @@ fn run_session(
                         stats.shown += 1;
                         first_picture_after.get_or_insert(started.elapsed());
                         let viewer_ms = received.elapsed().as_secs_f64() * 1e3;
-                        stats.viewer_ms.insert(picture.time as u64, viewer_ms);
+                        if stats.viewer_ms.len() < MAX_SAMPLES {
+                            stats.viewer_ms.insert(picture.time as u64, viewer_ms);
+                        }
                     }
                 }
                 PeerEvent::Data(bytes) => match Message::decode(&bytes) {
-                    Some(Message::Pong { sent_us, .. }) => {
+                    // Kept for the report, never more than MAX_SAMPLES: the other side sends these as often as it likes.
+                    Some(Message::Pong { sent_us, .. }) if stats.rtt_ms.len() < MAX_SAMPLES => {
                         let now_us = started.elapsed().as_micros() as u64;
                         stats
                             .rtt_ms
@@ -2415,9 +2421,10 @@ fn run_session(
                     Some(Message::FrameInfo {
                         time_90khz,
                         agent_ms,
-                    }) => {
+                    }) if stats.agent_ms.len() < MAX_SAMPLES => {
                         stats.agent_ms.insert(time_90khz, f64::from(agent_ms));
                     }
+                    Some(Message::Pong { .. } | Message::FrameInfo { .. }) => {}
                     Some(Message::Leave) => {
                         closed = Some("the agent ended the session".to_string());
                         break 'session;
