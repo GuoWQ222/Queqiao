@@ -7,10 +7,12 @@
 //! - `--service-update [--report <file>]`: run as SYSTEM by the Queqiao service for an update it checked: its
 //!   programs in %ProgramFiles%\Queqiao replaced, put back if its new agent does not keep running.
 //! - `--uninstall [--quiet] [--report <file>]`: removes everything it put on this PC (Settings > Apps runs this).
+//! - `--install-service`: run as an administrator (UAC) by the install when the service is chosen: the service and
+//!   its agent from this installer's own files, through a folder in Program Files (install::install_service).
 //! - `--remove-service`: run as an administrator by `--uninstall` when the service is installed.
 //! - `--ui-picture <file>`: shows the window, saves a picture of it and leaves without installing (tests).
-//! - `pack --output <installer> <file>...`: this program with those files appended (they are installed); sign the
-//!   result afterwards (scripts\package.ps1).
+//! - `pack --output <installer> <file>...`: this program with those files as its resource (they are installed; see
+//!   payload); sign the result afterwards (scripts\package.ps1).
 //! - `release-key --output <file>`: a new release key, DPAPI-encrypted for the person running this; prints its
 //!   public half (for queqiao_update::RELEASE_KEY).
 //! - `release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]`: the update feed
@@ -33,6 +35,7 @@ struct Options {
     service: bool,
     uninstall: bool,
     remove_service: bool,
+    install_service: bool,
     update: bool,
     service_update: bool,
     report: Option<PathBuf>,
@@ -40,6 +43,8 @@ struct Options {
 }
 
 fn main() {
+    // Run as an administrator or as SYSTEM, from wherever the person put it: DLLs only from System32.
+    queqiao_core::platform::system32_dlls_only();
     queqiao_core::platform::install_crash_log("queqiao-setup");
     let _ = queqiao_core::platform::prepare_process();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -76,7 +81,8 @@ fn main() {
     let mut lines = vec![queqiao_core::banner(env!("CARGO_PKG_NAME"))];
     // One installer at a time in this session: an update started while an install still finishes waits for it. Not
     // for --remove-service: --uninstall, which holds it, runs that and waits for it.
-    let _turn = if options.remove_service || options.ui_picture.is_some() {
+    let _turn = if options.remove_service || options.install_service || options.ui_picture.is_some()
+    {
         None
     } else {
         match one_at_a_time() {
@@ -92,11 +98,9 @@ fn main() {
         }
     };
     let result = if options.service_update {
-        std::env::current_exe()
-            .map_err(|e| e.to_string())
-            .and_then(|me| std::fs::read(&me).map_err(|e| format!("{}: {e}", me.display())))
-            .and_then(|data| payload::read(&data))
-            .and_then(|entries| service_update::service_update(&entries, &mut lines))
+        payload::own().and_then(|entries| service_update::service_update(&entries, &mut lines))
+    } else if options.install_service {
+        payload::own().and_then(|entries| install::install_service(&entries, &mut lines))
     } else if options.remove_service {
         install::remove_service(&mut lines)
     } else if options.uninstall {
@@ -108,7 +112,7 @@ fn main() {
         Ok(()) => true,
         Err(error) => {
             lines.push(format!("ERROR {error}"));
-            if !options.quiet && !options.remove_service {
+            if !options.quiet && !options.remove_service && !options.install_service {
                 show_error(tr("Queqiao"), &error);
             }
             false
@@ -142,6 +146,7 @@ fn parse(args: &[String]) -> Option<Options> {
         service: false,
         uninstall: false,
         remove_service: false,
+        install_service: false,
         update: false,
         service_update: false,
         report: None,
@@ -155,6 +160,7 @@ fn parse(args: &[String]) -> Option<Options> {
             "--service" => options.service = true,
             "--uninstall" => options.uninstall = true,
             "--remove-service" => options.remove_service = true,
+            "--install-service" => options.install_service = true,
             "--update" => {
                 options.update = true;
                 options.quiet = true;
@@ -172,9 +178,7 @@ fn parse(args: &[String]) -> Option<Options> {
 }
 
 fn run_install(options: &Options, lines: &mut Vec<String>) -> Result<(), String> {
-    let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    let data = std::fs::read(&me).map_err(|e| format!("{}: {e}", me.display()))?;
-    let entries = payload::read(&data)?;
+    let entries = payload::own()?;
     if options.update {
         if !install::target().exists() {
             return Err("Queqiao is not installed for this person: nothing to update".into());
@@ -337,7 +341,6 @@ fn pack(args: &[String]) -> Result<String, String> {
         _ => return Err("usage: queqiao-setup pack --output <installer> <file>...".into()),
     };
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    let program = std::fs::read(&me).map_err(|e| e.to_string())?;
     let mut entries = Vec::new();
     for file in files {
         let path = PathBuf::from(file);
@@ -349,11 +352,10 @@ fn pack(args: &[String]) -> Result<String, String> {
         let bytes = std::fs::read(&path).map_err(|e| format!("{file}: {e}"))?;
         entries.push(payload::Entry { name, bytes });
     }
-    let packed = payload::pack(&program, &entries)?;
-    std::fs::write(output, &packed).map_err(|e| format!("{output}: {e}"))?;
+    let size = payload::pack(&me, std::path::Path::new(output), &entries)?;
     Ok(format!(
         "{output}: {} files, {:.1} MB",
         entries.len(),
-        packed.len() as f64 / 1e6
+        size as f64 / 1e6
     ))
 }

@@ -30,6 +30,8 @@ fn usage() -> String {
 }
 
 fn main() {
+    // Run as SYSTEM or an administrator: DLLs only from System32.
+    queqiao_core::platform::system32_dlls_only();
     queqiao_core::platform::install_crash_log("queqiao-service");
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {

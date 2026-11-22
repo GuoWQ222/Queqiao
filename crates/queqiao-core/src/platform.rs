@@ -58,6 +58,16 @@ pub fn install_crash_log(program: &'static str) {
     }));
 }
 
+/// DLLs loaded by name come from System32 only, never from the program's own folder or the current one: for the
+/// programs that run as an administrator or as SYSTEM (the installer, the service) wherever their file lies. Their
+/// own imports are bound to System32 at link time (/DEPENDENTLOADFLAG, .cargo\config.toml).
+pub fn system32_dlls_only() {
+    use windows::Win32::System::LibraryLoader::{
+        LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories,
+    };
+    let _ = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) };
+}
+
 /// Whether this process runs as LocalService (S-1-5-19). The Queqiao service starts the agent for the sign-in
 /// screen so; no program of a person can.
 pub fn runs_as_local_service() -> bool {

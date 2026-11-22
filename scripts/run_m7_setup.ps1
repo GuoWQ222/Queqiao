@@ -116,6 +116,19 @@ Add-Check 'install with the service: RESULT PASS' ($text -contains 'RESULT PASS'
 $service = Get-Service Queqiao -ErrorAction SilentlyContinue
 Add-Check 'the Queqiao service runs' ($service -and $service.Status -eq 'Running')
 Add-Check 'its programs are in Program Files' (Test-Path -LiteralPath (Join-Path $programFiles 'queqiao-service.exe'))
+# The administrator's step takes nothing from the person's own folder, which any program of theirs may change: with
+# other programs put there, installing the service again still gives the installer's own.
+$genuine = (Get-FileHash -LiteralPath (Join-Path $programFiles 'queqiao-agent.exe')).Hash
+$stranger = Join-Path $env:SystemRoot 'System32\whoami.exe'
+foreach ($replaced in 'queqiao-agent.exe', 'queqiao-service.exe') { Copy-Item -LiteralPath $stranger -Destination (Join-Path $target $replaced) -Force }
+$serviceReport = Join-Path $env:TEMP 'queqiao-install-service.txt'
+Remove-Item -LiteralPath $serviceReport -ErrorAction SilentlyContinue
+$run = Start-Process -FilePath $Installer -ArgumentList "--install-service --report `"$serviceReport`"" -PassThru -Wait
+Add-Check 'the service from the installer itself: RESULT PASS' ($run.ExitCode -eq 0 -and (Select-String -LiteralPath $serviceReport -Pattern 'RESULT PASS' -Quiet))
+Add-Check "not the person's folder: Program Files has the real agent" ((Get-FileHash -LiteralPath (Join-Path $programFiles 'queqiao-agent.exe')).Hash -eq $genuine)
+Add-Check 'its folder in Program Files is gone again' (-not (Test-Path -LiteralPath "$programFiles.install"))
+$service = Get-Service Queqiao -ErrorAction SilentlyContinue
+Add-Check 'the Queqiao service runs again' ($service -and $service.Status -eq 'Running')
 $text = @(Invoke-Setup 'service-uninstall' '--uninstall --quiet')
 "--- service-uninstall"; $text
 Add-Check 'uninstall with the service: RESULT PASS' ($text -contains 'RESULT PASS')

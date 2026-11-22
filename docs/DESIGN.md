@@ -273,6 +273,18 @@ or the Ctrl+Alt+Del screen, and cannot copy files out.
   `check.ps1` lints and unit-tests the shipping configuration too. `--logon` (the agent for the sign-in screen,
   which shows nothing on the screen) is refused unless the agent runs as LocalService, as only the service can start it.
 - **queqiao: links** take exactly the one value after `--invite`: a link with a quote in it cannot add options.
+- **The service's folders.** Users may make folders in %ProgramData% and own them, so `%ProgramData%\Queqiao` is
+  never taken over: `install` removes whatever is at the path (links as themselves) and creates it anew with its
+  final security in one step; each update's installer gets a new folder for SYSTEM and administrators only.
+  Program Files and ProgramData come from HKLM, not from environment variables an elevated program inherits.
+- **The administrator's step of an install.** The installer carries its programs as a resource of its own image
+  (not appended to the file), so what it reads as an administrator or as SYSTEM is what Windows checked when it
+  started. With the service chosen, the installer itself runs as an administrator (`--install-service`): the
+  service and agent go from its own files into a new folder in Program Files, and `queqiao-service install` runs
+  from there; nothing comes from the person's folder (`%LOCALAPPDATA%\Programs\Queqiao`), which any program of
+  theirs may change. Every program is linked with `/DEPENDENTLOADFLAG:0x800` (imports from System32 only: a
+  WTSAPI32.dll put next to the installer was loaded before), and the installer and the service load DLLs by name
+  only from System32 (`SetDefaultDllDirectories`).
 
 ## Milestones
 

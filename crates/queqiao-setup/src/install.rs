@@ -134,9 +134,11 @@ pub fn install(
         entries.len()
     ));
 
-    // With the service chosen, it comes first: the agent started next leaves for the service's own.
+    // With the service chosen, it comes first: the agent started next leaves for the service's own. This installer
+    // itself runs as an administrator for it (install_service), never a program in the person's own folder.
     if choices.service {
-        match run_elevated(&target.join(PROGRAMS[2]), "install") {
+        let me = std::env::current_exe().map_err(|e| e.to_string())?;
+        match run_elevated(&me, "--install-service") {
             Ok(0) => lines
                 .push("the Queqiao service is installed (sign-in, lock and UAC screens)".into()),
             Ok(code) => return Err(format!("installing the service failed (exit code {code})")),
@@ -491,6 +493,66 @@ fn stop_running(folder: &Path, lines: &mut Vec<String>) {
             format!("could not end {path} (process {pid})")
         });
     }
+}
+
+/// The Queqiao service, as an administrator (`--install-service`, which the install starts through UAC). The service
+/// and its agent come from this installer's own files (payload: from its mapped image, as Windows checked it), are
+/// written to a new folder in Program Files (only administrators may make one there), and `queqiao-service install`
+/// runs from it, putting them in `Program Files\Queqiao`. Nothing is taken from the person's own installation, which
+/// any program of theirs may change: the security review of 2026-11-22 found that the administrator's step ran
+/// `queqiao-service.exe` from there, and copied whatever lay beside it into Program Files as the SYSTEM service.
+pub fn install_service(entries: &[Entry], lines: &mut Vec<String>) -> Result<(), String> {
+    use std::io::Write;
+    let staging = program_files().with_file_name("Queqiao.install");
+    if let Ok(meta) = std::fs::symlink_metadata(&staging) {
+        let removed = if meta.is_dir() && !meta.file_type().is_symlink() {
+            std::fs::remove_dir_all(&staging)
+        } else if meta.is_dir() {
+            std::fs::remove_dir(&staging)
+        } else {
+            std::fs::remove_file(&staging)
+        };
+        removed.map_err(|e| format!("{}: {e}", staging.display()))?;
+    }
+    std::fs::create_dir(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    let result = (|| {
+        for program in [PROGRAMS[2], PROGRAMS[1]] {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.name == program)
+                .ok_or_else(|| format!("this installer does not carry {program}"))?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(staging.join(program))
+                .and_then(|mut file| file.write_all(&entry.bytes))
+                .map_err(|e| format!("{program}: {e}"))?;
+        }
+        let output = std::process::Command::new(staging.join(PROGRAMS[2]))
+            .arg("install")
+            .current_dir(&staging)
+            .creation_flags(CREATE_NO_WINDOW.0)
+            .output()
+            .map_err(|e| format!("{}: {e}", PROGRAMS[2]))?;
+        for text in [&output.stdout, &output.stderr] {
+            lines.extend(
+                String::from_utf8_lossy(text)
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(str::to_string),
+            );
+        }
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "queqiao-service install: exit code {:?}",
+                output.status.code()
+            ))
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result
 }
 
 /// Runs `program parameters` as an administrator: Windows asks (UAC); refusing it is an error. Its exit code.

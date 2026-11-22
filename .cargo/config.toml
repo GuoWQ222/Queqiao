@@ -1,7 +1,10 @@
 # Link the C runtime statically: Queqiao's programs then start on any Windows PC, also without the
 # Visual C++ Redistributable installed. (The cc crate builds OpenH264's C++ with /MT to match.)
 [target.'cfg(all(windows, target_env = "msvc"))']
-rustflags = ["-C", "target-feature=+crt-static"]
+# /DEPENDENTLOADFLAG:0x800 (LOAD_LIBRARY_SEARCH_SYSTEM32): the programs' own imports come from System32 only, never
+# from the folder a program lies in, where someone could put a DLL of the same name next to an installer run as an
+# administrator (shown to work on the PC on 2026-11-22: a planted WTSAPI32.dll was loaded by queqiao-setup.exe).
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]
 
 # Test builds: the programs with their options for the tests (the `test-switches` features). scripts\check.ps1 and
 # the test scripts use these; a shipping build (scripts\package.ps1 -Ship) is a plain `cargo build` without them.
