@@ -289,7 +289,7 @@ fn start_pair(
     let (token, sid, logon_identity) = match launch::user_token(session) {
         Ok(user) => {
             let sid = launch::user_sid(&user)?;
-            (user, sid, None)
+            (launch::raised(&user)?, sid, None)
         }
         Err(nobody) => {
             if !logon::stored() {

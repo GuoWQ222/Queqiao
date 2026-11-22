@@ -11,10 +11,10 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
-    GetExitCodeProcess, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -184,14 +184,11 @@ fn start_in(console: HPCON, command: &str) -> Result<Owned, String> {
         let folder: Vec<u16> = folder.encode_utf16().chain(Some(0)).collect();
         let mut information = PROCESS_INFORMATION::default();
         unsafe {
-            CreateProcessW(
-                PCWSTR::null(),
-                Some(PWSTR(command_line.as_mut_ptr())),
-                None,
-                None,
+            // At Medium integrity when the agent runs raised (the person's programs' level).
+            queqiao_core::platform::create_process(
+                PWSTR(command_line.as_mut_ptr()),
                 false,
                 EXTENDED_STARTUPINFO_PRESENT,
-                None,
                 PCWSTR(folder.as_ptr()),
                 &startup.StartupInfo,
                 &mut information,

@@ -238,7 +238,11 @@ Open, in this order, all before any release:
    the agent injects with the person's rights). The agent's process is created with a descriptor that lets its
    own user only wait for it and end it: other programs of that person cannot copy its handles (the channel to
    the helper), write into it or start threads in it (checked by `run_m5_service.ps1` with a program of the same
-   user without debug rights). The programs are copied to `%ProgramFiles%\Queqiao` (administrators only) and the
+   user without debug rights). It runs at High integrity (the security review of 2026-11-22: threads it made later
+   could be opened, and a global window hook could load code into it): programs at the person's ordinary level
+   (Medium) can neither hook it nor send its windows messages, except its tray icon's (`run_m5_service.ps1` with
+   a Medium program), nor open its later threads; what it starts (the viewer, Explorer, command lines) runs at
+   Medium again. An administrator's full token is High already: there the protection is the descriptor alone. The programs are copied to `%ProgramFiles%\Queqiao` (administrators only) and the
    log folder `%ProgramData%\Queqiao` is set so that only SYSTEM and administrators may change it.
    What remains: threads the agent starts later get the person's default descriptor (same-user code could open
    them); an administrator's elevated programs have debug rights and may open any process anyway; and Microsoft

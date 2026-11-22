@@ -15,7 +15,7 @@ Add-Type -Namespace QueqiaoProbe -Name Native -MemberDefinition @"
 [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true)] public static extern uint GetSecurityInfo(System.IntPtr handle, int type, uint info, out System.IntPtr owner, out System.IntPtr group, out System.IntPtr dacl, out System.IntPtr sacl, out System.IntPtr descriptor);
 [System.Runtime.InteropServices.DllImport("advapi32.dll", SetLastError = true, CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(System.IntPtr descriptor, uint revision, uint info, out System.IntPtr text, out uint length);
 "@
-$rights = @(@('copy-handles', 0x40), @('write-memory', 0x28), @('start-thread', 0x2), @('full', 0x1FFFFF), @('wait-and-end', 0x101001))
+$rights = @(@('copy-handles', 0x40), @('write-memory', 0x28), @('start-thread', 0x2), @('full', 0x1FFFFF), @('wait', 0x101000), @('wait-and-end', 0x101001))
 function Test-Rights([string]$Phase) {
     foreach ($right in $rights) {
         $opened = [QueqiaoProbe.Native]::OpenProcess([uint32]$right[1], $false, [uint32]$ProcessId)

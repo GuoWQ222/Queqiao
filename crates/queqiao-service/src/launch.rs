@@ -170,6 +170,32 @@ fn session_of(token: &Owned) -> Option<u32> {
     .map(|()| session)
 }
 
+/// A copy of the person's token at High integrity when it is below (an administrator's full token is High already):
+/// the person's other programs (Medium) can then not hook the agent, send its windows messages, open its threads or
+/// write into it (the security review of 2026-11-22: they could, and so reach its channel to the helper, which
+/// works the secure desktops). What the agent starts runs at Medium again (queqiao_core::platform::create_process).
+pub fn raised(token: &Owned) -> Result<Owned, String> {
+    let mut copy = HANDLE::default();
+    unsafe {
+        DuplicateTokenEx(
+            token.0,
+            TOKEN_ALL_ACCESS,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut copy,
+        )
+    }
+    .map_err(|e| format!("DuplicateTokenEx: {e}"))?;
+    let copy = Owned(copy);
+    let high = queqiao_core::platform::HIGH_INTEGRITY;
+    if queqiao_core::platform::integrity_level(copy.0).is_some_and(|level| level < high) {
+        queqiao_core::platform::set_integrity_level(copy.0, high)
+            .map_err(|e| format!("the agent's integrity level: {e}"))?;
+    }
+    Ok(copy)
+}
+
 /// A token of LocalService (no rights of note, no profile secrets of anyone): the agent for the sign-in screen
 /// runs as it, in session 0.
 pub fn local_service_token() -> Result<Owned, String> {

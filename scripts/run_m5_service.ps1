@@ -126,7 +126,7 @@ try {
     $planted = Join-Path $dataFolder 'planted-before-install\version.dll'
     New-Item -ItemType Directory -Force (Split-Path $planted) | Out-Null
     Set-Content -LiteralPath $planted -Value 'not Queqiao' -Encoding ascii
-    $agentArgs = "--server $listen --pin $pin --user alice --password $password --sessions 1 --seconds 150 --dry-run-commands --report `"$Out\agent_secure.txt`""
+    $agentArgs = "--server $listen --pin $pin --user alice --password $password --sessions 1 --seconds 150 --dry-run-commands --test-start-program --report `"$Out\agent_secure.txt`""
     & { $ErrorActionPreference = 'Continue'; & $serviceExe install --agent-arguments $agentArgs --no-restart 2>&1 | ForEach-Object { "$_" } }
     if (-not (Wait-ServiceLog 'started the desktop helper \(\d+\) and the agent \(\d+\)' 1 30)) {
         $failed += 'service start'
@@ -160,7 +160,24 @@ try {
     foreach ($right in 'copy-handles', 'write-memory', 'start-thread', 'full') {
         Add-Check "protection: $right refused without debug rights" ($opened -contains "no-debug $right refused 5")
     }
-    Add-Check 'protection: waiting and ending still allowed' ($opened -contains 'no-debug wait-and-end opened')
+    # Waiting for it stays allowed. Ending it too while it runs at the person's own level; at High (raised by the
+    # service) a Medium program may not, as with an elevated program (the person ends it from its tray icon).
+    Add-Check 'protection: waiting still allowed' ($opened -contains 'no-debug wait opened')
+
+    '=== 2b. the agent''s windows, sent messages by a program at Medium integrity (the person''s ordinary level)'
+    # The agent runs at High integrity: a hook or a message from such a program does not reach it, except the tray
+    # icon's message (Explorer's clicks).
+    $windowScript = Join-Path $PSScriptRoot 'window_message_probe.ps1'
+    $windowReport = Join-Path $Out 'window_messages.txt'
+    Remove-Item -LiteralPath $windowReport -ErrorAction SilentlyContinue
+    Start-SessionTask 'Queqiao-M5-Windows' (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') "-NoProfile -ExecutionPolicy Bypass -File `"$windowScript`" -Probe `"$(Join-Path $Bin 'examples\message_probe.exe')`" -AgentId $($agentProcess.Id) -Report `"$windowReport`""
+    [void](Wait-SessionTask 'Queqiao-M5-Windows' 90)
+    [void](Wait-File $windowReport 30)
+    $messages = @(if (Test-Path -LiteralPath $windowReport) { @(Get-Content -LiteralPath $windowReport) } else { @('no report') })
+    $messages
+    Add-Check 'windows: the probe ran at Medium integrity' ($messages -contains 'level Medium')
+    Add-Check 'windows: its message to the agent refused' ($messages -contains 'other refused 5')
+    Add-Check 'windows: the tray icon''s message let through' ($messages -contains 'tray ok')
 
     '=== 3. a session: Ctrl+Alt+Del, its screen through the desktop helper, Escape, the own desktop again'
     Start-Sleep -Seconds 3
@@ -170,6 +187,14 @@ try {
     $agentDone = Wait-File "$Out\agent_secure.txt" 40
     $viewerText = @(if (Test-Path -LiteralPath "$Out\viewer_secure.txt") { @(Get-Content -LiteralPath "$Out\viewer_secure.txt" -Encoding UTF8) } else { @('no viewer report') })
     $agentText = @(if ($agentDone) { @(Get-Content -LiteralPath "$Out\agent_secure.txt" -Encoding UTF8) } else { @('no agent report') })
+    # At High integrity; what it starts at Medium when the service raised it (a person whose token is not an
+    # administrator's full one), else at its own level.
+    $integrity = @($agentText | Where-Object { $_ -match '^integrity: ' } | Select-Object -First 1)
+    $started = @($agentText | Where-Object { $_ -match '^test: a program' } | Select-Object -First 1)
+    "agent: $integrity; $started"
+    Add-Check 'agent: at High integrity' (($integrity.Count -eq 1) -and ($integrity[0] -match '^integrity: High'))
+    $startLevel = if (($integrity.Count -eq 1) -and ($integrity[0] -match 'raised by the service')) { 'Medium' } else { 'High' }
+    Add-Check "agent: what it starts runs at $startLevel" (($started.Count -eq 1) -and ($started[0] -match "runs at $startLevel integrity"))
     '--- viewer'
     $viewerText
     '--- agent'

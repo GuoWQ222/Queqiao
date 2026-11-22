@@ -254,6 +254,18 @@ impl Presence {
                 None,
             )
         }?;
+        // Started by the service, the person's agent runs at High integrity: of what the person's programs (Medium)
+        // send, only the tray icon's messages come through (Explorer's clicks and restart, a second copy's "show").
+        for message in [TRAY_CALLBACK, TASKBAR_CREATED.get()] {
+            let _ = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::ChangeWindowMessageFilterEx(
+                    tray,
+                    message,
+                    windows::Win32::UI::WindowsAndMessaging::MSGFLT_ALLOW,
+                    None,
+                )
+            };
+        }
         let mut presence = Presence {
             tray,
             tray_shown: false,

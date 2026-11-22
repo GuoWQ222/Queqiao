@@ -25,8 +25,7 @@ use windows::Win32::System::Pipes::{
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
-    CREATE_NEW_CONSOLE, CreateProcessW, GetExitCodeProcess, PROCESS_INFORMATION, STARTUPINFOW,
-    WaitForSingleObject,
+    CREATE_NEW_CONSOLE, GetExitCodeProcess, PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -100,14 +99,11 @@ impl TerminalWindow {
         };
         let mut information = PROCESS_INFORMATION::default();
         unsafe {
-            CreateProcessW(
-                PCWSTR::null(),
-                Some(PWSTR(command_line.as_mut_ptr())),
-                None,
-                None,
+            // At Medium integrity when the agent runs raised (the person's programs' level).
+            queqiao_core::platform::create_process(
+                PWSTR(command_line.as_mut_ptr()),
                 false,
                 CREATE_NEW_CONSOLE,
-                None,
                 PCWSTR::null(),
                 &startup,
                 &mut information,

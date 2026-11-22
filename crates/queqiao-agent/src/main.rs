@@ -78,6 +78,8 @@ const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 struct Options {
     /// Tests: this PC counts as locked for the whole session (nothing is really locked).
     test_locked: bool,
+    /// Tests: start a program at once and report its integrity level.
+    test_start_program: bool,
     /// Tests: the Windows password the lock gate takes (instead of Windows' check of the real one).
     test_password: Option<String>,
     /// Tests: the help mode for this run, never saved (the person's settings file is shared with the tests).
@@ -294,6 +296,7 @@ fn test_switch(
         "--test-tray-login" => options.test_tray_login = true,
         "--test-main-window" => options.test_main_window = true,
         "--test-locked" => options.test_locked = true,
+        "--test-start-program" => options.test_start_program = true,
         "--test-password" => options.test_password = Some(args.next()?),
         "--help-mode" => {
             options.help_mode = Some(match args.next()?.as_str() {
@@ -316,6 +319,30 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         lines.push("--- the advice shown in the tray:".into());
         lines.extend(wol_check::advice(&check).lines().map(str::to_string));
         return Ok(true);
+    }
+    lines.push(format!(
+        "integrity: {}{}",
+        queqiao_core::platform::own_integrity_level()
+            .map_or("unknown", queqiao_core::platform::integrity_name),
+        if queqiao_core::platform::runs_raised() {
+            " (raised by the service: what it starts runs at Medium)"
+        } else {
+            ""
+        }
+    ));
+    if options.test_start_program {
+        let cmd =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
+                .join(r"System32\cmd.exe");
+        lines.push(
+            match queqiao_core::platform::start_program(&cmd, "/d /c exit 0") {
+                Ok((_, level)) => format!(
+                    "test: a program it starts runs at {} integrity",
+                    level.map_or("unknown", queqiao_core::platform::integrity_name)
+                ),
+                Err(error) => format!("test: a program did not start: {error}"),
+            },
+        );
     }
     let mut links = Links::open(
         options.service_channel.as_deref(),
@@ -815,9 +842,12 @@ fn run_account(
                     lines.push("main window: logged out (this PC's saved logins are gone)".into());
                 }
                 PresenceEvent::OpenReceivedFiles => {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(queqiao_files::downloads_folder())
-                        .spawn();
+                    let explorer = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
+                        .join("explorer.exe");
+                    let _ = queqiao_core::platform::start_program(
+                        &explorer,
+                        &queqiao_core::platform::quote(&queqiao_files::downloads_folder().to_string_lossy()),
+                    );
                 }
                 PresenceEvent::ClearTransfers => {
                     queqiao_files::history::clear();
@@ -3490,8 +3520,15 @@ fn open_viewer(arguments: &[&str], lines: &mut Vec<String>) {
         );
         return;
     };
-    match std::process::Command::new(&program).args(arguments).spawn() {
-        Ok(child) => lines.push(format!("main window: the viewer started ({})", child.id())),
+    let arguments: Vec<String> = arguments
+        .iter()
+        .map(|argument| queqiao_core::platform::quote(argument))
+        .collect();
+    match queqiao_core::platform::start_program(&program, &arguments.join(" ")) {
+        Ok((id, level)) => lines.push(format!(
+            "main window: the viewer started ({id}, {} integrity)",
+            level.map_or("unknown", queqiao_core::platform::integrity_name)
+        )),
         Err(error) => lines.push(format!("main window: the viewer did not start: {error}")),
     }
 }
