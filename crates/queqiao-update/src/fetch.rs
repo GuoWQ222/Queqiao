@@ -61,8 +61,9 @@ fn parse(url: &str) -> Result<Address, String> {
     })
 }
 
-/// The body of `url` (status 200 only, at most `limit` bytes).
-pub fn fetch(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+/// The body of `url` (status 200 only, at most `limit` bytes, all of it within `within`).
+pub fn fetch(url: &str, limit: u64, within: std::time::Duration) -> Result<Vec<u8>, String> {
+    let started = std::time::Instant::now();
     let address = parse(url)?;
     let failed = |what: &str| {
         format!(
@@ -145,6 +146,9 @@ pub fn fetch(url: &str, limit: u64) -> Result<Vec<u8>, String> {
             body.extend_from_slice(&buffer[..read as usize]);
             if body.len() as u64 > limit {
                 return Err(format!("{url}: larger than {limit} bytes"));
+            }
+            if started.elapsed() > within {
+                return Err(format!("{url}: not done within {} s", within.as_secs()));
             }
         }
         Ok(body)

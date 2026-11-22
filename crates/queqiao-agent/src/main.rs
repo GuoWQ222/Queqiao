@@ -398,7 +398,11 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             lines.push("the Queqiao service runs Queqiao on this PC: this copy leaves".into());
             return Ok(true);
         }
-        if let Err(error) = autostart::claim_single_instance() {
+        // Not for the agent the service started: the service starts one per session, and a program of the person
+        // that took the name first would otherwise keep it from running (the security review of 2026-11-22).
+        if options.service_channel.is_none()
+            && let Err(error) = autostart::claim_single_instance()
+        {
             // Opened again (the Start menu): the Queqiao that runs already shows its window.
             if options.show && queqiao_display::show_running_main() {
                 lines.push("Queqiao runs already here: its main window is shown".into());
@@ -618,7 +622,7 @@ fn run_account(
     let updater = (tolerant
         && !options.test_tray_login
         && (update::installed_here() || links.service.is_some()))
-    .then(|| update::Updater::start(lines));
+    .then(|| update::Updater::start(lines, links.service.is_some()));
     loop {
         if end.is_some_and(|end| Instant::now() > end)
             || options.sessions.is_some_and(|n| sessions >= n)

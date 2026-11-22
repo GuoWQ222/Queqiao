@@ -2,11 +2,12 @@
 //! manifest: version, the installer's file name, size and SHA-256) and `queqiao-update.json.sig` (an Ed25519 signature
 //! over the manifest's exact bytes, hex, by the release key). Every Queqiao build carries the release key's public
 //! half ([`RELEASE_KEY`]); a manifest it does not verify is refused, and so is an installer whose size or SHA-256 is
-//! not the manifest's. Only a later version than this build's is taken.
+//! not the manifest's. Only a later version than this build's is taken, and only from a manifest published no earlier
+//! than the newest one this PC has seen (an old feed served again cannot hold back a later release once seen).
 //!
 //! The feed is the latest GitHub release's files ([`FEED`]); tests point the agent at their own (HTTPS, or HTTP on
 //! this PC only). Downloads use WinHTTP: the system's proxy settings and certificate store, redirects followed but
-//! never from HTTPS to HTTP, limited in size and time.
+//! never from HTTPS to HTTP, limited in size and time (each step, and the whole download).
 
 #[cfg(windows)]
 mod fetch;
@@ -30,6 +31,10 @@ pub const SIGNATURE: &str = "queqiao-update.json.sig";
 pub const MAX_INSTALLER: u64 = 256 << 20;
 /// The most a manifest or signature may be.
 const MAX_SMALL: u64 = 64 * 1024;
+/// How long fetching a manifest or signature, and an installer, may take in all (the security review of 2026-11-22:
+/// a feed that sent a byte now and then held the update thread for ever).
+const SMALL_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+const INSTALLER_TIME: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -43,6 +48,9 @@ pub struct Manifest {
     /// What changed, shown to the person (plain text).
     #[serde(default)]
     pub notes: String,
+    /// When it was signed (Unix seconds; 0 in manifests from before this field).
+    #[serde(default)]
+    pub published: u64,
 }
 
 /// major.minor.patch as numbers; None for anything else.
@@ -164,6 +172,37 @@ pub fn check_feed(feed: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How long a version that was tried and put back is not tried again. Then once more: the person may only have quit
+/// Queqiao while the new version was watched (the security review of 2026-11-22: a failed update was never retried).
+pub const RETRY_AFTER: u64 = 7 * 24 * 3600;
+
+/// Seconds since 1970.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// The note kept of a version tried: the version and the time (Unix seconds), a line each.
+pub fn tried_note(version: &str, at: u64) -> String {
+    format!("{version}\r\n{at}\r\n")
+}
+
+/// Whether `note` says `version` was tried less than RETRY_AFTER before `now`.
+pub fn tried_recently(note: &str, version: &str, now: u64) -> bool {
+    let mut lines = note.lines();
+    let tried = lines.next().map(str::trim);
+    let at = lines.next().and_then(|at| at.trim().parse::<u64>().ok());
+    tried == Some(version) && at.is_some_and(|at| now.saturating_sub(at) < RETRY_AFTER)
+}
+
+/// What the feed has: a later version, if any, and when its manifest was published.
+#[derive(Clone, Debug)]
+pub struct Checked {
+    pub offer: Option<Offer>,
+    pub published: u64,
+}
+
 /// A later version on the feed: the manifest as verified, and its exact bytes and signature (the service checks
 /// them again itself).
 #[derive(Clone, Debug)]
@@ -173,22 +212,37 @@ pub struct Offer {
     pub signature: String,
 }
 
-/// What the feed offers, if it is later than `current`, verified.
+/// Refuses a manifest published before `newest_seen` (the newest manifest this PC has seen): an old feed served again
+/// (the security review of 2026-11-22: a signed manifest never expired, so any old one could be replayed).
+pub fn check_fresh(manifest: &Manifest, newest_seen: u64) -> Result<(), String> {
+    if manifest.published < newest_seen {
+        return Err(format!(
+            "the feed's update ({}) is older than one this PC has seen: refused",
+            manifest.version
+        ));
+    }
+    Ok(())
+}
+
+/// What the feed offers, if it is later than `current`, verified, and published no earlier than `newest_seen`.
 #[cfg(windows)]
-pub fn check(feed: &str, current: &str) -> Result<Option<Offer>, String> {
+pub fn check(feed: &str, current: &str, newest_seen: u64) -> Result<Checked, String> {
     check_feed(feed)?;
-    let raw = fetch(&format!("{feed}{MANIFEST}"), MAX_SMALL)?;
-    let signature = fetch(&format!("{feed}{SIGNATURE}"), MAX_SMALL)?;
+    let raw = fetch(&format!("{feed}{MANIFEST}"), MAX_SMALL, SMALL_TIME)?;
+    let signature = fetch(&format!("{feed}{SIGNATURE}"), MAX_SMALL, SMALL_TIME)?;
     let signature = String::from_utf8(signature)
         .map_err(|_| "the update signature is not text")?
         .trim()
         .to_string();
     let manifest = verify_manifest(&raw, &signature)?;
-    Ok(newer(&manifest.version, current).then_some(Offer {
+    check_fresh(&manifest, newest_seen)?;
+    let published = manifest.published;
+    let offer = newer(&manifest.version, current).then_some(Offer {
         manifest,
         raw,
         signature,
-    }))
+    });
+    Ok(Checked { offer, published })
 }
 
 /// Downloads the installer `manifest` names into `folder` and checks it; its path.
@@ -199,7 +253,11 @@ pub fn download(
     folder: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
     check_feed(feed)?;
-    let bytes = fetch(&format!("{feed}{}", manifest.installer), manifest.size)?;
+    let bytes = fetch(
+        &format!("{feed}{}", manifest.installer),
+        manifest.size,
+        INSTALLER_TIME,
+    )?;
     check_installer(manifest, &bytes)?;
     std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let path = folder.join(&manifest.installer);
@@ -227,7 +285,35 @@ mod tests {
             size: installer.len() as u64,
             sha256: hex(&Sha256::digest(installer)),
             notes: "test".into(),
+            published: 1_800_000_000,
         }
+    }
+
+    #[test]
+    fn a_version_tried_is_tried_again_after_a_while() {
+        let note = tried_note("1.2.3", 1_000_000);
+        assert!(tried_recently(&note, "1.2.3", 1_000_000 + 3600));
+        assert!(!tried_recently(&note, "1.2.4", 1_000_000 + 3600));
+        assert!(!tried_recently(&note, "1.2.3", 1_000_000 + RETRY_AFTER));
+        assert!(
+            !tried_recently("1.2.3", "1.2.3", 1_000_000),
+            "no time: not counted"
+        );
+    }
+
+    #[test]
+    fn an_older_manifest_than_one_seen_is_refused() {
+        let seen = manifest(b"MZ");
+        assert!(check_fresh(&seen, seen.published).is_ok());
+        assert!(check_fresh(&seen, seen.published - 1).is_ok());
+        assert!(check_fresh(&seen, seen.published + 1).is_err());
+        // From before the field: fine until a newer one was seen.
+        let old = Manifest {
+            published: 0,
+            ..seen
+        };
+        assert!(check_fresh(&old, 0).is_ok());
+        assert!(check_fresh(&old, 1).is_err());
     }
 
     #[test]

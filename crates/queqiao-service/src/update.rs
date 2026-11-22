@@ -4,7 +4,9 @@
 //! Only then is the installer written where only SYSTEM and administrators may write (`%ProgramData%\Queqiao\updates`,
 //! under the folder `install` secured) and started as SYSTEM with `--service-update`: it stops this service, replaces
 //! the programs (keeping the earlier ones until the new ones work), starts the service again, and puts the earlier
-//! programs back if the new agent does not keep running.
+//! programs back if the new agent does not keep running. A version tried that way is not tried again for a week
+//! (queqiao_update::RETRY_AFTER) while this service is still older (`update_tried.txt` in `%ProgramData%\Queqiao`,
+//! where only SYSTEM and administrators may write).
 
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -23,6 +25,19 @@ pub fn start(manifest: &[u8], signature: &str, installer: &[u8]) -> Result<Strin
             queqiao_core::VERSION
         ));
     }
+    // Still later than this service and tried in the last RETRY_AFTER: its installer put this one back.
+    let tried = crate::log::folder().join("update_tried.txt");
+    let now = queqiao_update::unix_now();
+    if std::fs::read_to_string(&tried)
+        .is_ok_and(|note| queqiao_update::tried_recently(&note, &manifest.version, now))
+    {
+        return Err(format!(
+            "{} was tried here in the last week and did not keep running: not again yet",
+            manifest.version
+        ));
+    }
+    std::fs::write(&tried, queqiao_update::tried_note(&manifest.version, now))
+        .map_err(|e| format!("{}: {e}", tried.display()))?;
     // Made new for each update, for SYSTEM and administrators only: nobody else can have put a DLL beside the
     // installer, or swap it, before it runs as SYSTEM (secure_folder).
     let folder: PathBuf = crate::log::folder().join("updates");

@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender};
 use std::time::{Duration, Instant};
 
 use queqiao_local::{FromService, ToService, Writer};
@@ -253,8 +253,36 @@ struct Pair {
     agent_job: Job,
     helper: Child,
     agent: Child,
-    to_agent: Writer,
+    to_agent: Outbox,
     started: Instant,
+}
+
+/// Replies to the agent, written by a thread of their own (the security review of 2026-11-22: an agent that stopped
+/// reading its channel filled the pipe, and the service's next write waited for ever, every session with it). When
+/// MAX_REPLIES wait unread, the pair is ended.
+struct Outbox(SyncSender<Vec<u8>>);
+
+const MAX_REPLIES: usize = 64;
+/// Requests from the agent waiting for the service: past that the agent's writes wait (an update carries an installer).
+const MAX_REQUESTS: usize = 16;
+
+impl Outbox {
+    fn new(mut writer: Writer) -> Outbox {
+        let (sender, replies) = mpsc::sync_channel::<Vec<u8>>(MAX_REPLIES);
+        std::thread::spawn(move || {
+            while let Ok(reply) = replies.recv() {
+                if writer.write(&reply).is_err() {
+                    break;
+                }
+            }
+        });
+        Outbox(sender)
+    }
+
+    /// False when the agent left MAX_REPLIES unread, or is gone.
+    fn send(&self, reply: Vec<u8>) -> bool {
+        self.0.try_send(reply).is_ok()
+    }
 }
 
 impl Pair {
@@ -279,7 +307,7 @@ fn start_pair(
     id: u64,
     session: u32,
     settings: &Settings,
-    requests: &Sender<(u64, ToService)>,
+    requests: &SyncSender<(u64, ToService)>,
     wake: HANDLE,
 ) -> Result<Pair, String> {
     let folder = folder();
@@ -419,13 +447,13 @@ fn start_pair(
         agent_job,
         helper,
         agent,
-        to_agent,
+        to_agent: Outbox::new(to_agent),
         started: Instant::now(),
     })
 }
 
 fn supervise(stop: HANDLE, wake: HANDLE) {
-    let (requests, incoming) = mpsc::channel::<(u64, ToService)>();
+    let (requests, incoming) = mpsc::sync_channel::<(u64, ToService)>(MAX_REQUESTS);
     let mut pair: Option<Pair> = None;
     let mut next_id = 1u64;
     let mut failures = 0u32;
@@ -436,6 +464,8 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
     let mut last_error = String::new();
     loop {
         let console = unsafe { WTSGetActiveConsoleSessionId() };
+        // Set when the agent left the service's replies unread (Outbox).
+        let mut stalled = false;
         while let Ok((id, request)) = incoming.try_recv() {
             let Some(current) = pair.as_mut().filter(|p| p.id == id) else {
                 continue;
@@ -448,7 +478,7 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
                         current.session
                     ));
                     let reply = FromService::Reply("Ctrl+Alt+Del sent".into());
-                    let _ = current.to_agent.write(&reply.encode());
+                    stalled |= !current.to_agent.send(reply.encode());
                 }
                 ToService::Restart => {
                     if let Some(old) = pair.take() {
@@ -511,7 +541,7 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
                             format!("refused: {error}")
                         }
                     };
-                    let _ = current.to_agent.write(&FromService::Reply(reply).encode());
+                    stalled |= !current.to_agent.send(FromService::Reply(reply).encode());
                 }
                 ToService::ForgetLogon => {
                     let kept_owner = logon::load().map(|kept| kept.owner_sid);
@@ -532,6 +562,9 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
             }
         }
 
+        if stalled && let Some(old) = pair.take() {
+            old.end("the agent did not read what the service sent it");
+        }
         if let Some(current) = &pair {
             let mut verdict: Option<(String, bool)> = None;
             if current.session != console {
@@ -603,5 +636,25 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
     }
     if let Some(old) = pair.take() {
         old.end("the service stops");
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+
+    #[test]
+    fn an_agent_that_does_not_read_ends_its_pair_instead_of_holding_the_service() {
+        let (ours, theirs) = queqiao_local::channel().unwrap();
+        // The agent's side, never read.
+        let (_their_reader, _their_writer) = theirs.split();
+        let (_our_reader, our_writer) = ours.split();
+        let outbox = Outbox::new(our_writer);
+        let started = Instant::now();
+        let reply = vec![7u8; 100_000];
+        let sent = (0..1000).take_while(|_| outbox.send(reply.clone())).count();
+        assert!(sent < 1000, "the queue has no end");
+        assert!(sent > MAX_REPLIES, "the pipe's own buffer holds some");
+        assert!(started.elapsed() < Duration::from_secs(5), "a send waited");
     }
 }

@@ -37,6 +37,7 @@ pub fn sign(
         size: installer.len() as u64,
         sha256: hex(&Sha256::digest(installer)),
         notes: notes.to_string(),
+        published: crate::unix_now(),
     };
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
     let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|e| format!("release key: {e}"))?;

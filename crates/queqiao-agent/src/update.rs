@@ -6,7 +6,13 @@
 //! not keep running.
 //!
 //! A version that was tried and did not keep running (the installer put this one back) is not tried again: the agent
-//! notes the version it installs (`UpdateTried` in `HKCU\Software\Queqiao`) and skips it while it is still older.
+//! notes the version it installs in the person's own installation (`UpdateTried` in `HKCU\Software\Queqiao`) and
+//! skips it while it is still older. With the Queqiao service the service's own note counts, for a week
+//! (queqiao_update::RETRY_AFTER: then it is tried once more; `update_tried.txt` in
+//! `%ProgramData%\Queqiao`: only SYSTEM and administrators may write it, the agent reads it), and the service checks
+//! it again itself: a program of the person setting `UpdateTried` stops no update of the service (the security review
+//! of 2026-11-22). The newest manifest seen (`UpdateNewestPublished`) keeps an
+//! older feed served again from being taken.
 //!
 //! Tests point it elsewhere in the person's registry (`HKCU\Software\Queqiao`: `UpdateFeed`, a feed address, HTTPS or
 //! HTTP on this PC only; `UpdateFirstCheckSeconds`): whatever the feed, only what the release key signed is installed.
@@ -55,7 +61,8 @@ pub struct Updater {
 }
 
 impl Updater {
-    pub fn start(lines: &mut Vec<String>) -> Updater {
+    /// `through_service`: the Queqiao service updates its own copy (and decides what it tries again).
+    pub fn start(lines: &mut Vec<String>, through_service: bool) -> Updater {
         let (requests, wanted) = mpsc::channel::<()>();
         let (found, results) = mpsc::channel();
         let feed = feed();
@@ -80,7 +87,7 @@ impl Updater {
                         Err(RecvTimeoutError::Timeout) => false,
                         Err(RecvTimeoutError::Disconnected) => return,
                     };
-                    let result = look(&feed, by_hand);
+                    let result = look(&feed, by_hand, through_service);
                     wait = if matches!(result, Found::Failed { .. }) {
                         AFTER_FAILURE
                     } else {
@@ -104,13 +111,24 @@ impl Updater {
     }
 }
 
-fn look(feed: &str, by_hand: bool) -> Found {
-    match queqiao_update::check(feed, queqiao_core::VERSION) {
+fn look(feed: &str, by_hand: bool, through_service: bool) -> Found {
+    let newest_seen = read_text("UpdateNewestPublished")
+        .and_then(|text| text.parse::<u64>().ok())
+        .unwrap_or(0);
+    let checked = queqiao_update::check(feed, queqiao_core::VERSION, newest_seen);
+    if let Ok(checked) = &checked
+        && checked.published > newest_seen
+    {
+        let _ = write_text("UpdateNewestPublished", &checked.published.to_string());
+    }
+    match checked.map(|checked| checked.offer) {
         Ok(None) => Found::UpToDate { by_hand },
-        Ok(Some(offer)) if failed_before(&offer.manifest.version) => Found::Skipped {
-            version: offer.manifest.version,
-            by_hand,
-        },
+        Ok(Some(offer)) if tried_before(&offer.manifest.version, through_service) => {
+            Found::Skipped {
+                version: offer.manifest.version,
+                by_hand,
+            }
+        }
         Ok(Some(offer)) => match queqiao_update::download(feed, &offer.manifest, &folder()) {
             Ok(installer) => Found::Ready {
                 version: offer.manifest.version,
@@ -148,6 +166,20 @@ pub fn installed_here() -> bool {
         .starts_with(&prefix)
 }
 
+/// Whether `version` was tried and put back: by the service for its copy (its own note), or here.
+fn tried_before(version: &str, through_service: bool) -> bool {
+    if !through_service {
+        return failed_before(version);
+    }
+    let note = queqiao_core::platform::program_data()
+        .join("Queqiao")
+        .join("update_tried.txt");
+    std::fs::read_to_string(note).is_ok_and(|note| {
+        queqiao_update::tried_recently(&note, version, queqiao_update::unix_now())
+            && queqiao_update::newer(version, queqiao_core::VERSION)
+    })
+}
+
 /// Whether `version` was installed here before and this older version is still the one running (it was put back).
 fn failed_before(version: &str) -> bool {
     read_text("UpdateTried").is_some_and(|tried| {
@@ -183,11 +215,16 @@ pub fn apply_through_service(
     signature: &str,
     lines: &mut Vec<String>,
 ) -> Result<(), String> {
-    write_text("UpdateTried", version)?;
     let own = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .map(|local| local.join("Programs").join("Queqiao"));
-    if own.is_some_and(|folder| folder.join("queqiao-setup.exe").is_file()) {
+    let own_installed = own.is_some_and(|folder| folder.join("queqiao-setup.exe").is_file());
+    if own_installed && failed_before(version) {
+        lines.push(format!(
+            "updates: this person's installation: {version} did not keep running here before: skipped"
+        ));
+    } else if own_installed {
+        write_text("UpdateTried", version)?;
         let report = folder().join("update_report.txt");
         let status = std::process::Command::new(installer)
             .args(["--quiet", "--update", "--report"])

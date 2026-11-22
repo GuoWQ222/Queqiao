@@ -80,8 +80,14 @@ fn main() {
     };
     let mut lines = vec![queqiao_core::banner(env!("CARGO_PKG_NAME"))];
     // One installer at a time in this session: an update started while an install still finishes waits for it. Not
-    // for --remove-service: --uninstall, which holds it, runs that and waits for it.
-    let _turn = if options.remove_service || options.install_service || options.ui_picture.is_some()
+    // for --remove-service: --uninstall, which holds it, runs that and waits for it. Not for --service-update either:
+    // run by the service in session 0, where "Local\" names are the machine's own, any user's program could take the
+    // name first and stop every update of the service (the security review of 2026-11-22). The service makes its
+    // update folder new for each update, which fails while an earlier installer still runs from it: one at a time.
+    let _turn = if options.remove_service
+        || options.install_service
+        || options.service_update
+        || options.ui_picture.is_some()
     {
         None
     } else {
