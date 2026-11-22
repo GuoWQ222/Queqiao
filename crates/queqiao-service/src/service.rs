@@ -301,7 +301,10 @@ fn start_pair(
                 "the device for the sign-in screen cannot be read (made anew at the next sign-in)",
             )?;
             (
-                launch::local_service_token()?,
+                launch::without_privileges(
+                    &launch::local_service_token()?,
+                    launch::LOGON_AGENT_PRIVILEGES,
+                )?,
                 "S-1-5-19".to_string(),
                 Some(identity),
             )
@@ -314,9 +317,13 @@ fn start_pair(
         launch::user_account(&token).unwrap_or_default()
     };
     let owner_sid = if logon { String::new() } else { sid.clone() };
-    let (helper_job, agent_job) = (Job::new()?, Job::new()?);
+    // The helper and the sign-in agent start no programs: jobs of one process each. The person's agent does (the
+    // viewer, a command line).
+    let helper_job = Job::single()?;
+    let agent_job = if logon { Job::single()? } else { Job::new()? };
     let (helper_ends, agent_desktop_ends) = queqiao_local::channel()?;
-    let system = launch::system_token(session)?;
+    let system =
+        launch::without_privileges(&launch::system_token(session)?, launch::HELPER_PRIVILEGES)?;
     let helper = launch::start(
         &system,
         &folder.join("queqiao-service.exe"),

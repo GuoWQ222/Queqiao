@@ -70,6 +70,73 @@ pub fn system32_dlls_only() {
 
 /// Whether this process runs as LocalService (S-1-5-19). The Queqiao service starts the agent for the sign-in
 /// screen so; no program of a person can.
+/// The privileges of this process's token, by name (SeChangeNotifyPrivilege, ...).
+pub fn own_privileges() -> Vec<String> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::TOKEN_QUERY;
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token = HANDLE::default();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
+        return Vec::new();
+    }
+    let names = token_privileges(token)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    let _ = unsafe { CloseHandle(token) };
+    names
+}
+
+/// A token's privileges (whether enabled or not): each one's LUID and name.
+pub fn token_privileges(
+    token: windows::Win32::Foundation::HANDLE,
+) -> Vec<(windows::Win32::Foundation::LUID, String)> {
+    use windows::Win32::Security::{
+        GetTokenInformation, LUID_AND_ATTRIBUTES, LookupPrivilegeNameW, TOKEN_PRIVILEGES,
+        TokenPrivileges,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+    let mut size = 0u32;
+    let _ = unsafe { GetTokenInformation(token, TokenPrivileges, None, 0, &mut size) };
+    let mut buffer = vec![0u64; (size as usize).div_ceil(8).max(1)];
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            TokenPrivileges,
+            Some(buffer.as_mut_ptr().cast()),
+            (buffer.len() * 8) as u32,
+            &mut size,
+        )
+    };
+    if read.is_err() {
+        return Vec::new();
+    }
+    let header = buffer.as_ptr().cast::<TOKEN_PRIVILEGES>();
+    let room = (buffer.len() * 8).saturating_sub(4) / size_of::<LUID_AND_ATTRIBUTES>();
+    let count = (unsafe { (*header).PrivilegeCount } as usize).min(room);
+    let first = unsafe { std::ptr::addr_of!((*header).Privileges) }.cast::<LUID_AND_ATTRIBUTES>();
+    (0..count)
+        .map(|index| {
+            let luid = unsafe { first.add(index).read_unaligned() }.Luid;
+            let mut name = [0u16; 80];
+            let mut length = name.len() as u32;
+            let looked_up = unsafe {
+                LookupPrivilegeNameW(
+                    PCWSTR::null(),
+                    &luid,
+                    Some(PWSTR(name.as_mut_ptr())),
+                    &mut length,
+                )
+            };
+            let name = match looked_up {
+                Ok(()) => String::from_utf16_lossy(&name[..(length as usize).min(name.len())]),
+                Err(_) => format!("LUID {}:{}", luid.HighPart, luid.LowPart),
+            };
+            (luid, name)
+        })
+        .collect()
+}
+
 pub fn runs_as_local_service() -> bool {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{

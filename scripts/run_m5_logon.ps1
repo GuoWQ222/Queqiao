@@ -145,6 +145,9 @@ try {
     '--- agent for the sign-in screen'
     $agentText
     Add-Check 'logon agent: given this device' (($agentText -match '^the agent for the sign-in screen, as').Count -gt 0)
+    # Of LocalService's privileges it keeps three: none that lead back to SYSTEM.
+    $privileges = @($agentText | Where-Object { $_ -match '^privileges: ' } | Select-Object -First 1)
+    Add-Check 'logon agent: no SeImpersonatePrivilege or SeAssignPrimaryTokenPrivilege' (($privileges.Count -eq 1) -and ($privileges[0] -notmatch 'SeImpersonate|SeAssignPrimaryToken|SeTcb|SeDebug'))
     Add-Check 'logon agent: a session' (($agentText -match '^session 1: viewer').Count -gt 0)
     Add-Check 'logon agent: pictures from the helper' ((Get-Number $agentText '(\d+) pictures from it') -ge 1)
     Add-Check 'logon agent: input passed to the helper' ((Get-Number $agentText '(\d+) inputs passed to it') -ge 2)

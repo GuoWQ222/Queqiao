@@ -187,6 +187,10 @@ try {
     Add-Check 'viewer: pictures of the Ctrl+Alt+Del screen' ((Get-Number $viewerText '(\d+) pictures shown while the Ctrl\+Alt\+Del screen was up') -ge 1)
     Add-Check 'viewer: pictures after Escape' ((Get-Number $viewerText '(\d+) pictures shown after Escape') -ge 1)
     Add-Check 'helper: saw the Winlogon desktop' (@(Get-ServiceLog | Where-Object { $_ -match 'input desktop Winlogon' }).Count -gt 0)
+    # Of SYSTEM's privileges, the helper keeps SeChangeNotifyPrivilege only (and still does all of the above).
+    $helperStarts = @(Get-ServiceLog | Where-Object { $_ -match 'desktop helper: started' })
+    "helper: $($helperStarts | Select-Object -Last 1)"
+    Add-Check 'helper: SeChangeNotifyPrivilege only' (($helperStarts.Count -gt 0) -and (@($helperStarts | Where-Object { $_ -notmatch 'desktop helper: started \(privileges: SeChangeNotifyPrivilege\)$' }).Count -eq 0))
     # The person's own banner is out of sight there: the helper shows one on that screen.
     Add-Check 'helper: banner shown on the Ctrl+Alt+Del screen' (@(Get-ServiceLog | Where-Object { $_ -match 'banner shown on Winlogon' }).Count -gt 0)
     # The helper's own count, and how soon after Ctrl+Alt+Del the person's desktop was back (Escape goes 2 s after

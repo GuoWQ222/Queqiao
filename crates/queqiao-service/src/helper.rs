@@ -105,7 +105,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         banner_generation: AtomicU64::new(0),
         writer: Mutex::new(writer),
     });
-    log::line("desktop helper: started");
+    log::line(&format!(
+        "desktop helper: started (privileges: {})",
+        queqiao_core::platform::own_privileges().join(", ")
+    ));
     {
         let shared = shared.clone();
         std::thread::spawn(move || watch(&shared));

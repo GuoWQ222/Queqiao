@@ -15,21 +15,21 @@ use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    DuplicateTokenEx, GetTokenInformation, LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT,
-    LogonUserW, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SecurityImpersonation,
-    SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ALL_ACCESS,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenPrimary, TokenSessionId,
-    TokenUser,
+    CREATE_RESTRICTED_TOKEN_FLAGS, CreateRestrictedToken, DuplicateTokenEx, GetTokenInformation,
+    LOGON32_LOGON_SERVICE, LOGON32_PROVIDER_DEFAULT, LUID_AND_ATTRIBUTES, LogonUserW,
+    PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SecurityImpersonation, SetTokenInformation,
+    TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ALL_ACCESS, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_USER, TokenPrimary, TokenSessionId, TokenUser,
 };
 use windows::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
 use windows::Win32::System::RemoteDesktop::WTSQueryUserToken;
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, DETACHED_PROCESS,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     OpenProcessToken, PROCESS_INFORMATION, ResumeThread, STARTUPINFOEXW, TerminateProcess,
@@ -96,6 +96,78 @@ pub fn system_token(session: u32) -> Result<Owned, String> {
     }
     .map_err(|e| format!("SetTokenInformation(session {session}): {e}"))?;
     Ok(copy)
+}
+
+/// What the desktop helper keeps of SYSTEM's privileges: none of note (it reads and writes the screen through what
+/// the desktops' own rights give SYSTEM).
+pub const HELPER_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
+
+/// What the agent for the sign-in screen keeps of LocalService's: restarting the PC (a viewer may from the sign-in
+/// screen) and named objects; not SeImpersonatePrivilege or SeAssignPrimaryTokenPrivilege, the known ways from
+/// LocalService back to SYSTEM.
+pub const LOGON_AGENT_PRIVILEGES: &[&str] = &[
+    "SeChangeNotifyPrivilege",
+    "SeShutdownPrivilege",
+    "SeCreateGlobalPrivilege",
+];
+
+/// A copy of `token` (in the same session) with every privilege taken out but those named in `keep`: a privilege
+/// taken out cannot be enabled again by the process (the security review of 2026-11-22: the desktop helper ran with
+/// all of SYSTEM's, SeDebugPrivilege and SeTcbPrivilege among them, and the agent for the sign-in screen with
+/// LocalService's SeImpersonatePrivilege).
+pub fn without_privileges(token: &Owned, keep: &[&str]) -> Result<Owned, String> {
+    let delete: Vec<LUID_AND_ATTRIBUTES> = queqiao_core::platform::token_privileges(token.0)
+        .into_iter()
+        .filter(|(_, name)| !keep.contains(&name.as_str()))
+        .map(|(luid, _)| LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            ..Default::default()
+        })
+        .collect();
+    let mut restricted = HANDLE::default();
+    unsafe {
+        CreateRestrictedToken(
+            token.0,
+            CREATE_RESTRICTED_TOKEN_FLAGS(0),
+            None,
+            (!delete.is_empty()).then_some(delete.as_slice()),
+            None,
+            &mut restricted,
+        )
+    }
+    .map_err(|e| format!("CreateRestrictedToken: {e}"))?;
+    let restricted = Owned(restricted);
+    // The copy keeps the session; set again should it not have.
+    if let (Some(wanted), Some(got)) = (session_of(token), session_of(&restricted))
+        && wanted != got
+    {
+        unsafe {
+            SetTokenInformation(
+                restricted.0,
+                TokenSessionId,
+                (&raw const wanted).cast(),
+                size_of::<u32>() as u32,
+            )
+        }
+        .map_err(|e| format!("SetTokenInformation(session {wanted}): {e}"))?;
+    }
+    Ok(restricted)
+}
+
+fn session_of(token: &Owned) -> Option<u32> {
+    let mut session = 0u32;
+    let mut size = 0u32;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenSessionId,
+            Some((&raw mut session).cast()),
+            size_of::<u32>() as u32,
+            &mut size,
+        )
+    }
+    .ok()
+    .map(|()| session)
 }
 
 /// A token of LocalService (no rights of note, no profile secrets of anyone): the agent for the sign-in screen
@@ -192,12 +264,27 @@ pub fn user_account(token: &Owned) -> Result<String, String> {
 pub struct Job(Owned);
 
 impl Job {
+    /// A job that ends everything in it when it is closed.
     pub fn new() -> Result<Job, String> {
+        Job::make(None)
+    }
+
+    /// The same, and its process may start no other: the desktop helper's and the sign-in agent's (neither needs to,
+    /// so one that was taken over cannot start a program either).
+    pub fn single() -> Result<Job, String> {
+        Job::make(Some(1))
+    }
+
+    fn make(processes: Option<u32>) -> Result<Job, String> {
         let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
             .map_err(|e| format!("CreateJobObjectW: {e}"))?;
         let job = Job(Owned(job));
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Some(processes) = processes {
+            limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+            limits.BasicLimitInformation.ActiveProcessLimit = processes;
+        }
         unsafe {
             SetInformationJobObject(
                 job.0.0,
@@ -362,7 +449,9 @@ pub fn start(
             !inherit.is_empty(),
             EXTENDED_STARTUPINFO_PRESENT
                 | CREATE_UNICODE_ENVIRONMENT
-                | CREATE_NO_WINDOW
+                // No console (the service's own program is a console one): a console host would be a second
+                // process in a job of one.
+                | DETACHED_PROCESS
                 | CREATE_SUSPENDED,
             Some(environment.cast_const()),
             PCWSTR(folder.as_ptr()),
@@ -383,4 +472,89 @@ pub fn start(
     }
     unsafe { ResumeThread(thread.0) };
     Ok(child)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn own_token() -> Owned {
+        let mut token = HANDLE::default();
+        unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY,
+                &mut token,
+            )
+        }
+        .unwrap();
+        Owned(token)
+    }
+
+    fn names(token: &Owned) -> Vec<String> {
+        queqiao_core::platform::token_privileges(token.0)
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect()
+    }
+
+    #[test]
+    fn privileges_are_taken_out_but_the_kept_ones() {
+        let own = own_token();
+        let before = names(&own);
+        assert!(
+            before.iter().any(|name| name == "SeChangeNotifyPrivilege"),
+            "{before:?}"
+        );
+        let restricted =
+            without_privileges(&own, &["SeChangeNotifyPrivilege", "SeTcbPrivilege"]).unwrap();
+        // Kept only what was there: naming one adds nothing.
+        let expected: Vec<String> = before
+            .iter()
+            .filter(|name| *name == "SeChangeNotifyPrivilege" || *name == "SeTcbPrivilege")
+            .cloned()
+            .collect();
+        assert_eq!(names(&restricted), expected, "before: {before:?}");
+        assert_eq!(session_of(&restricted), session_of(&own));
+    }
+
+    #[test]
+    fn a_job_of_one_process_starts_no_other() {
+        let token = without_privileges(&own_token(), HELPER_PRIVILEGES).unwrap();
+        let cmd =
+            std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or("C:\\Windows".into()))
+                .join("System32")
+                .join("cmd.exe");
+        let run = |job: &Job| {
+            let child = start(
+                &token,
+                &cmd,
+                "/d /c cmd.exe /d /c exit 5",
+                &[],
+                None,
+                "",
+                job,
+            )
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                if let Some(code) = child.exit_code() {
+                    return code;
+                }
+                assert!(Instant::now() < deadline, "cmd.exe did not end");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        assert_eq!(
+            run(&Job::new().unwrap()),
+            5,
+            "in an ordinary job the inner program runs"
+        );
+        assert_ne!(
+            run(&Job::single().unwrap()),
+            5,
+            "in a job of one process it cannot start"
+        );
+    }
 }

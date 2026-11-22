@@ -348,6 +348,10 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             "the agent for the sign-in screen, as {} ({})",
             identity.device_name, identity.device_id
         ));
+        lines.push(format!(
+            "privileges: {}",
+            queqiao_core::platform::own_privileges().join(", ")
+        ));
         Some(identity)
     } else {
         None
