@@ -3,7 +3,7 @@
 //! Nothing secret goes in it.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `ProgramData\Queqiao`, the machine's folder from the registry (never from environment variables).
 pub fn folder() -> PathBuf {
@@ -20,11 +20,54 @@ pub fn line(text: &str) {
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
     );
+    append(&path, &format!("{stamp} [{}] {text}\n", std::process::id()));
+}
+
+/// Appends `line` in one write. The service and its desktop helper (two processes) write to the same log; a line
+/// written in pieces, as `writeln!` does on a `File`, got mixed into the other's (seen on sunshine on 2026-11-23:
+/// "10:58:19.140 [26440] 10:58:19.139desktop helper: started ...").
+fn append(path: &Path, line: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
     {
-        let _ = writeln!(file, "{stamp} [{}] {text}", std::process::id());
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn lines_from_several_writers_stay_whole() {
+        let path =
+            std::env::temp_dir().join(format!("queqiao_log_test_{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let tail = "x".repeat(40);
+        let writers: Vec<_> = (0..8)
+            .map(|writer| {
+                let (path, tail) = (path.clone(), tail.clone());
+                std::thread::spawn(move || {
+                    for n in 0..200 {
+                        super::append(&path, &format!("writer {writer} line {n} {tail}\n"));
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 8 * 200);
+        for line in lines {
+            assert!(
+                line.starts_with("writer ")
+                    && line.ends_with(&tail)
+                    && line.matches("writer").count() == 1,
+                "a line mixed with another: {line}"
+            );
+        }
     }
 }

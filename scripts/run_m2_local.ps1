@@ -41,7 +41,9 @@ function Wait-SessionTask([string]$Name, [int]$TimeoutSec) {
     $result
 }
 
-$viewerArgs = "--listen $Address --seconds $Seconds --report `"$Out\viewer.txt`" --input-test --width 960"
+# --mute: viewer and agent run on this one PC. Played here, the sound the agent captures from this PC's speakers would
+# be captured again and go round (a beep repeated for the whole session, heard on sunshine on 2026-11-22).
+$viewerArgs = "--listen $Address --seconds $Seconds --report `"$Out\viewer.txt`" --input-test --width 960 --mute"
 $agentArgs = "--connect $Address --seconds $Seconds --report `"$Out\agent.txt`" --verify-input"
 Start-SessionTask 'Queqiao-M2-Viewer' (Join-Path $Bin 'queqiao-viewer.exe') $viewerArgs $Force
 Start-Sleep -Milliseconds 800

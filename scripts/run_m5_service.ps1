@@ -181,7 +181,10 @@ try {
 
     '=== 3. a session: Ctrl+Alt+Del, its screen through the desktop helper, Escape, the own desktop again'
     Start-Sleep -Seconds 3
-    Start-SessionTask 'Queqiao-M5-Viewer' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds $Seconds --secure-test --width 960 --report `"$Out\viewer_secure.txt`""
+    # --mute: viewer and agent run on this one PC. Played here, the sound the agent captures from this PC's speakers
+    # would be captured again and go round (a beep repeated for the whole session, heard on sunshine on 2026-11-22).
+    # The agent still makes its sound sender at the start (what the socket check below needs); SoundOff ends it.
+    Start-SessionTask 'Queqiao-M5-Viewer' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds $Seconds --secure-test --width 960 --mute --report `"$Out\viewer_secure.txt`""
     $viewerResult = Wait-SessionTask 'Queqiao-M5-Viewer' ($Seconds + 150)
     "viewer task: $viewerResult"
     $agentDone = Wait-File "$Out\agent_secure.txt" 40
@@ -242,7 +245,7 @@ try {
     & { $ErrorActionPreference = 'Continue'; & $serviceExe install --agent-arguments $agentArgs2 --no-restart 2>&1 | ForEach-Object { "$_" } }
     if (-not (Wait-ServiceLog 'started the desktop helper' ($startsBefore + 1) 30)) { $failed += 'service start 2' }
     Start-Sleep -Seconds 3
-    Start-SessionTask 'Queqiao-M5-Restart' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds 8 --command restart-queqiao --width 960 --report `"$Out\viewer_restart.txt`""
+    Start-SessionTask 'Queqiao-M5-Restart' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds 8 --command restart-queqiao --width 960 --mute --report `"$Out\viewer_restart.txt`""
     [void](Wait-SessionTask 'Queqiao-M5-Restart' 120)
     $restarted = Wait-ServiceLog 'started the desktop helper' ($startsBefore + 2) 30
     $asked = (Get-ServiceLog | Where-Object { $_ -match 'the agent asked to restart Queqiao' }).Count -gt 0

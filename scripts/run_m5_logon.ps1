@@ -133,7 +133,7 @@ try {
 
     '=== 3. a viewer connects to the sign-in screen'
     Start-Sleep -Seconds 4
-    Start-SessionTask 'Queqiao-M5-Logon-Viewer' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds $Seconds --secure-test --width 960 --test-password $signInPassword --report `"$Out\viewer_logon.txt`""
+    Start-SessionTask 'Queqiao-M5-Logon-Viewer' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds $Seconds --secure-test --width 960 --mute --test-password $signInPassword --report `"$Out\viewer_logon.txt`""
     $viewerResult = Wait-SessionTask 'Queqiao-M5-Logon-Viewer' ($Seconds + 150)
     "viewer task: $viewerResult"
     $deadline = (Get-Date).AddSeconds(40)

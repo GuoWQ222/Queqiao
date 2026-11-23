@@ -94,7 +94,9 @@ try {
 
     $device = $env:COMPUTERNAME
     $agentArgs = "--server $Listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent.txt`""
-    $viewerArgs = "--server $Listen --pin $pin --user alice --password $password1 --ui-test $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer.txt`""
+    # --mute: viewer and agent run on this one PC. Played here, the sound the agent captures from this PC's speakers
+    # would be captured again and go round (a beep repeated for the whole session, heard on sunshine on 2026-11-22).
+    $viewerArgs = "--server $Listen --pin $pin --user alice --password $password1 --ui-test $device --seconds $Seconds --input-test --width 960 --mute --report `"$Out\viewer.txt`""
     Start-SessionTask 'Queqiao-M3-Agent' $agent $agentArgs
     Start-Sleep -Seconds 2
     Start-SessionTask 'Queqiao-M3-Viewer' $viewer $viewerArgs
