@@ -17,11 +17,12 @@ function Add-Check([string]$Name, [bool]$Ok) {
     if (-not $Ok) { $script:failed += $Name }
 }
 
-# The PC's own saved agent login (it must not change).
+# The PC's own saved logins, the agent's and the viewer's (they must not change: a test build keeps its own files;
+# the tray login used to write the viewer's too).
 $sid = (New-Object Security.Principal.NTAccount $consoleUser).Translate([Security.Principal.SecurityIdentifier]).Value
 $userHome = (Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid }).LocalPath
-$ownLogin = Join-Path $userHome 'AppData\Roaming\Queqiao\agent.json'
-function Get-OwnLogin { if (Test-Path -LiteralPath $ownLogin) { (Get-FileHash -LiteralPath $ownLogin).Hash } else { 'none' } }
+$ownLogin = @('agent.json', 'viewer.json') | ForEach-Object { Join-Path $userHome "AppData\Roaming\Queqiao\$_" }
+function Get-OwnLogin { ($ownLogin | ForEach-Object { if (Test-Path -LiteralPath $_) { (Get-FileHash -LiteralPath $_).Hash } else { 'none' } }) -join ',' }
 $ownBefore = Get-OwnLogin
 
 $server = Join-Path $Bin 'queqiao-server.exe'

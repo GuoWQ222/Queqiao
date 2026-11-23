@@ -580,6 +580,10 @@ const CHINESE: &[(&str, &str)] = &[
         "{name} logged in again with a new device key. If that was not you, change your password and take it out of the account.",
         "{name} 用新的设备密钥重新登录了你的账号。如果不是你本人，请修改密码并把它从账号中移除。",
     ),
+    (
+        "{server} has another certificate: its fingerprint begins {actual}, the one entered {pinned}. Check the fingerprint with whoever runs the server.",
+        "{server} 的证书与填写的不符：它的指纹以 {actual} 开头，填写的以 {pinned} 开头。请向服务器的管理者核对指纹。",
+    ),
 ];
 
 #[cfg(test)]

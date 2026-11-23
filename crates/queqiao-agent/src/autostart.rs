@@ -166,11 +166,11 @@ mod tests {
         assert_eq!(read(TEST_KEY, "AutostartTest"), None);
         // Removing what is not there is fine.
         set_in(TEST_KEY, "AutostartTest", false).unwrap();
-        // The test key goes too (and Software\Queqiao when nothing else is in it).
-        for key in [TEST_KEY, r"Software\Queqiao"] {
-            let key = wide(key);
-            let _ = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr())) };
-        }
+        // The test key goes too, and only it: Software\Queqiao holds the person's own values (the update settings), and
+        // RegDeleteKeyW deletes a key with values (only subkeys stop it), so it took them along on a PC with Queqiao
+        // installed (found 2026-11-23).
+        let key = wide(TEST_KEY);
+        let _ = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr())) };
     }
 
     #[test]

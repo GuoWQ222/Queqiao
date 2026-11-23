@@ -319,9 +319,11 @@ fn main() {
         Some((user1, password1)),
     );
     let error = result.err().map(|e| e.0).unwrap_or_default();
+    // Said plainly, with the beginnings of both fingerprints and never the server's whole one (the fingerprint to use
+    // comes from whoever runs the server, not from the connection).
     probe.check(
-        "other certificate refused",
-        error.contains("not the pinned one"),
+        "other certificate refused, plainly",
+        error.contains(&pin[..8]) && error.contains("00000000") && !error.contains(pin),
         &error,
     );
 

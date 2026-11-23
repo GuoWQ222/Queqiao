@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# Test builds (the agent's and viewer's test-switches): saved logins and pins in files of their own, never the person's.
+test-files = []
+
 [dependencies]
 queqiao-core.workspace = true
 queqiao-transport.workspace = true

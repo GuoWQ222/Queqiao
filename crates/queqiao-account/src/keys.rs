@@ -133,7 +133,13 @@ pub enum Pin {
 
 impl KnownDevices {
     pub fn load() -> Result<KnownDevices, Error> {
-        Ok(KnownDevices::at(folder()?.join("known_devices.json")))
+        // A test build pins in a file of its own, as it keeps its own saved logins (config.rs).
+        let name = if cfg!(feature = "test-files") {
+            "known_devices.test.json"
+        } else {
+            "known_devices.json"
+        };
+        Ok(KnownDevices::at(folder()?.join(name)))
     }
 
     /// The pins in `path` (another folder: tests).

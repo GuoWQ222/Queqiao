@@ -664,7 +664,7 @@ impl HelpForm {
             [20, 118, 340, 18],
         )?;
         let code = form.edit("", false, [20, 138, 340, 24])?;
-        let status = form.label("", [20, 170, 340, 36])?;
+        let status = form.text("", [20, 170, 340, 36])?;
         form.button(tr("Connect"), ID_OK, true, [260, 214, 100, 30])?;
         form.show();
         let _ = unsafe { SetFocus(Some(help_id)) };
@@ -751,7 +751,7 @@ pub struct LoginForm {
 
 impl LoginForm {
     pub fn new(title: &str, fields: &LoginFields) -> Result<LoginForm> {
-        let form = Form::new(title, 380, 336)?;
+        let form = Form::new(title, 380, 344)?;
         let (left, width) = (20, 340);
         form.label(tr("Server (host:port)"), [left, 16, width, 18])?;
         let server = form.edit(&fields.server, false, [left, 36, width, 24])?;
@@ -764,18 +764,19 @@ impl LoginForm {
         let user = form.edit(&fields.user, false, [left, 144, width, 24])?;
         form.label(tr("Password"), [left, 178, width, 18])?;
         let password = form.edit(&fields.password, true, [left, 198, width, 24])?;
-        let status = form.label("", [left, 234, width, 40])?;
+        // Three lines that wrap: an error is read whole (a label cut it off with an ellipsis, 2026-11-23).
+        let status = form.text("", [left, 232, width, 52])?;
         let button = form.button(
             tr("Log in"),
             ID_OK,
             true,
-            [left + width - 100, 286, 100, 30],
+            [left + width - 100, 294, 100, 30],
         )?;
         let signup = form.button(
             tr("Create an account"),
             ID_SIGNUP,
             false,
-            [left, 286, 160, 30],
+            [left, 294, 160, 30],
         )?;
         form.show();
         // Start where something is missing.
@@ -911,7 +912,7 @@ impl DeviceList {
                 Some(LPARAM(stops.as_ptr() as isize)),
             );
         }
-        let status = form.label(
+        let status = form.text(
             tr("Double-click a device to connect to it."),
             [20, 304, 500, 36],
         )?;

@@ -1,8 +1,8 @@
 //! TLS with a pinned server certificate, the WebSocket on top, and the connection thread's loop.
 
 use std::net::TcpStream;
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use queqiao_core::account::{ClientMessage, ServerMessage};
@@ -28,6 +28,8 @@ pub(crate) fn err(error: impl std::fmt::Display) -> Error {
 struct PinnedCertificate {
     fingerprint: String,
     provider: Arc<CryptoProvider>,
+    /// The fingerprint of a certificate that was not the pinned one, for a plain error ([`mismatch`]).
+    refused: Arc<Mutex<Option<String>>>,
 }
 
 impl ServerCertVerifier for PinnedCertificate {
@@ -46,6 +48,9 @@ impl ServerCertVerifier for PinnedCertificate {
         if actual == self.fingerprint {
             Ok(ServerCertVerified::assertion())
         } else {
+            if let Ok(mut refused) = self.refused.lock() {
+                *refused = Some(actual.clone());
+            }
             Err(rustls::Error::General(format!(
                 "the server's certificate ({actual}) is not the pinned one"
             )))
@@ -87,6 +92,22 @@ impl ServerCertVerifier for PinnedCertificate {
     }
 }
 
+/// The error for a server whose certificate is not the pinned one, in plain words. It came out as "IO error: unexpected
+/// error: the server's certificate (...) is not the pinned one", cut off in the login form (2026-11-23). Only the
+/// beginnings are shown, enough to see they differ: the fingerprint to use comes from whoever runs the server, not from
+/// the connection (someone in between would show their own).
+fn mismatch(server: &str, actual: &str, pinned: &str) -> String {
+    let start = |hex: &str| hex.chars().take(8).collect::<String>();
+    queqiao_core::text::trf(
+        "{server} has another certificate: its fingerprint begins {actual}, the one entered {pinned}. Check the fingerprint with whoever runs the server.",
+        &[
+            ("server", server),
+            ("actual", &start(actual)),
+            ("pinned", &start(pinned)),
+        ],
+    )
+}
+
 /// A fingerprint as lower-case hex, whether it was written with colons, spaces or capitals.
 pub(crate) fn normalize_pin(pin: &str) -> String {
     pin.chars()
@@ -98,9 +119,11 @@ pub(crate) fn normalize_pin(pin: &str) -> String {
 /// TLS (pinned) and the WebSocket handshake on a connected TCP stream.
 pub(crate) fn open(tcp: TcpStream, server: &str, pin: &str) -> Result<Socket, Error> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let refused = Arc::new(Mutex::new(None));
     let verifier = PinnedCertificate {
         fingerprint: normalize_pin(pin),
         provider: provider.clone(),
+        refused: refused.clone(),
     };
     let config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -113,8 +136,12 @@ pub(crate) fn open(tcp: TcpStream, server: &str, pin: &str) -> Result<Socket, Er
     let connection = ClientConnection::new(Arc::new(config), name).map_err(err)?;
     tcp.set_read_timeout(Some(Duration::from_secs(15)))?;
     let stream = StreamOwned::new(connection, tcp);
-    let (socket, _) = tungstenite::client(format!("ws://{server}/"), stream)
-        .map_err(|e| Error(format!("connecting to {server}: {e}")))?;
+    let (socket, _) = tungstenite::client(format!("ws://{server}/"), stream).map_err(|e| {
+        match refused.lock().ok().and_then(|mut refused| refused.take()) {
+            Some(actual) => Error(mismatch(server, &actual, &normalize_pin(pin))),
+            None => Error(format!("connecting to {server}: {e}")),
+        }
+    })?;
     Ok(socket)
 }
 
@@ -232,5 +259,24 @@ pub(crate) fn run(
                 ) => {}
             Err(error) => return format!("connection to the server lost: {error}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_refused_certificate_is_said_plainly_without_the_whole_fingerprint() {
+        let actual = format!("a2db11f0{}", "b".repeat(56));
+        let entered = "01dba320".repeat(8);
+        let text = super::mismatch("59.66.29.128:47100", &actual, &entered);
+        assert!(text.contains("59.66.29.128:47100"), "{text}");
+        assert!(
+            text.contains("a2db11f0") && text.contains("01dba320"),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&actual) && !text.contains(&entered),
+            "{text}"
+        );
     }
 }

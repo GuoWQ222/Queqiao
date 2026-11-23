@@ -152,10 +152,15 @@ impl SavedLogin {
     }
 }
 
+/// The saved login of each program. A test build (the agent's and viewer's test-switches) keeps its own, so tests on a
+/// PC never touch the login of the person there: they did, and the login form then offered a test server and its
+/// fingerprint (2026-11-23).
 fn file_name(role: Role) -> &'static str {
-    match role {
-        Role::Agent => "agent.json",
-        Role::Viewer => "viewer.json",
+    match (role, cfg!(feature = "test-files")) {
+        (Role::Agent, false) => "agent.json",
+        (Role::Viewer, false) => "viewer.json",
+        (Role::Agent, true) => "agent.test.json",
+        (Role::Viewer, true) => "viewer.test.json",
     }
 }
 

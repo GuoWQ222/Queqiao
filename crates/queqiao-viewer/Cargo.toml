@@ -8,7 +8,7 @@ publish.workspace = true
 [features]
 # Options for the tests (--connect, --listen, --server, --report, --send-file ...). Never in a shipping build: tests
 # build with `cargo build-test` (.cargo\config.toml), scripts\package.ps1 -Ship without it.
-test-switches = []
+test-switches = ["queqiao-account/test-files"]
 
 [dependencies]
 queqiao-account.workspace = true
