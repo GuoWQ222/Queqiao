@@ -486,8 +486,8 @@ fn params(config: &EncoderConfig, format: EncodeFormat) -> sys::mfxVideoParam {
             kbps((f64::from(config.bitrate) * PEAK) as u32, multiplier);
         let info = &mut mfx.FrameInfo;
         let (fourcc, chroma) = match (format.chroma444, format.ten_bit) {
-            (true, false) => (sys::MFX_FOURCC_RGB4, sys::MFX_CHROMAFORMAT_YUV444),
-            (true, true) => (sys::MFX_FOURCC_A2RGB10, sys::MFX_CHROMAFORMAT_YUV444),
+            (true, false) => (sys::MFX_FOURCC_AYUV, sys::MFX_CHROMAFORMAT_YUV444),
+            (true, true) => (sys::MFX_FOURCC_Y410, sys::MFX_CHROMAFORMAT_YUV444),
             (false, true) => (sys::MFX_FOURCC_P010, sys::MFX_CHROMAFORMAT_YUV420),
             (false, false) => (sys::MFX_FOURCC_NV12, sys::MFX_CHROMAFORMAT_YUV420),
         };
@@ -496,6 +496,7 @@ fn params(config: &EncoderConfig, format: EncodeFormat) -> sys::mfxVideoParam {
         if format.ten_bit {
             info.BitDepthLuma = 10;
             info.BitDepthChroma = 10;
+            // P010 keeps its 10 bits in the high bits of each 16; Y410 packs them.
             info.Shift = u16::from(!format.chroma444);
         }
         info.FrameRateExtN = config.fps.max(1);

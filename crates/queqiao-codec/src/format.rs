@@ -1,10 +1,10 @@
 //! What a vendor encoder (NVENC, oneVPL) makes, as UU Remote offers it: H.264 or H.265, 4:2:0 or 4:4:4 chroma,
-//! 8 or 10 bits. Also the texture each takes: NV12 (4:2:0), P010 (4:2:0 10-bit), or RGB for 4:4:4, which the
-//! encoder turns into YUV 4:4:4 itself (the converter only scales it).
+//! 8 or 10 bits. Also the YUV texture the converter makes for it (BT.709 limited range, as for every format):
+//! NV12, P010, AYUV (4:4:4) or Y410 (4:4:4 10-bit). RGB input instead, converted by the encoder, was measured
+//! wrong on Intel (2026-11-23): 8-bit RGB came out as 4:2:0, 10-bit RGB with red and blue swapped.
 
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_P010,
-    DXGI_FORMAT_R10G10B10A2_UNORM,
+    DXGI_FORMAT, DXGI_FORMAT_AYUV, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_Y410,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,8 +72,8 @@ impl EncodeFormat {
         match (self.chroma444, self.ten_bit) {
             (false, false) => DXGI_FORMAT_NV12,
             (false, true) => DXGI_FORMAT_P010,
-            (true, false) => DXGI_FORMAT_B8G8R8A8_UNORM,
-            (true, true) => DXGI_FORMAT_R10G10B10A2_UNORM,
+            (true, false) => DXGI_FORMAT_AYUV,
+            (true, true) => DXGI_FORMAT_Y410,
         }
     }
 }

@@ -26,6 +26,9 @@ use windows::core::{Error, Interface, Result, s, w};
 use crate::encoder::{EncodedFrame, EncoderConfig};
 use crate::format::{Codec, EncodeFormat};
 use crate::nvenc_sys as sys;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM,
+};
 
 const API_VERSION: u32 = sys::NVENCAPI_MAJOR_VERSION | (sys::NVENCAPI_MINOR_VERSION << 24);
 
@@ -148,8 +151,18 @@ const PROFILE_HEVC_FREXT: sys::GUID = guid(
     [0x9c, 0xbd, 0xb6, 0x16, 0xbd, 0x62, 0x13, 0x41],
 );
 
-/// NVENC's name for the texture format the encoder takes (`EncodeFormat::input`): ARGB is DXGI's B8G8R8A8 (blue
-/// in the lowest bits of the word), ABGR10 DXGI's R10G10B10A2 (red in the lowest).
+/// The texture NVENC takes for `format`: YUV 4:2:0 from the converter (NV12, P010); for 4:4:4 the screen's RGB
+/// (scaled only), which NVENC turns into YUV 4:4:4 itself (its D3D11 input has no packed 10-bit YUV 4:4:4).
+fn input_format(format: EncodeFormat) -> DXGI_FORMAT {
+    match (format.chroma444, format.ten_bit) {
+        (true, false) => DXGI_FORMAT_B8G8R8A8_UNORM,
+        (true, true) => DXGI_FORMAT_R10G10B10A2_UNORM,
+        _ => format.input(),
+    }
+}
+
+/// NVENC's name for that texture format: ARGB is DXGI's B8G8R8A8 (blue in the lowest bits of the word), ABGR10
+/// DXGI's R10G10B10A2 (red in the lowest).
 fn buffer_format(format: EncodeFormat) -> sys::NV_ENC_BUFFER_FORMAT {
     match (format.chroma444, format.ten_bit) {
         (false, false) => sys::NV_ENC_BUFFER_FORMAT_NV12,
@@ -374,7 +387,12 @@ impl NvencEncoder {
         out.append(&mut self.ready);
     }
 
-    /// Encodes one texture (in `self.format.input()`) now; the frame is ready when this returns.
+    /// The texture format `encode` takes.
+    pub(crate) fn input_format(&self) -> DXGI_FORMAT {
+        input_format(self.format)
+    }
+
+    /// Encodes one texture (in `input_format`) now; the frame is ready when this returns.
     pub(crate) fn encode(
         &mut self,
         input: &ID3D11Texture2D,

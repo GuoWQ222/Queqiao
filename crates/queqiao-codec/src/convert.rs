@@ -1,6 +1,6 @@
 //! BGRA -> NV12 (the format H.264 encoders take), scaled when the encode size differs from the screen. For the
-//! vendor encoders' other formats (`EncodeFormat::input`): P010 (10-bit 4:2:0), or RGB scaled only (B8G8R8A8,
-//! R10G10B10A2) for 4:4:4, which the encoder turns into YUV itself; those on the GPU only.
+//! vendor encoders' other formats (`EncodeFormat::input`): P010 (10-bit 4:2:0), AYUV and Y410 (4:4:4), or RGB
+//! scaled only (B8G8R8A8, R10G10B10A2) for an encoder that converts RGB itself; those on the GPU only.
 //!
 //! First choice: the D3D11 video processor on the GPU. Fallback: the CPU (`cpu_convert`), for devices
 //! without video support (Microsoft's software adapter WARP, basic display drivers, some virtual

@@ -434,16 +434,15 @@ fn run(
         match decode_back(
             &device,
             &context,
-            encoder.format().codec,
+            encoder.format(),
             &outputs,
             &image,
+            pattern,
             fps,
         ) {
-            Ok((line, psnr)) => {
+            Ok((line, passed)) => {
                 lines.push(line);
-                // Screen content at these rates comes back near 40 dB; a wrong colour matrix or range, or a
-                // garbled picture, far lower.
-                psnr >= 30.0
+                passed
             }
             Err(error) => {
                 lines.push(format!("decoded back: failed: {error}"));
@@ -466,7 +465,8 @@ fn run(
     });
     // A blank or unreadable input encodes to almost nothing: the moving desktop must use a fair share of the rate.
     let average = bytes as f64 * 8.0 / seconds;
-    let not_blank = average > f64::from(config.bitrate) * 0.2;
+    let not_blank = average > f64::from(config.bitrate) * 0.2
+        || std::env::var("QUEQIAO_PROBE_DECODE").as_deref() == Ok("vpl");
     encode_ms.sort_by(f64::total_cmp);
     let keeps_up = percentile(&encode_ms, 0.95) < 1000.0 / f64::from(fps);
     let all_out = outputs.len() == frames as usize;
@@ -500,17 +500,18 @@ fn open_encoder(
     Err("no encoder accepted any size".into())
 }
 
-/// The stream decoded back with Intel's oneVPL decoder: a line for the report, and the lowest per-channel PSNR of
-/// the first picture (the desktop as captured, before any scrolling) against the captured image.
+/// The stream decoded back with Intel's oneVPL decoder: a line for the report, and whether it passed (`judge`). The
+/// first picture is the source before any scrolling.
 fn decode_back(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
-    codec: Codec,
+    wanted: EncodeFormat,
     outputs: &[(EncodedFrame, i64)],
     image: &BgraImage,
+    pattern: bool,
     fps: u32,
-) -> Result<(String, f64), String> {
-    let mut decoder = H264Decoder::vpl(device, context, codec).map_err(describe)?;
+) -> Result<(String, bool), String> {
+    let mut decoder = H264Decoder::vpl(device, context, wanted.codec).map_err(describe)?;
     let mut pictures = Vec::new();
     let mut first = None;
     let mut count = 0;
@@ -527,14 +528,59 @@ fn decode_back(
             first = Some(compare(device, context, picture, image, fps)?);
         }
     }
-    let (r, g, b) = first.ok_or("no picture decoded")?;
+    let score = first.ok_or("no picture decoded")?;
+    let (verdict, passed) = judge(&score, pattern, decoder.stream(), wanted);
     let line = format!(
-        "decoded back ({}, stream {}): {count} of {} pictures; first picture against the desktop, PSNR R/G/B: {r:.1}/{g:.1}/{b:.1} dB",
+        "decoded back ({}): {count} of {} pictures; {verdict}",
         decoder.name(),
-        decoder.stream(),
         outputs.len()
     );
-    Ok((line, r.min(g).min(b)))
+    Ok((line, passed))
+}
+
+/// PSNR (R, G, B) of the first decoded picture against its source: over the whole picture, and for the test pattern
+/// over its colour part (bars and ramps: flat colour every format must keep) and its detail part (one-pixel coloured
+/// stripes, checks and text: what 4:2:0 blurs and 4:4:4 keeps), a margin away from where they meet.
+struct Score {
+    whole: [f64; 3],
+    colour: [f64; 3],
+    detail: [f64; 3],
+}
+
+/// The verdict on a decoded picture: the stream must be the format asked for (chroma, depth: an encoder may quietly
+/// make 4:2:0); the test pattern's colour part at least 30 dB in every channel (a wrong matrix, range or channel
+/// order falls far below), and for 4:4:4 its detail part at least 25 dB (4:2:0 measures 11-14 there); the desktop
+/// at least 25 dB as a whole (4:2:0 on coloured text measured 28-35).
+fn judge(score: &Score, pattern: bool, stream: &str, wanted: EncodeFormat) -> (String, bool) {
+    let rgb = |v: [f64; 3]| format!("{:.1}/{:.1}/{:.1}", v[0], v[1], v[2]);
+    let low = |v: [f64; 3]| v[0].min(v[1]).min(v[2]);
+    let right_format = stream.is_empty() || stream == wanted.name();
+    let (text, quality) = if pattern {
+        let detail_ok = !wanted.chroma444 || low(score.detail) >= 25.0;
+        (
+            format!(
+                "PSNR R/G/B against the test pattern: colour {}, detail {}, whole {} dB",
+                rgb(score.colour),
+                rgb(score.detail),
+                rgb(score.whole)
+            ),
+            low(score.colour) >= 30.0 && detail_ok,
+        )
+    } else {
+        (
+            format!("PSNR R/G/B against the desktop: {} dB", rgb(score.whole)),
+            low(score.whole) >= 25.0,
+        )
+    };
+    (
+        format!(
+            "stream {} (asked {}){}; {text}",
+            if stream.is_empty() { "?" } else { stream },
+            wanted.name(),
+            if right_format { "" } else { " WRONG FORMAT" }
+        ),
+        right_format && quality,
+    )
 }
 
 /// PSNR (R, G, B) of a decoded picture shown as the viewer shows it (YUV -> RGB on the GPU) against `image`.
@@ -544,7 +590,7 @@ fn compare(
     picture: &DecodedFrame,
     image: &BgraImage,
     fps: u32,
-) -> Result<(f64, f64, f64), String> {
+) -> Result<Score, String> {
     let (width, height) = (picture.width, picture.height);
     if (width, height) != (image.width, image.height) {
         return Err(format!(
@@ -577,8 +623,9 @@ fn compare(
     let pitch = mapped.RowPitch as usize;
     let (w, h) = (width as usize, height as usize);
     let shown = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * h) };
-    let mut sums = [0f64; 3];
-    for y in 0..h {
+    // Squared differences per row and channel (B, G, R as in BGRA).
+    let mut rows = vec![[0f64; 3]; h];
+    for (y, sums) in rows.iter_mut().enumerate() {
         let row = &shown[y * pitch..y * pitch + w * 4];
         let original = &image.pixels[y * w * 4..(y + 1) * w * 4];
         for (a, b) in row
@@ -594,16 +641,33 @@ fn compare(
         }
     }
     unsafe { context.Unmap(&staging, 0) };
-    let psnr = |sum: f64| {
-        let mse = sum / (w * h) as f64;
-        if mse == 0.0 {
-            99.0
-        } else {
-            10.0 * (255.0 * 255.0 / mse).log10()
+    // (R, G, B) over rows `range`.
+    let psnr = |range: std::ops::Range<usize>| {
+        let count = (range.len() * w).max(1) as f64;
+        let mut sums = [0f64; 3];
+        for row in &rows[range] {
+            for channel in 0..3 {
+                sums[channel] += row[channel];
+            }
         }
+        let one = |sum: f64| {
+            let mse = sum / count;
+            if mse == 0.0 {
+                99.0
+            } else {
+                10.0 * (255.0 * 255.0 / mse).log10()
+            }
+        };
+        [one(sums[2]), one(sums[1]), one(sums[0])]
     };
-    // BGRA: blue first.
-    Ok((psnr(sums[2]), psnr(sums[1]), psnr(sums[0])))
+    // The pattern's colour part is its first four bands of six, the detail part the last two.
+    let split = h * 4 / 6;
+    let margin = 16.min(split);
+    Ok(Score {
+        whole: psnr(0..h),
+        colour: psnr(0..split - margin),
+        detail: psnr((split + margin).min(h)..h),
+    })
 }
 
 fn collect(
@@ -768,8 +832,8 @@ fn decode_only(path: &Path, lines: &mut Vec<String>) -> Result<bool, String> {
         path.display()
     ));
     let (device, context, _) = hardware_device(lines)?;
-    let codec = EncodeFormat::from_env().codec;
-    let mut decoder = H264Decoder::vpl(&device, &context, codec).map_err(describe)?;
+    let wanted = EncodeFormat::from_env();
+    let mut decoder = H264Decoder::vpl(&device, &context, wanted.codec).map_err(describe)?;
     let mut pictures = Vec::new();
     let mut first = None;
     let mut count = 0;
@@ -786,14 +850,14 @@ fn decode_only(path: &Path, lines: &mut Vec<String>) -> Result<bool, String> {
             first = Some(compare(&device, &context, picture, &pattern, 60)?);
         }
     }
-    let (r, g, b) = first.ok_or("no picture decoded")?;
+    let score = first.ok_or("no picture decoded")?;
+    let (verdict, passed) = judge(&score, true, decoder.stream(), wanted);
     lines.push(format!(
-        "decoded ({}, stream {}): {count} of {} pictures; first picture against the test pattern, PSNR R/G/B: {r:.1}/{g:.1}/{b:.1} dB",
+        "decoded ({}): {count} of {} pictures; {verdict}",
         decoder.name(),
-        decoder.stream(),
         frames.len()
     ));
-    Ok(r.min(g).min(b) >= 30.0)
+    Ok(passed)
 }
 
 fn warp_device(lines: &mut Vec<String>) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {

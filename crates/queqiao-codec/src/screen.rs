@@ -105,7 +105,15 @@ impl ScreenEncoder {
         let (encoder, config) = opened
             .ok_or_else(|| Error::new(E_FAIL, format!("no encoder: {}", notes.join("; "))))?;
         let size = (config.width, config.height);
-        let converter = Nv12Converter::new(device, context, screen, size, config.fps)?;
+        // NV12, or what a vendor encoder set to another format takes (P010, AYUV, Y410, RGB).
+        let converter = Nv12Converter::with_format(
+            device,
+            context,
+            screen,
+            size,
+            config.fps,
+            encoder.input_format(),
+        )?;
         let ring = (0..4)
             .map(|_| converter.create_output(device))
             .collect::<Result<Vec<_>>>()?;

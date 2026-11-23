@@ -235,7 +235,8 @@ impl H264Encoder {
     /// The texture format `encode` takes (the converter's output): NV12 but for the vendor encoders' other formats.
     pub fn input_format(&self) -> DXGI_FORMAT {
         match &self.backend {
-            Backend::Nvenc(_) | Backend::Vpl(_) => self.format().input(),
+            Backend::Nvenc(encoder) => encoder.input_format(),
+            Backend::Vpl(encoder) => encoder.format.input(),
             _ => DXGI_FORMAT_NV12,
         }
     }

@@ -281,6 +281,7 @@ impl Peer {
         });
         let gathered = gathered?;
         let mut notes = gathered.notes;
+        set_sctp_timeouts();
         let mut rtc = tune(
             RtcConfig::new()
                 .clear_codecs()
@@ -541,6 +542,21 @@ impl Drop for Peer {
             let _ = thread.join();
         }
     }
+}
+
+/// The data channels' SCTP retransmission timeouts. RFC 4960's (3 s at first, never under 1 s) made file transfers
+/// stall: sctp-proto sends without pacing, a burst overflows a queue on the path and loses its tail, no later SACK
+/// reports the gap, and the timer is the only way out; measured 2026-11-23 between sunshine's Wi-Fi and the PC, 14
+/// pauses of about 1 s in 21 s, 4.9 MB/s where the link carries 11.3. The minimum stays above the receiver's 200 ms
+/// delayed SACK, so a lone packet's late SACK is no timeout. Test switch: QUEQIAO_FORCE=sctp_rto_min:<ms>.
+pub const SCTP_RTO_MS: (u64, u64, u64) = (1000, 250, 3000);
+
+fn set_sctp_timeouts() {
+    let (initial, mut min, max) = SCTP_RTO_MS;
+    if let Some(forced) = queqiao_core::forced("sctp_rto_min").and_then(|v| v.parse::<u64>().ok()) {
+        min = forced;
+    }
+    sctp_proto::set_default_rto_ms(initial, min, max.max(min));
 }
 
 /// str0m settings for desktop video (tests/loss_recovery.rs measures them on a lossy link):
