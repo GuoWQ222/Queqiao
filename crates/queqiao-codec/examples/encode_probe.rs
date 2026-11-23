@@ -438,7 +438,7 @@ fn run(
     std::fs::write(&stream_path, &stream).map_err(|e| e.to_string())?;
     lines.push(format!("stream file: {}", stream_path.display()));
 
-    let decoded_ok = if std::env::var("QUEQIAO_PROBE_DECODE").as_deref() == Ok("vpl") {
+    let decoded_ok = if std::env::var("QUEQIAO_PROBE_DECODE").is_ok() {
         match decode_back(
             &device,
             &context,
@@ -473,8 +473,8 @@ fn run(
     });
     // A blank or unreadable input encodes to almost nothing: the moving desktop must use a fair share of the rate.
     let average = bytes as f64 * 8.0 / seconds;
-    let not_blank = average > f64::from(config.bitrate) * 0.2
-        || std::env::var("QUEQIAO_PROBE_DECODE").as_deref() == Ok("vpl");
+    let not_blank =
+        average > f64::from(config.bitrate) * 0.2 || std::env::var("QUEQIAO_PROBE_DECODE").is_ok();
     encode_ms.sort_by(f64::total_cmp);
     let keeps_up = percentile(&encode_ms, 0.95) < 1000.0 / f64::from(fps);
     let all_out = outputs.len() == frames as usize;
@@ -521,7 +521,7 @@ fn decode_back(
     pattern: bool,
     fps: u32,
 ) -> Result<(String, bool), String> {
-    let mut decoder = H264Decoder::vpl(device, context, wanted.codec).map_err(describe)?;
+    let mut decoder = probe_decoder(device, context, wanted.codec)?;
     let mut pictures = Vec::new();
     let mut first = None;
     let mut count = 0;
@@ -539,7 +539,7 @@ fn decode_back(
         }
     }
     let score = first.ok_or("no picture decoded")?;
-    let (verdict, passed) = judge(&score, pattern, decoder.stream(), wanted);
+    let (verdict, passed) = judge(&score, pattern, &decoder.stream(), wanted);
     let line = format!(
         "decoded back ({}): {count} of {} pictures; {verdict}",
         decoder.name(),
@@ -593,6 +593,19 @@ fn judge(score: &Score, pattern: bool, stream: &str, wanted: EncodeFormat) -> (S
     )
 }
 
+/// The decoder decode= names: nvdec (NVIDIA's), else vpl (Intel's).
+fn probe_decoder(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    codec: Codec,
+) -> Result<H264Decoder, String> {
+    match std::env::var("QUEQIAO_PROBE_DECODE").as_deref() {
+        Ok("nvdec") => H264Decoder::nvdec(device, context, codec),
+        _ => H264Decoder::vpl(device, context, codec),
+    }
+    .map_err(describe)
+}
+
 /// PSNR (R, G, B) of a decoded picture shown as the viewer shows it (YUV -> RGB on the GPU) against `image`.
 fn compare(
     device: &ID3D11Device,
@@ -608,12 +621,20 @@ fn compare(
             image.width, image.height
         ));
     }
-    let mut converter =
-        Nv12Converter::to_rgb(device, context, (width, height), fps).map_err(describe)?;
-    let rgb = converter.create_output(device).map_err(describe)?;
-    converter
-        .convert(&picture.texture, &rgb)
-        .map_err(|e| format!("YUV -> RGB: {}", describe(e)))?;
+    // YUV pictures shown as the viewer shows them (the GPU's video processor); BGRA ones (NVDEC's) as they are.
+    let mut picture_desc = D3D11_TEXTURE2D_DESC::default();
+    unsafe { picture.texture.GetDesc(&mut picture_desc) };
+    let rgb = if picture_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM {
+        picture.texture.clone()
+    } else {
+        let mut converter =
+            Nv12Converter::to_rgb(device, context, (width, height), fps).map_err(describe)?;
+        let rgb = converter.create_output(device).map_err(describe)?;
+        converter
+            .convert(&picture.texture, &rgb)
+            .map_err(|e| format!("YUV -> RGB: {}", describe(e)))?;
+        rgb
+    };
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     unsafe { rgb.GetDesc(&mut desc) };
     desc.Usage = D3D11_USAGE_STAGING;
@@ -879,7 +900,7 @@ fn decode_only(path: &Path, lines: &mut Vec<String>) -> Result<bool, String> {
     ));
     let (device, context, _) = hardware_device(lines)?;
     let wanted = EncodeFormat::from_env();
-    let mut decoder = H264Decoder::vpl(&device, &context, wanted.codec).map_err(describe)?;
+    let mut decoder = probe_decoder(&device, &context, wanted.codec)?;
     let mut pictures = Vec::new();
     let mut first = None;
     let mut count = 0;
@@ -897,7 +918,7 @@ fn decode_only(path: &Path, lines: &mut Vec<String>) -> Result<bool, String> {
         }
     }
     let score = first.ok_or("no picture decoded")?;
-    let (verdict, passed) = judge(&score, true, decoder.stream(), wanted);
+    let (verdict, passed) = judge(&score, true, &decoder.stream(), wanted);
     lines.push(format!(
         "decoded ({}): {count} of {} pictures; {verdict}",
         decoder.name(),

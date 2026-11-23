@@ -172,6 +172,9 @@ pub fn fit(input: (u32, u32), output: (u32, u32)) -> RECT {
 /// NV12 -> BGRA on the GPU, straight into the swap chain's buffer.
 struct GpuBlit {
     input: (u32, u32),
+    /// Whether the pictures come as RGB (NVIDIA's decoder converts them itself), as the stream's colour space was
+    /// last set.
+    rgb_input: Option<bool>,
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
     enumerator: ID3D11VideoProcessorEnumerator,
@@ -250,6 +253,7 @@ impl GpuBlit {
         }
         Ok(Self {
             input,
+            rgb_input: None,
             video_device,
             video_context,
             enumerator,
@@ -258,6 +262,36 @@ impl GpuBlit {
     }
 
     fn draw(&mut self, nv12: &ID3D11Texture2D, back: &ID3D11Texture2D) -> Result<()> {
+        // YUV pictures (NV12, P010, AYUV, Y410) are BT.709 limited range; BGRA ones (NVDEC's, converted on the GPU)
+        // full-range RGB already.
+        let mut picture_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { nv12.GetDesc(&mut picture_desc) };
+        let rgb = matches!(
+            picture_desc.Format,
+            DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_R8G8B8A8_UNORM | DXGI_FORMAT_R10G10B10A2_UNORM
+        );
+        if self.rgb_input != Some(rgb) {
+            self.rgb_input = Some(rgb);
+            if let Ok(vc1) = self.video_context.cast::<ID3D11VideoContext1>() {
+                let space = if rgb {
+                    DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+                } else {
+                    DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709
+                };
+                unsafe { vc1.VideoProcessorSetStreamColorSpace1(&self.processor, 0, space) };
+            } else {
+                let stream = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+                    _bitfield: if rgb { 0 } else { 0b1_0100 },
+                };
+                unsafe {
+                    self.video_context.VideoProcessorSetStreamColorSpace(
+                        &self.processor,
+                        0,
+                        &stream,
+                    )
+                };
+            }
+        }
         let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,

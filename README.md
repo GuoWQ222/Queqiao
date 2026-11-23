@@ -101,3 +101,9 @@ in `target\release\examples`, or copy the .exe files and scripts into one folder
 `scripts\run_probes.ps1` (capture and encoders), `scripts\run_codec_probes.ps1` (encode/decode round trips,
 also over SSH), `scripts\run_loopbacks.ps1` (the whole loop in a window, with the delay of each stage). Fallback paths can be forced with `QUEQIAO_FORCE`, for
 example `encode:software`, `convert:cpu`, `adapter:warp` (probes take `force=...`).
+
+## Licence
+
+All rights reserved (LICENSE): no part of Queqiao may be copied, modified, distributed or used without the copyright
+holder's written permission. The third-party parts (a patched sctp-proto, bindings generated from NVIDIA's, Intel's and
+AMD's MIT-licensed headers, and the crates compiled in) keep their own licences: THIRD_PARTY_NOTICES.md.
