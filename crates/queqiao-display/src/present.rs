@@ -1,7 +1,8 @@
-//! Shows decoded NV12 pictures in a window through a D3D11 swap chain. The flip model (lowest latency,
+//! Shows decoded pictures (NV12, P010, AYUV, Y410, BGRA) in a window through a D3D11 swap chain. The flip model (lowest latency,
 //! Windows 10) is used when available, the older blit model otherwise. Pictures are converted to BGRA
 //! and scaled to the window (aspect kept, black bars) by the GPU video processor, or by the CPU on
-//! devices without one (WARP, basic display drivers). Presenting never waits for the display refresh.
+//! devices without one (WARP, basic display drivers) or whose video processor refuses the pictures
+//! (QUEQIAO_FORCE=present:cpu for tests). Presenting never waits for the display refresh.
 
 use std::mem::ManuallyDrop;
 use std::ptr::null_mut;
@@ -13,7 +14,7 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::core::{Error, Interface, Result};
 
 use crate::window::Window;
-use crate::yuv::nv12_to_bgra;
+use crate::yuv::{Layout, picture_to_bgra};
 
 pub struct Presenter {
     device: ID3D11Device,
@@ -95,7 +96,7 @@ impl Presenter {
         format!("{model}, {method}")
     }
 
-    /// Shows an NV12 picture of `size` (width, height) in the window and presents it.
+    /// Shows a decoded picture of `size` (width, height) in the window and presents it.
     pub fn show(
         &mut self,
         nv12: &ID3D11Texture2D,
@@ -142,6 +143,9 @@ impl Presenter {
     }
 
     fn choose(&mut self, input: (u32, u32)) -> Result<Method> {
+        if self.gpu_refused.is_none() && queqiao_core::forced("present").as_deref() == Some("cpu") {
+            self.gpu_refused = Some("forced (present:cpu)".into());
+        }
         if self.gpu_refused.is_none() {
             match GpuBlit::new(&self.device, &self.context, input, self.window_size) {
                 Ok(blit) => return Ok(Method::Gpu(Box::new(blit))),
@@ -344,6 +348,8 @@ struct CpuBlit {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     staging: Option<ID3D11Texture2D>,
+    /// The staging copy's format, width and height (the pictures').
+    staging_key: Option<(DXGI_FORMAT, u32, u32)>,
     bgra: Vec<u8>,
 }
 
@@ -360,21 +366,41 @@ impl CpuBlit {
             device: device.clone(),
             context: context.clone(),
             staging: None,
+            staging_key: None,
             bgra: Vec::new(),
         }
     }
 
-    fn draw(&mut self, nv12: &ID3D11Texture2D, back: &ID3D11Texture2D) -> Result<()> {
-        if self.staging.is_none() {
-            let mut desc = D3D11_TEXTURE2D_DESC::default();
-            unsafe { nv12.GetDesc(&mut desc) };
+    /// Draws `picture` (any format the decoders give: NV12, P010, AYUV, Y410, BGRA) into `back`. The staging copy
+    /// follows the picture: a decoder switched in a session (another codec, 4:4:4 to 4:2:0) gives another format.
+    fn draw(&mut self, picture: &ID3D11Texture2D, back: &ID3D11Texture2D) -> Result<()> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { picture.GetDesc(&mut desc) };
+        let layout = match desc.Format {
+            DXGI_FORMAT_NV12 => Layout::Nv12,
+            DXGI_FORMAT_P010 => Layout::P010,
+            DXGI_FORMAT_AYUV => Layout::Ayuv,
+            DXGI_FORMAT_Y410 => Layout::Y410,
+            DXGI_FORMAT_B8G8R8A8_UNORM => Layout::Bgra,
+            other => {
+                return Err(Error::new(
+                    E_UNEXPECTED,
+                    format!("pictures in {other:?} cannot be drawn by the CPU"),
+                ));
+            }
+        };
+        let key = (desc.Format, desc.Width, desc.Height);
+        if self.staging.is_none() || self.staging_key != Some(key) {
             desc.Usage = D3D11_USAGE_STAGING;
             desc.BindFlags = 0;
             desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
             desc.MiscFlags = 0;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
             let mut out: Option<ID3D11Texture2D> = None;
             unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut out)) }?;
             self.staging = out;
+            self.staging_key = Some(key);
         }
         let staging = self
             .staging
@@ -382,18 +408,40 @@ impl CpuBlit {
             .ok_or_else(|| Error::from(E_UNEXPECTED))?;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
-            self.context.CopyResource(staging, nv12);
+            self.context.CopyResource(staging, picture);
             self.context
                 .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
         }
-        let (width, height) = (self.input.0 as usize, self.input.1 as usize);
-        let pitch = mapped.RowPitch as usize;
-        let data = unsafe {
-            std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * height * 3 / 2)
-        };
+        // The shown part (the picture's size) of planes as high as the texture (a decoder's may be padded).
+        let (width, height) = (
+            (self.input.0 as usize).min(key.1 as usize),
+            (self.input.1 as usize).min(key.2 as usize),
+        );
+        let (pitch, rows) = (mapped.RowPitch as usize, key.2 as usize);
+        let length = layout.bytes(pitch, rows);
+        // Never past what Windows mapped (DepthPitch: the whole subresource, where the driver says it).
+        if mapped.DepthPitch != 0 && (mapped.DepthPitch as usize) < length {
+            unsafe { self.context.Unmap(staging, 0) };
+            return Err(Error::new(
+                E_UNEXPECTED,
+                format!(
+                    "the mapped picture is {} bytes, {length} needed",
+                    mapped.DepthPitch
+                ),
+            ));
+        }
+        let data = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), length) };
         let out_size = (self.output.0 as usize, self.output.1 as usize);
         self.bgra.resize(out_size.0 * out_size.1 * 4, 0);
-        nv12_to_bgra(data, pitch, (width, height), &mut self.bgra, out_size);
+        picture_to_bgra(
+            data,
+            pitch,
+            rows,
+            layout,
+            (width, height),
+            &mut self.bgra,
+            out_size,
+        );
         unsafe {
             self.context.Unmap(staging, 0);
             let row_pitch = self.output.0 * 4;

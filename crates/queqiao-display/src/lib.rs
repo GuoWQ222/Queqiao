@@ -31,4 +31,4 @@ pub use presence::{
 pub use present::{Presenter, fit};
 pub use privacy::PrivacyScreen;
 pub use window::{Window, WindowEvent};
-pub use yuv::nv12_to_bgra;
+pub use yuv::{Layout, nv12_to_bgra, picture_to_bgra};
