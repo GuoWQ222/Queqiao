@@ -979,7 +979,7 @@ impl Network {
                 );
                 let fec = if received > 0 {
                     format!(
-                        "; parity: {received} came, {rebuilt} packets rebuilt, {unrecoverable} groups short of it"
+                        "; parity: {received} came, {rebuilt} packets rebuilt, {unrecoverable} groups not completed from it"
                     )
                 } else {
                     String::new()

@@ -279,6 +279,9 @@ impl Options {
 struct Stats {
     received: u32,
     lost: u32,
+    /// After a loss: how often the last good picture was kept, and the frames held back until a keyframe.
+    holds: u32,
+    held_back: u32,
     /// Frames before the first picture that were not keyframes (each asks the agent for one).
     waiting_for_keyframe: u32,
     decoded: u32,
@@ -1802,6 +1805,8 @@ fn run_session(
     let mut overlay_picture = options.ui_pictures.clone();
     let mut course: Vec<String> = Vec::new();
     let mut course_at = (Instant::now(), 0usize, 0u32, 0u32);
+    // After a loss: the last good picture kept until a keyframe comes.
+    let mut held_after_loss = false;
     // Tests: pictures after a loss and after a keyframe (taken, and when due).
     let mut moment_pictures = (0u32, 0u32);
     let mut due_pictures: Vec<(Instant, String)> = Vec::new();
@@ -2662,26 +2667,45 @@ fn run_session(
                                 .push((soon, format!("after_keyframe_{}.bmp", moment_pictures.1)));
                         }
                     }
-                    let decode_start = Instant::now();
-                    decoder
-                        .decode(&data, time_90khz as i64, &mut decoded)
-                        .map_err(|e| format!("decode: {}", describe(e)))?;
-                    stats
-                        .decode_ms
-                        .push(decode_start.elapsed().as_secs_f64() * 1e3);
-                    for picture in decoded.drain(..) {
-                        stats.decoded += 1;
-                        picture_size = (picture.width, picture.height);
-                        let show_start = Instant::now();
-                        presenter
-                            .show(&picture.texture, picture_size, &window)
-                            .map_err(|e| format!("show: {}", describe(e)))?;
-                        stats.show_ms.push(show_start.elapsed().as_secs_f64() * 1e3);
-                        stats.shown += 1;
-                        first_picture_after.get_or_insert(started.elapsed());
-                        let viewer_ms = received.elapsed().as_secs_f64() * 1e3;
-                        if stats.viewer_ms.len() < MAX_SAMPLES {
-                            stats.viewer_ms.insert(picture.time as u64, viewer_ms);
+                    // After a loss the frames that follow are made from a picture this side does not have:
+                    // decoded, they showed blocks out of place and doubled text (measured over the PC -> sunshine
+                    // path, 2026-11-23: str0m gives up on missing packets after about three round trips, and that
+                    // path stalls for up to a second). The last good picture stays until a keyframe comes, asked
+                    // for again while waiting (the transport spaces the requests 600 ms apart).
+                    if !contiguous && stats.shown > 0 && !held_after_loss {
+                        held_after_loss = true;
+                        stats.holds += 1;
+                    }
+                    if held_after_loss && queqiao_codec::is_keyframe(codec, &data) {
+                        held_after_loss = false;
+                    }
+                    'frame: {
+                        if held_after_loss {
+                            stats.held_back += 1;
+                            peer.request_keyframe();
+                            break 'frame;
+                        }
+                        let decode_start = Instant::now();
+                        decoder
+                            .decode(&data, time_90khz as i64, &mut decoded)
+                            .map_err(|e| format!("decode: {}", describe(e)))?;
+                        stats
+                            .decode_ms
+                            .push(decode_start.elapsed().as_secs_f64() * 1e3);
+                        for picture in decoded.drain(..) {
+                            stats.decoded += 1;
+                            picture_size = (picture.width, picture.height);
+                            let show_start = Instant::now();
+                            presenter
+                                .show(&picture.texture, picture_size, &window)
+                                .map_err(|e| format!("show: {}", describe(e)))?;
+                            stats.show_ms.push(show_start.elapsed().as_secs_f64() * 1e3);
+                            stats.shown += 1;
+                            first_picture_after.get_or_insert(started.elapsed());
+                            let viewer_ms = received.elapsed().as_secs_f64() * 1e3;
+                            if stats.viewer_ms.len() < MAX_SAMPLES {
+                                stats.viewer_ms.insert(picture.time as u64, viewer_ms);
+                            }
                         }
                     }
                 }
@@ -2866,6 +2890,10 @@ fn run_session(
     lines.push(format!(
         "arrival course, every second (Mbit/s@frames shown, L after a loss): {}",
         course.join(" ")
+    ));
+    lines.push(format!(
+        "after a loss: the last good picture kept {} times, {} frames held back until a keyframe",
+        stats.holds, stats.held_back
     ));
     lines.push(format!("decode, ms: {}", summary(&mut stats.decode_ms)));
     // In order, one every half second: how the round trip went while files or clipboard images were moving.

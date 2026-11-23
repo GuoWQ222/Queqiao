@@ -16,7 +16,7 @@
 //! The code: a systematic Reed-Solomon code over GF(256) with a Cauchy matrix (any K of the K + M shards give the
 //! K data shards back). Each shard is a datagram with its length in front (2 bytes), padded to the group's longest.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// The first byte of a parity datagram (RFC 7983's demultiplexing leaves 192-255 unused).
@@ -338,11 +338,10 @@ pub struct Receiver {
     packets: HashMap<(u32, u16), Vec<u8>>,
     order: VecDeque<((u32, u16), Instant)>,
     groups: HashMap<(u32, u16), Group>,
-    /// The streams parity came for (only their packets are kept).
-    protected: HashSet<u32>,
     /// The highest sequence number seen per stream (a packet too far behind is not rebuilt: str0m would refuse it).
     newest: HashMap<u32, u16>,
-    /// Parity datagrams that came, packets rebuilt, groups that could not be (the report).
+    /// Parity datagrams that came, packets rebuilt, groups not completed from parity (the report; retransmission
+    /// may have repaired them: it comes on a stream of its own, not seen here).
     pub parity_received: u64,
     pub rebuilt: u64,
     pub unrecoverable: u64,
@@ -353,11 +352,9 @@ impl Receiver {
         Receiver::default()
     }
 
-    /// An RTP datagram that came: kept if its stream is protected. Returns the datagrams it let be rebuilt.
+    /// An RTP datagram that came: kept for a while (from the first one: the session's first keyframe is
+    /// protected too). Returns the datagrams it let be rebuilt.
     pub fn media(&mut self, datagram: &[u8], rtp: &Rtp, now: Instant) -> Vec<Vec<u8>> {
-        if !self.protected.contains(&rtp.ssrc) {
-            return Vec::new();
-        }
         self.keep((rtp.ssrc, rtp.seq), datagram.to_vec(), now);
         let newest = self.newest.entry(rtp.ssrc).or_insert(rtp.seq);
         if (rtp.seq.wrapping_sub(*newest) as i16) > 0 {
@@ -397,7 +394,6 @@ impl Receiver {
             return Vec::new();
         }
         self.parity_received += 1;
-        self.protected.insert(ssrc);
         let group = self.groups.entry((ssrc, first)).or_insert_with(|| Group {
             k,
             size,
@@ -588,7 +584,7 @@ mod tests {
         let mut sender = Sender::new();
         sender.set_rate(0.2);
         let mut receiver = Receiver::new();
-        // The stream is protected once a parity datagram named it: a first frame of one packet teaches the receiver.
+        // A first frame of one packet, lost: its parity alone brings it back.
         let first = packet(0xABCD, 65_519, true, 300);
         for datagram in sender.sent(&first, &rtp(&first).unwrap(), start) {
             receiver.parity(&datagram, start);
@@ -632,11 +628,6 @@ mod tests {
         let mut sender = Sender::new();
         sender.set_rate(0.1);
         let mut receiver = Receiver::new();
-        // The stream is protected once a parity datagram named it: a first group teaches the receiver.
-        let first = packet(9, 1, true, 200);
-        for datagram in sender.sent(&first, &rtp(&first).unwrap(), start) {
-            receiver.parity(&datagram, start);
-        }
         let frame: Vec<Vec<u8>> = (2..12u16)
             .map(|seq| packet(9, seq, seq == 11, 500))
             .collect();
