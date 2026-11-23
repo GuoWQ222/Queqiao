@@ -186,14 +186,14 @@ try {
         # AV1 asked for: the agent switches to its AV1 encoder, the viewer to Windows' AV1 decoder (needs both).
         # The viewer's microphone too (a test tone): the agent plays it into this PC's virtual microphone and hears it there.
         @('av1', '', '--mic-check', $av1Agent, $av1Viewer, $true),
-        # Only when asked for (-Sessions drag): a File Explorer window dragged round the screen for 12 s mid-session
-        # (scripts\drag_window.ps1), with the bitrate course on both sides and a picture in the middle of it.
+        # A File Explorer window dragged round the screen for 12 s mid-session (scripts\drag_window.ps1), with the
+        # bitrate course on both sides and a picture in the middle of it. The viewer asks for 4 Mbit/s at most: the
+        # agent's encoder must follow while it encodes (Intel's Quick Sync kept 12-17 Mbit/s before, 2026-11-23).
         @('drag', '', '', 'bitrate course, every second', 'arrival course, every second', $true)
     )
     foreach ($run in $runs) {
         $label, $mode, $extra, $agentExpects, $viewerExpects, $bothPass = $run
         if ($Sessions -notcontains $label -and $Sessions -notcontains 'all') { continue }
-        if ($label -eq 'drag' -and $Sessions -notcontains 'drag') { continue }
         $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`" $extra"
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_$label.txt`""
         # The clipboard and file tests run on both sides; the viewer sends commands the agent only reports.
@@ -209,7 +209,7 @@ try {
         if ($label -eq 'direct') { $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out`"" }
         if ($label -eq 'drag') {
             New-Item -ItemType Directory -Force (Join-Path $Out 'drag') | Out-Null
-            $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out\drag`" --picture-at 9 --seconds 22"
+            $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out\drag`" --picture-at 9 --seconds 22 --max-bitrate 4000"
         }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`" --clipboard-files-test `"$clipFile`"" }
@@ -360,6 +360,18 @@ try {
                 # Parity for the video (FEC): the viewer said it uses it, the agent sends it, the viewer gets it.
                 $fecPattern = if ($program -eq 'agent') { '^video parity \(FEC\): on' } else { 'parity: [1-9]\d* came' }
                 if (-not ($text | Where-Object { $_ -match $fecPattern })) { $failed += "$label $program (expected '$fecPattern')" }
+            }
+            # The drag session: what the agent sent while the window moved (seconds 6 to 15) stays near the 4 Mbit/s
+            # the viewer asked for (the peak is 1.5 times the mean: 6 Mbit/s and some room).
+            if ($label -eq 'drag' -and $program -eq 'agent') {
+                $course = $text | Where-Object { $_ -match '^bitrate course, every second .*?: (.+)$' } | Select-Object -First 1
+                if ($course -match '^bitrate course, every second .*?: (.+)$') {
+                    $sent = @($Matches[1].Trim() -split ' ' | Select-Object -Skip 5 -First 10 | ForEach-Object { if ($_ -match '^[\d.]+/[\d.]+/([\d.]+)@') { [double]$Matches[1] } } | Sort-Object)
+                    $middle = if ($sent.Count) { $sent[[int][Math]::Floor($sent.Count / 2)] } else { $null }
+                    if ($null -eq $middle -or $middle -gt 7) { $failed += "drag agent (sent while dragging, median $middle Mbit/s with 4 asked for: the encoder did not follow)" }
+                } else {
+                    $failed += "drag agent (expected 'bitrate course')"
+                }
             }
             # The session window's bar and card (the direct session has them on): pictures taken, "Figures" on the bar
             # clicked twice (the card off, then on).

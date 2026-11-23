@@ -19,6 +19,29 @@ use windows::core::{Error, GUID, Interface, PWSTR, Result};
 
 use crate::encoder::{EncodedFrame, EncoderConfig};
 
+/// The rate control mode: peak-constrained VBR (a mean bitrate and a peak, PEAK times it). Intel's Quick Sync
+/// encoder takes a new bitrate while encoding only so (measured on sunshine 2026-11-23, 18 -> 4 Mbit/s after 3 s:
+/// CBR and low-delay VBR kept 16-19 Mbit/s, whether the bitrate came through the codec API or a new output type;
+/// peak-constrained and unconstrained VBR went down to 4 within a second); before, the bandwidth estimate never
+/// reached its picture. For measurements (encode_probe mf_rc=) another of Media Foundation's: "cbr", "vbr"
+/// (unconstrained), "ldvbr" (low delay), "gldvbr" (global low delay).
+fn rate_control_mode() -> u32 {
+    match std::env::var("QUEQIAO_MF_RC").as_deref() {
+        Ok("cbr") => eAVEncCommonRateControlMode_CBR.0 as u32,
+        Ok("vbr") => 2,
+        Ok("ldvbr") => 4,
+        Ok("gldvbr") => 6,
+        _ => eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32,
+    }
+}
+
+/// The peak bitrate, as a multiple of the mean: room for a moving window without the bursts of no limit.
+const PEAK: f64 = 1.5;
+
+fn peak(bitrate: u32) -> u32 {
+    (f64::from(bitrate) * PEAK).min(f64::from(u32::MAX)) as u32
+}
+
 pub(crate) struct MfEncoder {
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
@@ -100,21 +123,26 @@ impl MfEncoder {
         // Encoder settings go before the media types: some encoders fix rate control with the type.
         let codec: ICodecAPI = transform.cast()?;
         let mut refused = Vec::new();
-        let settings: [(&'static str, &GUID, VARIANT); 5] = [
+        let settings: [(&'static str, &GUID, VARIANT); 6] = [
             (
                 "low latency",
                 &CODECAPI_AVLowLatencyMode,
                 VARIANT::from(true),
             ),
             (
-                "constant bitrate",
+                "peak-constrained VBR",
                 &CODECAPI_AVEncCommonRateControlMode,
-                VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
+                VARIANT::from(rate_control_mode()),
             ),
             (
                 "bitrate",
                 &CODECAPI_AVEncCommonMeanBitRate,
                 VARIANT::from(config.bitrate),
+            ),
+            (
+                "peak bitrate",
+                &CODECAPI_AVEncCommonMaxBitRate,
+                VARIANT::from(peak(config.bitrate)),
             ),
             (
                 "no B-frames",
@@ -198,10 +226,28 @@ impl MfEncoder {
     /// Sends one NV12 frame (only when `wants_input`). `time` is in 100 ns units.
     /// Changes the bitrate while streaming; an encoder that does not allow it keeps its bitrate (error).
     pub(crate) fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
-        unsafe {
-            self.codec
-                .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))
+        // Measurements (encode_probe mf_switch=): "value" (the codec API, as so far), "type" (a new output type
+        // with the bitrate), "both".
+        let how = std::env::var("QUEQIAO_MF_SWITCH").unwrap_or_default();
+        if how != "type" {
+            unsafe {
+                // The peak first when it goes up, the mean first when it goes down: the mean never above the peak.
+                let mean = &VARIANT::from(bitrate);
+                let peak = &VARIANT::from(peak(bitrate));
+                let _ = self.codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, peak);
+                self.codec
+                    .SetValue(&CODECAPI_AVEncCommonMeanBitRate, mean)?;
+                let _ = self.codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, peak);
+            }
         }
+        if how == "type" || how == "both" {
+            unsafe {
+                let current = self.transform.GetOutputCurrentType(0)?;
+                current.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
+                self.transform.SetOutputType(0, &current, 0)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn encode(

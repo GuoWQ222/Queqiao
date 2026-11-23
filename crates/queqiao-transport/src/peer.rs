@@ -229,23 +229,24 @@ impl Peer {
         let local = SocketAddr::new(local_ip, port);
         let servers = signal.ice_servers()?;
         let relay_only = queqiao_core::forced("network").as_deref() == Some("relay");
-        let extras: Vec<Extra> =
-            if addresses == Addresses::All && !relay_only && !bind_ip.is_unspecified() {
-                crate::interfaces::uplinks()
-                    .into_iter()
-                    .filter(|ip| *ip != bind_ip)
-                    .filter_map(|ip| {
-                        let socket = bind_socket(ip).ok()?;
-                        let local = socket.local_addr().ok()?;
-                        Some(Extra {
-                            socket: Arc::new(socket),
-                            local,
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let uplinks = if addresses == Addresses::All && !relay_only && !bind_ip.is_unspecified() {
+            crate::interfaces::uplinks()
+        } else {
+            Vec::new()
+        };
+        let extras: Vec<Extra> = uplinks
+            .iter()
+            .filter(|ip| **ip != bind_ip)
+            .filter_map(|ip| {
+                let socket = bind_socket(*ip).ok()?;
+                let local = socket.local_addr().ok()?;
+                Some(Extra {
+                    socket: Arc::new(socket),
+                    local,
+                })
+            })
+            .collect();
+        let main_is_tunnel = crate::interfaces::is_tunnel(bind_ip, &uplinks, extras.len());
         let stun = servers
             .stun
             .or(servers.turn.as_ref().map(|turn| turn.address));
@@ -274,14 +275,25 @@ impl Peer {
             Bitrate::bps(START_BITRATE),
         )
         .build(Instant::now());
-        for candidate in gathered.candidates {
-            rtc.add_local_candidate(candidate);
-        }
+        // The candidates added first are preferred (str0m's local preference goes down by the order of each kind).
+        // The server connection may leave through a VPN or a proxy's tunnel holding the route (Clash Verge's
+        // Mihomo on sunshine, 2026-11-23: the session went through it): then this PC's own uplinks come first
+        // and the tunnel is the fallback, as UU Remote gives VPN networks a cost.
+        let mut uplink_candidates = Vec::new();
         for (candidates, extra_notes) in found {
-            for candidate in candidates {
-                rtc.add_local_candidate(candidate);
-            }
+            uplink_candidates.extend(candidates);
             notes.extend(extra_notes);
+        }
+        let (first, then) = if main_is_tunnel {
+            notes.push(format!(
+                "{bind_ip} (the server connection's) is a tunnel, a VPN or a proxy: this PC's uplinks come first, it is the fallback"
+            ));
+            (uplink_candidates, gathered.candidates)
+        } else {
+            (gathered.candidates, uplink_candidates)
+        };
+        for candidate in first.into_iter().chain(then) {
+            rtc.add_local_candidate(candidate);
         }
 
         let (mut mid, mut audio_mid, mut channel) = (None, None, None);

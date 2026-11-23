@@ -18,6 +18,13 @@ use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR, SOCKADDR_IN};
 /// ERROR_BUFFER_OVERFLOW: the size needed is in `size` now.
 const BUFFER_OVERFLOW: u32 = 111;
 
+/// Whether `address` (the server connection's) is a tunnel: not one of this PC's `uplinks` (a VPN, Tailscale or a
+/// proxy's TUN adapter such as Clash's Mihomo has no gateway of its own), while there are uplinks (`others` of them
+/// besides it) for the session to go on instead.
+pub fn is_tunnel(address: Ipv4Addr, uplinks: &[Ipv4Addr], others: usize) -> bool {
+    others > 0 && !address.is_unspecified() && !uplinks.contains(&address)
+}
+
 pub fn uplinks() -> Vec<Ipv4Addr> {
     let mut size = 32 * 1024u32;
     for _ in 0..3 {
@@ -95,5 +102,19 @@ mod tests {
             assert!(super::usable(*ip), "{ip}");
             assert!(!found[..index].contains(ip), "{ip} twice");
         }
+    }
+
+    #[test]
+    fn a_tunnel_is_an_address_that_is_no_uplink() {
+        use std::net::Ipv4Addr;
+        let wifi = Ipv4Addr::new(183, 172, 254, 58);
+        let mihomo = Ipv4Addr::new(198, 19, 0, 1);
+        // The proxy's tunnel holds the route to the server and Wi-Fi is there: the tunnel goes last.
+        assert!(super::is_tunnel(mihomo, &[wifi], 1));
+        // The server connection leaves through Wi-Fi itself: as before.
+        assert!(!super::is_tunnel(wifi, &[wifi], 0));
+        // Only the tunnel: it stays first (nothing else to go by).
+        assert!(!super::is_tunnel(mihomo, &[], 0));
+        assert!(!super::is_tunnel(Ipv4Addr::UNSPECIFIED, &[wifi], 1));
     }
 }

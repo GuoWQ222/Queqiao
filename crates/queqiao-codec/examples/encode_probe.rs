@@ -6,7 +6,10 @@
 //! OpenH264 on the CPU otherwise. Runs in the desktop session via scripts\run_in_session.ps1 (no
 //! console window).
 //!
-//! Usage: encode_probe <out_dir> [frames=N] [fps=N] [mbps=N] [force=STAGE:CHOICE,...]
+//! Usage: encode_probe <out_dir> [frames=N] [fps=N] [mbps=N] [switch=S:MBPS] [force=STAGE:CHOICE,...]
+//!   switch_keyframe=1       with switch=: a keyframe right after the change
+//!   switch=S:MBPS           change the bitrate to MBPS after S seconds, as the agent does when the bandwidth
+//!                           estimate changes (the report gives the stream's rate each second)
 //!   force=encode:software   OpenH264 even when a hardware encoder exists
 //!   force=encode:hardware   hardware only (fails without one)
 //!   force=adapter:warp      convert and encode on Microsoft's software adapter (WARP): a PC without a
@@ -63,6 +66,13 @@ fn main() {
         // runs yet, so changing the environment here is safe.
         unsafe { std::env::set_var("QUEQIAO_FORCE", spec) };
     }
+    // Media Foundation encoders, for measurements: the rate control mode and how a new bitrate is given (mf.rs).
+    if let Some(mode) = options.get("mf_rc") {
+        unsafe { std::env::set_var("QUEQIAO_MF_RC", mode) };
+    }
+    if let Some(how) = options.get("mf_switch") {
+        unsafe { std::env::set_var("QUEQIAO_MF_SWITCH", how) };
+    }
     if let Some(preset) = options.get("nvenc_preset") {
         // NVENC preset P1..P7 for measurements (see nvenc.rs).
         unsafe { std::env::set_var("QUEQIAO_NVENC_PRESET", preset) };
@@ -83,6 +93,8 @@ fn main() {
         number("frames").unwrap_or(300),
         number("fps"),
         number("mbps"),
+        options.get("switch").map(String::as_str),
+        options.get("switch_keyframe").is_some_and(|v| v == "1"),
         &mut lines,
     ) {
         Ok(passed) => passed,
@@ -103,6 +115,8 @@ fn run(
     frames: u32,
     fps: Option<u32>,
     mbps: Option<u32>,
+    switch: Option<&str>,
+    switch_keyframe: bool,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -213,8 +227,22 @@ fn run(
     let mut submitted: HashMap<i64, (i64, i64)> = HashMap::new();
     let mut outputs: Vec<(EncodedFrame, i64)> = Vec::new();
     let mut late = 0;
+    // switch=S:MBPS: the bitrate changed after S seconds.
+    let switch = switch.and_then(|spec| {
+        let (at, mbps) = spec.split_once(':')?;
+        Some((at.parse::<u32>().ok()? * fps, mbps.parse::<f64>().ok()?))
+    });
     let start = qpc_now();
     for i in 0..frames {
+        if let Some((at, mbps)) = switch
+            && i == at
+        {
+            let result = encoder.set_bitrate((mbps * 1e6) as u32);
+            lines.push(format!(
+                "bitrate set to {mbps} Mbit/s at frame {i}: {}",
+                result.map_or_else(describe, |()| "accepted".into())
+            ));
+        }
         let target = start + (f64::from(i) * interval) as i64;
         while qpc_now() < target {
             collect(&mut encoder, &mut outputs)?;
@@ -244,7 +272,9 @@ fn run(
         if (submit - target) as f64 > interval {
             late += 1;
         }
-        encoder.encode(nv12, time, i == 0).map_err(describe)?;
+        // switch_keyframe=1: a keyframe right after the bitrate change.
+        let keyframe = i == 0 || (switch_keyframe && switch.is_some_and(|(at, _)| i == at));
+        encoder.encode(nv12, time, keyframe).map_err(describe)?;
         submitted.insert(time, (began, submit));
         collect(&mut encoder, &mut outputs)?;
     }
@@ -311,6 +341,22 @@ fn run(
         "stream: {:.2} MB, {:.1} Mbit/s average",
         bytes as f64 / 1e6,
         bytes as f64 * 8.0 / seconds / 1e6
+    ));
+    // The stream's rate each second of video (frame times are in 100 ns).
+    let mut per_second = vec![0usize; (seconds.ceil() as usize).max(1)];
+    for (frame, _) in &outputs {
+        let second = (frame.time.max(0) / 10_000_000) as usize;
+        if let Some(bytes) = per_second.get_mut(second) {
+            *bytes += frame.data.len();
+        }
+    }
+    lines.push(format!(
+        "Mbit/s each second: {}",
+        per_second
+            .iter()
+            .map(|bytes| format!("{:.1}", *bytes as f64 * 8.0 / 1e6))
+            .collect::<Vec<_>>()
+            .join(" ")
     ));
 
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
