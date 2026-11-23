@@ -182,7 +182,9 @@ try {
         @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
         @('allowed', '', "--ask --answer allow --privacy-test --ui-pictures `"$Out`"", 'the person at this PC allowed', 'RESULT PASS', $true),
         @('declined', '', '--ask --answer deny --seconds 45', 'the person at this PC declined', 'the person at that PC declined', $false),
-        @('ended-here', '', '--end-after 6 --lock-after-session --dry-run-commands', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true),
+        # Through this PC's uplinks' sockets (network:uplinks: they come first even though the server is on the
+        # loopback), with a file sent and cancelled: a burst there ended sessions ("DTLS error: receive queue full").
+        @('ended-here', 'network:uplinks', '--end-after 6 --lock-after-session --dry-run-commands', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true),
         # AV1 asked for: the agent switches to its AV1 encoder, the viewer to Windows' AV1 decoder (needs both).
         # The viewer's microphone too (a test tone): the agent plays it into this PC's virtual microphone and hears it there.
         @('av1', '', '--mic-check', $av1Agent, $av1Viewer, $true),

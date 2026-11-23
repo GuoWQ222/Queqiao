@@ -246,7 +246,12 @@ impl Peer {
                 })
             })
             .collect();
-        let main_is_tunnel = crate::interfaces::is_tunnel(bind_ip, &uplinks, extras.len());
+        // Tests (QUEQIAO_FORCE=network:uplinks): this PC's uplinks first even when the server connection's address is
+        // not a tunnel (on one PC it is the loopback): the session goes through the uplinks' sockets.
+        let uplinks_forced =
+            queqiao_core::forced("network").as_deref() == Some("uplinks") && !extras.is_empty();
+        let main_is_tunnel =
+            uplinks_forced || crate::interfaces::is_tunnel(bind_ip, &uplinks, extras.len());
         let stun = servers
             .stun
             .or(servers.turn.as_ref().map(|turn| turn.address));
@@ -750,10 +755,11 @@ impl Network {
                 Err(TryRecvError::Disconnected) => return Ok(()),
                 Err(TryRecvError::Empty) => {}
             }
-            // What the other uplinks' sockets received.
-            let mut took = false;
-            while let Ok(arriving) = self.arrived.try_recv() {
-                took = true;
+            // What the other uplinks' sockets received: one datagram at a time, str0m's output taken after each (the
+            // loop goes round), as on the main socket. Handed over in a row, a burst of file data filled the DTLS
+            // layer's queue (30 packets) and ended the session: "DTLS error: receive queue full" (M4, 2026-11-23,
+            // once uplinks came before a tunnel).
+            if let Ok(arriving) = self.arrived.try_recv() {
                 self.dtls_note(
                     false,
                     &arriving.contents,
@@ -772,8 +778,6 @@ impl Network {
                     arriving.destination,
                     &arriving.contents,
                 )?;
-            }
-            if took {
                 continue;
             }
             let deadline = match self.turn.as_ref().and_then(TurnClient::next_deadline) {

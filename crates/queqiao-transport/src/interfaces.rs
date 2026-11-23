@@ -22,7 +22,8 @@ const BUFFER_OVERFLOW: u32 = 111;
 /// proxy's TUN adapter such as Clash's Mihomo has no gateway of its own), while there are uplinks (`others` of them
 /// besides it) for the session to go on instead.
 pub fn is_tunnel(address: Ipv4Addr, uplinks: &[Ipv4Addr], others: usize) -> bool {
-    others > 0 && !address.is_unspecified() && !uplinks.contains(&address)
+    // The loopback is no tunnel: a server on this PC (M4 took its sessions through Wi-Fi to itself, 2026-11-23).
+    others > 0 && !address.is_unspecified() && !address.is_loopback() && !uplinks.contains(&address)
 }
 
 pub fn uplinks() -> Vec<Ipv4Addr> {
@@ -116,5 +117,7 @@ mod tests {
         // Only the tunnel: it stays first (nothing else to go by).
         assert!(!super::is_tunnel(mihomo, &[], 0));
         assert!(!super::is_tunnel(Ipv4Addr::UNSPECIFIED, &[wifi], 1));
+        // A server on this PC: the loopback is no tunnel.
+        assert!(!super::is_tunnel(Ipv4Addr::LOCALHOST, &[wifi], 1));
     }
 }
