@@ -161,6 +161,8 @@ pub enum VideoCodec {
     #[default]
     H264,
     Av1,
+    /// Through the GPU makers' encoders (NVENC, oneVPL, AMF), also 4:4:4 and 10-bit; or Windows' H.265 encoder.
+    H265,
 }
 
 impl VideoCodec {
@@ -168,6 +170,7 @@ impl VideoCodec {
         match self {
             VideoCodec::H264 => "H.264",
             VideoCodec::Av1 => "AV1",
+            VideoCodec::H265 => "H.265",
         }
     }
 }
@@ -179,6 +182,48 @@ pub enum CodecPreference {
     Automatic,
     H264,
     Av1,
+    H265,
+}
+
+/// What H.265 a viewer decodes: the bits of `Command::VideoCodec`'s `can_decode_hevc`.
+pub mod hevc {
+    /// Main (4:2:0, 8 bits).
+    pub const MAIN: u8 = 1;
+    /// Main 10 (4:2:0, 10 bits).
+    pub const MAIN10: u8 = 2;
+    /// 4:4:4, 8 bits (range extensions).
+    pub const CHROMA444: u8 = 4;
+    /// 4:4:4, 10 bits.
+    pub const CHROMA444_10: u8 = 8;
+
+    /// The bit for a format.
+    pub fn bit(chroma444: bool, ten_bit: bool) -> u8 {
+        match (chroma444, ten_bit) {
+            (false, false) => MAIN,
+            (false, true) => MAIN10,
+            (true, false) => CHROMA444,
+            (true, true) => CHROMA444_10,
+        }
+    }
+
+    /// "Main, Main 10, 4:4:4, 4:4:4 10-bit" (or "none").
+    pub fn describe(caps: u8) -> String {
+        let names: Vec<&str> = [
+            (MAIN, "Main"),
+            (MAIN10, "Main 10"),
+            (CHROMA444, "4:4:4"),
+            (CHROMA444_10, "4:4:4 10-bit"),
+        ]
+        .iter()
+        .filter(|(bit, _)| caps & bit != 0)
+        .map(|(_, name)| *name)
+        .collect();
+        if names.is_empty() {
+            "none".into()
+        } else {
+            names.join(", ")
+        }
+    }
 }
 
 /// What the viewer can ask the controlled PC to do.
@@ -213,10 +258,14 @@ pub enum Command {
     RestartQueqiao,
     /// The viewer's microphone comes (true) or stops: the controlled PC plays it into a virtual microphone.
     Microphone(bool),
-    /// The picture's codec as the viewer wants it, and whether it can decode AV1 (H.264 it always can).
+    /// The picture's codec as the viewer wants it, and whether it can decode AV1 (H.264 it always can), what H.265 it
+    /// decodes (`hevc` bits; 0 from viewers before H.265), and whether it wants 4:4:4 colour and 10 bits (H.265).
     VideoCodec {
         prefer: CodecPreference,
         can_decode_av1: bool,
+        can_decode_hevc: u8,
+        chroma444: bool,
+        ten_bit: bool,
     },
 }
 
@@ -324,14 +373,21 @@ impl Message {
                     Command::VideoCodec {
                         prefer,
                         can_decode_av1,
+                        can_decode_hevc,
+                        chroma444,
+                        ten_bit,
                     } => out.extend([
                         14,
                         match prefer {
                             CodecPreference::Automatic => 0,
                             CodecPreference::H264 => 1,
                             CodecPreference::Av1 => 2,
+                            CodecPreference::H265 => 3,
                         },
                         u8::from(can_decode_av1),
+                        // Earlier programs read the first three bytes only.
+                        can_decode_hevc & 0x0F,
+                        u8::from(chroma444) | (u8::from(ten_bit) << 1),
                     ]),
                     Command::Restart => out.push(3),
                     Command::SoundOn => out.push(4),
@@ -478,6 +534,7 @@ impl Message {
                         0 => CodecPreference::Automatic,
                         1 => CodecPreference::H264,
                         2 => CodecPreference::Av1,
+                        3 => CodecPreference::H265,
                         _ => return None,
                     },
                     can_decode_av1: match rest.get(2)? {
@@ -485,6 +542,10 @@ impl Message {
                         1 => true,
                         _ => return None,
                     },
+                    // Not there from viewers before H.265.
+                    can_decode_hevc: rest.get(3).copied().unwrap_or(0) & 0x0F,
+                    chroma444: rest.get(4).is_some_and(|flags| flags & 1 != 0),
+                    ten_bit: rest.get(4).is_some_and(|flags| flags & 2 != 0),
                 },
                 3 => Command::Restart,
                 4 => Command::SoundOn,
@@ -711,10 +772,23 @@ mod tests {
             Message::Command(Command::VideoCodec {
                 prefer: CodecPreference::Av1,
                 can_decode_av1: true,
+                can_decode_hevc: 0,
+                chroma444: false,
+                ten_bit: false,
             }),
             Message::Command(Command::VideoCodec {
                 prefer: CodecPreference::Automatic,
                 can_decode_av1: false,
+                can_decode_hevc: hevc::MAIN | hevc::MAIN10,
+                chroma444: false,
+                ten_bit: true,
+            }),
+            Message::Command(Command::VideoCodec {
+                prefer: CodecPreference::H265,
+                can_decode_av1: false,
+                can_decode_hevc: hevc::MAIN | hevc::CHROMA444 | hevc::CHROMA444_10,
+                chroma444: true,
+                ten_bit: true,
             }),
             Message::Command(Command::Restart),
             Message::Command(Command::CtrlAltDel),

@@ -309,6 +309,9 @@ impl Peer {
                 .clear_codecs()
                 .enable_h264(true)
                 .enable_av1(true)
+                // One H.265 payload type carries every profile between two Queqiao ends (Main, Main 10, 4:4:4): the
+                // decoders read the stream's own parameter sets.
+                .enable_h265(true)
                 .enable_opus(true, false),
             Bitrate::bps(START_BITRATE),
         )
@@ -1025,6 +1028,7 @@ impl Network {
                 }
                 let codec = match data.params.spec().codec {
                     str0m::format::Codec::Av1 => VideoCodec::Av1,
+                    str0m::format::Codec::H265 => VideoCodec::H265,
                     _ => VideoCodec::H264,
                 };
                 Some(PeerEvent::Video {
@@ -1182,6 +1186,7 @@ impl Network {
                 let wanted = match codec {
                     VideoCodec::H264 => str0m::format::Codec::H264,
                     VideoCodec::Av1 => str0m::format::Codec::Av1,
+                    VideoCodec::H265 => str0m::format::Codec::H265,
                 };
                 let Some(pt) = writer
                     .payload_params()

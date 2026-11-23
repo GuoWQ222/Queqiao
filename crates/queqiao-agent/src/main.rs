@@ -32,7 +32,7 @@ use queqiao_account::{
 };
 use queqiao_audio::{Capture, TEST_TONE_HZ, Tone};
 use queqiao_capture::{BgraImage, Duplicator, OutputInfo, needs_restart, qpc_frequency, qpc_now};
-use queqiao_codec::ScreenEncoder;
+use queqiao_codec::{EncodeFormat, ScreenEncoder};
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{Command, InputEvent, Message};
 use queqiao_core::text::{tr, trf};
@@ -1563,6 +1563,57 @@ fn automatic_codec(viewer_av1: bool, agent_av1: bool) -> queqiao_core::protocol:
     }
 }
 
+/// The H.265 to send for the viewer's wishes, without what it cannot decode (`can_decode`: `protocol::hevc` bits).
+fn hevc_format(can_decode: u8, chroma444: bool, ten_bit: bool) -> EncodeFormat {
+    use queqiao_core::protocol::hevc;
+    let (chroma444, ten_bit) = if can_decode & hevc::bit(chroma444, ten_bit) != 0 {
+        (chroma444, ten_bit)
+    } else if chroma444 && can_decode & hevc::CHROMA444 != 0 {
+        (true, false)
+    } else if ten_bit && can_decode & hevc::MAIN10 != 0 {
+        (false, true)
+    } else {
+        (false, false)
+    };
+    EncodeFormat {
+        codec: queqiao_codec::Codec::H265,
+        chroma444,
+        ten_bit,
+    }
+}
+
+/// What to try for `format`, best first: as it is, then 4:2:0 (AMD's encoders make no 4:4:4), then 8 bits.
+fn fallbacks(codec: queqiao_core::protocol::VideoCodec, format: EncodeFormat) -> Vec<EncodeFormat> {
+    if codec != queqiao_core::protocol::VideoCodec::H265 {
+        return vec![format];
+    }
+    let mut list = vec![format];
+    for next in [
+        EncodeFormat {
+            chroma444: false,
+            ..format
+        },
+        EncodeFormat {
+            chroma444: false,
+            ten_bit: false,
+            ..format
+        },
+    ] {
+        if !list.contains(&next) {
+            list.push(next);
+        }
+    }
+    list
+}
+
+/// "H.264", "AV1", or for H.265 its kind ("H.265 4:4:4 10-bit").
+fn picture_name(codec: queqiao_core::protocol::VideoCodec, format: EncodeFormat) -> String {
+    match codec {
+        queqiao_core::protocol::VideoCodec::H265 => format.name(),
+        _ => codec.name().to_string(),
+    }
+}
+
 /// The largest pointer shape sent each way (a 128 x 128 colour shape is 64 KB: one data channel message).
 const POINTER_LIMIT: u32 = 128;
 
@@ -2062,6 +2113,14 @@ fn session(
         "screen {}x{} at {:.0} Hz on {}",
         info.width, info.height, info.refresh_hz, info.adapter
     ));
+    // Discrete before integrated: the screen's GPU captures, and encodes too (moving each picture to another GPU is
+    // not built), so a screen on the integrated GPU is said.
+    if let Some(first) = queqiao_capture::preferred_gpu_besides(&info.adapter) {
+        lines.push(format!(
+            "the screen is on {}; {first} comes first (discrete before integrated), but encoding stays on the screen's GPU",
+            info.adapter
+        ));
+    }
     lines.push(format!(
         "encoder: {} ({}) at {}x{}, {} fps, {:.1} Mbit/s; convert: {}",
         encoder.encoder().name(),
@@ -2569,34 +2628,65 @@ fn session(
                     Some(Message::Command(Command::VideoCodec {
                         prefer,
                         can_decode_av1,
+                        can_decode_hevc,
+                        chroma444,
+                        ten_bit,
                     })) => {
-                        use queqiao_core::protocol::{CodecPreference, VideoCodec};
+                        use queqiao_core::protocol::{CodecPreference, VideoCodec, hevc};
                         let can_encode_av1 = *av1_encoder.get_or_insert_with(|| {
                             queqiao_codec::can_encode(VideoCodec::Av1, &device)
                         });
-                        let wanted = match prefer {
+                        let (wanted, format) = match prefer {
                             CodecPreference::Av1 if can_decode_av1 && can_encode_av1 => {
-                                VideoCodec::Av1
+                                (VideoCodec::Av1, EncodeFormat::H264)
                             }
-                            CodecPreference::Automatic => {
-                                automatic_codec(can_decode_av1, can_encode_av1)
-                            }
-                            _ => VideoCodec::H264,
+                            CodecPreference::H265 if can_decode_hevc & hevc::MAIN != 0 => (
+                                VideoCodec::H265,
+                                hevc_format(can_decode_hevc, chroma444, ten_bit),
+                            ),
+                            CodecPreference::Automatic => (
+                                automatic_codec(can_decode_av1, can_encode_av1),
+                                EncodeFormat::H264,
+                            ),
+                            _ => (VideoCodec::H264, EncodeFormat::H264),
                         };
                         let making = Instant::now();
-                        let mut notice = if wanted == encoder.codec() {
-                            format!("picture: {} ({})", wanted.name(), encoder.encoder().name())
+                        let same = wanted == encoder.codec()
+                            && (wanted != VideoCodec::H265 || format == encoder.format());
+                        let mut notice = if same {
+                            format!(
+                                "picture: {} ({})",
+                                picture_name(wanted, format),
+                                encoder.encoder().name()
+                            )
                         } else {
-                            match ScreenEncoder::with_codec(
-                                &device,
-                                &context,
-                                screen,
-                                fps,
-                                options.fps.is_some(),
-                                resolution_limit,
-                                wanted,
-                            ) {
-                                Ok(new) => {
+                            // H.265: as asked, then with less (4:2:0, 8 bits) when this PC's encoder cannot.
+                            let mut made = None;
+                            let mut refused = Vec::new();
+                            for format in fallbacks(wanted, format) {
+                                match ScreenEncoder::with_format(
+                                    &device,
+                                    &context,
+                                    screen,
+                                    fps,
+                                    options.fps.is_some(),
+                                    resolution_limit,
+                                    wanted,
+                                    format,
+                                ) {
+                                    Ok(new) => {
+                                        made = Some((new, format));
+                                        break;
+                                    }
+                                    Err(error) => refused.push(format!(
+                                        "{}: {}",
+                                        picture_name(wanted, format),
+                                        describe(error)
+                                    )),
+                                }
+                            }
+                            match made {
+                                Some((new, format)) => {
                                     encoder = new;
                                     force_keyframe = true;
                                     size_bitrate = encoder.config().bitrate;
@@ -2613,20 +2703,23 @@ fn session(
                                     lines.push(format!(
                                         "{} ms: the encoder for {} took {} ms to make",
                                         started.elapsed().as_millis(),
-                                        wanted.name(),
+                                        picture_name(wanted, format),
                                         making.elapsed().as_millis()
                                     ));
+                                    for line in &refused {
+                                        lines.push(format!("not made: {line}"));
+                                    }
                                     format!(
                                         "picture: {} ({})",
-                                        wanted.name(),
+                                        picture_name(wanted, format),
                                         encoder.encoder().name()
                                     )
                                 }
-                                Err(error) => format!(
+                                None => format!(
                                     "picture: {} did not start ({}); {} stays",
-                                    wanted.name(),
-                                    describe(error),
-                                    encoder.codec().name()
+                                    picture_name(wanted, format),
+                                    refused.join("; "),
+                                    picture_name(encoder.codec(), encoder.format())
                                 ),
                             }
                         };
@@ -2636,6 +2729,9 @@ fn session(
                             } else {
                                 " (AV1 asked for, but this PC has no AV1 encoder)"
                             });
+                        }
+                        if prefer == CodecPreference::H265 && wanted != VideoCodec::H265 {
+                            notice.push_str(" (H.265 asked for, but the viewer cannot decode it)");
                         }
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());

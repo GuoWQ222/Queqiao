@@ -69,6 +69,29 @@ impl ScreenEncoder {
         limit: Option<(u32, u32)>,
         codec: crate::VideoCodec,
     ) -> Result<Self> {
+        let format = match codec {
+            crate::VideoCodec::H265 => {
+                crate::EncodeFormat::from_name("hevc").unwrap_or(crate::EncodeFormat::H264)
+            }
+            _ => crate::EncodeFormat::H264,
+        };
+        Self::with_format(
+            device, context, screen, fps, fixed_fps, limit, codec, format,
+        )
+    }
+
+    /// As `with_codec`, with the GPU makers' encoders making `format` (H.265 4:4:4, 10-bit...).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_format(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        screen: (u32, u32),
+        fps: u32,
+        fixed_fps: bool,
+        limit: Option<(u32, u32)>,
+        codec: crate::VideoCodec,
+        format: crate::EncodeFormat,
+    ) -> Result<Self> {
         let mut notes = Vec::new();
         let mut choice = EncoderChoice::from_env();
         let mut limit = limit.unwrap_or((u32::MAX, u32::MAX));
@@ -81,6 +104,7 @@ impl ScreenEncoder {
                 }
                 let config = EncoderConfig {
                     codec,
+                    format,
                     ..EncoderConfig::for_screen(w, h, fps)
                 };
                 match H264Encoder::new(device, context, &config, choice) {
@@ -130,6 +154,11 @@ impl ScreenEncoder {
 
     pub fn codec(&self) -> crate::VideoCodec {
         self.config.codec
+    }
+
+    /// What the encoder makes (H.264 4:2:0 but for the GPU makers' encoders set otherwise).
+    pub fn format(&self) -> crate::EncodeFormat {
+        self.encoder.format()
     }
 
     pub fn config(&self) -> &EncoderConfig {

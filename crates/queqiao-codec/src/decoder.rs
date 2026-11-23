@@ -80,6 +80,33 @@ impl H264Decoder {
         if choice == DecoderChoice::Vpl && codec == crate::VideoCodec::H264 {
             return Self::vpl(device, context, Codec::H264);
         }
+        // H.265: Intel's decoder takes every kind (4:4:4, 10-bit); Windows' H.265 decoder Main only (its pictures come
+        // as NV12).
+        if codec == crate::VideoCodec::H265 {
+            match VplDecoder::open(device, context, Codec::H265) {
+                Ok(decoder) => {
+                    return Ok(Self {
+                        backend: Backend::Vpl(Box::new(decoder)),
+                        skipped,
+                    });
+                }
+                Err(error) => skipped.push(format!("Intel oneVPL: {}", error.message())),
+            }
+            return match MfDecoder::open(device, context, codec) {
+                Ok(decoder) => Ok(Self {
+                    backend: Backend::Hardware(Box::new(decoder)),
+                    skipped,
+                }),
+                Err(error) => Err(Error::new(
+                    E_FAIL,
+                    format!(
+                        "H.265 decoding: {}; Windows: {}",
+                        skipped.join("; "),
+                        error.message()
+                    ),
+                )),
+            };
+        }
         if codec != crate::VideoCodec::H264 {
             return MfDecoder::open(device, context, codec)
                 .map(|decoder| Self {

@@ -60,7 +60,7 @@ const MENU_MICROPHONE: u16 = 0x16D0;
 /// The card of the session's figures at the bottom right (also on the bar).
 const MENU_FIGURES: u16 = 0x16E0;
 /// The picture's codec: (menu id, preference, label).
-const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 3] = [
+const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 4] = [
     (
         0x16A0,
         queqiao_core::protocol::CodecPreference::Automatic,
@@ -76,7 +76,16 @@ const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 3] = [
         queqiao_core::protocol::CodecPreference::Av1,
         "AV1 (both PCs need it)",
     ),
+    (
+        0x16F0,
+        queqiao_core::protocol::CodecPreference::H265,
+        "H.265 (both PCs need it)",
+    ),
 ];
+/// H.265's 4:4:4 colour (sharp coloured text) and 10 bits (smooth gradients), as UU Remote offers them: toggles in
+/// the Picture codec menu, used when the picture is H.265 and both PCs can.
+const MENU_CHROMA444: u16 = 0x1700;
+const MENU_TEN_BIT: u16 = 0x1710;
 /// The game mouse's speed: (menu id, percent, label).
 const MENU_MOUSE_SPEED: [(u16, u32, &str); 3] = [
     (0x1670, 50, "Slow (x0.5)"),
@@ -249,8 +258,11 @@ struct Options {
     signup: bool,
     /// A throwaway device with this name instead of this PC's own (tests); its login is not kept.
     test_device: Option<String>,
-    /// The picture's codec to ask for (as the Picture codec menu does): auto, h264 or av1.
+    /// The picture's codec to ask for (as the Picture codec menu does): auto, h264, av1 or h265.
     codec: Option<queqiao_core::protocol::CodecPreference>,
+    /// H.265 in 4:4:4 colour, and in 10 bits (as the menu's toggles).
+    chroma444: bool,
+    ten_bit: bool,
     /// Send a test tone as this PC's microphone from the start (tests).
     mic_test: bool,
     /// The session window's opacity in percent (as the Opacity menu sets it).
@@ -540,9 +552,12 @@ fn test_switch(
             options.codec = Some(match args.next()?.as_str() {
                 "h264" => CodecPreference::H264,
                 "av1" => CodecPreference::Av1,
+                "h265" => CodecPreference::H265,
                 _ => CodecPreference::Automatic,
             });
         }
+        "--chroma444" => options.chroma444 = true,
+        "--ten-bit" => options.ten_bit = true,
         "--full-screen" => options.full_screen = true,
         "--privacy" => options.privacy = true,
         "--terminal-test" => options.terminal_test = true,
@@ -1507,29 +1522,44 @@ fn run_session(
         queqiao_core::protocol::CodecPreference::Automatic => av1_on_gpu,
         _ => can_decode_av1,
     };
+    // H.265: what this PC decodes (Intel's decoder: 4:4:4 and 10-bit too), and whether 4:4:4 and 10 bits are wanted.
+    let hevc_caps = queqiao_codec::hevc_decode_caps(device, context);
+    lines.push(format!(
+        "H.265 this PC decodes: {}",
+        queqiao_core::protocol::hevc::describe(hevc_caps)
+    ));
+    let (mut chroma444, mut ten_bit) = (options.chroma444, options.ten_bit);
     // A decoder for the other codec, made before it is needed: making Windows' AV1 decoder takes a while, and doing
     // it when the first AV1 frame comes would hold this window (and its keyboard hook) just after the first picture.
     let mut spare_decoder: Option<(queqiao_core::protocol::VideoCodec, H264Decoder)> = None;
-    if codec_choice != queqiao_core::protocol::CodecPreference::H264 && av1_for(codec_choice) {
+    let spare_codec = match codec_choice {
+        queqiao_core::protocol::CodecPreference::H265
+            if hevc_caps & queqiao_core::protocol::hevc::MAIN != 0 =>
+        {
+            Some(queqiao_core::protocol::VideoCodec::H265)
+        }
+        queqiao_core::protocol::CodecPreference::H264
+        | queqiao_core::protocol::CodecPreference::H265 => None,
+        choice if av1_for(choice) => Some(queqiao_core::protocol::VideoCodec::Av1),
+        _ => None,
+    };
+    if let Some(spare) = spare_codec {
         let making = Instant::now();
-        match H264Decoder::with_codec(
-            queqiao_core::protocol::VideoCodec::Av1,
-            device,
-            context,
-            DecoderChoice::from_env(),
-        ) {
+        match H264Decoder::with_codec(spare, device, context, DecoderChoice::from_env()) {
             Ok(made) => {
                 lines.push(format!(
-                    "decoder for AV1 ready: {} (made in {} ms)",
+                    "decoder for {} ready: {} (made in {} ms)",
+                    spare.name(),
                     made.name(),
                     making.elapsed().as_millis()
                 ));
-                spare_decoder = Some((queqiao_core::protocol::VideoCodec::Av1, made));
+                spare_decoder = Some((spare, made));
             }
-            Err(error) => lines.push(format!("decoder for AV1: {}", describe(error))),
+            Err(error) => lines.push(format!("decoder for {}: {}", spare.name(), describe(error))),
         }
     }
-    let mut frames_by_codec = [0u32; 2];
+    // Frames of each codec: H.264, AV1, H.265.
+    let mut frames_by_codec = [0u32; 3];
     lines.extend(peer.candidates().iter().cloned());
     let end = options.seconds.map(|s| started + Duration::from_secs(s));
     let mut stats = Stats::default();
@@ -1679,11 +1709,17 @@ fn run_session(
     let codec_items: Vec<(u16, &str)> = MENU_CODEC
         .iter()
         .map(|(id, _, text)| (*id, tr(text)))
+        .chain([
+            (MENU_CHROMA444, tr("4:4:4 colour (H.265)")),
+            (MENU_TEN_BIT, tr("10-bit colour (H.265)")),
+        ])
         .collect();
     window.add_submenu(tr("Picture codec"), &codec_items);
     for (item, choice, _) in MENU_CODEC {
         window.check_menu_item(item, choice == options.codec.unwrap_or_default());
     }
+    window.check_menu_item(MENU_CHROMA444, options.chroma444);
+    window.check_menu_item(MENU_TEN_BIT, options.ten_bit);
     // That PC's pointer shape as this window's cursor (the last one, to show again when turned back on).
     let mut pointer_shape_on = true;
     window.check_menu_item(MENU_POINTER_SHAPE, true);
@@ -1892,7 +1928,8 @@ fn run_session(
         {
             let codec = match decoder_codec {
                 queqiao_core::protocol::VideoCodec::Av1 => "AV1",
-                _ => "H.264",
+                queqiao_core::protocol::VideoCodec::H265 => "H.265",
+                queqiao_core::protocol::VideoCodec::H264 => "H.264",
             };
             let place = if decoder.name().contains("D3D11") {
                 "GPU"
@@ -2087,6 +2124,25 @@ fn run_session(
                         Some(Command::VideoCodec {
                             prefer: codec_choice,
                             can_decode_av1: av1_for(codec_choice),
+                            can_decode_hevc: hevc_caps,
+                            chroma444,
+                            ten_bit,
+                        })
+                    }
+                    MENU_CHROMA444 | MENU_TEN_BIT => {
+                        if id == MENU_CHROMA444 {
+                            chroma444 = !chroma444;
+                        } else {
+                            ten_bit = !ten_bit;
+                        }
+                        window.check_menu_item(MENU_CHROMA444, chroma444);
+                        window.check_menu_item(MENU_TEN_BIT, ten_bit);
+                        Some(Command::VideoCodec {
+                            prefer: codec_choice,
+                            can_decode_av1: av1_for(codec_choice),
+                            can_decode_hevc: hevc_caps,
+                            chroma444,
+                            ten_bit,
                         })
                     }
                     id if MENU_MOUSE_SPEED.iter().any(|(item, _, _)| *item == id) => {
@@ -2543,6 +2599,9 @@ fn run_session(
                         Message::Command(Command::VideoCodec {
                             prefer: codec_choice,
                             can_decode_av1: av1_for(codec_choice),
+                            can_decode_hevc: hevc_caps,
+                            chroma444,
+                            ten_bit,
                         })
                         .encode(),
                     );
@@ -2644,8 +2703,11 @@ fn run_session(
                             codec.name()
                         ));
                     }
-                    frames_by_codec
-                        [usize::from(codec == queqiao_core::protocol::VideoCodec::Av1)] += 1;
+                    frames_by_codec[match codec {
+                        queqiao_core::protocol::VideoCodec::H264 => 0,
+                        queqiao_core::protocol::VideoCodec::Av1 => 1,
+                        queqiao_core::protocol::VideoCodec::H265 => 2,
+                    }] += 1;
                     stats.pickup_ms.push(received.elapsed().as_secs_f64() * 1e3);
                     stats.received += 1;
                     stats.lost += u32::from(!contiguous);
@@ -2948,8 +3010,8 @@ fn run_session(
         ));
     }
     lines.push(format!(
-        "frames by codec: H.264 {}, AV1 {} (this PC decodes AV1: {can_decode_av1}, on its GPU: {av1_on_gpu})",
-        frames_by_codec[0], frames_by_codec[1]
+        "frames by codec: H.264 {}, AV1 {}, H.265 {} (this PC decodes AV1: {can_decode_av1}, on its GPU: {av1_on_gpu})",
+        frames_by_codec[0], frames_by_codec[1], frames_by_codec[2]
     ));
     lines.push(format!(
         "pointer: {pointer_shapes} shapes from that PC{}",
@@ -3676,6 +3738,7 @@ mod tests {
         ];
         ids.extend(MENU_MOUSE_SPEED.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_CODEC.iter().map(|(id, _, _)| *id));
+        ids.extend([MENU_CHROMA444, MENU_TEN_BIT]);
         ids.extend(MENU_FPS.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_QUALITY.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_RESOLUTION.iter().map(|(id, _, _)| *id));

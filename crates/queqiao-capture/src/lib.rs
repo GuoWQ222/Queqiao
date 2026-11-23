@@ -439,11 +439,67 @@ pub fn screen_device(index: Option<usize>) -> Result<ScreenDevice> {
     })
 }
 
-/// A D3D11 device on the first GPU, for a process that sees no screens (the agent at the sign-in screen runs in
-/// session 0, where none is attached): the screen's place and size come from elsewhere (left 0 x 0 here).
+/// The GPUs in the order to pick one when the screen does not decide: discrete first, then integrated (Windows'
+/// high-performance order; the user's rule, 2026-11-23: on a PC with an RTX 5080 and the processor's Radeon
+/// graphics, the 5080), software adapters left out. Windows before 1803 (no IDXGIFactory6): the plain order.
+pub fn gpus_by_preference() -> Vec<(IDXGIAdapter1, String)> {
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else {
+        return Vec::new();
+    };
+    let mut adapters = Vec::new();
+    if let Ok(factory6) = factory.cast::<IDXGIFactory6>() {
+        for index in 0.. {
+            let Ok(adapter) = (unsafe {
+                factory6.EnumAdapterByGpuPreference::<IDXGIAdapter1>(
+                    index,
+                    DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                )
+            }) else {
+                break;
+            };
+            adapters.push(adapter);
+        }
+    } else {
+        for index in 0.. {
+            let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+                break;
+            };
+            adapters.push(adapter);
+        }
+    }
+    adapters
+        .into_iter()
+        .filter_map(|adapter| {
+            let desc = unsafe { adapter.GetDesc1() }.ok()?;
+            if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+                return None;
+            }
+            Some((adapter, wide_to_string(&desc.Description)))
+        })
+        .collect()
+}
+
+/// The GPU that comes first by [`gpus_by_preference`] when it is not `adapter` (the screen's): the agent then says
+/// so (encoding on another GPU than the screen's is not built).
+pub fn preferred_gpu_besides(adapter: &str) -> Option<String> {
+    gpus_by_preference()
+        .into_iter()
+        .next()
+        .map(|(_, name)| name)
+        .filter(|name| name != adapter)
+}
+
+/// A D3D11 device on the first GPU by [`gpus_by_preference`], for a process that sees no screens (the agent at the
+/// sign-in screen runs in session 0, where none is attached): the screen's place and size come from elsewhere (left
+/// 0 x 0 here).
 pub fn first_device() -> Result<ScreenDevice> {
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
-    let adapter = unsafe { factory.EnumAdapters1(0) }?;
+    let adapter = match gpus_by_preference().into_iter().next() {
+        Some((adapter, _)) => adapter,
+        None => {
+            let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
+            unsafe { factory.EnumAdapters1(0) }?
+        }
+    };
     let (device, context) = create_device(&adapter)?;
     let adapter_desc = unsafe { adapter.GetDesc1() }?;
     let info = OutputInfo {

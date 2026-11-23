@@ -79,6 +79,12 @@ $password3 | & $server add-user carol --data $data | Out-Null
 $serveArgs = @('serve', '--listen', $listen, '--data', "`"$data`"", '--public-ip', $Address, '--relay-private', '--allow-signup')
 $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
 $failed = @()
+# A comma list comes as one string when the script is started with -File (tools\sunshine_run.ps1): split it. Unknown
+# names fail the run: "direct,h265" taken as one name ran no session and still passed (2026-11-23).
+$Sessions = @($Sessions | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$knownSessions = @("all", "direct", "relay", "allowed", "declined", "ended-here", "av1", "h265", "drag", "help", "help-link", "help-fixed", "help-noask", "removed", "locked", "two-at-once")
+$unknownSessions = @($Sessions | Where-Object { $knownSessions -notcontains $_ })
+if ($unknownSessions.Count) { $failed += "unknown sessions: $($unknownSessions -join ", ")" }
 try {
     $deadline = (Get-Date).AddSeconds(10)
     do {
@@ -192,6 +198,9 @@ try {
         # AV1 asked for: the agent switches to its AV1 encoder, the viewer to Windows' AV1 decoder (needs both).
         # The viewer's microphone too (a test tone): the agent plays it into this PC's virtual microphone and hears it there.
         @('av1', '', '--mic-check', $av1Agent, $av1Viewer, $true),
+        # H.265 4:4:4 10-bit through the GPU makers' SDKs (on sunshine Intel's oneVPL both ways): the agent makes it,
+        # the viewer decodes it.
+        @('h265', '', '', 'command from the viewer: picture: H\.265 4:4:4 10-bit \(', 'the picture is H\.265 now', $true),
         # A File Explorer window dragged round the screen for 12 s mid-session (scripts\drag_window.ps1), with the
         # bitrate course on both sides and a picture in the middle of it. The viewer asks for 4 Mbit/s at most: the
         # agent's encoder must follow while it encodes (Intel's Quick Sync kept 12-17 Mbit/s before, 2026-11-23).
@@ -210,6 +219,7 @@ try {
         # A command line on that PC, in a window of its own that closes by itself.
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0 --opacity 60 --boss-key-test' }
         if ($label -eq 'av1') { $viewerArgs += ' --codec av1 --mic-test' }
+        if ($label -eq 'h265') { $viewerArgs += ' --codec h265 --chroma444 --ten-bit' }
         # H.264 asked for (Automatic picks AV1 where both PCs have it on their GPUs): the H.264 path stays tested.
         # The bar and the card of figures on, and a picture of the window with them (viewer_session.bmp).
         if ($label -eq 'direct') { $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out`"" }

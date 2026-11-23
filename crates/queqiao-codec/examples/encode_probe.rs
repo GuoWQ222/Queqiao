@@ -31,10 +31,14 @@ use queqiao_codec::{
     H264Encoder, Nv12Converter, candidate_sizes, hevc_nal_types, nal_types,
 };
 use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+use windows::Win32::Graphics::Direct3D::{
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP,
+};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
-use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -75,6 +79,10 @@ fn main() {
     // decode=vpl: the stream decoded back with Intel's oneVPL decoder and its first picture compared with the desktop.
     if let Some(decoder) = options.get("decode") {
         unsafe { std::env::set_var("QUEQIAO_PROBE_DECODE", decoder) };
+    }
+    // adapter=amd|nvidia|intel: the GPU for source=pattern (else the default one).
+    if let Some(adapter) = options.get("adapter") {
+        unsafe { std::env::set_var("QUEQIAO_PROBE_ADAPTER", adapter) };
     }
     // source=pattern: a test picture instead of the desktop (nothing of the screen is captured).
     if let Some(source) = options.get("source") {
@@ -488,7 +496,9 @@ fn open_encoder(
         if w.max(h) > request.limit.0 || w.min(h) > request.limit.1 {
             continue;
         }
-        let mut config = EncoderConfig::for_screen(w, h, request.fps);
+        // The format asked for (format=, for NVENC, oneVPL and AMF): H.265, 4:4:4, 10-bit.
+        let mut config =
+            EncoderConfig::for_screen(w, h, request.fps).with_format(EncodeFormat::from_env());
         if let Some(mbps) = request.mbps {
             config.bitrate = mbps * 1_000_000;
         }
@@ -773,16 +783,52 @@ fn test_pattern(width: u32, height: u32) -> BgraImage {
     }
 }
 
-/// The default hardware adapter's device (source=pattern: no screen is captured, so no duplication device).
+/// The adapter of a GPU maker (QUEQIAO_PROBE_ADAPTER: amd, nvidia, intel), if there is one.
+fn adapter_of(maker: &str) -> Result<Option<IDXGIAdapter1>, String> {
+    let vendor = match maker {
+        "amd" => 0x1002,
+        "nvidia" => 0x10DE,
+        "intel" => 0x8086,
+        _ => return Err(format!("adapter={maker}: amd, nvidia or intel")),
+    };
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(describe)?;
+    for index in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+            break;
+        };
+        if unsafe { adapter.GetDesc1() }.is_ok_and(|desc| desc.VendorId == vendor) {
+            return Ok(Some(adapter));
+        }
+    }
+    Ok(None)
+}
+
+/// The default hardware adapter's device, or the one QUEQIAO_PROBE_ADAPTER names (source=pattern: no screen is
+/// captured, so no duplication device).
 fn hardware_device(
     lines: &mut Vec<String>,
 ) -> Result<(ID3D11Device, ID3D11DeviceContext, String), String> {
+    let chosen = match std::env::var("QUEQIAO_PROBE_ADAPTER") {
+        Ok(maker) => Some(
+            adapter_of(&maker)?.ok_or_else(|| format!("no {maker} graphics adapter on this PC"))?,
+        ),
+        Err(_) => None,
+    };
     let mut device = None;
     let mut context = None;
     unsafe {
         D3D11CreateDevice(
-            None::<&IDXGIAdapter>,
-            D3D_DRIVER_TYPE_HARDWARE,
+            chosen
+                .as_ref()
+                .map(|a| a.cast::<IDXGIAdapter>())
+                .transpose()
+                .map_err(describe)?
+                .as_ref(),
+            if chosen.is_some() {
+                D3D_DRIVER_TYPE_UNKNOWN
+            } else {
+                D3D_DRIVER_TYPE_HARDWARE
+            },
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
             None,

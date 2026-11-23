@@ -44,6 +44,11 @@ type DecodeFrame = unsafe extern "C" fn(
     *mut sys::mfxSyncPoint,
 ) -> sys::mfxStatus;
 type Sync = unsafe extern "C" fn(sys::mfxSession, sys::mfxSyncPoint, u32) -> sys::mfxStatus;
+type Query = unsafe extern "C" fn(
+    sys::mfxSession,
+    *mut sys::mfxVideoParam,
+    *mut sys::mfxVideoParam,
+) -> sys::mfxStatus;
 
 struct Api {
     initialize: Initialize,
@@ -54,6 +59,7 @@ struct Api {
     decode_close: Close,
     decode_frame: DecodeFrame,
     sync: Sync,
+    query: Query,
 }
 
 impl Api {
@@ -83,6 +89,7 @@ impl Api {
                     "MFXVideoDECODE_DecodeFrameAsync"
                 ))?),
                 sync: std::mem::transmute::<Proc, Sync>(get(s!("MFXVideoCORE_SyncOperation"))?),
+                query: std::mem::transmute::<Proc, Query>(get(s!("MFXVideoDECODE_Query"))?),
             })
         }
     }
@@ -206,6 +213,52 @@ impl VplDecoder {
             "set the D3D11 device",
         )?;
         Ok(decoder)
+    }
+
+    /// Whether the GPU decodes H.265 in this chroma and depth (asked of the runtime: Main and Main 10 on Intel graphics
+    /// from 2016 on, 4:4:4 from 2019 on).
+    fn supports_hevc(&self, chroma444: bool, ten_bit: bool) -> bool {
+        let mut input: sys::mfxVideoParam = unsafe { zeroed() };
+        input.IOPattern = sys::MFX_IOPATTERN_OUT_VIDEO_MEMORY as u16;
+        input.AsyncDepth = 1;
+        let fourcc = match (chroma444, ten_bit) {
+            (false, false) => sys::MFX_FOURCC_NV12,
+            (false, true) => sys::MFX_FOURCC_P010,
+            (true, false) => sys::MFX_FOURCC_AYUV,
+            (true, true) => sys::MFX_FOURCC_Y410,
+        } as u32;
+        unsafe {
+            let mfx = &mut input.__bindgen_anon_1.mfx;
+            mfx.CodecId = sys::MFX_CODEC_HEVC as u32;
+            mfx.CodecProfile = match (chroma444, ten_bit) {
+                (true, _) => sys::MFX_PROFILE_HEVC_REXT,
+                (false, true) => sys::MFX_PROFILE_HEVC_MAIN10,
+                (false, false) => sys::MFX_PROFILE_HEVC_MAIN,
+            } as u16;
+            let info = &mut mfx.FrameInfo;
+            info.FourCC = fourcc;
+            info.ChromaFormat = if chroma444 {
+                sys::MFX_CHROMAFORMAT_YUV444
+            } else {
+                sys::MFX_CHROMAFORMAT_YUV420
+            } as u16;
+            if ten_bit {
+                info.BitDepthLuma = 10;
+                info.BitDepthChroma = 10;
+                info.Shift = u16::from(!chroma444);
+            }
+            info.FrameRateExtN = 60;
+            info.FrameRateExtD = 1;
+            info.PicStruct = sys::MFX_PICSTRUCT_PROGRESSIVE as u16;
+            let size = &mut info.__bindgen_anon_1.__bindgen_anon_1;
+            size.Width = 1920;
+            size.Height = 1088;
+            size.CropW = 1920;
+            size.CropH = 1080;
+        }
+        let mut output = input;
+        let status = unsafe { (self.api.query)(self.session, &mut input, &mut output) };
+        status >= 0 && unsafe { output.__bindgen_anon_1.mfx.FrameInfo.FourCC } == fourcc
     }
 
     /// Decodes one access unit (Annex-B, as the encoder made it) and appends its picture to `out`.
@@ -400,6 +453,20 @@ impl Drop for VplDecoder {
             let _ = FreeLibrary(self.library);
         }
     }
+}
+
+/// What H.265 Intel's decoder takes on this PC (`protocol::hevc` bits; 0 without Intel graphics).
+pub(crate) fn hevc_caps(device: &ID3D11Device, context: &ID3D11DeviceContext) -> u8 {
+    let Ok(decoder) = VplDecoder::open(device, context, Codec::H265) else {
+        return 0;
+    };
+    let mut caps = 0;
+    for (chroma444, ten_bit) in [(false, false), (false, true), (true, false), (true, true)] {
+        if decoder.supports_hevc(chroma444, ten_bit) {
+            caps |= queqiao_core::protocol::hevc::bit(chroma444, ten_bit);
+        }
+    }
+    caps
 }
 
 // The raw pointers are only used from the thread that owns the decoder.

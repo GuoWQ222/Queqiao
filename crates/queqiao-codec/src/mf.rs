@@ -363,6 +363,7 @@ pub(crate) fn subtype(codec: crate::VideoCodec) -> &'static GUID {
     match codec {
         crate::VideoCodec::H264 => &MFVideoFormat_H264,
         crate::VideoCodec::Av1 => &MFVideoFormat_AV1,
+        crate::VideoCodec::H265 => &MFVideoFormat_HEVC,
     }
 }
 

@@ -8,6 +8,7 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12};
 use windows::core::{Error, Result};
 
+use crate::amf::AmfEncoder;
 use crate::format::EncodeFormat;
 use crate::mf::MfEncoder;
 use crate::nvenc::NvencEncoder;
@@ -22,8 +23,11 @@ pub struct EncoderConfig {
     pub fps: u32,
     /// Target bitrate in bits per second (constant bitrate).
     pub bitrate: u32,
-    /// H.264 (every encoder), or AV1 (hardware encoders through Media Foundation only).
+    /// H.264 (every encoder), AV1 (hardware encoders through Media Foundation only), or H.265 (the GPU makers'
+    /// encoders, or Media Foundation's for plain H.265).
     pub codec: crate::VideoCodec,
+    /// What the GPU makers' encoders make: H.264 4:2:0 unless asked otherwise (its codec agrees with `codec`).
+    pub format: EncodeFormat,
 }
 
 impl EncoderConfig {
@@ -38,6 +42,19 @@ impl EncoderConfig {
             fps,
             bitrate: bits.clamp(2e6, 50e6) as u32,
             codec: crate::VideoCodec::H264,
+            format: EncodeFormat::H264,
+        }
+    }
+
+    /// The codec and format for `format` (H.264 or H.265, its chroma and depth).
+    pub fn with_format(self, format: EncodeFormat) -> Self {
+        Self {
+            codec: match format.codec {
+                crate::Codec::H264 => crate::VideoCodec::H264,
+                crate::Codec::H265 => crate::VideoCodec::H265,
+            },
+            format,
+            ..self
         }
     }
 }
@@ -73,6 +90,8 @@ pub enum EncoderChoice {
     Nvenc,
     /// Intel's encoder driven directly (oneVPL, the graphics driver's runtime).
     Vpl,
+    /// AMD's encoder driven directly (AMF, the graphics driver's runtime).
+    Amf,
     Software,
 }
 
@@ -84,9 +103,31 @@ impl EncoderChoice {
             Some("hardware" | "mf") => Self::Hardware,
             Some("nvenc") => Self::Nvenc,
             Some("vpl") => Self::Vpl,
+            Some("amf") => Self::Amf,
             Some("software") => Self::Software,
             _ => Self::Auto,
         }
+    }
+}
+
+/// One of the GPU makers' encoders, for `format`.
+fn open_vendor(
+    kind: EncoderChoice,
+    device: &ID3D11Device,
+    config: &EncoderConfig,
+    format: EncodeFormat,
+) -> Result<Backend> {
+    match kind {
+        EncoderChoice::Nvenc => {
+            NvencEncoder::open(device, config, format).map(|e| Backend::Nvenc(Box::new(e)))
+        }
+        EncoderChoice::Vpl => {
+            VplEncoder::open(device, config, format).map(|e| Backend::Vpl(Box::new(e)))
+        }
+        EncoderChoice::Amf => {
+            AmfEncoder::open(device, config, format).map(|e| Backend::Amf(Box::new(e)))
+        }
+        _ => Err(Error::new(E_FAIL, "not a GPU maker's encoder")),
     }
 }
 
@@ -94,6 +135,7 @@ enum Backend {
     Hardware(MfEncoder),
     Nvenc(Box<NvencEncoder>),
     Vpl(Box<VplEncoder>),
+    Amf(Box<AmfEncoder>),
     /// Boxed: OpenH264's encoder state is several kilobytes.
     Software(Box<SoftwareEncoder>),
 }
@@ -112,6 +154,39 @@ impl H264Encoder {
         choice: EncoderChoice,
     ) -> Result<Self> {
         let mut skipped = Vec::new();
+        // H.265, 4:4:4 and 10-bit: the GPU makers' encoders, whichever this GPU has (as UU Remote); H.264 through
+        // one when it is forced (tests). Windows' encoder after them for plain H.265.
+        let forced_vendor = matches!(
+            choice,
+            EncoderChoice::Nvenc | EncoderChoice::Vpl | EncoderChoice::Amf
+        );
+        if config.codec == crate::VideoCodec::H265
+            || config.format != EncodeFormat::H264
+            || forced_vendor
+        {
+            let format = config.format;
+            for kind in [EncoderChoice::Nvenc, EncoderChoice::Vpl, EncoderChoice::Amf] {
+                if forced_vendor && choice != kind {
+                    continue;
+                }
+                match open_vendor(kind, device, config, format) {
+                    Ok(backend) => return Ok(Self { backend, skipped }),
+                    Err(error) => skipped.push(format!("{kind:?}: {}", error.message())),
+                }
+            }
+            let plain_hevc =
+                format.codec == crate::Codec::H265 && !format.chroma444 && !format.ten_bit;
+            if !forced_vendor
+                && plain_hevc
+                && let Some(encoder) = MfEncoder::open(device, config, &mut skipped)
+            {
+                return Ok(Self {
+                    backend: Backend::Hardware(encoder),
+                    skipped,
+                });
+            }
+            return Err(Error::new(E_FAIL, skipped.join("; ")));
+        }
         // AV1: only the GPU's encoder through Media Foundation.
         if config.codec != crate::VideoCodec::H264 {
             return MfEncoder::open(device, config, &mut skipped)
@@ -120,22 +195,6 @@ impl H264Encoder {
                     skipped: Vec::new(),
                 })
                 .ok_or_else(|| Error::new(E_FAIL, skipped.join("; ")));
-        }
-        if choice == EncoderChoice::Vpl {
-            // For measurements until the session negotiates it (encode_probe format=): H.265, 4:4:4, 10-bit.
-            let format = EncodeFormat::from_env();
-            let encoder = VplEncoder::open(device, config, format)?;
-            return Ok(Self {
-                backend: Backend::Vpl(Box::new(encoder)),
-                skipped,
-            });
-        }
-        if choice == EncoderChoice::Nvenc {
-            let encoder = NvencEncoder::open(device, config, EncodeFormat::from_env())?;
-            return Ok(Self {
-                backend: Backend::Nvenc(Box::new(encoder)),
-                skipped,
-            });
         }
         if choice == EncoderChoice::Software {
             skipped.push("hardware encoders: not tried (software forced)".into());
@@ -165,6 +224,7 @@ impl H264Encoder {
             Backend::Hardware(encoder) => &encoder.name,
             Backend::Nvenc(encoder) => &encoder.name,
             Backend::Vpl(encoder) => &encoder.name,
+            Backend::Amf(encoder) => &encoder.name,
             Backend::Software(encoder) => &encoder.name,
         }
     }
@@ -214,6 +274,10 @@ impl H264Encoder {
                 encoder.poll(out);
                 Ok(())
             }
+            Backend::Amf(encoder) => {
+                encoder.poll(out);
+                Ok(())
+            }
             Backend::Software(encoder) => {
                 encoder.poll(out);
                 Ok(())
@@ -228,6 +292,7 @@ impl H264Encoder {
         match &self.backend {
             Backend::Nvenc(encoder) => encoder.format,
             Backend::Vpl(encoder) => encoder.format,
+            Backend::Amf(encoder) => encoder.format,
             _ => EncodeFormat::H264,
         }
     }
@@ -237,6 +302,7 @@ impl H264Encoder {
         match &self.backend {
             Backend::Nvenc(encoder) => encoder.input_format(),
             Backend::Vpl(encoder) => encoder.format.input(),
+            Backend::Amf(encoder) => encoder.format.input(),
             _ => DXGI_FORMAT_NV12,
         }
     }
@@ -247,6 +313,7 @@ impl H264Encoder {
             Backend::Hardware(encoder) => encoder.encode(nv12, time, keyframe),
             Backend::Nvenc(encoder) => encoder.encode(nv12, time, keyframe),
             Backend::Vpl(encoder) => encoder.encode(nv12, time, keyframe),
+            Backend::Amf(encoder) => encoder.encode(nv12, time, keyframe),
             Backend::Software(encoder) => encoder.encode(nv12, time, keyframe),
         }
     }
@@ -257,6 +324,7 @@ impl H264Encoder {
             Backend::Hardware(encoder) => encoder.set_bitrate(bitrate),
             Backend::Nvenc(encoder) => encoder.set_bitrate(bitrate),
             Backend::Vpl(encoder) => encoder.set_bitrate(bitrate),
+            Backend::Amf(encoder) => encoder.set_bitrate(bitrate),
             Backend::Software(encoder) => encoder.set_bitrate(bitrate),
         }
     }
