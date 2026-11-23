@@ -465,7 +465,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         (None, None) => unreachable!("checked above"),
     }
     .map_err(|e| e.to_string())?;
-    signal.hello("agent").map_err(|e| e.to_string())?;
+    let hello = signal.hello("agent").map_err(|e| e.to_string())?;
     let viewer = signal.peer_address().map_err(|e| e.to_string())?;
     let mut deferred = Vec::new();
     let outcome = session(
@@ -480,6 +480,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             files: settings.receive_files,
             terminal: settings.allow_terminal,
             helper: false,
+            fec: hello.fec,
         },
         &mut links,
         &mut deferred,
@@ -1088,11 +1089,14 @@ fn run_account(
                     None => from_name.clone(),
                 };
                 let mut signal = online.session(&from, AccountRole::Viewer, &id);
-                if let Err(error) = check_hello(&body, "agent") {
-                    let _ = signal.send("error", &error.0);
-                    lines.push(format!("refused viewer {from_name}: {error}"));
-                    continue;
-                }
+                let hello = match check_hello(&body, "agent") {
+                    Ok(hello) => hello,
+                    Err(error) => {
+                        let _ = signal.send("error", &error.0);
+                        lines.push(format!("refused viewer {from_name}: {error}"));
+                        continue;
+                    }
+                };
                 if helper.is_none() && !settings.allow_account_control {
                     let _ = signal.send(
                         "error",
@@ -1174,6 +1178,7 @@ fn run_account(
                         files: settings.receive_files && (helper.is_none() || settings.help_files),
                         terminal: settings.allow_terminal && helper.is_none(),
                         helper: helper.is_some(),
+                        fec: hello.fec,
                     },
                     links,
                     &mut deferred,
@@ -1855,6 +1860,8 @@ struct Permissions {
     terminal: bool,
     /// Another account's device, joined by a help code: no privacy screen, no restart.
     helper: bool,
+    /// The viewer rebuilds lost video packets from parity (its hello said "fec"): it is sent parity.
+    fec: bool,
 }
 
 /// A help code: 8 of 32 letters and digits without look-alikes (no 0, O, 1 or I), 40 bits.
@@ -1985,6 +1992,7 @@ fn session(
         files: receive_files,
         terminal: allow_terminal,
         helper,
+        fec,
     } = permissions;
     // Told once per secure desktop that someone helping cannot operate it.
     let mut secure_refused_told = false;
@@ -2091,6 +2099,13 @@ fn session(
     };
     let peer = Peer::start_with(Role::Agent, signal, addresses).map_err(|e| e.to_string())?;
     lines.extend(peer.candidates().iter().cloned());
+    // Parity for the video (as UU Remote): lost packets are rebuilt at once instead of after a round trip.
+    peer.send_fec(fec);
+    lines.push(if fec {
+        "video parity (FEC): on, the viewer rebuilds lost packets from it".to_string()
+    } else {
+        "video parity (FEC): off, the viewer does not use it".to_string()
+    });
     // This PC's sound, captured and sent from its own thread (the viewer can turn it off).
     let mut sound = start_sound(&peer, options, lines);
     let _tone = if options.sound_test {

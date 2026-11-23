@@ -127,20 +127,29 @@ pub trait Signaling {
     }
 
     /// Exchanges hellos: both sides must speak the same protocol version and have different roles.
-    /// Returns the other side's role.
-    fn hello(&mut self, role: &str) -> Result<String, Error> {
+    /// Returns the other side's.
+    fn hello(&mut self, role: &str) -> Result<Hello, Error> {
         self.send("hello", &hello_body(role))?;
         check_hello(&self.expect("hello")?, role)
     }
 }
 
-/// Our hello: "queqiao <protocol version> <role>".
+/// Our hello: "queqiao <protocol version> <role> <what we can do>". What we can do: "fec", we rebuild lost video
+/// packets from parity (crate::fec). Earlier programs read the first three words only, so they ignore it.
 pub fn hello_body(role: &str) -> String {
-    format!("queqiao {} {role}", queqiao_core::PROTOCOL_VERSION)
+    format!("queqiao {} {role} fec", queqiao_core::PROTOCOL_VERSION)
 }
 
-/// Checks the other side's hello (same protocol version, the other role) and returns its role.
-pub fn check_hello(body: &str, role: &str) -> Result<String, Error> {
+/// The other side's hello.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hello {
+    pub role: String,
+    /// It rebuilds lost video packets from parity: send it parity.
+    pub fec: bool,
+}
+
+/// Checks the other side's hello (same protocol version, the other role) and returns it.
+pub fn check_hello(body: &str, role: &str) -> Result<Hello, Error> {
     let version = queqiao_core::PROTOCOL_VERSION;
     let mut parts = body.split_whitespace();
     let (name, their_version, their_role) = (parts.next(), parts.next(), parts.next());
@@ -153,7 +162,11 @@ pub fn check_hello(body: &str, role: &str) -> Result<String, Error> {
     if their_role == role {
         return Err(Error(format!("both sides are {role}s")));
     }
-    Ok(their_role)
+    let fec = parts.any(|word| word == "fec");
+    Ok(Hello {
+        role: their_role,
+        fec,
+    })
 }
 
 impl Signaling for Signal {
@@ -167,5 +180,24 @@ impl Signaling for Signal {
 
     fn local_ip(&self) -> Result<IpAddr, Error> {
         Signal::local_ip(self)
+    }
+}
+
+#[cfg(test)]
+mod hello_tests {
+    use super::*;
+
+    #[test]
+    fn hellos_say_what_the_other_side_can_do() {
+        let ours = hello_body("viewer");
+        let hello = check_hello(&ours, "agent").unwrap();
+        assert_eq!(hello.role, "viewer");
+        assert!(hello.fec);
+        // An earlier program's hello: no parity for it.
+        let earlier = format!("queqiao {} viewer", queqiao_core::PROTOCOL_VERSION);
+        assert!(!check_hello(&earlier, "agent").unwrap().fec);
+        // Earlier programs read the first three words: they are as before.
+        assert!(ours.starts_with(&format!("{earlier} ")));
+        assert!(check_hello(&ours, "viewer").is_err());
     }
 }

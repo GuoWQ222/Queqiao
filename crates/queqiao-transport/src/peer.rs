@@ -33,6 +33,7 @@ use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTi
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use crate::fec;
 use crate::flow::{self, Flow};
 use crate::gather::{ExtraDeadline, gather, gather_extra};
 use crate::signal::Signaling;
@@ -120,6 +121,8 @@ enum Command {
     Data(Vec<u8>),
     StreamData(Stream, Vec<u8>),
     RequestKeyframe,
+    /// Parity for the video (the other side repairs lost packets from it: it said so in its hello).
+    Fec(bool),
     BitrateRange {
         minimum: u64,
         desired: u64,
@@ -360,6 +363,10 @@ impl Peer {
             written: [0; STREAMS],
             rtt_notes: 0,
             video_noted: (0, 0, 0, None),
+            fec_tx: None,
+            video_pts: Vec::new(),
+            losses: VecDeque::new(),
+            fec_rx: fec::Receiver::new(),
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -437,6 +444,12 @@ impl Peer {
     /// Asks the sender for a keyframe (the viewer does this by itself after a loss).
     pub fn request_keyframe(&self) {
         self.command(Command::RequestKeyframe);
+    }
+
+    /// Sends parity for the video ([`crate::fec`]): only to a side that said in its hello it uses it. The bitrate
+    /// estimate given to the encoder is then less the parity's share.
+    pub fn send_fec(&self, on: bool) {
+        self.command(Command::Fec(on));
     }
 
     pub fn try_event(&self) -> Option<PeerEvent> {
@@ -657,6 +670,13 @@ struct Network {
     /// The video's RTP counters last noted (str0m's stats: packets, NACKs, PLIs), and when: a note at most every
     /// 5 s while they change (the reports show how losses were repaired).
     video_noted: (u64, u64, u64, Option<Instant>),
+    /// Parity for the video sent (when the other side uses it), and the video's payload types (its packets).
+    fec_tx: Option<fec::Sender>,
+    video_pts: Vec<u8>,
+    /// The loss the other side reported (str0m's stats, once a second) over the last seconds: how much parity.
+    losses: VecDeque<(Instant, f32)>,
+    /// Lost video packets rebuilt from the other side's parity.
+    fec_rx: fec::Receiver,
 }
 
 impl Drop for Network {
@@ -729,24 +749,17 @@ impl Network {
                     arriving.source,
                     false,
                 );
-                let Ok(contents) = arriving.contents.as_slice().try_into() else {
-                    continue;
-                };
                 let at = self.clock(Instant::now());
-                let input = Input::Receive(
-                    at,
-                    Receive {
-                        proto: Protocol::Udp,
-                        source: arriving.source,
-                        destination: arriving.destination,
-                        contents,
-                    },
-                );
                 // Not `rtc.accepts`: before ICE has a pair it refuses DTLS from a candidate not yet checked, and the
                 // viewer's first ClientHello (sent as soon as its own ICE connected) was dropped here; its resend
                 // came 2 s later (seen over the internet 2026-11-21). One Rtc per session: everything goes to it, as
                 // on the main socket.
-                self.rtc.handle_input(input).map_err(err)?;
+                self.deliver(
+                    at,
+                    arriving.source,
+                    arriving.destination,
+                    &arriving.contents,
+                )?;
             }
             if took {
                 continue;
@@ -769,20 +782,10 @@ impl Network {
                 }
                 Ok((length, source)) => {
                     self.dtls_note(false, &buffer[..length], self.local, source, false);
-                    // Something that is not STUN, DTLS or RTP (anyone can send to this port): left out, the
-                    // session goes on.
-                    let Ok(contents) = buffer[..length].try_into() else {
-                        continue;
-                    };
-                    Input::Receive(
-                        self.clock(Instant::now()),
-                        Receive {
-                            proto: Protocol::Udp,
-                            source,
-                            destination: self.local,
-                            contents,
-                        },
-                    )
+                    let at = self.clock(Instant::now());
+                    let local = self.local;
+                    self.deliver(at, source, local, &buffer[..length])?;
+                    continue;
                 }
                 Err(error)
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
@@ -811,21 +814,12 @@ impl Network {
                     return Ok(Some(deadline));
                 }
                 Output::Transmit(packet) => {
-                    let relayed = match self.turn.as_mut() {
-                        Some(turn) if turn.relayed == Some(packet.source) => {
-                            turn.send(packet.destination, &packet.contents, Instant::now());
-                            Some(turn.server)
-                        }
-                        _ => {
-                            let socket = self
-                                .extras
-                                .iter()
-                                .find(|extra| extra.local == packet.source)
-                                .map_or(&self.socket, |extra| &extra.socket);
-                            let _ = socket.send_to(&packet.contents, packet.destination);
-                            None
-                        }
-                    };
+                    let relayed =
+                        self.send_datagram(packet.source, packet.destination, &packet.contents);
+                    // Parity for the video once its group is complete, the same way.
+                    for parity in self.video_parity(&packet.contents) {
+                        self.send_datagram(packet.source, packet.destination, &parity);
+                    }
                     self.dtls_note(
                         true,
                         &packet.contents,
@@ -939,20 +933,60 @@ impl Network {
                 }
             }
             Event::MediaEgressStats(stats) if Some(stats.mid) == self.mid => {
+                // How much parity: the worst loss the other side reported in the last 10 s.
+                let now = Instant::now();
+                if let Some(loss) = stats.loss {
+                    self.losses.push_back((now, loss));
+                }
+                while self.losses.front().is_some_and(|(at, _)| {
+                    now.saturating_duration_since(*at) > Duration::from_secs(10)
+                }) {
+                    self.losses.pop_front();
+                }
+                let worst = self
+                    .losses
+                    .iter()
+                    .map(|(_, loss)| f64::from(*loss))
+                    .fold(0.0, f64::max);
+                let fec = match self.fec_tx.as_mut() {
+                    Some(sender) => {
+                        sender.set_rate(fec::rate_for_loss(worst));
+                        format!(
+                            "; parity {:.0} %: {} for {} packets",
+                            sender.rate() * 100.0,
+                            sender.parity_sent,
+                            sender.protected
+                        )
+                    }
+                    None => String::new(),
+                };
                 let lost = stats.remote.as_ref().map_or(String::new(), |remote| {
                     format!(", {} lost by the other side's count", remote.packets_lost)
                 });
-                self.video_note(stats.packets, stats.nacks, stats.plis, || {
+                let parity_sent = self.fec_tx.as_ref().map_or(0, |sender| sender.parity_sent);
+                self.video_note((stats.nacks, stats.plis, parity_sent), || {
                     format!(
-                        "video out: {} packets, {} NACKs and {} PLIs received{lost}",
+                        "video out: {} packets, {} NACKs and {} PLIs received{lost}{fec}",
                         stats.packets, stats.nacks, stats.plis
                     )
                 })
             }
             Event::MediaIngressStats(stats) if Some(stats.mid) == self.mid => {
-                self.video_note(stats.packets, stats.nacks, stats.plis, || {
+                let (received, rebuilt, unrecoverable) = (
+                    self.fec_rx.parity_received,
+                    self.fec_rx.rebuilt,
+                    self.fec_rx.unrecoverable,
+                );
+                let fec = if received > 0 {
                     format!(
-                        "video in: {} packets, {} NACKs and {} PLIs sent, loss {:.1} %",
+                        "; parity: {received} came, {rebuilt} packets rebuilt, {unrecoverable} groups short of it"
+                    )
+                } else {
+                    String::new()
+                };
+                self.video_note((stats.nacks, stats.plis, received), || {
+                    format!(
+                        "video in: {} packets, {} NACKs and {} PLIs sent, loss {:.1} %{fec}",
                         stats.packets,
                         stats.nacks,
                         stats.plis,
@@ -963,7 +997,13 @@ impl Network {
             Event::KeyframeRequest(_) => Some(PeerEvent::KeyframeRequested),
             Event::EgressBitrateEstimate(
                 BweKind::Twcc { estimate, .. } | BweKind::Remb { estimate, .. },
-            ) => Some(PeerEvent::Bitrate(estimate.as_u64())),
+            ) => {
+                // The parity goes beside the video, outside str0m's pacing: the encoder gets the rest.
+                let share = self.fec_tx.as_ref().map_or(0.0, fec::Sender::rate);
+                Some(PeerEvent::Bitrate(
+                    (estimate.as_u64() as f64 / (1.0 + share)) as u64,
+                ))
+            }
             _ => None,
         };
         if let Some(event) = forward {
@@ -1035,6 +1075,9 @@ impl Network {
                     self.ask_keyframe(mid);
                 }
             }
+            Command::Fec(on) => {
+                self.fec_tx = on.then(fec::Sender::new);
+            }
             Command::Close => {
                 self.rtc.disconnect();
                 if let Some(turn) = self.turn.as_mut() {
@@ -1058,20 +1101,8 @@ impl Network {
         self.flush_turn();
         if let (Incoming::Data { peer, payload }, Some(relayed)) = (incoming, relayed) {
             self.dtls_note(false, &payload, relayed, peer, true);
-            // As on the direct sockets: what is not STUN, DTLS or RTP is left out, the session goes on.
-            let Ok(contents) = payload.as_slice().try_into() else {
-                return Ok(());
-            };
-            let input = Input::Receive(
-                now,
-                Receive {
-                    proto: Protocol::Udp,
-                    source: peer,
-                    destination: relayed,
-                    contents,
-                },
-            );
-            self.rtc.handle_input(input).map_err(err)?;
+            // As on the direct sockets (parity included).
+            self.deliver(now, peer, relayed, &payload)?;
         }
         Ok(())
     }
@@ -1167,20 +1198,116 @@ impl Network {
         self.clock
     }
 
-    /// A note on the video's counters when NACKs or PLIs changed, at most every 5 s.
+    /// Sends a datagram from `source` (our address: a socket of ours, or the TURN relay's) to `destination`;
+    /// the TURN server's address when it went through it.
+    fn send_datagram(
+        &mut self,
+        source: SocketAddr,
+        destination: SocketAddr,
+        contents: &[u8],
+    ) -> Option<SocketAddr> {
+        match self.turn.as_mut() {
+            Some(turn) if turn.relayed == Some(source) => {
+                turn.send(destination, contents, Instant::now());
+                Some(turn.server)
+            }
+            _ => {
+                let socket = self
+                    .extras
+                    .iter()
+                    .find(|extra| extra.local == source)
+                    .map_or(&self.socket, |extra| &extra.socket);
+                let _ = socket.send_to(contents, destination);
+                None
+            }
+        }
+    }
+
+    /// The parity datagrams to send after `datagram` (a video packet leaving, when parity is on).
+    fn video_parity(&mut self, datagram: &[u8]) -> Vec<Vec<u8>> {
+        if self.fec_tx.is_none() {
+            return Vec::new();
+        }
+        let Some(header) = fec::rtp(datagram) else {
+            return Vec::new();
+        };
+        if self.video_pts.is_empty()
+            && let Some(mid) = self.mid
+            && let Some(writer) = self.rtc.writer(mid)
+        {
+            self.video_pts = writer.payload_params().map(|params| *params.pt()).collect();
+        }
+        if !self.video_pts.contains(&header.pt) {
+            return Vec::new();
+        }
+        match self.fec_tx.as_mut() {
+            Some(sender) => sender.sent(datagram, &header, Instant::now()),
+            None => Vec::new(),
+        }
+    }
+
+    /// A datagram that came (from any of our sockets or through TURN): parity goes to the FEC receiver, which may
+    /// rebuild lost video packets; the rest to str0m, as do the rebuilt packets. What is not STUN, DTLS or RTP is
+    /// left out (anyone can send to these ports): the session goes on.
+    fn deliver(
+        &mut self,
+        at: Instant,
+        source: SocketAddr,
+        destination: SocketAddr,
+        datagram: &[u8],
+    ) -> Result<(), Error> {
+        let now = Instant::now();
+        let rebuilt = if datagram.first() == Some(&fec::MAGIC) {
+            self.fec_rx.parity(datagram, now)
+        } else {
+            let rebuilt = match fec::rtp(datagram) {
+                Some(header) => self.fec_rx.media(datagram, &header, now),
+                None => Vec::new(),
+            };
+            self.hand_to_rtc(at, source, destination, datagram)?;
+            rebuilt
+        };
+        for datagram in rebuilt {
+            self.hand_to_rtc(at, source, destination, &datagram)?;
+        }
+        Ok(())
+    }
+
+    fn hand_to_rtc(
+        &mut self,
+        at: Instant,
+        source: SocketAddr,
+        destination: SocketAddr,
+        datagram: &[u8],
+    ) -> Result<(), Error> {
+        let Ok(contents) = str0m::net::DatagramRecv::try_from(datagram) else {
+            return Ok(());
+        };
+        let input = Input::Receive(
+            at,
+            Receive {
+                proto: Protocol::Udp,
+                source,
+                destination,
+                contents,
+            },
+        );
+        self.rtc.handle_input(input).map_err(err)
+    }
+
+    /// A note on the video's counters when they changed (NACKs, PLIs, parity), at most every 5 s.
     fn video_note(
         &mut self,
-        packets: u64,
-        nacks: u64,
-        plis: u64,
+        counters: (u64, u64, u64),
         text: impl FnOnce() -> String,
     ) -> Option<PeerEvent> {
-        let (_, noted_nacks, noted_plis, at) = self.video_noted;
-        let changed = nacks != noted_nacks || plis != noted_plis;
-        if !changed || at.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+        let (nacks, plis, parity, at) = self.video_noted;
+        if counters == (nacks, plis, parity)
+            || at.is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+        {
             return None;
         }
-        self.video_noted = (packets, nacks, plis, Some(Instant::now()));
+        self.video_noted = (counters.0, counters.1, counters.2, Some(Instant::now()));
         Some(PeerEvent::Note(text()))
     }
 

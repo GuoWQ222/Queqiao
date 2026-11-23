@@ -357,6 +357,9 @@ try {
                     }
                 }
                 if (-not ($text | Where-Object { $_ -match '^\d+ ms: path round trip \(STUN\), shortest so far: [\d.]+ ms' })) { $failed += "$label $program (expected 'path round trip (STUN)')" }
+                # Parity for the video (FEC): the viewer said it uses it, the agent sends it, the viewer gets it.
+                $fecPattern = if ($program -eq 'agent') { '^video parity \(FEC\): on' } else { 'parity: [1-9]\d* came' }
+                if (-not ($text | Where-Object { $_ -match $fecPattern })) { $failed += "$label $program (expected '$fecPattern')" }
             }
             # The session window's bar and card (the direct session has them on): pictures taken, "Figures" on the bar
             # clicked twice (the card off, then on).
