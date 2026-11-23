@@ -1552,6 +1552,88 @@ fn ask_consent(ui: &ui::Ui, question: &str, answer: Option<bool>) -> Result<bool
     }
 }
 
+/// How long one pass of the session loop spent in each stage, and its slowest peer event: a pass over a limit is
+/// named in the report (a stall of the loop holds input, pings and the picture alike).
+struct Stages {
+    started: Instant,
+    last: Instant,
+    slowest: (&'static str, Duration),
+    event: (&'static str, Duration),
+    current_event: &'static str,
+}
+
+impl Stages {
+    fn new() -> Stages {
+        let now = Instant::now();
+        Stages {
+            started: now,
+            last: now,
+            slowest: ("", Duration::ZERO),
+            event: ("", Duration::ZERO),
+            current_event: "",
+        }
+    }
+
+    fn mark(&mut self, stage: &'static str) {
+        let now = Instant::now();
+        if now - self.last > self.slowest.1 {
+            self.slowest = (stage, now - self.last);
+        }
+        self.last = now;
+    }
+
+    fn event(&mut self, name: &'static str, _at: Instant) {
+        self.current_event = name;
+    }
+
+    fn event_done(&mut self, started: Instant) {
+        let took = started.elapsed();
+        if took > self.event.1 {
+            self.event = (self.current_event, took);
+        }
+    }
+
+    /// "the session loop stopped 5503 ms, 5490 ms of it in the viewer's messages (slowest: data, 5488 ms)".
+    fn slow(&self, limit: Duration) -> Option<String> {
+        let total = self.started.elapsed();
+        (total > limit).then(|| {
+            format!(
+                "the session loop stopped {} ms, {} ms of it in {}{}",
+                total.as_millis(),
+                self.slowest.1.as_millis(),
+                self.slowest.0,
+                if self.event.1 > Duration::from_millis(50) {
+                    format!(
+                        " (slowest event: {}, {} ms)",
+                        self.event.0,
+                        self.event.1.as_millis()
+                    )
+                } else {
+                    String::new()
+                }
+            )
+        })
+    }
+}
+
+/// A peer event's kind, for the report.
+fn peer_event_name(event: &PeerEvent) -> &'static str {
+    match event {
+        PeerEvent::Connected => "connected",
+        PeerEvent::ChannelOpen => "channel open",
+        PeerEvent::Video { .. } => "video",
+        PeerEvent::Data(_) => "a message",
+        PeerEvent::StreamOpen(_) => "stream open",
+        PeerEvent::StreamData(..) => "stream data",
+        PeerEvent::KeyframeRequested => "keyframe request",
+        PeerEvent::Path(_) => "path",
+        PeerEvent::Note(_) => "note",
+        PeerEvent::Bitrate(_) => "bitrate",
+        PeerEvent::Audio { .. } => "audio",
+        PeerEvent::Closed(_) => "closed",
+    }
+}
+
 /// The codec "Automatic" picks: AV1 when this PC encodes it on its GPU and the viewer decodes it on its GPU (as
 /// fast as H.264 and fewer bits for the same picture: measured 2026-11-22, 13.8 ms median screen change -> shown
 /// against 14.9 ms), otherwise H.264.
@@ -2290,7 +2372,10 @@ fn session(
     } else {
         lock_gate::LockGate::new(options.test_locked)
     };
+    // Passes of the loop that took long: a note names the slowest stage (at most 8 notes).
+    let mut slow_notes = 0u32;
     'session: loop {
+        let mut watch = Stages::new();
         // The report: once a second for the first two minutes, the bandwidth estimate, the encoder's bitrate, what
         // was sent and how many frames (K: a keyframe among them), to see how the picture's bitrate followed.
         if course.len() < 120 && course_at.0.elapsed() >= Duration::from_secs(1) {
@@ -2398,7 +2483,11 @@ fn session(
             ));
             break;
         }
+        watch.mark("the start of the pass (course, gate, trust, UI)");
         while let Some(event) = peer.try_event() {
+            let event_started = Instant::now();
+            let event_name = peer_event_name(&event);
+            watch.event(event_name, event_started);
             match event {
                 PeerEvent::Connected => connected_after = Some(started.elapsed()),
                 PeerEvent::KeyframeRequested => {
@@ -3020,7 +3109,9 @@ fn session(
                 }
                 PeerEvent::Video { .. } => {}
             }
+            watch.event_done(event_started);
         }
+        watch.mark("the viewer's messages");
 
         for message in transfers.take(peer.room(Stream::Files)) {
             peer.send_stream(Stream::Files, message);
@@ -3112,6 +3203,7 @@ fn session(
             }
         }
 
+        watch.mark("files, clipboard, command lines, sound, the channel's first seconds");
         // Capture: wait for a screen change, at most until the next frame is due and at most 5 ms, so
         // input from the viewer is handled quickly.
         let now = Instant::now();
@@ -3277,6 +3369,7 @@ fn session(
             }
         }
 
+        watch.mark("capture");
         // Encode as soon as there is a change and the frame time has passed.
         if connected_after.is_some()
             && Instant::now() >= due
@@ -3317,6 +3410,13 @@ fn session(
                 };
                 peer.send_data(info.encode());
             }
+        }
+        watch.mark("encode");
+        if let Some(note) = watch.slow(Duration::from_millis(300))
+            && slow_notes < 8
+        {
+            slow_notes += 1;
+            lines.push(format!("{} ms: {note}", started.elapsed().as_millis()));
         }
     }
     if let Some(link) = links.desktop.as_mut() {
