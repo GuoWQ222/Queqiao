@@ -7,6 +7,7 @@
 # 3. the saved login: the viewer lists the devices with no password, logs out, and is refused afterwards.
 # The agent and viewer run in the logged-on user's desktop session (one-off scheduled tasks).
 # Usage: scripts\run_m3_local.ps1 [-Bin target\release] [-Out <report folder>] [-Seconds 12]
+# Prints M3_LOCAL_PASS or M3_LOCAL_FAIL: <what failed> last (RUN_FAIL before it when it could not start).
 param(
     [string]$Bin = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\release'),
     [string]$Out = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\probe\m3_local'),
@@ -71,13 +72,23 @@ function Start-TestServer([string]$Log) {
     } while (-not $up -and (Get-Date) -lt $deadline)
     if ($up) { $process } else { $null }
 }
+# What failed, for the verdict at the end; $reached: the checks ran to the end (else RUN_FAIL said why).
+$failures = New-Object System.Collections.Generic.List[string]
+$reached = $false
+function Test-Report([string]$Program, [string]$Expected) {
+    $report = Join-Path $Out "$Program.txt"
+    $lines = if (Test-Path -LiteralPath $report) { @(Get-Content -LiteralPath $report -Encoding UTF8) } else { @() }
+    if (-not ($lines -match $Expected)) { $failures.Add("$Program (expected '$Expected')") }
+}
 $serverProcess = Start-TestServer 'server_out.txt'
 try {
     if (-not $serverProcess) { 'RUN_FAIL the server did not start'; return }
     "server up, certificate $pin"
 
     '=== account probe'
-    & (Join-Path $Bin 'examples\account_probe.exe') $Listen $pin alice $password1 bob $password2
+    $probe = @(& (Join-Path $Bin 'examples\account_probe.exe') $Listen $pin alice $password1 bob $password2)
+    $probe
+    if ($probe -notcontains 'PROBE_PASS') { $failures.Add('account probe') }
     # The probe fails logins on purpose (lockout checks, counted for 127.0.0.1 too): the server starts again so its
     # in-memory failure counts do not lock the sessions out (as in run_m4_local.ps1). Accounts stay in its database.
     Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
@@ -86,7 +97,9 @@ try {
     if (-not $serverProcess) { 'RUN_FAIL the server did not start again'; return }
     # Sign-up and the account hardening apart, against the server just started (the checks above used up this
     # address's tries); then once more anew for the sessions.
-    & (Join-Path $Bin 'examples\account_probe.exe') $Listen $pin alice $password1 bob $password2 --accounts
+    $probe = @(& (Join-Path $Bin 'examples\account_probe.exe') $Listen $pin alice $password1 bob $password2 --accounts)
+    $probe
+    if ($probe -notcontains 'PROBE_PASS') { $failures.Add('account probe --accounts') }
     Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
     $serverProcess = Start-TestServer 'server_out3.txt'
@@ -113,8 +126,18 @@ try {
         "$($step[0]) exit $result"
         Show-Report $step[0]
     }
+    Test-Report 'agent' '^RESULT PASS'
+    Test-Report 'viewer' '^RESULT PASS'
+    Test-Report 'list_saved' '^RESULT PASS'
+    Test-Report 'logout' '^RESULT PASS'
+    # After logging out the saved login is gone: the list must be refused.
+    Test-Report 'list_after_logout' '^ERROR not logged in'
+    $reached = $true
 } finally {
     Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
     '=== server log'
     Get-Content -LiteralPath "$Out\server_out.txt", "$Out\server_out2.txt", "$Out\server_err.txt" -ErrorAction SilentlyContinue
+    if (-not $reached) { 'M3_LOCAL_FAIL: the checks did not run to the end' }
+    elseif ($failures.Count) { 'M3_LOCAL_FAIL: ' + ($failures -join '; ') }
+    else { 'M3_LOCAL_PASS' }
 }
