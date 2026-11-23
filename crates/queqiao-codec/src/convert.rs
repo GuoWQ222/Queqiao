@@ -1,4 +1,6 @@
-//! BGRA -> NV12 (the format H.264 encoders take), scaled when the encode size differs from the screen.
+//! BGRA -> NV12 (the format H.264 encoders take), scaled when the encode size differs from the screen. For the
+//! vendor encoders' other formats (`EncodeFormat::input`): P010 (10-bit 4:2:0), or RGB scaled only (B8G8R8A8,
+//! R10G10B10A2) for 4:4:4, which the encoder turns into YUV itself; those on the GPU only.
 //!
 //! First choice: the D3D11 video processor on the GPU. Fallback: the CPU (`cpu_convert`), for devices
 //! without video support (Microsoft's software adapter WARP, basic display drivers, some virtual
@@ -7,7 +9,7 @@
 use std::mem::ManuallyDrop;
 use std::ptr::null_mut;
 
-use windows::Win32::Foundation::E_UNEXPECTED;
+use windows::Win32::Foundation::{E_FAIL, E_UNEXPECTED};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::core::{Error, Interface, Result};
@@ -22,6 +24,8 @@ pub struct Nv12Converter {
     height: u32,
     /// Why the GPU path was not used, if it was not.
     fallback: Option<String>,
+    /// The output texture format: NV12 unless made `with_format`.
+    format: DXGI_FORMAT,
 }
 
 enum Method {
@@ -38,12 +42,34 @@ impl Nv12Converter {
         output: (u32, u32),
         fps: u32,
     ) -> Result<Self> {
+        Self::with_format(device, context, input, output, fps, DXGI_FORMAT_NV12)
+    }
+
+    /// As `new`, with output textures in `format` (NV12, P010, B8G8R8A8 or R10G10B10A2). Only NV12 has the CPU
+    /// fallback: for the others this fails without the GPU's video processor (or its support for the format).
+    pub fn with_format(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        input: (u32, u32),
+        output: (u32, u32),
+        fps: u32,
+        format: DXGI_FORMAT,
+    ) -> Result<Self> {
         let forced_cpu = queqiao_core::forced("convert").as_deref() == Some("cpu");
         let gpu = if forced_cpu {
             Err("CPU forced (QUEQIAO_FORCE=convert:cpu)".to_string())
         } else {
-            VideoProcessor::new(device, context, input, output, fps).map_err(|e| e.message())
+            VideoProcessor::new(device, context, input, output, fps, format, false)
+                .map_err(|e| e.message())
         };
+        if format != DXGI_FORMAT_NV12
+            && let Err(reason) = &gpu
+        {
+            return Err(Error::new(
+                E_FAIL,
+                format!("no GPU conversion to {format:?}: {reason}"),
+            ));
+        }
         let (method, fallback) = match gpu {
             Ok(processor) => (Method::Gpu(processor), None),
             Err(reason) => {
@@ -56,6 +82,26 @@ impl Nv12Converter {
             width: output.0,
             height: output.1,
             fallback,
+            format,
+        })
+    }
+
+    /// The other way, for checks: decoded YUV pictures (NV12, P010, AYUV, Y410; BT.709 limited range) into BGRA
+    /// textures, as the viewer shows them. GPU only.
+    pub fn to_rgb(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        size: (u32, u32),
+        fps: u32,
+    ) -> Result<Self> {
+        let format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        let processor = VideoProcessor::new(device, context, size, size, fps, format, true)?;
+        Ok(Self {
+            method: Method::Gpu(processor),
+            width: size.0,
+            height: size.1,
+            fallback: None,
+            format,
         })
     }
 
@@ -68,7 +114,7 @@ impl Nv12Converter {
         }
     }
 
-    /// An NV12 texture that [`Nv12Converter::convert`] can write and the encoder can read.
+    /// A texture (NV12, or the format given) that [`Nv12Converter::convert`] can write and the encoder can read.
     pub fn create_output(&self, device: &ID3D11Device) -> Result<ID3D11Texture2D> {
         // The video processor renders into the texture; the CPU path uploads with UpdateSubresource.
         let bind = match self.method {
@@ -80,7 +126,7 @@ impl Nv12Converter {
             Height: self.height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_NV12,
+            Format: self.format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -120,6 +166,8 @@ impl VideoProcessor {
         input: (u32, u32),
         output: (u32, u32),
         fps: u32,
+        format: DXGI_FORMAT,
+        yuv_input: bool,
     ) -> Result<Self> {
         let video_device: ID3D11VideoDevice = device.cast()?;
         let video_context: ID3D11VideoContext = context.cast()?;
@@ -138,9 +186,22 @@ impl VideoProcessor {
             Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
         };
         let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&content) }?;
+        if format != DXGI_FORMAT_NV12 {
+            let support = unsafe { enumerator.CheckVideoProcessorFormat(format) }?;
+            if support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT.0 as u32 == 0 {
+                return Err(Error::new(
+                    E_FAIL,
+                    format!("the video processor cannot write {format:?}"),
+                ));
+            }
+        }
         let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0) }?;
         unsafe { video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false) };
-        set_color_spaces(&video_context, &processor);
+        let rgb_output = matches!(
+            format,
+            DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_R10G10B10A2_UNORM
+        );
+        set_color_spaces(&video_context, &processor, yuv_input, rgb_output);
         Ok(Self {
             video_device,
             video_context,
@@ -267,24 +328,36 @@ impl CpuConverter {
     }
 }
 
-/// Input full-range RGB, output BT.709 limited range. Windows 10 drivers take the DXGI color space
-/// (ID3D11VideoContext1); older ones only the D3D11 bit field, set the same way.
-fn set_color_spaces(context: &ID3D11VideoContext, processor: &ID3D11VideoProcessor) {
+/// Each side full-range RGB or BT.709 limited range YUV: normally RGB in (the desktop), YUV out (or the same RGB, for
+/// 4:4:4); for checks YUV in, RGB out. Windows 10 drivers take the DXGI color space (ID3D11VideoContext1); older
+/// ones only the D3D11 bit field, set the same way.
+fn set_color_spaces(
+    context: &ID3D11VideoContext,
+    processor: &ID3D11VideoProcessor,
+    yuv_input: bool,
+    rgb_output: bool,
+) {
     if let Ok(context1) = context.cast::<ID3D11VideoContext1>() {
         unsafe {
             let rgb = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
             let yuv = DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
-            context1.VideoProcessorSetStreamColorSpace1(processor, 0, rgb);
-            context1.VideoProcessorSetOutputColorSpace1(processor, yuv);
+            context1.VideoProcessorSetStreamColorSpace1(
+                processor,
+                0,
+                if yuv_input { yuv } else { rgb },
+            );
+            context1
+                .VideoProcessorSetOutputColorSpace1(processor, if rgb_output { rgb } else { yuv });
         }
         return;
     }
-    // Bit field: bit 1 RGB_Range (0 = full 0-255), bit 2 YCbCr_Matrix (1 = BT.709),
+    // Bit field: bit 0 Usage, bit 1 RGB_Range (0 = full 0-255), bit 2 YCbCr_Matrix (1 = BT.709),
     // bits 4-5 Nominal_Range (1 = 16-235).
-    let input = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0b100 };
-    let output = D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
-        _bitfield: 0b1_0100,
+    let space = |rgb: bool| D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
+        _bitfield: if rgb { 0b100 } else { 0b1_0100 },
     };
+    let input = space(!yuv_input);
+    let output = space(rgb_output);
     unsafe {
         context.VideoProcessorSetStreamColorSpace(processor, 0, &input);
         context.VideoProcessorSetOutputColorSpace(processor, &output);

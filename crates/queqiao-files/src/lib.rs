@@ -21,6 +21,7 @@ pub use clip::{
 };
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -748,9 +749,74 @@ impl Drop for Inbox {
 }
 
 /// Both directions of one session: what the program needs from the "files" channel.
+/// File data over time, from its first byte (for the test reports: where the time of a transfer goes, steady or
+/// in bursts with pauses).
+#[derive(Default)]
+struct Course {
+    start: Option<Instant>,
+    last: Option<Instant>,
+    /// Bytes per 100 ms, at most the first two minutes.
+    tenths: Vec<u64>,
+    /// Pauses between two pieces of data of 150 ms or more.
+    pauses: Vec<Duration>,
+}
+
+impl Course {
+    const MOST: usize = 1200;
+
+    fn add(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let start = *self.start.get_or_insert(now);
+        if let Some(last) = self.last
+            && now - last >= Duration::from_millis(150)
+        {
+            self.pauses.push(now - last);
+        }
+        self.last = Some(now);
+        let index = ((now - start).as_millis() / 100) as usize;
+        if index < Self::MOST {
+            if self.tenths.len() <= index {
+                self.tenths.resize(index + 1, 0);
+            }
+            self.tenths[index] += bytes as u64;
+        }
+    }
+
+    /// "MB each second: ...; pauses of 150 ms or more: N (longest X ms, Y s in all); kB each 100 ms: ...".
+    fn describe(&self) -> Option<String> {
+        self.start?;
+        let seconds = self
+            .tenths
+            .chunks(10)
+            .map(|tenths| format!("{:.1}", tenths.iter().sum::<u64>() as f64 / 1e6))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let longest = self.pauses.iter().max().copied().unwrap_or_default();
+        let paused: Duration = self.pauses.iter().sum();
+        let tenths = self
+            .tenths
+            .iter()
+            .take(300)
+            .map(|bytes| (bytes / 1000).to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(format!(
+            "MB each second: {seconds}; pauses of 150 ms or more: {} (longest {} ms, {:.1} s in all); kB each 100 ms (first 30 s): {tenths}",
+            self.pauses.len(),
+            longest.as_millis(),
+            paused.as_secs_f64()
+        ))
+    }
+}
+
 pub struct Transfers {
     outbox: Outbox,
     inbox: Inbox,
+    sent_course: Course,
+    arrival_course: Course,
     open: bool,
     /// Files to send once the channel is open, with their clipboard copy (0: none).
     queued: Vec<(PathBuf, u32)>,
@@ -763,6 +829,8 @@ impl Transfers {
         Transfers {
             outbox: Outbox::default(),
             inbox: Inbox::new(folder, allow_receive),
+            sent_course: Course::default(),
+            arrival_course: Course::default(),
             open: false,
             queued: Vec::new(),
             last_batch: 0,
@@ -813,6 +881,9 @@ impl Transfers {
         let Some(message) = FileMessage::decode(bytes) else {
             return Vec::new();
         };
+        if let FileMessage::Chunk { data, .. } = &message {
+            self.arrival_course.add(data.len());
+        }
         if for_receiver(&message) {
             self.inbox
                 .handle(message)
@@ -830,11 +901,29 @@ impl Transfers {
         if !self.open {
             return Vec::new();
         }
-        self.outbox
-            .take(room)
+        let messages = self.outbox.take(room);
+        let data: usize = messages
             .iter()
-            .map(FileMessage::encode)
-            .collect()
+            .map(|message| match message {
+                FileMessage::Chunk { data, .. } => data.len(),
+                _ => 0,
+            })
+            .sum();
+        self.sent_course.add(data);
+        messages.iter().map(FileMessage::encode).collect()
+    }
+
+    /// For the test reports: the course of the file data sent and received so far ("file data sent: MB each
+    /// second ..."), then both start over.
+    pub fn take_courses(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(course) = std::mem::take(&mut self.sent_course).describe() {
+            lines.push(format!("file data sent: {course}"));
+        }
+        if let Some(course) = std::mem::take(&mut self.arrival_course).describe() {
+            lines.push(format!("file data received: {course}"));
+        }
+        lines
     }
 
     /// What finished or failed since the last call, both directions.

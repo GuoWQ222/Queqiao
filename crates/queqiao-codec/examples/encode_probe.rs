@@ -27,17 +27,18 @@ use std::path::{Path, PathBuf};
 
 use queqiao_capture::{BgraImage, Duplicator, qpc_frequency, qpc_now};
 use queqiao_codec::{
-    EncodedFrame, EncoderChoice, EncoderConfig, H264Encoder, Nv12Converter, candidate_sizes,
-    nal_types,
+    Codec, DecodedFrame, EncodeFormat, EncodedFrame, EncoderChoice, EncoderConfig, H264Decoder,
+    H264Encoder, Nv12Converter, candidate_sizes, hevc_nal_types, nal_types,
 };
 use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
-use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
+use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+use windows::core::Interface;
 
 /// Software encoders run on the CPU: they start at no more than 1080p and 30 fps. (The agent will adapt
 /// to the measured encode time; this is the starting point.)
@@ -70,6 +71,23 @@ fn main() {
     if let Some(mode) = options.get("mf_rc") {
         unsafe { std::env::set_var("QUEQIAO_MF_RC", mode) };
     }
+    // What NVENC or oneVPL make (force=encode:nvenc or encode:vpl): h264, h264_444, hevc, hevc10, hevc444, hevc444_10.
+    // decode=vpl: the stream decoded back with Intel's oneVPL decoder and its first picture compared with the desktop.
+    if let Some(decoder) = options.get("decode") {
+        unsafe { std::env::set_var("QUEQIAO_PROBE_DECODE", decoder) };
+    }
+    // source=pattern: a test picture instead of the desktop (nothing of the screen is captured).
+    if let Some(source) = options.get("source") {
+        unsafe { std::env::set_var("QUEQIAO_PROBE_SOURCE", source) };
+    }
+    // keep_first=N: the first N frames also into encode_probe_first.frames (each after its 4-byte length), small
+    // enough to check on another machine (decode_file=).
+    if let Some(count) = options.get("keep_first") {
+        unsafe { std::env::set_var("QUEQIAO_PROBE_KEEP_FIRST", count) };
+    }
+    if let Some(format) = options.get("format") {
+        unsafe { std::env::set_var("QUEQIAO_ENCODE_FORMAT", format) };
+    }
     if let Some(how) = options.get("mf_switch") {
         unsafe { std::env::set_var("QUEQIAO_MF_SWITCH", how) };
     }
@@ -88,15 +106,20 @@ fn main() {
             result.map_or_else(|e| e, |()| "ok".into())
         ));
     }
-    let passed = match run(
-        &out_dir,
-        number("frames").unwrap_or(300),
-        number("fps"),
-        number("mbps"),
-        options.get("switch").map(String::as_str),
-        options.get("switch_keyframe").is_some_and(|v| v == "1"),
-        &mut lines,
-    ) {
+    let result = if let Some(path) = options.get("decode_file") {
+        decode_only(Path::new(path), &mut lines)
+    } else {
+        run(
+            &out_dir,
+            number("frames").unwrap_or(300),
+            number("fps"),
+            number("mbps"),
+            options.get("switch").map(String::as_str),
+            options.get("switch_keyframe").is_some_and(|v| v == "1"),
+            &mut lines,
+        )
+    };
+    let passed = match result {
         Ok(passed) => passed,
         Err(error) => {
             lines.push(format!("ERROR {error}"));
@@ -125,44 +148,55 @@ fn run(
         "forced: {}",
         if force.is_empty() { "nothing" } else { &force }
     ));
-    let mut duplicator = Duplicator::primary().map_err(describe)?;
-    let info = duplicator.info().clone();
-    let screen_fps = (info.refresh_hz.round() as u32).clamp(1, 60);
-    lines.push(format!(
-        "screen: {} {}x{} at {:.0} Hz on {}",
-        info.output, info.width, info.height, info.refresh_hz, info.adapter
-    ));
-
-    // One real desktop image (the first frame after starting can be an empty mouse-only update).
     let frequency = qpc_frequency() as f64;
-    let deadline = qpc_now() + (10.0 * frequency) as i64;
-    let image = loop {
-        if qpc_now() > deadline {
-            return Err("no screen update within 10 s".into());
-        }
-        if let Some(frame) = duplicator.acquire(100).map_err(describe)?
-            && frame.present_qpc != 0
-        {
-            break duplicator.copy_to_cpu(&frame).map_err(describe)?;
-        }
-    };
-    duplicator.release().map_err(describe)?;
-
-    // The device that converts and encodes: the capturing GPU, or WARP when forced.
-    let warp = queqiao_core::forced("adapter").as_deref() == Some("warp");
-    let (device, context) = if warp {
-        warp_device(lines)?
+    // The picture: one real desktop image, or the test pattern (source=pattern: nothing of the screen captured).
+    let pattern = std::env::var("QUEQIAO_PROBE_SOURCE").as_deref() == Ok("pattern");
+    let (image, device, context, screen_fps) = if pattern {
+        let (device, context, adapter) = hardware_device(lines)?;
+        lines.push(format!(
+            "source: test pattern 1920x1080 (no screen capture); convert + encode on: {adapter}"
+        ));
+        (test_pattern(1920, 1080), device, context, 60)
     } else {
-        (duplicator.device().clone(), duplicator.context().clone())
-    };
-    lines.push(format!(
-        "convert + encode on: {}",
-        if warp {
-            "Microsoft WARP (software adapter)"
+        let mut duplicator = Duplicator::primary().map_err(describe)?;
+        let info = duplicator.info().clone();
+        let screen_fps = (info.refresh_hz.round() as u32).clamp(1, 60);
+        lines.push(format!(
+            "screen: {} {}x{} at {:.0} Hz on {}",
+            info.output, info.width, info.height, info.refresh_hz, info.adapter
+        ));
+
+        // One real desktop image (the first frame after starting can be an empty mouse-only update).
+        let deadline = qpc_now() + (10.0 * frequency) as i64;
+        let image = loop {
+            if qpc_now() > deadline {
+                return Err("no screen update within 10 s".into());
+            }
+            if let Some(frame) = duplicator.acquire(100).map_err(describe)?
+                && frame.present_qpc != 0
+            {
+                break duplicator.copy_to_cpu(&frame).map_err(describe)?;
+            }
+        };
+        duplicator.release().map_err(describe)?;
+
+        // The device that converts and encodes: the capturing GPU, or WARP when forced.
+        let warp = queqiao_core::forced("adapter").as_deref() == Some("warp");
+        let (device, context) = if warp {
+            warp_device(lines)?
         } else {
-            &info.adapter
-        }
-    ));
+            (duplicator.device().clone(), duplicator.context().clone())
+        };
+        lines.push(format!(
+            "convert + encode on: {}",
+            if warp {
+                "Microsoft WARP (software adapter)"
+            } else {
+                &info.adapter
+            }
+        ));
+        (image, device, context, screen_fps)
+    };
     let source = upload(&device, &image)?;
     let (width, height) = (image.width, image.height);
 
@@ -212,8 +246,10 @@ fn run(
 
     let fps = config.fps;
     let size = (config.width, config.height);
-    let mut converter = Nv12Converter::new(&device, &context, (width, height), size, fps)
-        .map_err(|e| format!("BGRA -> NV12 converter: {}", describe(e)))?;
+    let input_format = encoder.input_format();
+    let mut converter =
+        Nv12Converter::with_format(&device, &context, (width, height), size, fps, input_format)
+            .map_err(|e| format!("BGRA -> {input_format:?} converter: {}", describe(e)))?;
     lines.push(format!("convert: {}", converter.description()));
     let ring = (0..4)
         .map(|_| converter.create_output(&device))
@@ -312,20 +348,28 @@ fn run(
         seconds
     ));
     lines.push(format!(
-        "encode time (frame in -> H.264 out), ms: {}",
+        "encode time (frame in -> stream out), ms: {}",
         summary(&mut encode_ms)
     ));
     lines.push(format!(
         "scroll + convert + encode, ms: {}",
         summary(&mut total_ms)
     ));
+    let hevc = encoder.format().codec == Codec::H265;
+    let types_of = |data: &[u8]| {
+        if hevc {
+            hevc_nal_types(data)
+        } else {
+            nal_types(data)
+        }
+    };
     let first = outputs.first().map(|(f, _)| f);
     if let Some(first) = first {
         lines.push(format!(
             "first frame: {:.1} KB, keyframe {}, NAL types {:?}",
             first.data.len() as f64 / 1024.0,
             first.keyframe,
-            nal_types(&first.data)
+            types_of(&first.data)
         ));
     }
     lines.push(format!("other frames, KB: {}", summary(&mut delta_kb)));
@@ -360,22 +404,76 @@ fn run(
     ));
 
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    if let Some(count) = std::env::var("QUEQIAO_PROBE_KEEP_FIRST")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        let mut kept = Vec::new();
+        for (frame, _) in outputs.iter().take(count) {
+            kept.extend_from_slice(&(frame.data.len() as u32).to_le_bytes());
+            kept.extend_from_slice(&frame.data);
+        }
+        let path = out_dir.join("encode_probe_first.frames");
+        std::fs::write(&path, &kept).map_err(|e| e.to_string())?;
+        lines.push(format!(
+            "first {count} frames: {} ({:.0} kB)",
+            path.display(),
+            kept.len() as f64 / 1e3
+        ));
+    }
     let stream: Vec<u8> = outputs.iter().flat_map(|(f, _)| f.data.clone()).collect();
-    let stream_path = out_dir.join("encode_probe.h264");
+    let stream_path = out_dir.join(if hevc {
+        "encode_probe.h265"
+    } else {
+        "encode_probe.h264"
+    });
     std::fs::write(&stream_path, &stream).map_err(|e| e.to_string())?;
     lines.push(format!("stream file: {}", stream_path.display()));
 
+    let decoded_ok = if std::env::var("QUEQIAO_PROBE_DECODE").as_deref() == Ok("vpl") {
+        match decode_back(
+            &device,
+            &context,
+            encoder.format().codec,
+            &outputs,
+            &image,
+            fps,
+        ) {
+            Ok((line, psnr)) => {
+                lines.push(line);
+                // Screen content at these rates comes back near 40 dB; a wrong colour matrix or range, or a
+                // garbled picture, far lower.
+                psnr >= 30.0
+            }
+            Err(error) => {
+                lines.push(format!("decoded back: failed: {error}"));
+                false
+            }
+        }
+    } else {
+        true
+    };
+    // H.264: SPS, PPS, IDR; H.265: VPS, SPS, PPS, IDR (with or without leading pictures).
     let starts_clean = first.is_some_and(|f| {
-        let types = nal_types(&f.data);
-        f.keyframe && types.contains(&7) && types.contains(&8) && types.contains(&5)
+        let types = types_of(&f.data);
+        f.keyframe
+            && if hevc {
+                [32, 33, 34].iter().all(|t| types.contains(t))
+                    && (types.contains(&19) || types.contains(&20))
+            } else {
+                types.contains(&7) && types.contains(&8) && types.contains(&5)
+            }
     });
+    // A blank or unreadable input encodes to almost nothing: the moving desktop must use a fair share of the rate.
+    let average = bytes as f64 * 8.0 / seconds;
+    let not_blank = average > f64::from(config.bitrate) * 0.2;
     encode_ms.sort_by(f64::total_cmp);
     let keeps_up = percentile(&encode_ms, 0.95) < 1000.0 / f64::from(fps);
     let all_out = outputs.len() == frames as usize;
     lines.push(format!(
-        "checks: all frames out {all_out}, starts with SPS+PPS+IDR {starts_clean}, p95 encode < frame time {keeps_up}"
+        "checks: all frames out {all_out}, starts with parameter sets + IDR {starts_clean}, p95 encode < frame time {keeps_up}, stream not blank {not_blank}, decoded back {decoded_ok}"
     ));
-    Ok(all_out && starts_clean && keeps_up)
+    Ok(all_out && starts_clean && keeps_up && not_blank && decoded_ok)
 }
 
 /// The largest candidate size within `request.limit` that an encoder of `request.choice` accepts.
@@ -400,6 +498,112 @@ fn open_encoder(
         }
     }
     Err("no encoder accepted any size".into())
+}
+
+/// The stream decoded back with Intel's oneVPL decoder: a line for the report, and the lowest per-channel PSNR of
+/// the first picture (the desktop as captured, before any scrolling) against the captured image.
+fn decode_back(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    codec: Codec,
+    outputs: &[(EncodedFrame, i64)],
+    image: &BgraImage,
+    fps: u32,
+) -> Result<(String, f64), String> {
+    let mut decoder = H264Decoder::vpl(device, context, codec).map_err(describe)?;
+    let mut pictures = Vec::new();
+    let mut first = None;
+    let mut count = 0;
+    for (frame, _) in outputs {
+        pictures.clear();
+        decoder
+            .decode(&frame.data, frame.time, &mut pictures)
+            .map_err(describe)?;
+        count += pictures.len();
+        if first.is_none()
+            && let Some(picture) = pictures.first()
+        {
+            // At once: the decoder reuses its textures a few pictures later.
+            first = Some(compare(device, context, picture, image, fps)?);
+        }
+    }
+    let (r, g, b) = first.ok_or("no picture decoded")?;
+    let line = format!(
+        "decoded back ({}, stream {}): {count} of {} pictures; first picture against the desktop, PSNR R/G/B: {r:.1}/{g:.1}/{b:.1} dB",
+        decoder.name(),
+        decoder.stream(),
+        outputs.len()
+    );
+    Ok((line, r.min(g).min(b)))
+}
+
+/// PSNR (R, G, B) of a decoded picture shown as the viewer shows it (YUV -> RGB on the GPU) against `image`.
+fn compare(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    picture: &DecodedFrame,
+    image: &BgraImage,
+    fps: u32,
+) -> Result<(f64, f64, f64), String> {
+    let (width, height) = (picture.width, picture.height);
+    if (width, height) != (image.width, image.height) {
+        return Err(format!(
+            "decoded {width}x{height}, desktop {}x{}: not compared",
+            image.width, image.height
+        ));
+    }
+    let mut converter =
+        Nv12Converter::to_rgb(device, context, (width, height), fps).map_err(describe)?;
+    let rgb = converter.create_output(device).map_err(describe)?;
+    converter
+        .convert(&picture.texture, &rgb)
+        .map_err(|e| format!("YUV -> RGB: {}", describe(e)))?;
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    unsafe { rgb.GetDesc(&mut desc) };
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+    desc.MiscFlags = 0;
+    let mut staging: Option<ID3D11Texture2D> = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging)) }.map_err(describe)?;
+    let staging = staging.ok_or("staging texture")?;
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    unsafe {
+        context.CopyResource(&staging, &rgb);
+        context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .map_err(describe)?;
+    }
+    let pitch = mapped.RowPitch as usize;
+    let (w, h) = (width as usize, height as usize);
+    let shown = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * h) };
+    let mut sums = [0f64; 3];
+    for y in 0..h {
+        let row = &shown[y * pitch..y * pitch + w * 4];
+        let original = &image.pixels[y * w * 4..(y + 1) * w * 4];
+        for (a, b) in row
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(original.as_chunks::<4>().0)
+        {
+            for channel in 0..3 {
+                let d = f64::from(a[channel]) - f64::from(b[channel]);
+                sums[channel] += d * d;
+            }
+        }
+    }
+    unsafe { context.Unmap(&staging, 0) };
+    let psnr = |sum: f64| {
+        let mse = sum / (w * h) as f64;
+        if mse == 0.0 {
+            99.0
+        } else {
+            10.0 * (255.0 * 255.0 / mse).log10()
+        }
+    };
+    // BGRA: blue first.
+    Ok((psnr(sums[2]), psnr(sums[1]), psnr(sums[0])))
 }
 
 fn collect(
@@ -438,6 +642,160 @@ fn disable_power_throttling() -> Result<(), String> {
 
 /// Microsoft's software Direct3D 11 adapter (WARP), as on a PC without a usable GPU. Tries with video
 /// support first (the converter needs it), then without, and reports both attempts.
+/// A test picture instead of the screen (source=pattern), so nothing of the desktop is captured: colour bars (100 %
+/// and 75 %), a grey ramp and a colour ramp (banding shows in 8 bits), one-pixel coloured stripes and checks (chroma
+/// detail that 4:2:0 blurs and 4:4:4 keeps), and dark blue "text" on paper.
+fn test_pattern(width: u32, height: u32) -> BgraImage {
+    let (w, h) = (width as usize, height as usize);
+    let mut pixels = vec![0u8; w * h * 4];
+    // White, yellow, cyan, green, magenta, red, blue, black (R, G, B).
+    let bars: [(u8, u8, u8); 8] = [
+        (255, 255, 255),
+        (255, 255, 0),
+        (0, 255, 255),
+        (0, 255, 0),
+        (255, 0, 255),
+        (255, 0, 0),
+        (0, 0, 255),
+        (0, 0, 0),
+    ];
+    for y in 0..h {
+        for x in 0..w {
+            let ramp = (x * 255 / (w - 1).max(1)) as u8;
+            let (r, g, b) = match y * 6 / h {
+                0 => bars[x * 8 / w],
+                1 => {
+                    let (r, g, b) = bars[x * 8 / w];
+                    (r / 4 * 3, g / 4 * 3, b / 4 * 3)
+                }
+                2 => (ramp, ramp, ramp),
+                3 => (ramp, 64, 255 - ramp),
+                4 if x < w / 2 => {
+                    if x % 2 == 0 {
+                        (255, 0, 0)
+                    } else {
+                        (0, 0, 255)
+                    }
+                }
+                4 => {
+                    if (x + y) % 2 == 0 {
+                        (0, 255, 0)
+                    } else {
+                        (255, 0, 255)
+                    }
+                }
+                _ => {
+                    // Strokes of 1-2 pixels in rows of "characters".
+                    let (cx, cy) = (x % 9, y % 16);
+                    let stroke = cy < 12 && (cx == (y / 16 + x / 9) % 7 || cy == (x / 9) % 11);
+                    if stroke {
+                        (20, 30, 140)
+                    } else {
+                        (250, 248, 236)
+                    }
+                }
+            };
+            let i = (y * w + x) * 4;
+            pixels[i] = b;
+            pixels[i + 1] = g;
+            pixels[i + 2] = r;
+            pixels[i + 3] = 255;
+        }
+    }
+    BgraImage {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// The default hardware adapter's device (source=pattern: no screen is captured, so no duplication device).
+fn hardware_device(
+    lines: &mut Vec<String>,
+) -> Result<(ID3D11Device, ID3D11DeviceContext, String), String> {
+    let mut device = None;
+    let mut context = None;
+    unsafe {
+        D3D11CreateDevice(
+            None::<&IDXGIAdapter>,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+    }
+    .map_err(describe)?;
+    let device: ID3D11Device = device.ok_or("no device")?;
+    let context = context.ok_or("no device context")?;
+    let adapter = device
+        .cast::<IDXGIDevice>()
+        .and_then(|dxgi| unsafe { dxgi.GetAdapter() })
+        .and_then(|adapter| unsafe { adapter.GetDesc() })
+        .map(|desc| {
+            let end = desc
+                .Description
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(desc.Description.len());
+            String::from_utf16_lossy(&desc.Description[..end])
+        })
+        .unwrap_or_else(|_| "default hardware adapter".into());
+    lines.push(format!("device: {adapter} (default hardware adapter)"));
+    Ok((device, context, adapter))
+}
+
+/// decode_file=<path> (with source=pattern and format=): decodes the first frames another machine's probe kept
+/// (keep_first=, each frame after its 4-byte little-endian length) with Intel's oneVPL decoder and compares the first
+/// picture with the test pattern. So an NVENC stream made on an NVIDIA PC is checked where oneVPL decodes.
+fn decode_only(path: &Path, lines: &mut Vec<String>) -> Result<bool, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut frames = Vec::new();
+    let mut at = 0usize;
+    while at + 4 <= bytes.len() {
+        let length = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap_or_default()) as usize;
+        at += 4;
+        let end = (at + length).min(bytes.len());
+        frames.push(bytes[at..end].to_vec());
+        at = end;
+    }
+    lines.push(format!(
+        "decode only: {} frames from {}",
+        frames.len(),
+        path.display()
+    ));
+    let (device, context, _) = hardware_device(lines)?;
+    let codec = EncodeFormat::from_env().codec;
+    let mut decoder = H264Decoder::vpl(&device, &context, codec).map_err(describe)?;
+    let mut pictures = Vec::new();
+    let mut first = None;
+    let mut count = 0;
+    for (index, data) in frames.iter().enumerate() {
+        pictures.clear();
+        decoder
+            .decode(data, index as i64, &mut pictures)
+            .map_err(describe)?;
+        count += pictures.len();
+        if first.is_none()
+            && let Some(picture) = pictures.first()
+        {
+            let pattern = test_pattern(picture.width, picture.height);
+            first = Some(compare(&device, &context, picture, &pattern, 60)?);
+        }
+    }
+    let (r, g, b) = first.ok_or("no picture decoded")?;
+    lines.push(format!(
+        "decoded ({}, stream {}): {count} of {} pictures; first picture against the test pattern, PSNR R/G/B: {r:.1}/{g:.1}/{b:.1} dB",
+        decoder.name(),
+        decoder.stream(),
+        frames.len()
+    ));
+    Ok(r.min(g).min(b) >= 30.0)
+}
+
 fn warp_device(lines: &mut Vec<String>) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
     let with_video = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
     for (label, flags) in [

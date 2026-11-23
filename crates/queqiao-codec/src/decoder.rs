@@ -8,8 +8,10 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
 use windows::core::{Error, Result};
 
+use crate::format::Codec;
 use crate::mf_decode::MfDecoder;
 use crate::software_decode::SoftwareDecoder;
+use crate::vpl_decode::VplDecoder;
 
 /// Which kind of decoder to use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +20,8 @@ pub enum DecoderChoice {
     Auto,
     Hardware,
     Software,
+    /// Intel's decoder driven directly (oneVPL), as NVENC/oneVPL encode.
+    Vpl,
 }
 
 impl DecoderChoice {
@@ -26,6 +30,7 @@ impl DecoderChoice {
         match queqiao_core::forced("decode").as_deref() {
             Some("hardware") => Self::Hardware,
             Some("software") => Self::Software,
+            Some("vpl") => Self::Vpl,
             _ => Self::Auto,
         }
     }
@@ -47,6 +52,7 @@ pub const RING: usize = 4;
 enum Backend {
     Hardware(Box<MfDecoder>),
     Software(Box<SoftwareDecoder>),
+    Vpl(Box<VplDecoder>),
 }
 
 pub struct H264Decoder {
@@ -71,6 +77,9 @@ impl H264Decoder {
         choice: DecoderChoice,
     ) -> Result<Self> {
         let mut skipped = Vec::new();
+        if choice == DecoderChoice::Vpl && codec == crate::VideoCodec::H264 {
+            return Self::vpl(device, context, Codec::H264);
+        }
         if codec != crate::VideoCodec::H264 {
             return MfDecoder::open(device, context, codec)
                 .map(|decoder| Self {
@@ -111,10 +120,29 @@ impl H264Decoder {
         Err(Error::new(E_FAIL, skipped.join("; ")))
     }
 
+    /// Intel's oneVPL decoder for `codec` (H.264 or H.265, any chroma and depth the GPU decodes); its pictures come
+    /// in the decoder's own format (NV12, P010, AYUV or Y410).
+    pub fn vpl(device: &ID3D11Device, context: &ID3D11DeviceContext, codec: Codec) -> Result<Self> {
+        VplDecoder::open(device, context, codec).map(|decoder| Self {
+            backend: Backend::Vpl(Box::new(decoder)),
+            skipped: Vec::new(),
+        })
+    }
+
     pub fn name(&self) -> &str {
         match &self.backend {
             Backend::Hardware(decoder) => &decoder.name,
             Backend::Software(decoder) => &decoder.name,
+            Backend::Vpl(decoder) => &decoder.name,
+        }
+    }
+
+    /// What the stream turned out to be, for the oneVPL decoder once its headers were read ("H.265 4:4:4 10-bit");
+    /// empty otherwise.
+    pub fn stream(&self) -> &str {
+        match &self.backend {
+            Backend::Vpl(decoder) => &decoder.stream,
+            _ => "",
         }
     }
 
@@ -124,6 +152,7 @@ impl H264Decoder {
         match &self.backend {
             Backend::Hardware(decoder) => decoder.cpu_frames == 0,
             Backend::Software(_) => false,
+            Backend::Vpl(_) => true,
         }
     }
 
@@ -138,6 +167,7 @@ impl H264Decoder {
         match &mut self.backend {
             Backend::Hardware(decoder) => decoder.decode(data, time, out),
             Backend::Software(decoder) => decoder.decode(data, time, out),
+            Backend::Vpl(decoder) => decoder.decode(data, time, out),
         }
     }
 }

@@ -5,11 +5,14 @@
 
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12};
 use windows::core::{Error, Result};
 
+use crate::format::EncodeFormat;
 use crate::mf::MfEncoder;
 use crate::nvenc::NvencEncoder;
 use crate::software::SoftwareEncoder;
+use crate::vpl::VplEncoder;
 
 /// What to encode.
 #[derive(Clone, Debug)]
@@ -68,6 +71,8 @@ pub enum EncoderChoice {
     Hardware,
     /// NVIDIA's encoder driven directly (NVENC SDK), for comparison with Media Foundation.
     Nvenc,
+    /// Intel's encoder driven directly (oneVPL, the graphics driver's runtime).
+    Vpl,
     Software,
 }
 
@@ -78,6 +83,7 @@ impl EncoderChoice {
         match queqiao_core::forced("encode").as_deref() {
             Some("hardware" | "mf") => Self::Hardware,
             Some("nvenc") => Self::Nvenc,
+            Some("vpl") => Self::Vpl,
             Some("software") => Self::Software,
             _ => Self::Auto,
         }
@@ -87,6 +93,7 @@ impl EncoderChoice {
 enum Backend {
     Hardware(MfEncoder),
     Nvenc(Box<NvencEncoder>),
+    Vpl(Box<VplEncoder>),
     /// Boxed: OpenH264's encoder state is several kilobytes.
     Software(Box<SoftwareEncoder>),
 }
@@ -114,8 +121,17 @@ impl H264Encoder {
                 })
                 .ok_or_else(|| Error::new(E_FAIL, skipped.join("; ")));
         }
+        if choice == EncoderChoice::Vpl {
+            // For measurements until the session negotiates it (encode_probe format=): H.265, 4:4:4, 10-bit.
+            let format = EncodeFormat::from_env();
+            let encoder = VplEncoder::open(device, config, format)?;
+            return Ok(Self {
+                backend: Backend::Vpl(Box::new(encoder)),
+                skipped,
+            });
+        }
         if choice == EncoderChoice::Nvenc {
-            let encoder = NvencEncoder::open(device, config)?;
+            let encoder = NvencEncoder::open(device, config, EncodeFormat::from_env())?;
             return Ok(Self {
                 backend: Backend::Nvenc(Box::new(encoder)),
                 skipped,
@@ -148,6 +164,7 @@ impl H264Encoder {
         match &self.backend {
             Backend::Hardware(encoder) => &encoder.name,
             Backend::Nvenc(encoder) => &encoder.name,
+            Backend::Vpl(encoder) => &encoder.name,
             Backend::Software(encoder) => &encoder.name,
         }
     }
@@ -193,6 +210,10 @@ impl H264Encoder {
                 encoder.poll(out);
                 Ok(())
             }
+            Backend::Vpl(encoder) => {
+                encoder.poll(out);
+                Ok(())
+            }
             Backend::Software(encoder) => {
                 encoder.poll(out);
                 Ok(())
@@ -202,10 +223,29 @@ impl H264Encoder {
 
     /// Sends one NV12 frame (only when [`H264Encoder::wants_input`]). `time` is in 100 ns units;
     /// `keyframe` forces an IDR frame.
+    /// What the encoder makes: H.264 4:2:0 but for the vendor encoders (NVENC, oneVPL) set otherwise.
+    pub fn format(&self) -> EncodeFormat {
+        match &self.backend {
+            Backend::Nvenc(encoder) => encoder.format,
+            Backend::Vpl(encoder) => encoder.format,
+            _ => EncodeFormat::H264,
+        }
+    }
+
+    /// The texture format `encode` takes (the converter's output): NV12 but for the vendor encoders' other formats.
+    pub fn input_format(&self) -> DXGI_FORMAT {
+        match &self.backend {
+            Backend::Nvenc(_) | Backend::Vpl(_) => self.format().input(),
+            _ => DXGI_FORMAT_NV12,
+        }
+    }
+
+    /// Encodes one texture in `input_format` (NV12 unless a vendor encoder makes another format).
     pub fn encode(&mut self, nv12: &ID3D11Texture2D, time: i64, keyframe: bool) -> Result<()> {
         match &mut self.backend {
             Backend::Hardware(encoder) => encoder.encode(nv12, time, keyframe),
             Backend::Nvenc(encoder) => encoder.encode(nv12, time, keyframe),
+            Backend::Vpl(encoder) => encoder.encode(nv12, time, keyframe),
             Backend::Software(encoder) => encoder.encode(nv12, time, keyframe),
         }
     }
@@ -215,6 +255,7 @@ impl H264Encoder {
         match &mut self.backend {
             Backend::Hardware(encoder) => encoder.set_bitrate(bitrate),
             Backend::Nvenc(encoder) => encoder.set_bitrate(bitrate),
+            Backend::Vpl(encoder) => encoder.set_bitrate(bitrate),
             Backend::Software(encoder) => encoder.set_bitrate(bitrate),
         }
     }

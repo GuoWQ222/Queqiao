@@ -4,7 +4,10 @@
 //! March 2026 driver supports 13.0 and refused 13.1). The driver's `nvEncodeAPI64.dll` is loaded at run
 //! time, so the program still starts on PCs without NVIDIA graphics.
 //!
-//! Used synchronously: each NV12 texture is registered once, then per frame mapped, encoded, and its
+//! Formats (`EncodeFormat`): H.264 4:2:0 or 4:4:4, H.265 4:2:0 or 4:4:4, H.265 in 8 or 10 bits; 4:4:4 from RGB
+//! textures, which NVENC converts to YUV 4:4:4 itself.
+//!
+//! Used synchronously: each input texture is registered once, then per frame mapped, encoded, and its
 //! bitstream locked (which waits for the GPU). Settings follow NVIDIA's advice for game streaming:
 //! preset P1 with the ultra-low-latency tuning, constant bitrate with a one-frame buffer, no B-frames, an
 //! endless GOP with keyframes on request, SPS/PPS repeated with every keyframe, BT.709 limited range.
@@ -21,6 +24,7 @@ use windows::Win32::System::LibraryLoader::{
 use windows::core::{Error, Interface, Result, s, w};
 
 use crate::encoder::{EncodedFrame, EncoderConfig};
+use crate::format::{Codec, EncodeFormat};
 use crate::nvenc_sys as sys;
 
 const API_VERSION: u32 = sys::NVENCAPI_MAJOR_VERSION | (sys::NVENCAPI_MINOR_VERSION << 24);
@@ -112,6 +116,49 @@ const CODEC_H264: sys::GUID = sys::GUID {
     Data3: 0x4ca4,
     Data4: [0xaa, 0x85, 0x1e, 0x50, 0xf3, 0x21, 0xf6, 0xbf],
 };
+const CODEC_HEVC: sys::GUID = guid(
+    0x790c_dc88,
+    0x4522,
+    0x4d7b,
+    [0x94, 0x25, 0xbd, 0xa9, 0x97, 0x5f, 0x76, 0x03],
+);
+const PROFILE_HIGH_444: sys::GUID = guid(
+    0x7ac6_63cb,
+    0xa598,
+    0x4960,
+    [0xb8, 0x44, 0x33, 0x9b, 0x26, 0x1a, 0x7d, 0x52],
+);
+const PROFILE_HEVC_MAIN: sys::GUID = guid(
+    0xb514_c39a,
+    0xb55b,
+    0x40fa,
+    [0x87, 0x8f, 0xf1, 0x25, 0x3b, 0x4d, 0xfd, 0xec],
+);
+const PROFILE_HEVC_MAIN10: sys::GUID = guid(
+    0xfa4d_2b6c,
+    0x3a5b,
+    0x411a,
+    [0x80, 0x18, 0x0a, 0x3f, 0x5e, 0x3c, 0x9b, 0xe5],
+);
+/// H.265 range extensions: 4:4:4.
+const PROFILE_HEVC_FREXT: sys::GUID = guid(
+    0x51ec_32b5,
+    0x1b4c,
+    0x453c,
+    [0x9c, 0xbd, 0xb6, 0x16, 0xbd, 0x62, 0x13, 0x41],
+);
+
+/// NVENC's name for the texture format the encoder takes (`EncodeFormat::input`): ARGB is DXGI's B8G8R8A8 (blue
+/// in the lowest bits of the word), ABGR10 DXGI's R10G10B10A2 (red in the lowest).
+fn buffer_format(format: EncodeFormat) -> sys::NV_ENC_BUFFER_FORMAT {
+    match (format.chroma444, format.ten_bit) {
+        (false, false) => sys::NV_ENC_BUFFER_FORMAT_NV12,
+        (false, true) => sys::NV_ENC_BUFFER_FORMAT_YUV420_10BIT,
+        (true, false) => sys::NV_ENC_BUFFER_FORMAT_ARGB,
+        (true, true) => sys::NV_ENC_BUFFER_FORMAT_ABGR10,
+    }
+}
+
 const PRESET_P1: sys::GUID = sys::GUID {
     Data1: 0xfc0a_8d3e,
     Data2: 0x45f8,
@@ -146,10 +193,18 @@ pub(crate) struct NvencEncoder {
     encode_config: Box<sys::NV_ENC_CONFIG>,
     init: Box<sys::NV_ENC_INITIALIZE_PARAMS>,
     fps: u32,
+    pub(crate) format: EncodeFormat,
 }
 
 impl NvencEncoder {
-    pub(crate) fn open(device: &ID3D11Device, config: &EncoderConfig) -> Result<Self> {
+    pub(crate) fn open(
+        device: &ID3D11Device,
+        config: &EncoderConfig,
+        format: EncodeFormat,
+    ) -> Result<Self> {
+        if format.codec == Codec::H264 && format.ten_bit {
+            return Err(Error::new(E_FAIL, "NVENC makes H.264 in 8 bits only"));
+        }
         let library =
             unsafe { LoadLibraryExW(w!("nvEncodeAPI64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
                 .map_err(|e| {
@@ -168,10 +223,12 @@ impl NvencEncoder {
             init: Box::new(unsafe { zeroed() }),
             fps: config.fps.max(1),
             name: format!(
-                "NVIDIA NVENC (direct, API {}.{})",
+                "NVIDIA NVENC {} (direct, API {}.{})",
+                format.name(),
                 sys::NVENCAPI_MAJOR_VERSION,
                 sys::NVENCAPI_MINOR_VERSION
             ),
+            format,
         };
         // From here on, Drop cleans up whatever was created.
         encoder.start(device, config)?;
@@ -220,14 +277,28 @@ impl NvencEncoder {
         let tuning = sys::NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
         let get_preset = function(self.api.nvEncGetEncodePresetConfigEx)?;
         let (preset_number, preset_guid) = chosen_preset();
+        let codec = match self.format.codec {
+            Codec::H264 => CODEC_H264,
+            Codec::H265 => CODEC_HEVC,
+        };
         let preset_status =
-            unsafe { get_preset(self.session, CODEC_H264, preset_guid, tuning, &mut preset) };
+            unsafe { get_preset(self.session, codec, preset_guid, tuning, &mut preset) };
         self.check(preset_status, "preset")?;
         self.name = format!("{}, preset P{preset_number}", self.name);
 
         let mut encode_config = preset.presetCfg;
         encode_config.version = CONFIG_VER;
-        encode_config.profileGUID = PROFILE_HIGH;
+        encode_config.profileGUID = match (
+            self.format.codec,
+            self.format.chroma444,
+            self.format.ten_bit,
+        ) {
+            (Codec::H264, false, _) => PROFILE_HIGH,
+            (Codec::H264, true, _) => PROFILE_HIGH_444,
+            (Codec::H265, true, _) => PROFILE_HEVC_FREXT,
+            (Codec::H265, false, true) => PROFILE_HEVC_MAIN10,
+            (Codec::H265, false, false) => PROFILE_HEVC_MAIN,
+        };
         encode_config.gopLength = INFINITE_GOP;
         encode_config.frameIntervalP = 1;
         let rc = &mut encode_config.rcParams;
@@ -242,10 +313,24 @@ impl NvencEncoder {
         // tuning). Measured on synthetic screen content, 1080p, first-picture luma PSNR: 2x 19.1 dB, 4x
         // 27.1 dB, 8x 33.7 dB (16 is out of range and falls back to 2). Keyframes are rare (start, loss).
         rc.lowDelayKeyFrameScale = KEYFRAME_SCALE;
-        let h264 = unsafe { &mut encode_config.encodeCodecConfig.h264Config };
-        h264.idrPeriod = INFINITE_GOP;
-        h264.set_repeatSPSPPS(1);
-        let vui = &mut h264.h264VUIParameters;
+        let chroma_format_idc = if self.format.chroma444 { 3 } else { 1 };
+        let vui = match self.format.codec {
+            Codec::H264 => {
+                let h264 = unsafe { &mut encode_config.encodeCodecConfig.h264Config };
+                h264.idrPeriod = INFINITE_GOP;
+                h264.set_repeatSPSPPS(1);
+                h264.chromaFormatIDC = chroma_format_idc;
+                &mut h264.h264VUIParameters
+            }
+            Codec::H265 => {
+                let hevc = unsafe { &mut encode_config.encodeCodecConfig.hevcConfig };
+                hevc.idrPeriod = INFINITE_GOP;
+                hevc.set_repeatSPSPPS(1);
+                hevc.set_chromaFormatIDC(chroma_format_idc);
+                hevc.set_pixelBitDepthMinus8(if self.format.ten_bit { 2 } else { 0 });
+                &mut hevc.hevcVUIParameters
+            }
+        };
         vui.videoSignalTypePresentFlag = 1;
         vui.videoFormat = 5;
         vui.videoFullRangeFlag = 0;
@@ -257,7 +342,7 @@ impl NvencEncoder {
         *self.encode_config = encode_config;
         let mut init: sys::NV_ENC_INITIALIZE_PARAMS = unsafe { zeroed() };
         init.version = INITIALIZE_VER;
-        init.encodeGUID = CODEC_H264;
+        init.encodeGUID = codec;
         init.presetGUID = preset_guid;
         init.encodeWidth = config.width;
         init.encodeHeight = config.height;
@@ -270,7 +355,7 @@ impl NvencEncoder {
         init.maxEncodeWidth = config.width;
         init.maxEncodeHeight = config.height;
         init.tuningInfo = tuning;
-        init.bufferFormat = sys::NV_ENC_BUFFER_FORMAT_NV12;
+        init.bufferFormat = buffer_format(self.format);
         *self.init = init;
         let initialize = function(self.api.nvEncInitializeEncoder)?;
         let init_status = unsafe { initialize(self.session, &mut *self.init) };
@@ -289,14 +374,14 @@ impl NvencEncoder {
         out.append(&mut self.ready);
     }
 
-    /// Encodes one NV12 texture now; the frame is ready when this returns.
+    /// Encodes one texture (in `self.format.input()`) now; the frame is ready when this returns.
     pub(crate) fn encode(
         &mut self,
-        nv12: &ID3D11Texture2D,
+        input: &ID3D11Texture2D,
         time: i64,
         keyframe: bool,
     ) -> Result<()> {
-        let registered = self.register(nv12)?;
+        let registered = self.register(input)?;
         let mut map: sys::NV_ENC_MAP_INPUT_RESOURCE = unsafe { zeroed() };
         map.version = MAP_INPUT_VER;
         map.registeredResource = registered;
@@ -393,7 +478,7 @@ impl NvencEncoder {
         resource.width = desc.Width;
         resource.height = desc.Height;
         resource.resourceToRegister = texture.as_raw();
-        resource.bufferFormat = sys::NV_ENC_BUFFER_FORMAT_NV12;
+        resource.bufferFormat = buffer_format(self.format);
         let register_resource = function(self.api.nvEncRegisterResource)?;
         let register_status = unsafe { register_resource(self.session, &mut resource) };
         self.check(register_status, "register texture")?;

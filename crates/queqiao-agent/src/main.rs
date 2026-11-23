@@ -2944,6 +2944,12 @@ fn session(
                 }
             }
         }
+        if outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::Sent { .. } | Outcome::Received { .. }))
+        {
+            lines.extend(transfers.take_courses());
+        }
         report_files(outcomes, viewer, lines, started.elapsed());
         for message in images.take(peer.room(Stream::Clipboard)) {
             peer.send_stream(Stream::Clipboard, message);
