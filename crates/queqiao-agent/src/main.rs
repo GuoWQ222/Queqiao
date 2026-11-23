@@ -1552,6 +1552,27 @@ fn ask_consent(ui: &ui::Ui, question: &str, answer: Option<bool>) -> Result<bool
     }
 }
 
+/// Whether this PC (its primary screen's GPU) has an AV1 encoder: asked once per process.
+static AV1_ENCODER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Asks for [`AV1_ENCODER`] in the background (a D3D11 device of its own, Windows' AV1 encoder opened and closed).
+fn start_av1_probe() {
+    if AV1_ENCODER.get().is_some() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("queqiao-av1-probe".into())
+        .spawn(|| {
+            AV1_ENCODER.get_or_init(|| match queqiao_capture::screen_device(None) {
+                Ok(screen) => queqiao_codec::can_encode(
+                    queqiao_core::protocol::VideoCodec::Av1,
+                    &screen.device,
+                ),
+                Err(_) => false,
+            });
+        });
+}
+
 /// How long one pass of the session loop spent in each stage, and its slowest peer event: a pass over a limit is
 /// named in the report (a stall of the loop holds input, pings and the picture alike).
 struct Stages {
@@ -1560,6 +1581,8 @@ struct Stages {
     slowest: (&'static str, Duration),
     event: (&'static str, Duration),
     current_event: &'static str,
+    current_kind: (Option<u8>, Option<u8>),
+    event_kind: (Option<u8>, Option<u8>),
 }
 
 impl Stages {
@@ -1571,6 +1594,8 @@ impl Stages {
             slowest: ("", Duration::ZERO),
             event: ("", Duration::ZERO),
             current_event: "",
+            current_kind: (None, None),
+            event_kind: (None, None),
         }
     }
 
@@ -1582,14 +1607,18 @@ impl Stages {
         self.last = now;
     }
 
-    fn event(&mut self, name: &'static str, _at: Instant) {
+    /// The event being handled: its kind, and for a message the protocol's first two bytes (the message kind; a
+    /// command's own kind).
+    fn event(&mut self, name: &'static str, kind: (Option<u8>, Option<u8>)) {
         self.current_event = name;
+        self.current_kind = kind;
     }
 
     fn event_done(&mut self, started: Instant) {
         let took = started.elapsed();
         if took > self.event.1 {
             self.event = (self.current_event, took);
+            self.event_kind = self.current_kind;
         }
     }
 
@@ -1603,8 +1632,13 @@ impl Stages {
                 self.slowest.1.as_millis(),
                 self.slowest.0,
                 if self.event.1 > Duration::from_millis(50) {
+                    let kind = match self.event_kind {
+                        (Some(first), Some(second)) => format!(" of kind {first}/{second}"),
+                        (Some(first), None) => format!(" of kind {first}"),
+                        _ => String::new(),
+                    };
                     format!(
-                        " (slowest event: {}, {} ms)",
+                        " (slowest event: {}{kind}, {} ms)",
                         self.event.0,
                         self.event.1.as_millis()
                     )
@@ -2263,8 +2297,9 @@ fn session(
     let mut microphone_packets = 0u64;
     type ToneCheck = std::thread::JoinHandle<Result<(u32, u32), String>>;
     let mut microphone_check: Option<ToneCheck> = None;
-    // Whether this PC has an AV1 encoder (asked once, when the viewer first says which codec it wants).
-    let mut av1_encoder: Option<bool> = None;
+    // Whether this PC has an AV1 encoder: asked in the background from now, ready before the viewer says which codec
+    // it wants (asked then, in this loop, it held input and pings for about 450 ms at each session's start).
+    start_av1_probe();
     // That PC's pointer shape as last sent, and how many were sent or left out.
     let mut last_pointer: Option<queqiao_core::protocol::PointerShape> = None;
     let (mut pointer_shapes, mut pointer_skipped) = (0u32, 0u32);
@@ -2487,7 +2522,11 @@ fn session(
         while let Some(event) = peer.try_event() {
             let event_started = Instant::now();
             let event_name = peer_event_name(&event);
-            watch.event(event_name, event_started);
+            let kind = match &event {
+                PeerEvent::Data(bytes) => (bytes.first().copied(), bytes.get(1).copied()),
+                _ => (None, None),
+            };
+            watch.event(event_name, kind);
             match event {
                 PeerEvent::Connected => connected_after = Some(started.elapsed()),
                 PeerEvent::KeyframeRequested => {
@@ -2722,9 +2761,9 @@ fn session(
                         ten_bit,
                     })) => {
                         use queqiao_core::protocol::{CodecPreference, VideoCodec, hevc};
-                        let can_encode_av1 = *av1_encoder.get_or_insert_with(|| {
-                            queqiao_codec::can_encode(VideoCodec::Av1, &device)
-                        });
+                        // Waits for the background probe if it is still at it.
+                        let can_encode_av1 = *AV1_ENCODER
+                            .get_or_init(|| queqiao_codec::can_encode(VideoCodec::Av1, &device));
                         let (wanted, format) = match prefer {
                             CodecPreference::Av1 if can_decode_av1 && can_encode_av1 => {
                                 (VideoCodec::Av1, EncodeFormat::H264)
