@@ -310,8 +310,8 @@ impl Peer {
                 .enable_h264(true)
                 .enable_av1(true)
                 // One H.265 payload type carries every profile between two Queqiao ends (Main, Main 10, 4:4:4): the
-                // decoders read the stream's own parameter sets.
-                .enable_h265(true)
+                // decoders read the stream's own parameter sets. Tests: QUEQIAO_FORCE=h265:off.
+                .enable_h265(queqiao_core::forced("h265").as_deref() != Some("off"))
                 .enable_opus(true, false),
             Bitrate::bps(START_BITRATE),
         )
@@ -464,6 +464,8 @@ impl Peer {
             quic,
             quic_pair: None,
             files_on_quic: files_on_quic.clone(),
+            deadlines: (None, None),
+            runaway_notes: 0,
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -806,6 +808,9 @@ struct Network {
     quic: Option<Quic>,
     quic_pair: Option<(SocketAddr, SocketAddr)>,
     files_on_quic: Arc<AtomicBool>,
+    /// The last deadlines asked for (str0m's, QUIC's), and notes on runaway loops so far.
+    deadlines: (Option<Instant>, Option<Instant>),
+    runaway_notes: u32,
 }
 
 impl Drop for Network {
@@ -861,6 +866,22 @@ impl Network {
                     }
                 }
                 continue;
+            }
+            if immediate >= 10_000 && self.runaway_notes < 3 {
+                // The guard stopped a runaway: which deadline kept the loop from waiting (and from reading the
+                // network: everything that arrived meanwhile waited).
+                self.runaway_notes += 1;
+                let now = Instant::now();
+                let when = |at: Option<Instant>| match at {
+                    Some(at) if at >= now => format!("in {:.3} ms", (at - now).as_secs_f64() * 1e3),
+                    Some(at) => format!("{:.3} ms ago", (now - at).as_secs_f64() * 1e3),
+                    None => "none".into(),
+                };
+                let _ = self.events.send(PeerEvent::Note(format!(
+                    "the network loop ran 10000 times without waiting: str0m's next deadline {}, QUIC's {}",
+                    when(self.deadlines.0),
+                    when(self.deadlines.1)
+                )));
             }
             immediate = 0;
             if !self.connected {
@@ -948,7 +969,9 @@ impl Network {
                 Output::Timeout(deadline) => {
                     self.flush_turn();
                     self.flush_channels();
-                    let deadline = match self.pump_quic() {
+                    let quic = self.pump_quic();
+                    self.deadlines = (Some(deadline), quic);
+                    let deadline = match quic {
                         Some(quic) => deadline.min(quic),
                         None => deadline,
                     };

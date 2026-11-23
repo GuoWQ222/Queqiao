@@ -12,6 +12,8 @@ param(
     [string]$Address = '127.0.0.1',
     # Which sessions to run: all, or some of direct, relay, allowed, declined, ended-here.
     [string[]]$Sessions = @('all'),
+    # QUEQIAO_FORCE added to every session's own (A/B runs, e.g. 'files:sctp').
+    [string]$Force = '',
     # The drag session: QUEQIAO_FORCE for it (e.g. 'shape:8000/200/10,fec:off': a bottleneck, no parity) and the bitrate
     # the viewer asks for at most (kbit/s; the check that the agent follows it is made at 4000 only).
     [string]$DragForce = '',
@@ -208,6 +210,7 @@ try {
     )
     foreach ($run in $runs) {
         $label, $mode, $extra, $agentExpects, $viewerExpects, $bothPass = $run
+        if ($Force) { $mode = (@($mode, $Force) | Where-Object { $_ }) -join ',' }
         if ($Sessions -notcontains $label -and $Sessions -notcontains 'all') { continue }
         $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`" $extra"
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_$label.txt`""
