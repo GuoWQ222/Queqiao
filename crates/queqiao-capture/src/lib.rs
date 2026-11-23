@@ -5,7 +5,7 @@
 //! interactive session (not session 0, so not straight from an SSH shell). The process should be
 //! per-monitor DPI aware so that sizes are real pixels.
 
-use windows::Win32::Foundation::{E_UNEXPECTED, HMODULE};
+use windows::Win32::Foundation::{E_UNEXPECTED, HMODULE, POINT};
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::*;
@@ -477,6 +477,43 @@ pub fn gpus_by_preference() -> Vec<(IDXGIAdapter1, String)> {
             Some((adapter, wide_to_string(&desc.Description)))
         })
         .collect()
+}
+
+/// The GPUs in the order the viewer picks one: the GPU showing the primary screen first (its window opens there, and
+/// no picture then crosses between GPUs), then the others discrete first (the user's choice, 2026-11-23: screen
+/// first, then capability, then discrete before integrated; for decoding, capability is what the viewer offers).
+pub fn gpus_screen_first() -> Vec<(IDXGIAdapter1, String)> {
+    let luid = |adapter: &IDXGIAdapter1| {
+        unsafe { adapter.GetDesc1() }
+            .ok()
+            .map(|desc| (desc.AdapterLuid.LowPart, desc.AdapterLuid.HighPart))
+    };
+    let primary = unsafe {
+        windows::Win32::Graphics::Gdi::MonitorFromPoint(
+            POINT { x: 0, y: 0 },
+            windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTOPRIMARY,
+        )
+    };
+    let screen = attached_outputs()
+        .ok()
+        .and_then(|outputs| {
+            outputs
+                .into_iter()
+                .find(|(_, _, desc)| desc.Monitor == primary)
+        })
+        .and_then(|(adapter, _, _)| {
+            let desc = unsafe { adapter.GetDesc1() }.ok()?;
+            (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0)
+                .then(|| (adapter, wide_to_string(&desc.Description)))
+        });
+    let screen_luid = screen.as_ref().and_then(|(adapter, _)| luid(adapter));
+    let mut list: Vec<(IDXGIAdapter1, String)> = screen.into_iter().collect();
+    for (adapter, name) in gpus_by_preference() {
+        if screen_luid.is_none() || luid(&adapter) != screen_luid {
+            list.push((adapter, name));
+        }
+    }
+    list
 }
 
 /// The GPU that comes first by [`gpus_by_preference`] when it is not `adapter` (the screen's): the agent then says

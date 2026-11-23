@@ -149,7 +149,7 @@ use queqiao_terminal::{TerminalMessage, TerminalWindow, WindowEvent as TerminalE
 use queqiao_transport::{Addresses, Peer, PeerEvent, Role, Signal, Signaling, Stream};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
+    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP,
 };
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice};
@@ -3534,10 +3534,37 @@ fn report_files(outcomes: Vec<Outcome>, peer: &str, lines: &mut Vec<String>, at:
     }
 }
 
-/// The GPU's D3D11 device with video support; Microsoft's software adapter (WARP) without a usable GPU
-/// or when forced (QUEQIAO_FORCE=adapter:warp).
+/// The GPU's D3D11 device with video support: the GPU showing the primary screen first (the window opens there; no
+/// picture crosses between GPUs), then the others discrete first (the user's choice, 2026-11-23); Microsoft's
+/// software adapter (WARP) without a usable GPU or when forced (QUEQIAO_FORCE=adapter:warp).
 fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String), String> {
     let forced_warp = queqiao_core::forced("adapter").as_deref() == Some("warp");
+    let video = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+    let mut failures = Vec::new();
+    if !forced_warp {
+        for (adapter, name) in queqiao_capture::gpus_screen_first() {
+            let mut device = None;
+            let mut context = None;
+            let created = unsafe {
+                D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    video,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )
+            };
+            match (created, device, context) {
+                (Ok(()), Some(device), Some(context)) => return Ok((device, context, name)),
+                (Err(error), _, _) => failures.push(format!("{name}: {}", describe(error))),
+                _ => failures.push(format!("{name}: nothing returned")),
+            }
+        }
+    }
     let video = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
     let attempts: &[(D3D_DRIVER_TYPE, D3D11_CREATE_DEVICE_FLAG)] = if forced_warp {
         &[(D3D_DRIVER_TYPE_WARP, D3D11_CREATE_DEVICE_BGRA_SUPPORT)]
@@ -3547,7 +3574,6 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String), String
             (D3D_DRIVER_TYPE_WARP, D3D11_CREATE_DEVICE_BGRA_SUPPORT),
         ]
     };
-    let mut failures = Vec::new();
     for &(driver, flags) in attempts {
         let mut device = None;
         let mut context = None;

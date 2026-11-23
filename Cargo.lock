@@ -983,6 +983,7 @@ version = "0.1.0"
 dependencies = [
  "queqiao-account",
  "queqiao-audio",
+ "queqiao-capture",
  "queqiao-codec",
  "queqiao-core",
  "queqiao-display",
