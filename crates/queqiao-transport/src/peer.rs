@@ -41,7 +41,9 @@ use crate::turn::{Incoming, TurnClient};
 use crate::{Error, err};
 
 /// Which of this PC's addresses a session offers: all its uplinks (the account's own devices), or only the one
-/// the server connection uses (someone helping from another account does not learn the others).
+/// the server connection uses (someone helping from another account does not learn the others); when that one is a
+/// tunnel (a proxy or a VPN holding the route), the uplink this PC itself would use too, first
+/// ([`crate::interfaces::offered`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Addresses {
     All,
@@ -229,14 +231,20 @@ impl Peer {
         let local = SocketAddr::new(local_ip, port);
         let servers = signal.ice_servers()?;
         let relay_only = queqiao_core::forced("network").as_deref() == Some("relay");
-        let uplinks = if addresses == Addresses::All && !relay_only && !bind_ip.is_unspecified() {
+        // Tests (QUEQIAO_FORCE=network:route-only): as for someone of another account.
+        let addresses = if queqiao_core::forced("network").as_deref() == Some("route-only") {
+            Addresses::RouteOnly
+        } else {
+            addresses
+        };
+        let uplinks = if !relay_only && !bind_ip.is_unspecified() {
             crate::interfaces::uplinks()
         } else {
             Vec::new()
         };
-        let extras: Vec<Extra> = uplinks
+        let offered = crate::interfaces::offered(bind_ip, &uplinks, addresses == Addresses::All);
+        let extras: Vec<Extra> = offered
             .iter()
-            .filter(|ip| **ip != bind_ip)
             .filter_map(|ip| {
                 let socket = bind_socket(*ip).ok()?;
                 let local = socket.local_addr().ok()?;
@@ -384,6 +392,9 @@ impl Peer {
             video_pts: Vec::new(),
             losses: VecDeque::new(),
             fec_rx: fec::Receiver::new(),
+            shaper: queqiao_core::forced("shape")
+                .as_deref()
+                .and_then(crate::shape::Shaper::from_spec),
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -694,6 +705,8 @@ struct Network {
     losses: VecDeque<(Instant, f32)>,
     /// Lost video packets rebuilt from the other side's parity.
     fec_rx: fec::Receiver,
+    /// Tests: a bottleneck for what this side sends (QUEQIAO_FORCE=shape:<kbit/s>/<queue ms>/<loss per mille>).
+    shaper: Option<crate::shape::Shaper>,
 }
 
 impl Drop for Network {
@@ -718,6 +731,15 @@ impl Network {
             let Some(mut deadline) = self.drain()? else {
                 return Ok(());
             };
+            // Tests: what the bottleneck has carried goes out, and the loop wakes for the next.
+            self.release_shaped();
+            if let Some(next) = self
+                .shaper
+                .as_ref()
+                .and_then(crate::shape::Shaper::next_release)
+            {
+                deadline = deadline.min(next);
+            }
             // str0m's pacer releases a packet and asks for the next one a fraction of a millisecond later
             // (one packet's time at the pacing rate); its budget cannot go below zero. Waking up no more
             // often than every millisecond (the socket wait) would cap paced video at about 1000 packets a
@@ -980,9 +1002,15 @@ impl Network {
                     format!(", {} lost by the other side's count", remote.packets_lost)
                 });
                 let parity_sent = self.fec_tx.as_ref().map_or(0, |sender| sender.parity_sent);
+                let shaped = self.shaper.as_ref().map_or(String::new(), |shaper| {
+                    format!(
+                        "; bottleneck: {} passed, {} dropped (queue full), {} lost",
+                        shaper.passed, shaper.dropped_full, shaper.dropped_lost
+                    )
+                });
                 self.video_note((stats.nacks, stats.plis, parity_sent), || {
                     format!(
-                        "video out: {} packets, {} NACKs and {} PLIs received{lost}{fec}",
+                        "video out: {} packets, {} NACKs and {} PLIs received{lost}{fec}{shaped}",
                         stats.packets, stats.nacks, stats.plis
                     )
                 })
@@ -1092,7 +1120,9 @@ impl Network {
                 }
             }
             Command::Fec(on) => {
-                self.fec_tx = on.then(fec::Sender::new);
+                // Tests (QUEQIAO_FORCE=fec:off): no parity, to measure without it.
+                let off = queqiao_core::forced("fec").as_deref() == Some("off");
+                self.fec_tx = (on && !off).then(fec::Sender::new);
             }
             Command::Close => {
                 self.rtc.disconnect();
@@ -1217,6 +1247,34 @@ impl Network {
     /// Sends a datagram from `source` (our address: a socket of ours, or the TURN relay's) to `destination`;
     /// the TURN server's address when it went through it.
     fn send_datagram(
+        &mut self,
+        source: SocketAddr,
+        destination: SocketAddr,
+        contents: &[u8],
+    ) -> Option<SocketAddr> {
+        // Tests: through the bottleneck (QUEQIAO_FORCE=shape:...), sent when it has carried the datagram.
+        if let Some(shaper) = self.shaper.as_mut() {
+            shaper.offer(Instant::now(), source, destination, contents);
+            return match self.turn.as_ref() {
+                Some(turn) if turn.relayed == Some(source) => Some(turn.server),
+                _ => None,
+            };
+        }
+        self.send_now(source, destination, contents)
+    }
+
+    /// The datagrams the test bottleneck has carried, sent now.
+    fn release_shaped(&mut self) {
+        let due = match self.shaper.as_mut() {
+            Some(shaper) => shaper.due(Instant::now()),
+            None => return,
+        };
+        for (source, destination, datagram) in due {
+            self.send_now(source, destination, &datagram);
+        }
+    }
+
+    fn send_now(
         &mut self,
         source: SocketAddr,
         destination: SocketAddr,

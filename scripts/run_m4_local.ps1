@@ -12,6 +12,10 @@ param(
     [string]$Address = '127.0.0.1',
     # Which sessions to run: all, or some of direct, relay, allowed, declined, ended-here.
     [string[]]$Sessions = @('all'),
+    # The drag session: QUEQIAO_FORCE for it (e.g. 'shape:8000/200/10,fec:off': a bottleneck, no parity) and the bitrate
+    # the viewer asks for at most (kbit/s; the check that the agent follows it is made at 4000 only).
+    [string]$DragForce = '',
+    [int]$DragMaxBitrate = 4000,
     # Sound: the agent captures -AgentSoundDevice and the viewer plays into -ViewerSoundDevice (parts of the
     # device names; use two virtual devices, so nothing is heard and the viewer's sound is not captured again).
     # In the direct and relay sessions the agent plays a test tone there and the viewer must hear it. Without them the
@@ -191,7 +195,7 @@ try {
         # A File Explorer window dragged round the screen for 12 s mid-session (scripts\drag_window.ps1), with the
         # bitrate course on both sides and a picture in the middle of it. The viewer asks for 4 Mbit/s at most: the
         # agent's encoder must follow while it encodes (Intel's Quick Sync kept 12-17 Mbit/s before, 2026-11-23).
-        @('drag', '', '', 'bitrate course, every second', 'arrival course, every second', $true)
+        @('drag', $DragForce, '', 'bitrate course, every second', 'arrival course, every second', $true)
     )
     foreach ($run in $runs) {
         $label, $mode, $extra, $agentExpects, $viewerExpects, $bothPass = $run
@@ -211,7 +215,7 @@ try {
         if ($label -eq 'direct') { $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out`"" }
         if ($label -eq 'drag') {
             New-Item -ItemType Directory -Force (Join-Path $Out 'drag') | Out-Null
-            $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out\drag`" --picture-at 9 --seconds 22 --max-bitrate 4000"
+            $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out\drag`" --picture-at 9 --seconds 22 --max-bitrate $DragMaxBitrate"
         }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`" --clipboard-files-test `"$clipFile`"" }
@@ -365,7 +369,7 @@ try {
             }
             # The drag session: what the agent sent while the window moved (seconds 6 to 15) stays near the 4 Mbit/s
             # the viewer asked for (the peak is 1.5 times the mean: 6 Mbit/s and some room).
-            if ($label -eq 'drag' -and $program -eq 'agent') {
+            if ($label -eq 'drag' -and $program -eq 'agent' -and $DragMaxBitrate -eq 4000) {
                 $course = $text | Where-Object { $_ -match '^bitrate course, every second .*?: (.+)$' } | Select-Object -First 1
                 if ($course -match '^bitrate course, every second .*?: (.+)$') {
                     $sent = @($Matches[1].Trim() -split ' ' | Select-Object -Skip 5 -First 10 | ForEach-Object { if ($_ -match '^[\d.]+/[\d.]+/([\d.]+)@') { [double]$Matches[1] } } | Sort-Object)

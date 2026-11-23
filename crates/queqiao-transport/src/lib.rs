@@ -7,6 +7,7 @@ mod flow;
 mod gather;
 mod interfaces;
 mod peer;
+mod shape;
 mod signal;
 mod turn;
 

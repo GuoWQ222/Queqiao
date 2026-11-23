@@ -26,6 +26,29 @@ pub fn is_tunnel(address: Ipv4Addr, uplinks: &[Ipv4Addr], others: usize) -> bool
     others > 0 && !address.is_unspecified() && !address.is_loopback() && !uplinks.contains(&address)
 }
 
+/// The uplinks a session offers besides the server connection's `address`: all of them for the account's own devices
+/// (`all`); for someone of another account none, so that they do not learn this PC's other networks, unless
+/// `address` is a tunnel: then the uplink this PC itself would use (the first: `uplinks` are in route order), with
+/// the tunnel after it. Through the tunnel alone a help session went where the proxy sends it: Clash Verge carried
+/// sunshine's UDP to the PC in 318 ms, Wi-Fi in 3-4 ms (2026-11-23). The other account sees what it would see
+/// without the tunnel.
+pub fn offered(address: Ipv4Addr, uplinks: &[Ipv4Addr], all: bool) -> Vec<Ipv4Addr> {
+    let others: Vec<Ipv4Addr> = uplinks
+        .iter()
+        .copied()
+        .filter(|ip| *ip != address)
+        .collect();
+    if all {
+        return others;
+    }
+    if is_tunnel(address, uplinks, others.len()) {
+        others.into_iter().take(1).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// This PC's uplinks, in route order (the adapter's IPv4 metric: the one Windows sends by first).
 pub fn uplinks() -> Vec<Ipv4Addr> {
     let mut size = 32 * 1024u32;
     for _ in 0..3 {
@@ -45,7 +68,7 @@ pub fn uplinks() -> Vec<Ipv4Addr> {
         if result != 0 {
             return Vec::new();
         }
-        let mut found = Vec::new();
+        let mut found: Vec<(u32, Ipv4Addr)> = Vec::new();
         let mut adapter = first as *const IP_ADAPTER_ADDRESSES_LH;
         while let Some(entry) = unsafe { adapter.as_ref() } {
             if entry.OperStatus == IfOperStatusUp && has_gateway(entry) {
@@ -53,16 +76,17 @@ pub fn uplinks() -> Vec<Ipv4Addr> {
                 while let Some(address) = unsafe { unicast.as_ref() } {
                     if let Some(ip) = ipv4(address.Address.lpSockaddr)
                         && usable(ip)
-                        && !found.contains(&ip)
+                        && !found.iter().any(|(_, known)| *known == ip)
                     {
-                        found.push(ip);
+                        found.push((entry.Ipv4Metric, ip));
                     }
                     unicast = address.Next;
                 }
             }
             adapter = entry.Next;
         }
-        return found;
+        found.sort_by_key(|(metric, _)| *metric);
+        return found.into_iter().map(|(_, ip)| ip).collect();
     }
     Vec::new()
 }
@@ -119,5 +143,25 @@ mod tests {
         assert!(!super::is_tunnel(Ipv4Addr::UNSPECIFIED, &[wifi], 1));
         // A server on this PC: the loopback is no tunnel.
         assert!(!super::is_tunnel(Ipv4Addr::LOCALHOST, &[wifi], 1));
+    }
+
+    #[test]
+    fn someone_of_another_account_is_offered_one_uplink_only_past_a_tunnel() {
+        use std::net::Ipv4Addr;
+        let wifi = Ipv4Addr::new(183, 172, 254, 58);
+        let mobile = Ipv4Addr::new(10, 64, 1, 2);
+        let mihomo = Ipv4Addr::new(198, 19, 0, 1);
+        // The account's own devices: every other uplink.
+        assert_eq!(super::offered(wifi, &[wifi, mobile], true), vec![mobile]);
+        assert_eq!(
+            super::offered(mihomo, &[wifi, mobile], true),
+            vec![wifi, mobile]
+        );
+        // Another account: nothing besides the route's address when that is an uplink...
+        assert!(super::offered(wifi, &[wifi, mobile], false).is_empty());
+        // ...and the first uplink (route order) when the route goes through a tunnel.
+        assert_eq!(super::offered(mihomo, &[wifi, mobile], false), vec![wifi]);
+        assert!(super::offered(mihomo, &[], false).is_empty());
+        assert!(super::offered(Ipv4Addr::LOCALHOST, &[wifi], false).is_empty());
     }
 }
