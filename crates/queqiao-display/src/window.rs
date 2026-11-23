@@ -95,6 +95,9 @@ impl Window {
                 lpfnWndProc: Some(window_proc),
                 hInstance: instance.into(),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                // The session window shows Queqiao in the taskbar and Alt+Tab.
+                hIcon: crate::icon::app_icon(32),
+                hIconSm: crate::icon::app_icon(16),
                 lpszClassName: CLASS,
                 ..Default::default()
             };

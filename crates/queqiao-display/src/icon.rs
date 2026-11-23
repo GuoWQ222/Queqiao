@@ -1,15 +1,51 @@
-//! Queqiao's icon, drawn in code (no picture files in the repository): a blue rounded square with a white bridge
-//! (鹊桥, the magpie bridge of the Qixi legend) and the star it leads to. Anti-aliased by coverage, at any size.
+//! Queqiao's icon: a magpie (喜鹊) perched on a small gold arch, the magpie bridge (鹊桥) of the Qixi legend. Each
+//! program carries it as icon group 1 (assets\queqiao.ico, embedded by the build scripts; drawn by
+//! assets\icon\magpie_icon.js), with images made for each size, the small ones with a stronger light rim for dark
+//! taskbars. A program without it (the examples, the tests) gets the earlier icon, drawn here in code: a blue rounded
+//! square with a white bridge and the star it leads to.
 
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
     DeleteObject,
 };
-use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateIconIndirect, HICON, ICONINFO, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW,
+};
+use windows::core::PCWSTR;
 
 /// The icon at `size` x `size` pixels (16 for the tray and title bars, 32 and more elsewhere).
 pub fn app_icon(size: i32) -> HICON {
     let size = size.clamp(8, 256);
+    resource_icon(1, size).unwrap_or_else(|| drawn_icon(size))
+}
+
+/// The magpie with its wings spread (icon group 2: assets\magpie_spread.ico), at `size` pixels: the main window's
+/// card puts three of them on its bridge. None in a program without it.
+pub(crate) fn spread_magpie(size: i32) -> Option<HICON> {
+    resource_icon(2, size.clamp(8, 256))
+}
+
+/// Icon group `id` of this program at `size` pixels: Windows picks the image made for that size.
+fn resource_icon(id: usize, size: i32) -> Option<HICON> {
+    let module = unsafe { GetModuleHandleW(None) }.ok()?;
+    let handle = unsafe {
+        LoadImageW(
+            Some(module.into()),
+            // MAKEINTRESOURCE(id): the id in the pointer.
+            PCWSTR(std::ptr::without_provenance(id)),
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
+        )
+    }
+    .ok()?;
+    (!handle.is_invalid()).then_some(HICON(handle.0))
+}
+
+/// The earlier icon, drawn in code (for programs without the resource).
+fn drawn_icon(size: i32) -> HICON {
     let pixels = draw(size as usize);
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {

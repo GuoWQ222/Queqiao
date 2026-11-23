@@ -35,7 +35,7 @@ use queqiao_capture::{BgraImage, Duplicator, OutputInfo, needs_restart, qpc_freq
 use queqiao_codec::ScreenEncoder;
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{Command, InputEvent, Message};
-use queqiao_core::text::trf;
+use queqiao_core::text::{tr, trf};
 use queqiao_display::{AccountState, LoginAction, LoginFields, LoginForm, PresenceEvent};
 use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
@@ -813,6 +813,12 @@ fn run_account(
                     ));
                 }
                 PresenceEvent::Connect(device) => open_viewer(&["--open", &device], lines),
+                PresenceEvent::SendFiles(device) => {
+                    open_viewer(&["--open", &device, "--then", "files"], lines)
+                }
+                PresenceEvent::OpenCommandLine(device) => {
+                    open_viewer(&["--open", &device, "--then", "terminal"], lines)
+                }
                 PresenceEvent::HelpSomeone { help_id, code } => {
                     let link = queqiao_core::invitation::link(&help_id, &code);
                     open_viewer(&["--help-connect", &link], lines);
@@ -876,6 +882,7 @@ fn run_account(
                 }
                 PresenceEvent::MainShown => {
                     ui.set_transfers(transfer_rows());
+                    ui.set_connections(connection_rows());
                     if let Some(online) = account.as_ref() {
                         ui.set_devices(main_devices(&online.devices, &online.device_id));
                     }
@@ -3495,6 +3502,41 @@ fn main_devices(
         .collect();
     rows.sort_by_key(|row| (!row.this_pc, !row.online, row.name.to_lowercase()));
     rows
+}
+
+/// The sessions this PC started (queqiao_account::connections), as the main window lists them: "Today 15:08" for
+/// today, the date otherwise; "12 min", "1 h 05 min".
+fn connection_rows() -> Vec<queqiao_display::ConnectionRow> {
+    let now = queqiao_account::connections::local_now();
+    let today = now.get(..10).unwrap_or_default().to_string();
+    queqiao_account::connections::load()
+        .into_iter()
+        .map(|connection| {
+            let when = match connection.when.split_once(' ') {
+                Some((date, time)) if date == today => trf("Today {time}", &[("time", time)]),
+                _ => connection.when.clone(),
+            };
+            let minutes = connection.seconds.div_ceil(60);
+            let length = if connection.seconds < 60 {
+                tr("under a minute").to_string()
+            } else if minutes < 60 {
+                trf("{minutes} min", &[("minutes", &minutes.to_string())])
+            } else {
+                trf(
+                    "{hours} h {minutes} min",
+                    &[
+                        ("hours", &(minutes / 60).to_string()),
+                        ("minutes", &format!("{:02}", minutes % 60)),
+                    ],
+                )
+            };
+            queqiao_display::ConnectionRow {
+                device_id: connection.device_id,
+                when,
+                length,
+            }
+        })
+        .collect()
 }
 
 /// The files sent and received (queqiao_files::history), as the main window lists them.

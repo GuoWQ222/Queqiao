@@ -5,6 +5,7 @@
 //! The connection runs on its own thread ("queqiao-account"); the program talks to it through channels.
 
 mod config;
+pub mod connections;
 mod keys;
 mod local_password;
 mod notes;

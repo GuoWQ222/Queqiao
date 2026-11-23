@@ -19,7 +19,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::forms::{Form, Kind, set_text};
-use crate::main_window::{MainAction, MainDevice, MainWindow, Page, Shown, TransferRow};
+use crate::main_window::{
+    ConnectionRow, MainAction, MainDevice, MainWindow, Page, Shown, TransferRow,
+};
 
 /// What the person did.
 /// Checks a typed settings password.
@@ -70,6 +72,10 @@ pub enum PresenceEvent {
     CheckWakeOnLan,
     /// The main window: connect to this device of the account.
     Connect(String),
+    /// The main window: connect to this device and send it files (a file picker in the session).
+    SendFiles(String),
+    /// The main window: connect to this device and open a command line on it.
+    OpenCommandLine(String),
     /// The main window: wake this device up (Wake-on-LAN through a device of the account next to it).
     Wake(String),
     /// The main window: take this device out of the account (after the person confirmed it).
@@ -202,6 +208,7 @@ pub struct Presence {
     user: String,
     devices: Vec<MainDevice>,
     transfers: Vec<TransferRow>,
+    connections: Vec<ConnectionRow>,
     /// This PC's help ID and code while help is open.
     help_now: Option<(String, String)>,
     version: String,
@@ -291,6 +298,7 @@ impl Presence {
             user: String::new(),
             devices: Vec::new(),
             transfers: Vec::new(),
+            connections: Vec::new(),
             help_now: None,
             version: queqiao_core::VERSION.to_string(),
             icon: crate::icon::app_icon(unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16)),
@@ -496,6 +504,7 @@ impl Presence {
             main.set_account(&self.user, self.account);
             main.set_devices(self.devices.clone());
             main.set_transfers(self.transfers.clone());
+            main.set_connections(self.connections.clone());
             main.set_help(self.help_now.clone());
             main.set_settings(self.shown());
             self.main = Some(main);
@@ -570,6 +579,14 @@ impl Presence {
         self.transfers = transfers;
     }
 
+    /// The sessions this PC started, newest first: each device's page in the main window lists its own.
+    pub fn set_connections(&mut self, connections: Vec<ConnectionRow>) {
+        if let Some(main) = self.main.as_mut() {
+            main.set_connections(connections.clone());
+        }
+        self.connections = connections;
+    }
+
     /// The help mode and whether files go while someone helps (Settings).
     pub fn set_help_settings(&mut self, mode: HelpMode, files: bool) {
         self.help_mode = mode;
@@ -612,6 +629,8 @@ impl Presence {
                 event
             }
             MainAction::Connect(id) => Some(PresenceEvent::Connect(id)),
+            MainAction::Files(id) => Some(PresenceEvent::SendFiles(id)),
+            MainAction::Terminal(id) => Some(PresenceEvent::OpenCommandLine(id)),
             MainAction::Wake(id) => Some(PresenceEvent::Wake(id)),
             MainAction::More(id) => {
                 let owner = self.main.as_ref()?.hwnd;

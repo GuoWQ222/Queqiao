@@ -1,7 +1,10 @@
-//! Embeds a manifest asking for Common Controls 6, so the login form and the device list have the
+//! Embeds Queqiao's icon (assets\queqiao.ico) and a manifest asking for Common Controls 6, so the login form and the device list have the
 //! current Windows look (without it, Windows draws the controls in the Windows 2000 style).
 
+include!("../../assets/icon/embed.rs");
+
 fn main() {
+    embed_icon();
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         println!("cargo:rustc-link-arg-bins=/MANIFEST:EMBED");
         println!(

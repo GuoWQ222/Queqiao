@@ -1,8 +1,8 @@
 # The main window, as the person at this PC sees it: queqiao-server on this PC (fresh data folder, one user), a
 # second device of the account (a viewer logged in as "Office PC", which then leaves: shown offline), a few files in
 # the list of transfers, and the agent logged in with --test-main-window, which saves a picture of each page
-# (main_devices.bmp, main_help.bmp, main_transfers.bmp, main_settings.bmp) into -Out. The person's own list of
-# transfers is put back afterwards. Runs in the console session (one-off scheduled tasks); the window shows there for
+# (main_devices.bmp, main_help.bmp, main_transfers.bmp, main_settings.bmp) into -Out. The list of transfers is the
+# test build's own (transfers.test.log), put back as it was afterwards. Runs in the console session (one-off scheduled tasks); the window shows there for
 # a few seconds. Prints MAIN_WINDOW_PASS or MAIN_WINDOW_FAIL. ASCII only.
 # Usage: scripts\run_main_window.ps1 [-Bin target\release] [-Out <folder>]
 param(
@@ -57,9 +57,10 @@ do {
 } while (-not $up -and (Get-Date) -lt $deadline)
 if (-not $up) { 'RUN_FAIL the server did not start'; return }
 
-# The person's list of transfers, kept aside while a sample stands in.
+# The test build's list of transfers, kept aside while a sample stands in.
 $userHome = (Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq (New-Object Security.Principal.NTAccount $consoleUser).Translate([Security.Principal.SecurityIdentifier]).Value }).LocalPath
-$history = Join-Path $userHome 'AppData\Roaming\Queqiao\transfers.log'
+# A test build reads transfers.test.log (never the person's own transfers.log).
+$history = Join-Path $userHome 'AppData\Roaming\Queqiao\transfers.test.log'
 $kept = if (Test-Path -LiteralPath $history) { [IO.File]::ReadAllBytes($history) } else { $null }
 $sample = @(
     "2026-11-22 09:41`tS`t2483112`tOffice PC`tquarterly-report.xlsx",

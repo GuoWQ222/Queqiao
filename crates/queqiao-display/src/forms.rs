@@ -100,6 +100,8 @@ impl Form {
                 hInstance: instance.into(),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
                 hbrBackground: GetSysColorBrush(COLOR_WINDOW),
+                hIcon: crate::icon::app_icon(32),
+                hIconSm: crate::icon::app_icon(16),
                 lpszClassName: CLASS,
                 ..Default::default()
             };
@@ -1026,6 +1028,54 @@ impl DeviceList {
 
     pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
         save_window_picture(self.form.hwnd, path)
+    }
+}
+
+/// The standard Open dialog for one or more files, owned by `owner`: the paths chosen (none if it was cancelled).
+/// Run it on a thread of its own when the caller must keep going meanwhile (a session keeps its picture).
+pub fn pick_files(owner: Option<HWND>, title: &str) -> Vec<std::path::PathBuf> {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
+        OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+    // The dialog uses COM; this thread may not have it yet.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let mut buffer = vec![0u16; 64 * 1024];
+    let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let filter: Vec<u16> = format!("{}\0*.*\0\0", tr("All files"))
+        .encode_utf16()
+        .collect();
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner.unwrap_or_default(),
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: windows::core::PWSTR(buffer.as_mut_ptr()),
+        nMaxFile: buffer.len() as u32,
+        lpstrTitle: PCWSTR(title.as_ptr()),
+        Flags: OFN_ALLOWMULTISELECT
+            | OFN_EXPLORER
+            | OFN_FILEMUSTEXIST
+            | OFN_PATHMUSTEXIST
+            | OFN_HIDEREADONLY,
+        ..Default::default()
+    };
+    if !unsafe { GetOpenFileNameW(&mut dialog) }.as_bool() {
+        return Vec::new();
+    }
+    // One file: its full path. Several: the folder, then each name; NUL-separated, two NULs at the end.
+    let parts: Vec<String> = buffer
+        .split(|&unit| unit == 0)
+        .take_while(|part| !part.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect();
+    match parts.as_slice() {
+        [] => Vec::new(),
+        [one] => vec![std::path::PathBuf::from(one)],
+        [folder, names @ ..] => names
+            .iter()
+            .map(|name| std::path::Path::new(folder).join(name))
+            .collect(),
     }
 }
 

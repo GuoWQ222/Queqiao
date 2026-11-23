@@ -12,7 +12,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use queqiao_display::{
-    AccountState, MainDevice, Page, Presence, PresenceEvent, PrivacyScreen, TransferRow,
+    AccountState, ConnectionRow, MainDevice, Page, Presence, PresenceEvent, PrivacyScreen,
+    TransferRow,
 };
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::RECT;
@@ -47,6 +48,7 @@ enum Command {
     User(String),
     /// The files sent and received, for the main window.
     Transfers(Vec<TransferRow>),
+    Connections(Vec<ConnectionRow>),
     /// Tests: pictures of the main window's pages into the folder.
     MainPictures(PathBuf, Sender<Result<(), String>>),
     /// A notification from the tray icon.
@@ -229,6 +231,11 @@ impl Ui {
         self.send(Command::Transfers(rows));
     }
 
+    /// The sessions this PC started (each device's page in the main window lists its own).
+    pub fn set_connections(&self, rows: Vec<ConnectionRow>) {
+        self.send(Command::Connections(rows));
+    }
+
     /// A notification from the tray icon (a toast).
     pub fn notify(&self, text: &str) {
         self.send(Command::Notify(text.to_string()));
@@ -374,6 +381,7 @@ fn run(
                 Ok(Command::Devices(devices)) => presence.set_devices(devices),
                 Ok(Command::User(user)) => presence.set_user(&user),
                 Ok(Command::Transfers(rows)) => presence.set_transfers(rows),
+                Ok(Command::Connections(rows)) => presence.set_connections(rows),
                 Ok(Command::Notify(text)) => presence.notify(&text),
                 Ok(Command::MainPictures(folder, reply)) => {
                     let _ = reply.send(
@@ -579,7 +587,12 @@ pub fn record_session(viewer: &str, viewer_id: &str, started: SystemTime, ended:
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(folder.join("sessions.log"))
+        .open(folder.join(if cfg!(feature = "test-switches") {
+            // A test build keeps its own list, never the person's.
+            "sessions.test.log"
+        } else {
+            "sessions.log"
+        }))
     {
         let _ = file.write_all(line.as_bytes());
     }

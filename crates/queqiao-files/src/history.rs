@@ -1,5 +1,6 @@
 //! The files sent and received in sessions, for the main window's Transfers page: `%APPDATA%\Queqiao\transfers.log`,
-//! one line per file (the agent and the viewer both add to it), the newest KEEP kept. Nothing secret: names, sizes,
+//! one line per file (the agent and the viewer both add to it), the newest KEEP kept; `transfers.test.log` in a test
+//! build. Nothing secret: names, sizes,
 //! the other device's name, the time.
 
 use std::io::Write;
@@ -24,8 +25,13 @@ pub struct Entry {
 }
 
 fn path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(|folder| PathBuf::from(folder).join("Queqiao").join("transfers.log"))
+    // A test build keeps its own list (the agent's and viewer's test-switches), never the person's.
+    let name = if cfg!(feature = "test-files") {
+        "transfers.test.log"
+    } else {
+        "transfers.log"
+    };
+    std::env::var_os("APPDATA").map(|folder| PathBuf::from(folder).join("Queqiao").join(name))
 }
 
 /// Notes a finished file (failed ones are not listed).

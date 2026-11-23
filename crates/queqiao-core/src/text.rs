@@ -584,6 +584,45 @@ const CHINESE: &[(&str, &str)] = &[
         "{server} has another certificate: its fingerprint begins {actual}, the one entered {pinned}. Check the fingerprint with whoever runs the server.",
         "{server} 的证书与填写的不符：它的指纹以 {actual} 开头，填写的以 {pinned} 开头。请向服务器的管理者核对指纹。",
     ),
+    // The main window's device page (2026-11-23).
+    ("My devices", "我的设备"),
+    ("No other devices yet.", "还没有其他设备。"),
+    ("Send files", "发送文件"),
+    ("Command line", "命令行"),
+    ("More", "更多"),
+    ("Recent connections", "最近连接"),
+    (
+        "No connections from this PC yet.",
+        "这台电脑还没有连接过它。",
+    ),
+    (
+        "Sessions from this PC to your other devices are listed on their pages.",
+        "这台电脑连接其他设备的记录，显示在那些设备的页面上。",
+    ),
+    ("Online: you can connect now.", "在线：现在就可以连接。"),
+    (
+        "Offline: a device of yours on its network can wake it.",
+        "离线：它所在网络里你的另一台设备可以唤醒它。",
+    ),
+    (
+        "This PC: your other devices can control it.",
+        "本机：你的其他设备可以控制它。",
+    ),
+    (
+        "Your devices appear here once this PC is logged in to your account, and you can control them from here.",
+        "这台电脑登录你的账号后，你的设备会显示在这里，并可以从这里控制它们。",
+    ),
+    (
+        "Your other devices connect to it from their own Queqiao.",
+        "你的其他设备在它们自己的鹊桥里连接这台电脑。",
+    ),
+    ("Today {time}", "今天 {time}"),
+    ("under a minute", "不到一分钟"),
+    ("{minutes} min", "{minutes} 分钟"),
+    ("{hours} h {minutes} min", "{hours} 小时 {minutes} 分钟"),
+    ("Send files...", "发送文件……"),
+    ("Send files to {name}", "发送文件到 {name}"),
+    ("All files", "所有文件"),
 ];
 
 #[cfg(test)]

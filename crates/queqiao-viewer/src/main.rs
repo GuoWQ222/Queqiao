@@ -51,6 +51,7 @@ const MENU_CUSTOM_BITRATE: u16 = 0x10B0;
 const MENU_TRANSFERS: u16 = 0x10C0;
 const MENU_RESTART_QUEQIAO: u16 = 0x10D0;
 const MENU_COMMAND_LINES: u16 = 0x10E0;
+const MENU_SEND_FILES: u16 = 0x10F0;
 // System-menu command ids are multiples of 16: Windows reports them masked with 0xFFF0.
 const MENU_ACTUAL_SIZE: u16 = 0x1640;
 const MENU_HOTKEYS: u16 = 0x1650;
@@ -155,6 +156,15 @@ const TEST_SCANCODE: u16 = 0x76;
 /// A session that is not connected after this long is given up.
 const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
+/// What the main window asks the session to do as soon as it is up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Then {
+    /// The file picker: the files chosen go to that PC.
+    Files,
+    /// A command line on that PC.
+    Terminal,
+}
+
 #[derive(Default, Clone)]
 struct Options {
     /// A device whose new key the person confirmed (its old pin is dropped).
@@ -166,6 +176,8 @@ struct Options {
     user: Option<String>,
     password: Option<String>,
     device: Option<String>,
+    /// With --open: what to do as soon as the session is up (the main window's "Send files" and "Command line").
+    then: Option<Then>,
     /// With --device: a second device of the account at the same time (tests: several sessions at once).
     also_device: Option<String>,
     list: bool,
@@ -454,6 +466,13 @@ fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             // The main window (the agent's): a device of the account, or helping someone with their help ID and
             // code (as a link). Each does what a click there does.
             "--open" => options.device = Some(args.next()?),
+            "--then" => {
+                options.then = Some(match args.next()?.as_str() {
+                    "files" => Then::Files,
+                    "terminal" => Then::Terminal,
+                    _ => return None,
+                })
+            }
             "--help-connect" => {
                 options.invite = Some(args.next()?);
                 options.help_go = true;
@@ -672,7 +691,13 @@ fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, Strin
             let (peer, started) = start_peer(&mut account, &target, Addresses::All)?;
             running.push((
                 target.name.clone(),
-                session_thread(options, peer, started, target.name.clone()),
+                session_thread(
+                    options,
+                    peer,
+                    started,
+                    target.id.clone(),
+                    target.name.clone(),
+                ),
             ));
         }
         let mut passed = true;
@@ -1029,7 +1054,13 @@ fn device_list(
                                 ));
                                 running.push((
                                     target.name.clone(),
-                                    session_thread(options, peer, started, target.name.clone()),
+                                    session_thread(
+                                        options,
+                                        peer,
+                                        started,
+                                        target.id.clone(),
+                                        target.name.clone(),
+                                    ),
                                 ));
                             }
                             Err(error) => {
@@ -1349,7 +1380,8 @@ fn connect_to(
     let id = new_session_id();
     let mut signal = account.session(&target.id, AccountRole::Agent, &id);
     signal.hello("viewer").map_err(|e| e.to_string())?;
-    session(
+    let (began, since) = (queqiao_account::connections::local_now(), Instant::now());
+    let result = session(
         options,
         device,
         context,
@@ -1357,7 +1389,21 @@ fn connect_to(
         &target.name,
         addresses,
         lines,
-    )
+    );
+    if result.is_ok() {
+        remember(&target.id, &target.name, began, since);
+    }
+    result
+}
+
+/// Notes a session this PC started, once it ended (the main window lists them as "Recent connections").
+fn remember(device_id: &str, device_name: &str, began: String, since: Instant) {
+    queqiao_account::connections::record(&queqiao_account::connections::Connection {
+        when: began,
+        seconds: since.elapsed().as_secs(),
+        device_id: device_id.to_string(),
+        device_name: device_name.to_string(),
+    });
 }
 
 /// One session: the agent's screen in a window, this window's input to the agent.
@@ -1396,16 +1442,21 @@ fn session_thread(
     options: &Options,
     peer: Peer,
     started: Instant,
+    device_id: String,
     agent: String,
 ) -> std::thread::JoinHandle<(Result<bool, String>, Vec<String>)> {
     let options = options.clone();
     std::thread::spawn(move || {
         let mut lines = Vec::new();
+        let began = queqiao_account::connections::local_now();
         let result = create_device().and_then(|(device, context, _)| {
             run_session(
                 &options, &device, &context, peer, started, &agent, &mut lines,
             )
         });
+        if result.is_ok() {
+            remember(&device_id, &agent, began, started);
+        }
         (result, lines)
     })
 }
@@ -1526,6 +1577,7 @@ fn run_session(
         (MENU_COMMAND_LINES, tr("Command lines...")),
         (MENU_FULL_SCREEN, full_screen_label.as_str()),
         (MENU_ON_TOP, tr("Always on top")),
+        (MENU_SEND_FILES, tr("Send files...")),
         (MENU_TRANSFERS, tr("Transfers...")),
         (MENU_CUSTOM_BITRATE, tr("Custom bitrate...")),
         (MENU_GAME_MOUSE, game_mouse_label.as_str()),
@@ -1664,12 +1716,34 @@ fn run_session(
     };
     show_picture_choice(&window, fps_cap, quality);
     let mut terminals = TerminalWindows::default();
+    // The file picker runs on a thread of its own (the session goes on meanwhile); the files chosen come back here.
+    let (picked_files, picked) = std::sync::mpsc::channel::<Vec<PathBuf>>();
+    let pick_title = trf("Send files to {name}", &[("name", agent)]);
+    let owner = window.hwnd().0 as isize;
+    let start_picker = || {
+        let (title, back) = (pick_title.clone(), picked_files.clone());
+        std::thread::spawn(move || {
+            let owner = windows::Win32::Foundation::HWND(owner as *mut std::ffi::c_void);
+            let _ = back.send(queqiao_display::pick_files(Some(owner), &title));
+        });
+    };
+    // What the main window asked for, done once the session is up.
+    let mut then = options.then;
     window.check_menu_item(MENU_PRIVACY, privacy_on);
     window.set_full_screen(options.full_screen);
     window.check_menu_item(MENU_SOUND, sound_on);
     let mut closed = None;
 
     'session: loop {
+        // Files from the picker go as dropped ones do.
+        while let Ok(paths) = picked.try_recv() {
+            for path in &paths {
+                match transfers.send(path) {
+                    Ok(()) => lines.push(format!("sending {}", path.display())),
+                    Err(error) => lines.push(format!("not sent: {error}")),
+                }
+            }
+        }
         status.update(&window, &stats);
         if end.is_some_and(|end| Instant::now() > end) {
             break;
@@ -1727,6 +1801,10 @@ fn run_session(
                     }
                     MENU_TERMINAL => {
                         terminals.open(&peer, agent, false, lines);
+                        None
+                    }
+                    MENU_SEND_FILES => {
+                        start_picker();
                         None
                     }
                     MENU_COMMAND_LINES => {
@@ -2258,6 +2336,11 @@ fn run_session(
                 PeerEvent::Connected => connected_after = Some(started.elapsed()),
                 PeerEvent::ChannelOpen => {
                     channel_open = true;
+                    match then.take() {
+                        Some(Then::Terminal) => terminals.open(&peer, agent, false, lines),
+                        Some(Then::Files) => start_picker(),
+                        None => {}
+                    }
                     if !sound_on {
                         peer.send_data(Message::Command(Command::SoundOff).encode());
                     }
