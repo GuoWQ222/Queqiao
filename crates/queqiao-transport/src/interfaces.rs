@@ -10,7 +10,8 @@ use std::net::Ipv4Addr;
 
 use windows::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-    GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses, GetIfEntry2, IP_ADAPTER_ADDRESSES_LH,
+    MIB_IF_ROW2,
 };
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR, SOCKADDR_IN};
@@ -48,7 +49,9 @@ pub fn offered(address: Ipv4Addr, uplinks: &[Ipv4Addr], all: bool) -> Vec<Ipv4Ad
     }
 }
 
-/// This PC's uplinks, in route order (the adapter's IPv4 metric: the one Windows sends by first).
+/// This PC's uplinks: network cards first (Windows marks them as hardware interfaces), then virtual adapters that
+/// have a gateway of their own (Radmin VPN's has one: between the PC and sunshine it was taken for the PC's uplink
+/// and the session went through Tailscale, 2026-11-23); each in route order (the adapter's IPv4 metric).
 pub fn uplinks() -> Vec<Ipv4Addr> {
     let mut size = 32 * 1024u32;
     for _ in 0..3 {
@@ -68,7 +71,7 @@ pub fn uplinks() -> Vec<Ipv4Addr> {
         if result != 0 {
             return Vec::new();
         }
-        let mut found: Vec<(u32, Ipv4Addr)> = Vec::new();
+        let mut found: Vec<((bool, u32), Ipv4Addr)> = Vec::new();
         let mut adapter = first as *const IP_ADAPTER_ADDRESSES_LH;
         while let Some(entry) = unsafe { adapter.as_ref() } {
             if entry.OperStatus == IfOperStatusUp && has_gateway(entry) {
@@ -78,17 +81,26 @@ pub fn uplinks() -> Vec<Ipv4Addr> {
                         && usable(ip)
                         && !found.iter().any(|(_, known)| *known == ip)
                     {
-                        found.push((entry.Ipv4Metric, ip));
+                        found.push(((!hardware(entry), entry.Ipv4Metric), ip));
                     }
                     unicast = address.Next;
                 }
             }
             adapter = entry.Next;
         }
-        found.sort_by_key(|(metric, _)| *metric);
+        found.sort_by_key(|(order, _)| *order);
         return found.into_iter().map(|(_, ip)| ip).collect();
     }
     Vec::new()
+}
+
+/// Whether the adapter is a network card (Windows' HardwareInterface flag), not a virtual one.
+fn hardware(entry: &IP_ADAPTER_ADDRESSES_LH) -> bool {
+    let mut row = MIB_IF_ROW2 {
+        InterfaceLuid: entry.Luid,
+        ..Default::default()
+    };
+    unsafe { GetIfEntry2(&mut row) }.is_ok() && row.InterfaceAndOperStatusFlags._bitfield & 1 != 0
 }
 
 fn has_gateway(entry: &IP_ADAPTER_ADDRESSES_LH) -> bool {

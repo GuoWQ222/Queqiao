@@ -150,6 +150,8 @@ pub struct Peer {
     in_flight: Arc<[InFlight; STREAMS]>,
     /// How much all streams together may have in flight (set by the network thread, [`crate::flow`]).
     flow_cap: Arc<AtomicUsize>,
+    /// Tests (QUEQIAO_FORCE=flow:<kB>): each stream's cap fixed instead, to measure what the cap costs.
+    fixed_cap: Option<usize>,
 }
 
 /// Bulk data with a data channel of its own and flow control: a sender keeps no more in flight on each than the
@@ -414,6 +416,9 @@ impl Peer {
             notes,
             in_flight,
             flow_cap,
+            fixed_cap: queqiao_core::forced("flow")
+                .and_then(|kb| kb.parse::<usize>().ok())
+                .map(|kb| kb * 1024),
         })
     }
 
@@ -456,6 +461,9 @@ impl Peer {
             .into_iter()
             .filter(|other| *other != stream && in_flight(*other) > 0)
             .count();
+        if let Some(fixed) = self.fixed_cap {
+            return fixed.saturating_sub(in_flight(stream));
+        }
         flow::room(
             self.flow_cap.load(Ordering::Relaxed),
             in_flight(stream),
