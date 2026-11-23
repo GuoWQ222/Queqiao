@@ -235,7 +235,14 @@ mod tests {
 
     #[test]
     fn only_plain_file_names() {
-        for name in ["queqiao-agent.exe", "README.txt", "a_b-c.dll"] {
+        // LICENSE and THIRD_PARTY_NOTICES.md: packed beside the programs (scripts\package.ps1).
+        for name in [
+            "queqiao-agent.exe",
+            "README.txt",
+            "a_b-c.dll",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md",
+        ] {
             assert!(valid_name(name), "{name}");
         }
         for name in [

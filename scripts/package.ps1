@@ -39,6 +39,12 @@ $programs = @('queqiao-viewer.exe', 'queqiao-agent.exe', 'queqiao-service.exe') 
 foreach ($program in $programs + (Join-Path $release 'queqiao-setup.exe')) {
     if (-not (Test-Path -LiteralPath $program)) { "PACKAGE_FAIL $program is missing (build the release first)"; return }
 }
+# The licence and the third-party notices go with the programs (the notices' licences ask for them in every copy);
+# text, so packed as they are, not signed.
+$texts = @('LICENSE', 'THIRD_PARTY_NOTICES.md') | ForEach-Object { Join-Path $root $_ }
+foreach ($text in $texts) {
+    if (-not (Test-Path -LiteralPath $text)) { "PACKAGE_FAIL $text is missing"; return }
+}
 $version = ((& (Join-Path $release 'queqiao-agent.exe') --version 2>$null | Select-Object -First 1) -split ' ')[1]
 if (-not $version) { $version = '0.0.0' }
 $signArgs = @{ Subject = $Subject }
@@ -52,7 +58,7 @@ $out = Join-Path $root 'target\package'
 New-Item -ItemType Directory -Force $out | Out-Null
 $installer = Join-Path $out "queqiao-setup-$version.exe"
 Remove-Item -LiteralPath $installer -ErrorAction SilentlyContinue
-$packed = @(& (Join-Path $release 'queqiao-setup.exe') pack --output $installer @programs 2>&1 | ForEach-Object { "$_" })
+$packed = @(& (Join-Path $release 'queqiao-setup.exe') pack --output $installer @programs @texts 2>&1 | ForEach-Object { "$_" })
 $packed
 if (-not (Test-Path -LiteralPath $installer)) { 'PACKAGE_FAIL packing'; return }
 

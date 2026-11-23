@@ -27,15 +27,19 @@ use std::path::{Path, PathBuf};
 
 use queqiao_capture::{BgraImage, Duplicator, qpc_frequency, qpc_now};
 use queqiao_codec::{
-    Codec, DecodedFrame, EncodeFormat, EncodedFrame, EncoderChoice, EncoderConfig, H264Decoder,
-    H264Encoder, Nv12Converter, candidate_sizes, hevc_nal_types, nal_types,
+    Codec, DecodedFrame, DecoderChoice, EncodeFormat, EncodedFrame, EncoderChoice, EncoderConfig,
+    H264Decoder, H264Encoder, Nv12Converter, VideoCodec, candidate_sizes, hevc_nal_types,
+    nal_types,
 };
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP,
 };
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_AYUV, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_P010,
+    DXGI_FORMAT_Y410, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1,
 };
@@ -84,9 +88,18 @@ fn main() {
     if let Some(adapter) = options.get("adapter") {
         unsafe { std::env::set_var("QUEQIAO_PROBE_ADAPTER", adapter) };
     }
+    // vp_check=1: the GPU's video processor measured alone (with source=pattern).
+    if options.contains_key("vp_check") {
+        unsafe { std::env::set_var("QUEQIAO_PROBE_VP_CHECK", "1") };
+    }
     // source=pattern: a test picture instead of the desktop (nothing of the screen is captured).
     if let Some(source) = options.get("source") {
         unsafe { std::env::set_var("QUEQIAO_PROBE_SOURCE", source) };
+    }
+    // shift=N: the test pattern moved right and down by N pixels (1: its edges off 4:2:0's 2x2 blocks, as most of a
+    // real screen's are; at 0 a 4:2:0 decoder that copies each colour sample over its block scores unfairly well).
+    if let Some(by) = options.get("shift") {
+        unsafe { std::env::set_var("QUEQIAO_PROBE_SHIFT", by) };
     }
     // keep_first=N: the first N frames also into encode_probe_first.frames (each after its 4-byte length), small
     // enough to check on another machine (decode_file=).
@@ -164,7 +177,7 @@ fn run(
         lines.push(format!(
             "source: test pattern 1920x1080 (no screen capture); convert + encode on: {adapter}"
         ));
-        (test_pattern(1920, 1080), device, context, 60)
+        (probe_pattern(1920, 1080), device, context, 60)
     } else {
         let mut duplicator = Duplicator::primary().map_err(describe)?;
         let info = duplicator.info().clone();
@@ -206,6 +219,26 @@ fn run(
         (image, device, context, screen_fps)
     };
     let source = upload(&device, &image)?;
+    // vp_check=1: the GPU's video processor alone (no codec), each YUV format, then nothing else.
+    if std::env::var("QUEQIAO_PROBE_VP_CHECK").is_ok() {
+        for offset in [0, 1] {
+            let moved = shifted(&image, offset);
+            let source = upload(&device, &moved)?;
+            let label = format!("edges +{offset}");
+            for yuv in [
+                DXGI_FORMAT_NV12,
+                DXGI_FORMAT_P010,
+                DXGI_FORMAT_AYUV,
+                DXGI_FORMAT_Y410,
+            ] {
+                if let Err(error) = vp_check(&device, &context, &source, &moved, yuv, &label, lines)
+                {
+                    lines.push(format!("{label}: video processor check {yuv:?}: {error}"));
+                }
+            }
+        }
+        return Ok(true);
+    }
     let (width, height) = (image.width, image.height);
 
     let mut request = Request {
@@ -593,6 +626,354 @@ fn judge(score: &Score, pattern: bool, stream: &str, wanted: EncodeFormat) -> (S
     )
 }
 
+/// A texture's bytes as the CPU sees them (a staging copy): every plane, rows of `pitch` bytes (NV12 and P010: the
+/// chroma plane after `height` rows of luma).
+fn read_texture(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    texture: &ID3D11Texture2D,
+) -> Result<(DXGI_FORMAT, Vec<u8>, usize, u32, u32), String> {
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    unsafe { texture.GetDesc(&mut desc) };
+    let (format, width, height) = (desc.Format, desc.Width, desc.Height);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+    desc.MiscFlags = 0;
+    let mut staging: Option<ID3D11Texture2D> = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging)) }.map_err(describe)?;
+    let staging = staging.ok_or("staging texture")?;
+    let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+    unsafe {
+        context.CopyResource(&staging, texture);
+        context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .map_err(describe)?;
+    }
+    let pitch = mapped.RowPitch as usize;
+    let rows = match format {
+        DXGI_FORMAT_NV12 | DXGI_FORMAT_P010 => height as usize * 3 / 2,
+        _ => height as usize,
+    };
+    let bytes =
+        unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * rows) }.to_vec();
+    unsafe { context.Unmap(&staging, 0) };
+    Ok((format, bytes, pitch, width, height))
+}
+
+/// BGRA rows of a BGRA texture, packed (w * 4 bytes each).
+fn bgra_of(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    texture: &ID3D11Texture2D,
+) -> Result<Vec<u8>, String> {
+    let (_, raw, pitch, width, height) = read_texture(device, context, texture)?;
+    let row = width as usize * 4;
+    Ok((0..height as usize)
+        .flat_map(|y| raw[y * pitch..y * pitch + row].to_vec())
+        .collect())
+}
+
+/// The PSNR of BGRA pixels against `image` (R, G, B over the whole picture, the pattern's colour part and its detail
+/// part).
+fn score(shown: &[u8], image: &BgraImage) -> Score {
+    let (w, h) = (image.width as usize, image.height as usize);
+    let mut rows = vec![[0f64; 3]; h];
+    for (y, sums) in rows.iter_mut().enumerate() {
+        let a = &shown[y * w * 4..(y + 1) * w * 4];
+        let b = &image.pixels[y * w * 4..(y + 1) * w * 4];
+        for (p, q) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
+            for channel in 0..3 {
+                let d = f64::from(p[channel]) - f64::from(q[channel]);
+                sums[channel] += d * d;
+            }
+        }
+    }
+    let psnr = |range: std::ops::Range<usize>| {
+        let count = (range.len() * w).max(1) as f64;
+        let mut sums = [0f64; 3];
+        for row in &rows[range] {
+            for channel in 0..3 {
+                sums[channel] += row[channel];
+            }
+        }
+        let one = |sum: f64| {
+            let mse = sum / count;
+            if mse == 0.0 {
+                99.0
+            } else {
+                10.0 * (255.0 * 255.0 / mse).log10()
+            }
+        };
+        [one(sums[2]), one(sums[1]), one(sums[0])]
+    };
+    let split = h * 4 / 6;
+    let margin = 16.min(split);
+    Score {
+        whole: psnr(0..h),
+        colour: psnr(0..split - margin),
+        detail: psnr((split + margin).min(h)..h),
+    }
+}
+
+/// Decoded YUV planes in 8-bit code values (10-bit ones divided by 4), the chroma at its own resolution.
+struct Planes {
+    width: usize,
+    height: usize,
+    luma: Vec<f64>,
+    cb: Vec<f64>,
+    cr: Vec<f64>,
+    /// 2 for 4:2:0, 1 for 4:4:4.
+    sub: usize,
+}
+
+/// Where 4:2:0's colour samples are taken to sit, for turning them back into a colour per pixel.
+#[derive(Clone, Copy, Debug)]
+enum Siting {
+    /// Each sample for its 2x2 block as it is.
+    Replicate,
+    /// Interpolated, the sample in the middle of its 2x2 block.
+    Centre,
+    /// Interpolated, the sample on the block's left column, between its rows (MPEG-2's).
+    Left,
+}
+
+fn planes(
+    format: DXGI_FORMAT,
+    raw: &[u8],
+    pitch: usize,
+    width: u32,
+    height: u32,
+) -> Option<Planes> {
+    let (w, h) = (width as usize, height as usize);
+    let ten = |i: usize| f64::from(u16::from_le_bytes([raw[i], raw[i + 1]]) >> 6) / 4.0;
+    let mut luma = vec![0.0; w * h];
+    let (sub, mut cb, mut cr) = match format {
+        DXGI_FORMAT_NV12 | DXGI_FORMAT_P010 => {
+            (2, vec![0.0; w / 2 * (h / 2)], vec![0.0; w / 2 * (h / 2)])
+        }
+        DXGI_FORMAT_AYUV | DXGI_FORMAT_Y410 => (1, vec![0.0; w * h], vec![0.0; w * h]),
+        _ => return None,
+    };
+    let cw = w / sub;
+    for y in 0..h {
+        for x in 0..w {
+            let at = y * w + x;
+            match format {
+                DXGI_FORMAT_NV12 => luma[at] = f64::from(raw[y * pitch + x]),
+                DXGI_FORMAT_P010 => luma[at] = ten(y * pitch + x * 2),
+                DXGI_FORMAT_AYUV => {
+                    // V, U, Y, A in memory.
+                    let p = y * pitch + x * 4;
+                    (luma[at], cb[at], cr[at]) = (
+                        f64::from(raw[p + 2]),
+                        f64::from(raw[p + 1]),
+                        f64::from(raw[p]),
+                    );
+                }
+                _ => {
+                    // Y410: U, Y, V in bits 0-9, 10-19, 20-29.
+                    let p = y * pitch + x * 4;
+                    let word = u32::from_le_bytes([raw[p], raw[p + 1], raw[p + 2], raw[p + 3]]);
+                    let part = |shift: u32| f64::from((word >> shift) & 0x3FF) / 4.0;
+                    (luma[at], cb[at], cr[at]) = (part(10), part(0), part(20));
+                }
+            }
+        }
+    }
+    if sub == 2 {
+        for y in 0..h / 2 {
+            for x in 0..cw {
+                let row = h * pitch + y * pitch;
+                let at = y * cw + x;
+                if format == DXGI_FORMAT_P010 {
+                    (cb[at], cr[at]) = (ten(row + x * 4), ten(row + x * 4 + 2));
+                } else {
+                    (cb[at], cr[at]) =
+                        (f64::from(raw[row + x * 2]), f64::from(raw[row + x * 2 + 1]));
+                }
+            }
+        }
+    }
+    Some(Planes {
+        width: w,
+        height: h,
+        luma,
+        cb,
+        cr,
+        sub,
+    })
+}
+
+/// The planes in BGRA, BT.709 limited range by the book, 4:2:0's colour placed by `siting`.
+fn to_bgra(p: &Planes, siting: Siting) -> Vec<u8> {
+    let (w, h) = (p.width, p.height);
+    let (cw, ch) = (w / p.sub, h / p.sub);
+    let eight = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    // Bilinear at chroma coordinates (sample centres on whole numbers), clamped to the plane.
+    let at = |plane: &[f64], fx: f64, fy: f64| {
+        let fx = fx.clamp(0.0, (cw - 1) as f64);
+        let fy = fy.clamp(0.0, (ch - 1) as f64);
+        let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+        let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
+        let (ax, ay) = (fx - x0 as f64, fy - y0 as f64);
+        let top = plane[y0 * cw + x0] * (1.0 - ax) + plane[y0 * cw + x1] * ax;
+        let bottom = plane[y1 * cw + x0] * (1.0 - ax) + plane[y1 * cw + x1] * ax;
+        top * (1.0 - ay) + bottom * ay
+    };
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = match (p.sub, siting) {
+                (1, _) => (x as f64, y as f64),
+                (_, Siting::Replicate) => ((x / 2) as f64, (y / 2) as f64),
+                (_, Siting::Centre) => (x as f64 / 2.0 - 0.25, y as f64 / 2.0 - 0.25),
+                (_, Siting::Left) => (x as f64 / 2.0, y as f64 / 2.0 - 0.25),
+            };
+            let l = (p.luma[y * w + x] - 16.0) / 219.0;
+            let cb = (at(&p.cb, fx, fy) - 128.0) / 224.0;
+            let cr = (at(&p.cr, fx, fy) - 128.0) / 224.0;
+            let i = (y * w + x) * 4;
+            out[i] = eight(l + 1.8556 * cb);
+            out[i + 1] = eight(l - 0.1873 * cb - 0.4681 * cr);
+            out[i + 2] = eight(l + 1.5748 * cr);
+            out[i + 3] = 255;
+        }
+    }
+    out
+}
+
+/// What the video processor wrote against BT.709 limited range by the book from the source's RGB: mean (signed) and
+/// RMS error of luma, Cb and Cr in 8-bit levels; 4:2:0's colour only where its 2x2 block is one colour.
+fn yuv_errors(p: &Planes, image: &BgraImage) -> [(f64, f64); 3] {
+    let w = p.width;
+    let exact = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        let channel = |k: usize| f64::from(image.pixels[i + k]) / 255.0;
+        let (b, g, r) = (channel(0), channel(1), channel(2));
+        let e = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        (
+            16.0 + 219.0 * e,
+            128.0 + 224.0 * (b - e) / 1.8556,
+            128.0 + 224.0 * (r - e) / 1.5748,
+        )
+    };
+    let mut sums = [(0.0f64, 0.0f64, 0usize); 3];
+    let mut add = |k: usize, d: f64| {
+        sums[k].0 += d;
+        sums[k].1 += d * d;
+        sums[k].2 += 1;
+    };
+    for y in 0..p.height {
+        for x in 0..w {
+            add(0, p.luma[y * w + x] - exact(x, y).0);
+        }
+    }
+    let cw = w / p.sub;
+    for cy in 0..p.height / p.sub {
+        for cx in 0..cw {
+            let (x, y) = (cx * p.sub, cy * p.sub);
+            let colour = |dx: usize, dy: usize| {
+                let i = ((y + dy) * w + x + dx) * 4;
+                &image.pixels[i..i + 3]
+            };
+            let uniform = (0..p.sub).all(|dy| (0..p.sub).all(|dx| colour(dx, dy) == colour(0, 0)));
+            if uniform {
+                let (_, cb, cr) = exact(x, y);
+                add(1, p.cb[cy * cw + cx] - cb);
+                add(2, p.cr[cy * cw + cx] - cr);
+            }
+        }
+    }
+    sums.map(|(sum, squares, count)| {
+        let count = count.max(1) as f64;
+        (sum / count, (squares / count).sqrt())
+    })
+}
+
+/// `image` moved right and down by `by` pixels (its first rows and columns repeated): the pattern's edges on odd
+/// pixels, as most of a real screen's are to 4:2:0's 2x2 blocks.
+fn shifted(image: &BgraImage, by: usize) -> BgraImage {
+    let (w, h) = (image.width as usize, image.height as usize);
+    let mut pixels = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let from = (y.saturating_sub(by) * w + x.saturating_sub(by)) * 4;
+            let to = (y * w + x) * 4;
+            pixels[to..to + 4].copy_from_slice(&image.pixels[from..from + 4]);
+        }
+    }
+    BgraImage {
+        width: image.width,
+        height: image.height,
+        pixels,
+    }
+}
+
+/// vp_check=1: the GPU's video processor alone, without a codec, on the test pattern. The YUV it writes from RGB (as
+/// the agent converts) against BT.709 by the book; and how it shows that YUV (as the viewer does) against conversions
+/// by the book with each placing of 4:2:0's colour, all against the pattern. Lines for the report.
+fn vp_check(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    source: &ID3D11Texture2D,
+    image: &BgraImage,
+    yuv: DXGI_FORMAT,
+    label: &str,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    let size = (image.width, image.height);
+    let text = |s: &Score| {
+        format!(
+            "colour {:.1}/{:.1}/{:.1}, detail {:.1}/{:.1}/{:.1}",
+            s.colour[0], s.colour[1], s.colour[2], s.detail[0], s.detail[1], s.detail[2]
+        )
+    };
+    let mut to_yuv =
+        Nv12Converter::with_format(device, context, size, size, 60, yuv).map_err(describe)?;
+    let target = to_yuv.create_output(device).map_err(describe)?;
+    to_yuv.convert(source, &target).map_err(describe)?;
+    let (format, raw, pitch, width, height) = read_texture(device, context, &target)?;
+    let planes =
+        planes(format, &raw, pitch, width, height).ok_or("no exact conversion for this format")?;
+    let [luma, cb, cr] = yuv_errors(&planes, image);
+    lines.push(format!(
+        "{label}: video processor RGB -> {yuv:?} against BT.709 by the book, mean/RMS in 8-bit levels: luma {:+.2}/{:.2}, Cb {:+.2}/{:.2}, Cr {:+.2}/{:.2}",
+        luma.0, luma.1, cb.0, cb.1, cr.0, cr.1
+    ));
+    let mut to_rgb = Nv12Converter::to_rgb(device, context, size, 60).map_err(describe)?;
+    let shown_texture = to_rgb.create_output(device).map_err(describe)?;
+    to_rgb.convert(&target, &shown_texture).map_err(describe)?;
+    let shown = bgra_of(device, context, &shown_texture)?;
+    lines.push(format!(
+        "{label}: {yuv:?} shown by the video processor, PSNR R/G/B against the pattern: {}",
+        text(&score(&shown, image))
+    ));
+    let sitings: &[Siting] = if planes.sub == 1 {
+        &[Siting::Replicate]
+    } else {
+        &[Siting::Replicate, Siting::Centre, Siting::Left]
+    };
+    for &siting in sitings {
+        let exact = to_bgra(&planes, siting);
+        let against_pattern = score(&exact, image);
+        let reference = BgraImage {
+            width: image.width,
+            height: image.height,
+            pixels: exact,
+        };
+        let vp = score(&shown, &reference).whole;
+        lines.push(format!(
+            "{label}: {yuv:?} by the book, colour {siting:?}: against the pattern {}; the video processor against it {:.1}/{:.1}/{:.1}",
+            text(&against_pattern),
+            vp[0],
+            vp[1],
+            vp[2]
+        ));
+    }
+    Ok(())
+}
+
 /// The decoder decode= names: nvdec (NVIDIA's), amf (AMD's), else vpl (Intel's).
 fn probe_decoder(
     device: &ID3D11Device,
@@ -602,6 +983,16 @@ fn probe_decoder(
     match std::env::var("QUEQIAO_PROBE_DECODE").as_deref() {
         Ok("nvdec") => H264Decoder::nvdec(device, context, codec),
         Ok("amf") => H264Decoder::amf(device, context, codec),
+        // Windows' decoder (Media Foundation, D3D11 video): its pictures shown by the video processor.
+        Ok("mf") => H264Decoder::with_codec(
+            match codec {
+                Codec::H264 => VideoCodec::H264,
+                Codec::H265 => VideoCodec::H265,
+            },
+            device,
+            context,
+            DecoderChoice::Hardware,
+        ),
         _ => H264Decoder::vpl(device, context, codec),
     }
     .map_err(describe)
@@ -741,6 +1132,18 @@ fn disable_power_throttling() -> Result<(), String> {
 /// A test picture instead of the screen (source=pattern), so nothing of the desktop is captured: colour bars (100 %
 /// and 75 %), a grey ramp and a colour ramp (banding shows in 8 bits), one-pixel coloured stripes and checks (chroma
 /// detail that 4:2:0 blurs and 4:4:4 keeps), and dark blue "text" on paper.
+/// The test pattern, moved by shift= if given.
+fn probe_pattern(width: u32, height: u32) -> BgraImage {
+    let image = test_pattern(width, height);
+    match std::env::var("QUEQIAO_PROBE_SHIFT")
+        .ok()
+        .and_then(|by| by.parse::<usize>().ok())
+    {
+        Some(by) if by > 0 => shifted(&image, by),
+        _ => image,
+    }
+}
+
 fn test_pattern(width: u32, height: u32) -> BgraImage {
     let (w, h) = (width as usize, height as usize);
     let mut pixels = vec![0u8; w * h * 4];
@@ -914,7 +1317,7 @@ fn decode_only(path: &Path, lines: &mut Vec<String>) -> Result<bool, String> {
         if first.is_none()
             && let Some(picture) = pictures.first()
         {
-            let pattern = test_pattern(picture.width, picture.height);
+            let pattern = probe_pattern(picture.width, picture.height);
             first = Some(compare(&device, &context, picture, &pattern, 60)?);
         }
     }

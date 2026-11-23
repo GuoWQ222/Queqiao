@@ -229,6 +229,12 @@ fn check(result: sys::CUresult, what: &str) -> Result<()> {
 
 /// The YUV -> BGRA shader: the planes one after another in one texture of one channel (8 or 16 bits); 4:2:0 has its
 /// chroma interleaved (U V) at half size, 4:4:4 its U and V planes in full. BT.709, limited range.
+///
+/// 4:2:0's colour is interpolated between its samples, each taken to sit on its 2x2 block's left column between the
+/// block's rows: H.264's and H.265's default placing (chroma_sample_loc_type 0), and the one AMD's and Intel's video
+/// processors use. Measured 2026-11-24 (encode_probe vp_check=1, the test pattern's edges moved off the 2x2 blocks as
+/// most of a screen's are): against copying each sample over its block (what this did before), red 34.1-35.3 dB
+/// instead of 31.1-32.7 whichever GPU made the 4:2:0.
 const SHADER: &str = r#"
 Texture2D<float> planes : register(t0);
 cbuffer Info : register(b0) { uint height; uint chroma444; uint ten_bit; uint unused; };
@@ -244,9 +250,21 @@ float4 ps(float4 position : SV_Position) : SV_Target {
         u = planes.Load(int3(p.x, height + p.y, 0));
         v = planes.Load(int3(p.x, 2 * height + p.y, 0));
     } else {
-        uint2 c = p / 2;
-        u = planes.Load(int3(c.x * 2, height + c.y, 0));
-        v = planes.Load(int3(c.x * 2 + 1, height + c.y, 0));
+        // This pixel's place among the colour samples: x / 2 across, y / 2 - 1/4 down, clamped to the plane.
+        uint width_c = 0, rows = 0, levels = 0;
+        planes.GetDimensions(0, width_c, rows, levels);
+        int2 last = int2(width_c / 2 - 1, height / 2 - 1);
+        float2 at = clamp(float2(p.x * 0.5, p.y * 0.5 - 0.25), float2(0, 0), float2(last));
+        int2 c0 = int2(floor(at));
+        int2 c1 = min(c0 + 1, last);
+        float2 f = at - float2(c0);
+        float2 s00 = float2(planes.Load(int3(c0.x * 2, height + c0.y, 0)), planes.Load(int3(c0.x * 2 + 1, height + c0.y, 0)));
+        float2 s10 = float2(planes.Load(int3(c1.x * 2, height + c0.y, 0)), planes.Load(int3(c1.x * 2 + 1, height + c0.y, 0)));
+        float2 s01 = float2(planes.Load(int3(c0.x * 2, height + c1.y, 0)), planes.Load(int3(c0.x * 2 + 1, height + c1.y, 0)));
+        float2 s11 = float2(planes.Load(int3(c1.x * 2, height + c1.y, 0)), planes.Load(int3(c1.x * 2 + 1, height + c1.y, 0)));
+        float2 uv = lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y);
+        u = uv.x;
+        v = uv.y;
     }
     // The samples as code values: 8 bits (0-255), or 10 bits in the high bits of 16 (0-1023). Limited range: luma
     // from 16 (64) over 219 (876) steps, chroma about 128 (512) over 224 (896).
