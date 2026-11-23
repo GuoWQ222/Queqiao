@@ -3322,8 +3322,10 @@ fn verify_delta(event: &InputEvent, before: (i32, i32), stats: &mut Stats) {
 }
 
 /// Windows applies injected input asynchronously (SendInput returns before the key state or the pointer has
-/// changed, later still when another program has a low-level hook): a check waits up to this long for it.
-const VERIFY_WAIT: Duration = Duration::from_millis(50);
+/// changed, later still when another program has a low-level hook): a check waits up to this long for it. The time
+/// it took is reported. 50 ms was too short on sunshine on 2026-11-23 (its key down "NOT within 50 ms" once, in 0 ms
+/// otherwise): up to a second tells a late key from a lost one.
+const VERIFY_WAIT: Duration = Duration::from_millis(1000);
 
 /// Whether `done` turns true within [`VERIFY_WAIT`].
 fn within_verify_wait(mut done: impl FnMut() -> bool) -> bool {

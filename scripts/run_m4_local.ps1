@@ -18,6 +18,10 @@ param(
     # viewer starts muted: on one PC it would otherwise play the agent's sound back into what the agent captures.
     [string]$AgentSoundDevice = '',
     [string]$ViewerSoundDevice = '',
+    # This PC has no AV1 encoder that works (an Intel Iris Xe of the 12th generation registers one that refuses
+    # everything: sunshine, 2026-11-23). The av1 session then checks the fallback: the agent says so and stays on H.264.
+    # Not found out here: only the agent's own check (it opens the encoder) knows, and that is what is tested.
+    [switch]$NoAv1Encoder,
     [switch]$SkipProbe
 )
 $ErrorActionPreference = 'Stop'
@@ -166,6 +170,13 @@ try {
     [IO.File]::WriteAllText($clipFile, 'queqiao clipboard file test')
     # label, QUEQIAO_FORCE, extra agent options, what the agent's report must say, what the viewer's must say,
     # whether both runs must pass (a declined session passes neither). Later options win, so an extra --seconds shortens the agent's run.
+    # A virtual microphone on this PC (the names the agent pairs: VB-CABLE, VoiceMeeter, Virtual Audio Cable): with one
+    # the av1 session's microphone check must pass, without one the agent must tell the viewer it has none.
+    $virtualMicrophone = @(Get-PnpDevice -Class AudioEndpoint -PresentOnly -ErrorAction SilentlyContinue |
+        Where-Object { $_.Status -eq 'OK' -and $_.FriendlyName -match 'CABLE Output|VoiceMeeter Out|Virtual Audio Cable' }).Count -gt 0
+    $av1Agent = if ($NoAv1Encoder) { 'picture: H\.264 .*\(AV1 asked for, but this PC has no AV1 encoder\)' } else { 'command from the viewer: picture: AV1 \(' }
+    $av1Viewer = if ($NoAv1Encoder) { 'notice from that PC: picture: H\.264 .*AV1 asked for, but this PC has no AV1 encoder' } else { 'the picture is AV1 now' }
+    "this PC: AV1 encoder $(if ($NoAv1Encoder) { 'none (-NoAv1Encoder)' } else { 'expected' }), virtual microphone $(if ($virtualMicrophone) { 'yes' } else { 'none' })"
     $runs = @(
         @('direct', '', "--clipboard-test --dry-run-commands --send-file `"$fileToViewer`"", 'test text from the other side received: yes', 'test text from the other side received: yes', $true),
         @('relay', 'network:relay', '', 'path after .*: relayed through ', 'path after .*: relayed through ', $true),
@@ -174,7 +185,7 @@ try {
         @('ended-here', '', '--end-after 6 --lock-after-session --dry-run-commands', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true),
         # AV1 asked for: the agent switches to its AV1 encoder, the viewer to Windows' AV1 decoder (needs both).
         # The viewer's microphone too (a test tone): the agent plays it into this PC's virtual microphone and hears it there.
-        @('av1', '', '--mic-check', 'command from the viewer: picture: AV1 \(', 'the picture is AV1 now', $true)
+        @('av1', '', '--mic-check', $av1Agent, $av1Viewer, $true)
     )
     foreach ($run in $runs) {
         $label, $mode, $extra, $agentExpects, $viewerExpects, $bothPass = $run
@@ -284,8 +295,9 @@ try {
                     $failed += "$label viewer (expected the agent's pointer shapes, all of them: sent $sent, got $got)"
                 }
             }
-            if ($label -eq 'av1' -and $program -eq 'agent' -and -not ($text | Where-Object { $_ -match '^microphone check: PASS' })) {
-                $failed += "$label agent (expected 'microphone check: PASS')"
+            if ($label -eq 'av1' -and $program -eq 'agent') {
+                $micExpected = if ($virtualMicrophone) { '^microphone check: PASS' } else { 'microphone: that PC has no virtual microphone' }
+                if (-not ($text | Where-Object { $_ -match $micExpected })) { $failed += "$label agent (expected '$micExpected')" }
             }
             if ($label -eq 'relay' -and $program -eq 'viewer' -and -not ($text | Where-Object { $_ -match '^boss key test: PASS' })) {
                 $failed += "$label viewer (expected 'boss key test: PASS')"
