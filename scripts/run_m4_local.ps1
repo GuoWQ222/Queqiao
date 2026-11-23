@@ -185,11 +185,15 @@ try {
         @('ended-here', '', '--end-after 6 --lock-after-session --dry-run-commands', 'ended: ended by the person at this PC', 'ended: the agent ended the session', $true),
         # AV1 asked for: the agent switches to its AV1 encoder, the viewer to Windows' AV1 decoder (needs both).
         # The viewer's microphone too (a test tone): the agent plays it into this PC's virtual microphone and hears it there.
-        @('av1', '', '--mic-check', $av1Agent, $av1Viewer, $true)
+        @('av1', '', '--mic-check', $av1Agent, $av1Viewer, $true),
+        # Only when asked for (-Sessions drag): a File Explorer window dragged round the screen for 12 s mid-session
+        # (scripts\drag_window.ps1), with the bitrate course on both sides and a picture in the middle of it.
+        @('drag', '', '', 'bitrate course, every second', 'arrival course, every second', $true)
     )
     foreach ($run in $runs) {
         $label, $mode, $extra, $agentExpects, $viewerExpects, $bothPass = $run
         if ($Sessions -notcontains $label -and $Sessions -notcontains 'all') { continue }
+        if ($label -eq 'drag' -and $Sessions -notcontains 'drag') { continue }
         $agentArgs = "--server $listen --pin $pin --user alice --password $password1 --sessions 1 --seconds $($Seconds + 90) --verify-input --report `"$Out\agent_$label.txt`" $extra"
         $viewerArgs = "--server $listen --pin $pin --user alice --password $password1 --device $device --seconds $Seconds --input-test --width 960 --report `"$Out\viewer_$label.txt`""
         # The clipboard and file tests run on both sides; the viewer sends commands the agent only reports.
@@ -203,6 +207,10 @@ try {
         # H.264 asked for (Automatic picks AV1 where both PCs have it on their GPUs): the H.264 path stays tested.
         # The bar and the card of figures on, and a picture of the window with them (viewer_session.bmp).
         if ($label -eq 'direct') { $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out`"" }
+        if ($label -eq 'drag') {
+            New-Item -ItemType Directory -Force (Join-Path $Out 'drag') | Out-Null
+            $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out\drag`" --picture-at 9 --seconds 22"
+        }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`" --clipboard-files-test `"$clipFile`"" }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
@@ -219,8 +227,18 @@ try {
         Start-SessionTask "Queqiao-M4-Agent-$label" $agent $agentArgs $mode
         Start-Sleep -Seconds 2
         Start-SessionTask "Queqiao-M4-Viewer-$label" $viewer $viewerArgs $mode
+        if ($label -eq 'drag') {
+            $dragOut = Join-Path $Out 'drag\drag.txt'
+            Remove-Item -LiteralPath $dragOut -ErrorAction SilentlyContinue
+            $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            Start-SessionTask 'Queqiao-M4-Drag' $powershell "-NoProfile -ExecutionPolicy Bypass -Command `"& '$PSScriptRoot\drag_window.ps1' -Delay 4 -Seconds 12 *> '$dragOut'`"" ''
+        }
         $viewerResult = Wait-SessionTask "Queqiao-M4-Viewer-$label" ($Seconds + 120)
         $agentResult = Wait-SessionTask "Queqiao-M4-Agent-$label" 60
+        if ($label -eq 'drag') {
+            $null = Wait-SessionTask 'Queqiao-M4-Drag' 30
+            "drag: $(if (Test-Path -LiteralPath $dragOut) { (Get-Content -LiteralPath $dragOut) -join ' ' } else { 'no output' })"
+        }
         "=== session '$label' (QUEQIAO_FORCE=$mode $extra): agent exit $agentResult, viewer exit $viewerResult"
         foreach ($check in @(@('agent', $agentExpects, $bothPass), @('viewer', $viewerExpects, $bothPass))) {
             $program, $expects, $mustPass = $check

@@ -2138,6 +2138,8 @@ fn session(
         ));
     }
     let mut bitrate_changes = 0u32;
+    let mut course: Vec<String> = Vec::new();
+    let mut course_at = (Instant::now(), 0usize, 0u32, 0u32);
     let mut lowest_bitrate = encoder.bitrate();
     let mut last_bitrate_change: Option<Instant> = None;
 
@@ -2212,6 +2214,24 @@ fn session(
         lock_gate::LockGate::new(options.test_locked)
     };
     'session: loop {
+        // The report: once a second for the first two minutes, the bandwidth estimate, the encoder's bitrate, what
+        // was sent and how many frames (K: a keyframe among them), to see how the picture's bitrate followed.
+        if course.len() < 120 && course_at.0.elapsed() >= Duration::from_secs(1) {
+            let seconds = course_at.0.elapsed().as_secs_f64();
+            course.push(format!(
+                "{:.1}/{:.1}/{:.1}@{:.0}{}",
+                last_estimate as f64 / 1e6,
+                f64::from(encoder.bitrate()) / 1e6,
+                (stats.bytes - course_at.1) as f64 * 8.0 / seconds / 1e6,
+                f64::from(stats.sent - course_at.2) / seconds,
+                if stats.keyframes > course_at.3 {
+                    "K"
+                } else {
+                    ""
+                }
+            ));
+            course_at = (Instant::now(), stats.bytes, stats.sent, stats.keyframes);
+        }
         if gate.refresh() {
             let (reason, tries_left) = if helper {
                 (queqiao_core::protocol::PasswordReason::OnlyTheOwner, 0)
@@ -3265,6 +3285,10 @@ fn session(
         } else {
             String::new()
         }
+    ));
+    lines.push(format!(
+        "bitrate course, every second (estimate/encoder/sent Mbit/s@frames, K a keyframe): {}",
+        course.join(" ")
     ));
     lines.push(format!(
         "bitrate: started at {:.1}, lowest {:.1}, last {:.1}, highest allowed {:.1} Mbit/s; {bitrate_changes} changes",

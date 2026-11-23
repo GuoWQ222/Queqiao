@@ -138,11 +138,20 @@ pub fn install(
     // itself runs as an administrator for it (install_service), never a program in the person's own folder.
     if choices.service {
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
-        match run_elevated(&me, "--install-service") {
-            Ok(0) => lines
-                .push("the Queqiao service is installed (sign-in, lock and UAC screens)".into()),
-            Ok(code) => return Err(format!("installing the service failed (exit code {code})")),
-            Err(error) => return Err(format!("the service was not installed: {error}")),
+        let failed = match run_elevated(&me, "--install-service") {
+            Ok(0) => {
+                lines.push(
+                    "the Queqiao service is installed (sign-in, lock and UAC screens)".into(),
+                );
+                None
+            }
+            Ok(code) => Some(format!("installing the service failed (exit code {code})")),
+            Err(error) => Some(format!("the service was not installed: {error}")),
+        };
+        // Nothing half done (the administrator's prompt declined, 2026-11-23: new programs were left beside the
+        // earlier service, the earlier ones in Queqiao.old): the earlier version back, or none at all.
+        if let Some(error) = failed {
+            return Err(undo(&target, &old, had_earlier, &error, lines));
         }
     }
 
@@ -266,16 +275,44 @@ fn start_and_watch(agent: &Path) -> Result<String, String> {
 
 /// The earlier installation back in place and its agent started; the error to report.
 fn roll_back(target: &Path, old: &Path, error: &str, lines: &mut Vec<String>) -> String {
-    stop_running(target, lines);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while target.exists() && std::fs::remove_dir_all(target).is_err() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    if let Err(problem) = std::fs::rename(old, target) {
-        return format!(
+    match put_back(target, old, lines) {
+        Ok(()) => format!("the update did not keep running ({error}): the earlier version is back"),
+        Err(problem) => format!(
             "the update did not keep running ({error}), and the earlier version could not be put back: {problem}"
-        );
+        ),
     }
+}
+
+/// After a step failed once the new programs were placed: the earlier installation back and its agent started
+/// again (`had_earlier`), or the new programs removed (a first installation). The error, for the report.
+fn undo(
+    target: &Path,
+    old: &Path,
+    had_earlier: bool,
+    error: &str,
+    lines: &mut Vec<String>,
+) -> String {
+    if had_earlier {
+        return match put_back(target, old, lines) {
+            Ok(()) => format!("{error}: the earlier version is back"),
+            Err(problem) => {
+                format!("{error}, and the earlier version could not be put back: {problem}")
+            }
+        };
+    }
+    stop_running(target, lines);
+    remove_folder(target);
+    if target.exists() {
+        return format!("{error}, and {} could not be removed", target.display());
+    }
+    format!("{error}: nothing was installed")
+}
+
+/// The new programs removed, the earlier ones (`old`) back in their place, their agent started again.
+fn put_back(target: &Path, old: &Path, lines: &mut Vec<String>) -> Result<(), String> {
+    stop_running(target, lines);
+    remove_folder(target);
+    std::fs::rename(old, target).map_err(|problem| problem.to_string())?;
     lines.push("the earlier version is back".into());
     match start_and_watch(&target.join(PROGRAMS[1])) {
         Ok(note) => lines.push(format!("earlier version: {note}")),
@@ -283,7 +320,15 @@ fn roll_back(target: &Path, old: &Path, error: &str, lines: &mut Vec<String>) ->
             "the earlier agent did not keep running either: {problem}"
         )),
     }
-    format!("the update did not keep running ({error}): the earlier version is back")
+    Ok(())
+}
+
+/// Removes `folder`, trying again for 10 s (a program that was just stopped may still hold its files).
+fn remove_folder(folder: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while folder.exists() && std::fs::remove_dir_all(folder).is_err() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(300));
+    }
 }
 
 fn place(entries: &[Entry], target: &Path) -> Result<(), String> {
@@ -716,3 +761,76 @@ fn delete_tree(key: &str) -> Result<(), String> {
 
 /// For std::process::Command on Windows.
 use std::os::windows::process::CommandExt;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of its own under %TEMP% with `files` (name, content) in `name`.
+    fn folder(root: &Path, name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let path = root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        for (file, content) in files {
+            std::fs::write(path.join(file), content).unwrap();
+        }
+        path
+    }
+
+    fn scratch(test: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("queqiao_undo_{test}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn an_update_whose_service_step_failed_puts_the_earlier_version_back() {
+        let root = scratch("update");
+        let target = folder(&root, "Queqiao", &[("queqiao-viewer.exe", "new")]);
+        let old = folder(&root, "Queqiao.old", &[("queqiao-viewer.exe", "earlier")]);
+        let mut lines = Vec::new();
+        let error = undo(
+            &target,
+            &old,
+            true,
+            "the service was not installed: cancelled",
+            &mut lines,
+        );
+        assert_eq!(
+            error,
+            "the service was not installed: cancelled: the earlier version is back"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("queqiao-viewer.exe")).unwrap(),
+            "earlier"
+        );
+        assert!(!old.exists(), "Queqiao.old is left");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "the earlier version is back")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_first_installation_whose_service_step_failed_leaves_nothing() {
+        let root = scratch("first");
+        let target = folder(&root, "Queqiao", &[("queqiao-viewer.exe", "new")]);
+        let old = root.join("Queqiao.old");
+        let mut lines = Vec::new();
+        let error = undo(
+            &target,
+            &old,
+            false,
+            "installing the service failed (exit code 1)",
+            &mut lines,
+        );
+        assert_eq!(
+            error,
+            "installing the service failed (exit code 1): nothing was installed"
+        );
+        assert!(!target.exists(), "the new programs are left");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

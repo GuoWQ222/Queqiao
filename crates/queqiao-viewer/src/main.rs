@@ -191,6 +191,8 @@ struct Options {
     input_test: bool,
     /// Tests: the card of figures on and the bar kept out from the start.
     figures: bool,
+    /// Tests: the session picture (--ui-pictures) this many seconds after the first picture (default 3).
+    picture_at: Option<u64>,
     /// Tests: a picture of the session window with its bar and card (viewer_session.bmp) into this folder.
     ui_pictures: Option<PathBuf>,
     /// For tests: send a clipboard text once the data channel is open.
@@ -522,6 +524,7 @@ fn test_switch(
         "--report" => options.report = args.next().map(PathBuf::from),
         "--input-test" => options.input_test = true,
         "--figures" => options.figures = true,
+        "--picture-at" => options.picture_at = Some(args.next()?.parse().ok()?),
         "--ui-pictures" => options.ui_pictures = Some(PathBuf::from(args.next()?)),
         "--clipboard-test" => options.clipboard_test = true,
         "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
@@ -1797,6 +1800,8 @@ fn run_session(
     }
     // Tests: the picture of the window with its overlays, taken once, a few seconds after the first picture.
     let mut overlay_picture = options.ui_pictures.clone();
+    let mut course: Vec<String> = Vec::new();
+    let mut course_at = (Instant::now(), 0usize, 0u32, 0u32);
     // Then one with the bar let go, tucked into its tab (unless the pointer is at the top of the window).
     let mut tucked_picture: Option<(PathBuf, Instant)> = None;
     window.check_menu_item(MENU_PRIVACY, privacy_on);
@@ -1809,7 +1814,7 @@ fn run_session(
             overlay.tick();
         }
         if let Some(shown) = first_picture_after
-            && started.elapsed() > shown + Duration::from_secs(3)
+            && started.elapsed() > shown + Duration::from_secs(options.picture_at.unwrap_or(3))
             && let Some(folder) = overlay_picture.take()
         {
             let path = folder.join("viewer_session.bmp");
@@ -1846,6 +1851,18 @@ fn run_session(
                     Err(error) => lines.push(format!("not sent: {error}")),
                 }
             }
+        }
+        // The report: once a second for the first two minutes, what arrived (Mbit/s), frames shown, L: frames after a
+        // loss among them.
+        if course.len() < 120 && course_at.0.elapsed() >= Duration::from_secs(1) {
+            let seconds = course_at.0.elapsed().as_secs_f64();
+            course.push(format!(
+                "{:.1}@{:.0}{}",
+                (stats.bytes - course_at.1) as f64 * 8.0 / seconds / 1e6,
+                f64::from(stats.shown - course_at.2) / seconds,
+                if stats.lost > course_at.3 { "L" } else { "" }
+            ));
+            course_at = (Instant::now(), stats.bytes, stats.shown, stats.lost);
         }
         if let Some((fps, rate)) = status.update(&window, &stats)
             && let Some(overlay) = overlay.as_mut()
@@ -2813,6 +2830,10 @@ fn run_session(
             stats.waiting_for_keyframe
         ));
     }
+    lines.push(format!(
+        "arrival course, every second (Mbit/s@frames shown, L after a loss): {}",
+        course.join(" ")
+    ));
     lines.push(format!("decode, ms: {}", summary(&mut stats.decode_ms)));
     // In order, one every half second: how the round trip went while files or clipboard images were moving.
     let course: Vec<String> = stats
