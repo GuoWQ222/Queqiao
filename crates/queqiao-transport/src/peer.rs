@@ -36,6 +36,7 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use crate::fec;
 use crate::flow::{self, Flow};
 use crate::gather::{ExtraDeadline, gather, gather_extra};
+use crate::quic::{self, Quic, QuicEvent};
 use crate::signal::Signaling;
 use crate::turn::{Incoming, TurnClient};
 use crate::{Error, err};
@@ -152,6 +153,8 @@ pub struct Peer {
     flow_cap: Arc<AtomicUsize>,
     /// Tests (QUEQIAO_FORCE=flow:<kB>): each stream's cap fixed instead, to measure what the cap costs.
     fixed_cap: Option<usize>,
+    /// The files go over QUIC (quic.rs), not over their data channel.
+    files_on_quic: Arc<AtomicBool>,
 }
 
 /// Bulk data with a data channel of its own and flow control: a sender keeps no more in flight on each than the
@@ -201,6 +204,10 @@ struct InFlight {
 /// Bytes a sender keeps in flight at most on one stream (queued for the network thread plus in the channel's
 /// buffer); usually less: as much as the path needs (see [`crate::flow`]).
 pub const STREAM_IN_FLIGHT: usize = 1024 * 1024;
+
+/// Bytes the files keep waiting for QUIC at most (its own send window holds 8 MB more): QUIC paces and controls its
+/// congestion itself, and has a channel of its own, so nothing waits behind the files.
+const QUIC_IN_FLIGHT: usize = 4 * 1024 * 1024;
 
 impl Peer {
     /// Negotiates over `signal` (the viewer offers, the agent answers) and starts the network thread, offering
@@ -281,6 +288,21 @@ impl Peer {
         });
         let gathered = gathered?;
         let mut notes = gathered.notes;
+        // The files over QUIC when both sides offer it (each side's certificate fingerprint in its SDP). Tests:
+        // QUEQIAO_FORCE=files:sctp keeps them on their data channel.
+        let identity = if queqiao_core::forced("files").as_deref() == Some("sctp") {
+            notes.push("files: QUIC off (QUEQIAO_FORCE=files:sctp)".into());
+            None
+        } else {
+            match quic::Identity::new() {
+                Ok(identity) => Some(identity),
+                Err(error) => {
+                    notes.push(format!("files: no QUIC ({error})"));
+                    None
+                }
+            }
+        };
+        let peer_quic: Option<String>;
         set_sctp_timeouts();
         let mut rtc = tune(
             RtcConfig::new()
@@ -328,17 +350,55 @@ impl Peer {
                 let (offer, pending) = api
                     .apply()
                     .ok_or_else(|| Error("nothing to offer".into()))?;
-                signal.send("offer", &offer.to_sdp_string())?;
-                let answer = SdpAnswer::from_sdp_string(&signal.expect("answer")?).map_err(err)?;
+                let offer = match &identity {
+                    Some(identity) => quic::add_to_sdp(&offer.to_sdp_string(), identity),
+                    None => offer.to_sdp_string(),
+                };
+                signal.send("offer", &offer)?;
+                let answer = signal.expect("answer")?;
+                peer_quic = quic::from_sdp(&answer);
+                let answer = SdpAnswer::from_sdp_string(&answer).map_err(err)?;
                 rtc.sdp_api().accept_answer(pending, answer).map_err(err)?;
             }
             Role::Agent => {
-                let offer = SdpOffer::from_sdp_string(&signal.expect("offer")?).map_err(err)?;
+                let offer = signal.expect("offer")?;
+                peer_quic = quic::from_sdp(&offer);
+                let offer = SdpOffer::from_sdp_string(&offer).map_err(err)?;
                 let answer = rtc.sdp_api().accept_offer(offer).map_err(err)?;
-                signal.send("answer", &answer.to_sdp_string())?;
+                let answer = match (&identity, &peer_quic) {
+                    (Some(identity), Some(_)) => {
+                        quic::add_to_sdp(&answer.to_sdp_string(), identity)
+                    }
+                    _ => answer.to_sdp_string(),
+                };
+                signal.send("answer", &answer)?;
             }
         }
 
+        let quic = match (&identity, &peer_quic) {
+            (Some(identity), Some(fingerprint)) => {
+                let made = match role {
+                    Role::Viewer => Quic::client(identity, fingerprint),
+                    Role::Agent => Quic::server(identity, fingerprint),
+                };
+                match made {
+                    Ok(quic) => {
+                        notes.push("files: over QUIC (both sides offer it)".into());
+                        Some(quic)
+                    }
+                    Err(error) => {
+                        notes.push(format!("files: over SCTP ({error})"));
+                        None
+                    }
+                }
+            }
+            (Some(_), None) => {
+                notes.push("files: over SCTP (the other side offers no QUIC)".into());
+                None
+            }
+            (None, _) => None,
+        };
+        let files_on_quic = Arc::new(AtomicBool::new(false));
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         // The wake-up goes to the main socket, which listens on its own address only.
@@ -398,6 +458,9 @@ impl Peer {
             shaper: queqiao_core::forced("shape")
                 .as_deref()
                 .and_then(crate::shape::Shaper::from_spec),
+            quic,
+            quic_pair: None,
+            files_on_quic: files_on_quic.clone(),
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -420,6 +483,7 @@ impl Peer {
             fixed_cap: queqiao_core::forced("flow")
                 .and_then(|kb| kb.parse::<usize>().ok())
                 .map(|kb| kb * 1024),
+            files_on_quic,
         })
     }
 
@@ -458,6 +522,9 @@ impl Peer {
             let counters = &self.in_flight[stream.index()];
             counters.queued.load(Ordering::Relaxed) + counters.buffered.load(Ordering::Relaxed)
         };
+        if stream == Stream::Files && self.files_on_quic.load(Ordering::Relaxed) {
+            return QUIC_IN_FLIGHT.saturating_sub(in_flight(stream));
+        }
         let others = Stream::ALL
             .into_iter()
             .filter(|other| *other != stream && in_flight(*other) > 0)
@@ -731,6 +798,11 @@ struct Network {
     fec_rx: fec::Receiver,
     /// Tests: a bottleneck for what this side sends (QUEQIAO_FORCE=shape:<kbit/s>/<queue ms>/<loss per mille>).
     shaper: Option<crate::shape::Shaper>,
+    /// The file channel over QUIC while it is negotiated and has not failed; its datagrams go over the selected
+    /// pair (source, destination), the one DTLS and SRTP use.
+    quic: Option<Quic>,
+    quic_pair: Option<(SocketAddr, SocketAddr)>,
+    files_on_quic: Arc<AtomicBool>,
 }
 
 impl Drop for Network {
@@ -873,6 +945,10 @@ impl Network {
                 Output::Timeout(deadline) => {
                     self.flush_turn();
                     self.flush_channels();
+                    let deadline = match self.pump_quic() {
+                        Some(quic) => deadline.min(quic),
+                        None => deadline,
+                    };
                     return Ok(Some(deadline));
                 }
                 Output::Transmit(packet) => {
@@ -892,6 +968,7 @@ impl Network {
                     // DTLS and SRTP packets (first byte 20 and up; STUN starts with 0 or 1) go only on the
                     // selected pair, so they show which way the session goes.
                     if self.connected && packet.contents.first().is_some_and(|byte| *byte >= 20) {
+                        self.quic_pair = Some((packet.source, packet.destination));
                         let path = match relayed {
                             Some(server) => {
                                 format!("relayed through {server} to {}", packet.destination)
@@ -961,10 +1038,18 @@ impl Network {
             Event::ChannelOpen(id, label) => match Stream::from_label(&label) {
                 Some(stream) => {
                     self.streams[stream.index()] = Some(id);
-                    Some(PeerEvent::StreamOpen(stream))
+                    // While QUIC carries (or may yet carry) the files, their data channel stays unused.
+                    if stream == Stream::Files && self.quic.is_some() {
+                        None
+                    } else {
+                        Some(PeerEvent::StreamOpen(stream))
+                    }
                 }
                 None => {
                     self.channel = Some(id);
+                    if let Some(quic) = self.quic.as_mut() {
+                        quic.start(Instant::now());
+                    }
                     Some(PeerEvent::ChannelOpen)
                 }
             },
@@ -1129,6 +1214,17 @@ impl Network {
                 }
                 self.flush_channels();
             }
+            Command::StreamData(stream, bytes)
+                if stream == Stream::Files && self.files_on_quic.load(Ordering::Relaxed) =>
+            {
+                self.in_flight[stream.index()]
+                    .queued
+                    .fetch_sub(bytes.len(), Ordering::Relaxed);
+                if let Some(quic) = self.quic.as_mut() {
+                    quic.send(&bytes);
+                }
+                self.pump_quic();
+            }
             Command::StreamData(stream, bytes) => {
                 self.stream_pending[stream.index()].push_back(bytes);
                 self.flush_channels();
@@ -1251,6 +1347,61 @@ impl Network {
         self.flow_cap.store(self.flow.cap(), Ordering::Relaxed);
     }
 
+    /// Runs QUIC: its datagrams out over the selected pair, its events to the peer. When it next needs running.
+    fn pump_quic(&mut self) -> Option<Instant> {
+        let quic = self.quic.as_mut()?;
+        let (datagrams, events) = quic.poll(Instant::now());
+        let queued = quic.queued();
+        let next = quic.next_timeout();
+        if let Some((source, destination)) = self.quic_pair {
+            for datagram in &datagrams {
+                self.send_datagram(source, destination, datagram);
+            }
+        }
+        if self.files_on_quic.load(Ordering::Relaxed) {
+            self.in_flight[Stream::Files.index()]
+                .buffered
+                .store(queued, Ordering::Relaxed);
+        }
+        for event in events {
+            match event {
+                QuicEvent::Open => {
+                    self.files_on_quic.store(true, Ordering::Relaxed);
+                    let _ = self
+                        .events
+                        .send(PeerEvent::Note("files: QUIC connected".into()));
+                    let _ = self.events.send(PeerEvent::StreamOpen(Stream::Files));
+                }
+                QuicEvent::Message(message) => {
+                    let _ = self
+                        .events
+                        .send(PeerEvent::StreamData(Stream::Files, message));
+                }
+                QuicEvent::Failed(reason) => {
+                    // The files go over their data channel from now on (open already, or when it opens).
+                    let was_on_quic = self.files_on_quic.swap(false, Ordering::Relaxed);
+                    self.quic = None;
+                    self.in_flight[Stream::Files.index()]
+                        .buffered
+                        .store(0, Ordering::Relaxed);
+                    let _ = self.events.send(PeerEvent::Note(format!(
+                        "files: QUIC {} ({reason}); over SCTP from now on",
+                        if was_on_quic {
+                            "ended"
+                        } else {
+                            "did not connect"
+                        }
+                    )));
+                    if self.streams[Stream::Files.index()].is_some() {
+                        let _ = self.events.send(PeerEvent::StreamOpen(Stream::Files));
+                    }
+                    return None;
+                }
+            }
+        }
+        next
+    }
+
     fn flush_turn(&mut self) {
         if let Some(turn) = self.turn.as_mut() {
             for datagram in turn.take_outbox() {
@@ -1355,6 +1506,13 @@ impl Network {
         datagram: &[u8],
     ) -> Result<(), Error> {
         let now = Instant::now();
+        if datagram.first() == Some(&quic::MAGIC) {
+            if let Some(quic) = self.quic.as_mut() {
+                quic.receive(now, &datagram[1..]);
+                self.pump_quic();
+            }
+            return Ok(());
+        }
         let rebuilt = if datagram.first() == Some(&fec::MAGIC) {
             self.fec_rx.parity(datagram, now)
         } else {

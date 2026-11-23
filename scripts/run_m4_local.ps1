@@ -366,6 +366,10 @@ try {
                 # Parity for the video (FEC): the viewer said it uses it, the agent sends it, the viewer gets it.
                 $fecPattern = if ($program -eq 'agent') { '^video parity \(FEC\): on' } else { 'parity: [1-9]\d* came' }
                 if (-not ($text | Where-Object { $_ -match $fecPattern })) { $failed += "$label $program (expected '$fecPattern')" }
+                # The files go over QUIC (both sides offer it, each pinning the other's certificate from the SDP): the
+                # 21 MB each way above went through it.
+                if (-not ($text | Where-Object { $_ -match '^\d+ ms: files: QUIC connected' })) { $failed += "$label $program (expected 'files: QUIC connected')" }
+                if ($text | Where-Object { $_ -match 'files: QUIC (ended|did not connect)' }) { $failed += "$label $program (QUIC failed: $(($text | Where-Object { $_ -match 'files: QUIC (ended|did not connect)' }) -join ' / '))" }
             }
             # The drag session: what the agent sent while the window moved (seconds 6 to 15) stays near the 4 Mbit/s
             # the viewer asked for (the peak is 1.5 times the mean: 6 Mbit/s and some room).
