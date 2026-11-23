@@ -166,6 +166,8 @@ pub fn set_integrity_level(
 /// Whether this process runs above the person's own level: at High integrity without being elevated. The service
 /// starts the person's agent so (the security review of 2026-11-22): the person's other programs, at Medium, can then
 /// not hook it, send its windows messages or open its threads. (An administrator's full token is High already.)
+/// Exactly High, the level the service sets: a service account's own System level is not raised (the agent for the
+/// sign-in screen, as LocalService, reported "raised by the service" on sunshine on 2026-11-23).
 pub fn runs_raised() -> bool {
     use windows::Win32::Security::{
         GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
@@ -185,7 +187,7 @@ pub fn runs_raised() -> bool {
         )
     }
     .map_or(true, |()| elevation.TokenIsElevated != 0);
-    !elevated && integrity_level(token.0).is_some_and(|level| level >= HIGH_INTEGRITY)
+    !elevated && integrity_level(token.0) == Some(HIGH_INTEGRITY)
 }
 
 /// The token for the programs this process starts: when it runs raised, a copy at Medium again (the viewer, Explorer

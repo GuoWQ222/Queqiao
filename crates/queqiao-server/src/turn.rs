@@ -870,8 +870,25 @@ mod tests {
             );
         }
         let lan = config(true);
-        assert!(lan.peer_allowed("192.168.1.5:5000".parse().unwrap()));
-        assert!(lan.peer_allowed("100.99.120.92:5000".parse().unwrap()));
+        // Private addresses that are not this machine's own, which is refused (below): a fixed one can be. The test
+        // failed on sunshine on 2026-11-23, whose Tailscale address 100.99.120.92 was the one written here.
+        let not_own = |candidates: [&str; 3]| -> SocketAddr {
+            candidates
+                .iter()
+                .map(|candidate| candidate.parse::<SocketAddr>().unwrap())
+                .find(|candidate| !this_machine(candidate.ip()))
+                .expect("one of three is not this machine's")
+        };
+        assert!(lan.peer_allowed(not_own([
+            "192.168.1.5:5000",
+            "192.168.77.13:5000",
+            "10.31.7.9:5000"
+        ])));
+        assert!(lan.peer_allowed(not_own([
+            "100.99.120.92:5000",
+            "100.101.7.21:5000",
+            "100.70.3.44:5000"
+        ])));
         assert!(!lan.peer_allowed("127.0.0.1:5000".parse().unwrap()));
         // This machine's own address (the one its default route leaves from), even where private ones may go.
         let own = std::net::UdpSocket::bind("0.0.0.0:0")
