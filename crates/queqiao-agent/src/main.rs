@@ -1898,16 +1898,18 @@ fn clipboard_size(paths: &[PathBuf]) -> u64 {
 }
 
 /// One report line per finished or failed file; finished ones go into the list of transfers (main window).
-fn report_files(outcomes: Vec<Outcome>, peer: &str, lines: &mut Vec<String>) {
+/// `at`: how long the session has been on (the report says when each file was done).
+fn report_files(outcomes: Vec<Outcome>, peer: &str, lines: &mut Vec<String>, at: Duration) {
+    let at = at.as_secs_f64();
     for outcome in outcomes {
         queqiao_files::history::record(&outcome, peer);
         lines.push(match outcome {
             Outcome::Sent { name, size } => {
-                format!("file sent: {name} ({size} bytes, checked by the viewer)")
+                format!("file sent: {name} ({size} bytes, checked by the viewer) after {at:.1} s")
             }
             Outcome::Received { path, size, .. } => {
                 format!(
-                    "file received: {} ({size} bytes, SHA-256 checked)",
+                    "file received: {} ({size} bytes, SHA-256 checked) after {at:.1} s",
                     path.display()
                 )
             }
@@ -2832,7 +2834,7 @@ fn session(
                     }
                 }
                 PeerEvent::StreamOpen(Stream::Files) => {
-                    report_files(transfers.opened(), viewer, lines)
+                    report_files(transfers.opened(), viewer, lines, started.elapsed())
                 }
                 PeerEvent::StreamOpen(Stream::Clipboard) => {}
                 PeerEvent::StreamData(Stream::Clipboard, bytes) => {
@@ -2904,7 +2906,7 @@ fn session(
                 }
             }
         }
-        report_files(outcomes, viewer, lines);
+        report_files(outcomes, viewer, lines, started.elapsed());
         for message in images.take(peer.room(Stream::Clipboard)) {
             peer.send_stream(Stream::Clipboard, message);
         }

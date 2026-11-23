@@ -323,6 +323,23 @@ try {
                 $titlePattern = "^window title: Queqiao - .+ \| \d+ ms \| \d+ fps \| \d+(\.\d)? [kM]bit/s \| $pathWord"
                 if (-not ($text | Where-Object { $_ -match $titlePattern })) { $failed += "$label viewer (expected '$titlePattern')" }
             }
+            # Input and control messages are not held up by files: the direct session moves a 21 MB file each way
+            # and clipboard images in its first seconds. One every half second, the round trips after the first two
+            # (the session starting) stay short (1 MB in flight per stream: 285 ms median, 2026-11-23); both sides
+            # measured the path's round trip (ICE's checks), which the flow control needs.
+            if ($label -eq 'direct' -and $mustPass) {
+                if ($program -eq 'viewer') {
+                    $course = $text | Where-Object { $_ -match '^network round trips, first minute, ms: (.+)$' } | Select-Object -First 1
+                    if ($course -match '^network round trips, first minute, ms: (.+)$') {
+                        $samples = @($Matches[1].Trim() -split ' ' | Select-Object -Skip 2 | ForEach-Object { [double]$_ } | Sort-Object)
+                        $middle = if ($samples.Count) { $samples[[int][Math]::Floor($samples.Count / 2)] } else { $null }
+                        if ($null -eq $middle -or $middle -gt 50) { $failed += "$label viewer (round trips while files move, median $middle ms > 50 ms: $($Matches[1]))" }
+                    } else {
+                        $failed += "$label viewer (expected 'network round trips, first minute')"
+                    }
+                }
+                if (-not ($text | Where-Object { $_ -match '^\d+ ms: path round trip \(STUN\), shortest so far: [\d.]+ ms' })) { $failed += "$label $program (expected 'path round trip (STUN)')" }
+            }
             # The session window's bar and card (the direct session has them on): pictures taken, "Figures" on the bar
             # clicked twice (the card off, then on).
             if ($label -eq 'direct' -and $program -eq 'viewer') {

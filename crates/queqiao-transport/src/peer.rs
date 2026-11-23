@@ -33,6 +33,7 @@ use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTi
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+use crate::flow::{self, Flow};
 use crate::gather::{ExtraDeadline, gather, gather_extra};
 use crate::signal::Signaling;
 use crate::turn::{Incoming, TurnClient};
@@ -142,10 +143,13 @@ pub struct Peer {
     thread: Option<JoinHandle<()>>,
     notes: Vec<String>,
     in_flight: Arc<[InFlight; STREAMS]>,
+    /// How much all streams together may have in flight (set by the network thread, [`crate::flow`]).
+    flow_cap: Arc<AtomicUsize>,
 }
 
-/// Bulk data with a data channel of its own, so it never delays input or control messages, and with flow
-/// control: a sender keeps at most [`STREAM_IN_FLIGHT`] bytes in flight on each.
+/// Bulk data with a data channel of its own and flow control: a sender keeps no more in flight on each than the
+/// path needs ([`crate::flow`]; at most [`STREAM_IN_FLIGHT`]). The channels share one SCTP queue, so whatever bulk
+/// data waits in it delays input and control messages: the flow control keeps that to about 25 ms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stream {
     /// File transfer.
@@ -188,7 +192,7 @@ struct InFlight {
 }
 
 /// Bytes a sender keeps in flight at most on one stream (queued for the network thread plus in the channel's
-/// buffer).
+/// buffer); usually less: as much as the path needs (see [`crate::flow`]).
 pub const STREAM_IN_FLIGHT: usize = 1024 * 1024;
 
 impl Peer {
@@ -326,6 +330,8 @@ impl Peer {
                 .spawn(move || receive_extra(socket, local, waker, wake_to, arrivals, stop))?;
         }
         let in_flight: Arc<[InFlight; STREAMS]> = Arc::new(Default::default());
+        let flow = Flow::new();
+        let flow_cap = Arc::new(AtomicUsize::new(flow.cap()));
         let mut network = Network {
             rtc,
             socket,
@@ -349,6 +355,10 @@ impl Peer {
             in_flight: in_flight.clone(),
             control_pending: VecDeque::new(),
             stream_pending: Default::default(),
+            flow,
+            flow_cap: flow_cap.clone(),
+            written: [0; STREAMS],
+            rtt_notes: 0,
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -367,6 +377,7 @@ impl Peer {
             thread: Some(thread),
             notes,
             in_flight,
+            flow_cap,
         })
     }
 
@@ -398,12 +409,23 @@ impl Peer {
         self.command(Command::StreamData(stream, bytes));
     }
 
-    /// How many more bytes may be sent on `stream` now ([`STREAM_IN_FLIGHT`] minus what is in flight).
+    /// How many more bytes may be sent on `stream` now: its share of what the path needs in flight
+    /// ([`crate::flow`]; busy streams share it), less what it has in flight.
     pub fn room(&self, stream: Stream) -> usize {
-        let counters = &self.in_flight[stream.index()];
-        let in_flight =
-            counters.queued.load(Ordering::Relaxed) + counters.buffered.load(Ordering::Relaxed);
-        STREAM_IN_FLIGHT.saturating_sub(in_flight)
+        let in_flight = |stream: Stream| {
+            let counters = &self.in_flight[stream.index()];
+            counters.queued.load(Ordering::Relaxed) + counters.buffered.load(Ordering::Relaxed)
+        };
+        let others = Stream::ALL
+            .into_iter()
+            .filter(|other| *other != stream && in_flight(*other) > 0)
+            .count();
+        flow::room(
+            self.flow_cap.load(Ordering::Relaxed),
+            in_flight(stream),
+            others,
+            STREAM_IN_FLIGHT,
+        )
     }
 
     /// The bitrate range the sender wants: the bandwidth estimate probes up to `desired` (str0m's BWE).
@@ -479,7 +501,8 @@ impl Drop for Peer {
 /// - bandwidth estimation (transport-wide congestion control) from `start`, which also paces the packets out
 ///   instead of sending a keyframe as one burst;
 /// - 4 MB of data-channel buffer (str0m's default of 128 kB refuses writes beyond it, which dropped file chunks)
-///   and messages up to 1 MiB (the default 256 KiB is just below a full clipboard message).
+///   and messages up to 1 MiB (the default 256 KiB is just below a full clipboard message);
+/// - stats once a second: the path's round trip (ICE's STUN checks) for the streams' flow control.
 pub fn tune(config: RtcConfig, start: Bitrate) -> RtcConfig {
     config
         .set_reordering_size_video(2048)
@@ -487,15 +510,18 @@ pub fn tune(config: RtcConfig, start: Bitrate) -> RtcConfig {
         .enable_bwe(Some(start))
         .set_sctp_max_buffered_amount(4 << 20)
         .set_sctp_max_message_size(1 << 20)
+        // Once a second: the path's round trip from ICE's checks, for the streams' flow control.
+        .set_stats_interval(Some(Duration::from_secs(1)))
 }
 
 /// Writes `pending` into channel `id` until str0m refuses (buffer full) or the queue is empty; `queued` counts the
-/// bytes still waiting.
+/// bytes still waiting, `written` those str0m took.
 fn flush_channel(
     rtc: &mut Rtc,
     id: Option<ChannelId>,
     pending: &mut VecDeque<Vec<u8>>,
     queued: Option<&AtomicUsize>,
+    mut written: Option<&mut u64>,
 ) {
     let Some(id) = id else {
         return;
@@ -508,6 +534,9 @@ fn flush_channel(
             Ok(true) => {
                 if let Some(queued) = queued {
                     queued.fetch_sub(bytes.len(), Ordering::Relaxed);
+                }
+                if let Some(written) = written.as_deref_mut() {
+                    *written += bytes.len() as u64;
                 }
                 pending.pop_front();
             }
@@ -616,6 +645,14 @@ struct Network {
     path: Option<String>,
     /// The latest time given to str0m: inputs never go back in time (deadlines are served up to 1 ms early).
     clock: Instant,
+    /// How much the streams may have in flight, from what the path delivers ([`crate::flow`]); the cap is shared
+    /// with the peer's `room`.
+    flow: Flow,
+    flow_cap: Arc<AtomicUsize>,
+    /// Bytes each stream has written into str0m so far (less its buffered amount: acknowledged).
+    written: [u64; STREAMS],
+    /// Notes on the path's round trip so far (a few at most).
+    rtt_notes: u32,
 }
 
 impl Drop for Network {
@@ -880,6 +917,23 @@ impl Network {
                     None => Some(PeerEvent::Data(data.data)),
                 }
             }
+            Event::PeerStats(stats) => {
+                let rtt = stats
+                    .selected_candidate_pair
+                    .and_then(|pair| pair.current_round_trip_time);
+                if let Some(rtt) = rtt
+                    && self.flow.path_rtt(rtt)
+                    && self.rtt_notes < 5
+                {
+                    self.rtt_notes += 1;
+                    Some(PeerEvent::Note(format!(
+                        "path round trip (STUN), shortest so far: {:.1} ms",
+                        rtt.as_secs_f64() * 1e3
+                    )))
+                } else {
+                    None
+                }
+            }
             Event::KeyframeRequest(_) => Some(PeerEvent::KeyframeRequested),
             Event::EgressBitrateEstimate(
                 BweKind::Twcc { estimate, .. } | BweKind::Remb { estimate, .. },
@@ -1037,7 +1091,14 @@ impl Network {
     /// Writes queued data-channel messages, in order, as far as str0m's buffer takes them (a refused write is
     /// kept and tried again later, so nothing is lost or reordered; messages wait for their channel to open).
     fn flush_channels(&mut self) {
-        flush_channel(&mut self.rtc, self.channel, &mut self.control_pending, None);
+        flush_channel(
+            &mut self.rtc,
+            self.channel,
+            &mut self.control_pending,
+            None,
+            None,
+        );
+        let mut acked = 0u64;
         for stream in Stream::ALL {
             let index = stream.index();
             flush_channel(
@@ -1045,15 +1106,22 @@ impl Network {
                 self.streams[index],
                 &mut self.stream_pending[index],
                 Some(&self.in_flight[index].queued),
+                Some(&mut self.written[index]),
             );
+            let mut buffered = 0;
             if let Some(id) = self.streams[index]
                 && let Some(mut channel) = self.rtc.channel(id)
             {
+                buffered = channel.buffered_amount();
                 self.in_flight[index]
                     .buffered
-                    .store(channel.buffered_amount(), Ordering::Relaxed);
+                    .store(buffered, Ordering::Relaxed);
             }
+            acked += self.written[index].saturating_sub(buffered as u64);
         }
+        // What the other side acknowledged sets how much the streams may have in flight.
+        self.flow.update(Instant::now(), acked);
+        self.flow_cap.store(self.flow.cap(), Ordering::Relaxed);
     }
 
     fn flush_turn(&mut self) {

@@ -2458,7 +2458,7 @@ fn run_session(
                 }
             }
         }
-        report_files(outcomes, agent, lines);
+        report_files(outcomes, agent, lines, started.elapsed());
         for message in images.take(peer.room(Stream::Clipboard)) {
             peer.send_stream(Stream::Clipboard, message);
         }
@@ -2530,7 +2530,7 @@ fn run_session(
                     }
                 }
                 PeerEvent::StreamOpen(Stream::Files) => {
-                    report_files(transfers.opened(), agent, lines)
+                    report_files(transfers.opened(), agent, lines, started.elapsed())
                 }
                 PeerEvent::StreamOpen(Stream::Clipboard) => {}
                 PeerEvent::StreamData(Stream::Clipboard, bytes) => {
@@ -2814,6 +2814,17 @@ fn run_session(
         ));
     }
     lines.push(format!("decode, ms: {}", summary(&mut stats.decode_ms)));
+    // In order, one every half second: how the round trip went while files or clipboard images were moving.
+    let course: Vec<String> = stats
+        .rtt_ms
+        .iter()
+        .take(120)
+        .map(|ms| format!("{ms:.0}"))
+        .collect();
+    lines.push(format!(
+        "network round trips, first minute, ms: {}",
+        course.join(" ")
+    ));
     lines.push(format!(
         "network round trip, ms: {}",
         summary(&mut stats.rtt_ms.clone())
@@ -3353,16 +3364,18 @@ fn clipboard_size(paths: &[PathBuf]) -> u64 {
 }
 
 /// One report line per finished or failed file; finished ones go into the list of transfers (main window).
-fn report_files(outcomes: Vec<Outcome>, peer: &str, lines: &mut Vec<String>) {
+/// `at`: how long the session has been on (the report says when each file was done).
+fn report_files(outcomes: Vec<Outcome>, peer: &str, lines: &mut Vec<String>, at: Duration) {
+    let at = at.as_secs_f64();
     for outcome in outcomes {
         queqiao_files::history::record(&outcome, peer);
         lines.push(match outcome {
             Outcome::Sent { name, size } => {
-                format!("file sent: {name} ({size} bytes, checked by the agent)")
+                format!("file sent: {name} ({size} bytes, checked by the agent) after {at:.1} s")
             }
             Outcome::Received { path, size, .. } => {
                 format!(
-                    "file received: {} ({size} bytes, SHA-256 checked)",
+                    "file received: {} ({size} bytes, SHA-256 checked) after {at:.1} s",
                     path.display()
                 )
             }

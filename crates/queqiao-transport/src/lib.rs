@@ -2,6 +2,7 @@
 //! SCTP data channel for input and control), driven on its own thread ([`Peer`]), and the signaling that
 //! sets it up ([`Signaling`]: a direct TCP connection ([`Signal`]) or queqiao-server through queqiao-account).
 
+mod flow;
 mod gather;
 mod interfaces;
 mod peer;
