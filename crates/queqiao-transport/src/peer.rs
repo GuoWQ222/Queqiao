@@ -359,6 +359,7 @@ impl Peer {
             flow_cap: flow_cap.clone(),
             written: [0; STREAMS],
             rtt_notes: 0,
+            video_noted: (0, 0, 0, None),
         };
         let thread = std::thread::Builder::new()
             .name("queqiao-net".into())
@@ -653,6 +654,9 @@ struct Network {
     written: [u64; STREAMS],
     /// Notes on the path's round trip so far (a few at most).
     rtt_notes: u32,
+    /// The video's RTP counters last noted (str0m's stats: packets, NACKs, PLIs), and when: a note at most every
+    /// 5 s while they change (the reports show how losses were repaired).
+    video_noted: (u64, u64, u64, Option<Instant>),
 }
 
 impl Drop for Network {
@@ -934,6 +938,28 @@ impl Network {
                     None
                 }
             }
+            Event::MediaEgressStats(stats) if Some(stats.mid) == self.mid => {
+                let lost = stats.remote.as_ref().map_or(String::new(), |remote| {
+                    format!(", {} lost by the other side's count", remote.packets_lost)
+                });
+                self.video_note(stats.packets, stats.nacks, stats.plis, || {
+                    format!(
+                        "video out: {} packets, {} NACKs and {} PLIs received{lost}",
+                        stats.packets, stats.nacks, stats.plis
+                    )
+                })
+            }
+            Event::MediaIngressStats(stats) if Some(stats.mid) == self.mid => {
+                self.video_note(stats.packets, stats.nacks, stats.plis, || {
+                    format!(
+                        "video in: {} packets, {} NACKs and {} PLIs sent, loss {:.1} %",
+                        stats.packets,
+                        stats.nacks,
+                        stats.plis,
+                        stats.loss.unwrap_or(0.0) * 100.0
+                    )
+                })
+            }
             Event::KeyframeRequest(_) => Some(PeerEvent::KeyframeRequested),
             Event::EgressBitrateEstimate(
                 BweKind::Twcc { estimate, .. } | BweKind::Remb { estimate, .. },
@@ -1139,6 +1165,23 @@ impl Network {
     fn clock(&mut self, at: Instant) -> Instant {
         self.clock = self.clock.max(at);
         self.clock
+    }
+
+    /// A note on the video's counters when NACKs or PLIs changed, at most every 5 s.
+    fn video_note(
+        &mut self,
+        packets: u64,
+        nacks: u64,
+        plis: u64,
+        text: impl FnOnce() -> String,
+    ) -> Option<PeerEvent> {
+        let (_, noted_nacks, noted_plis, at) = self.video_noted;
+        let changed = nacks != noted_nacks || plis != noted_plis;
+        if !changed || at.is_some_and(|at| at.elapsed() < Duration::from_secs(5)) {
+            return None;
+        }
+        self.video_noted = (packets, nacks, plis, Some(Instant::now()));
+        Some(PeerEvent::Note(text()))
     }
 
     fn ask_keyframe(&mut self, mid: Mid) {

@@ -1802,6 +1802,9 @@ fn run_session(
     let mut overlay_picture = options.ui_pictures.clone();
     let mut course: Vec<String> = Vec::new();
     let mut course_at = (Instant::now(), 0usize, 0u32, 0u32);
+    // Tests: pictures after a loss and after a keyframe (taken, and when due).
+    let mut moment_pictures = (0u32, 0u32);
+    let mut due_pictures: Vec<(Instant, String)> = Vec::new();
     // Then one with the bar let go, tucked into its tab (unless the pointer is at the top of the window).
     let mut tucked_picture: Option<(PathBuf, Instant)> = None;
     window.check_menu_item(MENU_PRIVACY, privacy_on);
@@ -1832,6 +1835,21 @@ fn run_session(
                 overlay.hover_for_test(None);
             }
             tucked_picture = Some((folder, Instant::now()));
+        }
+        if let Some(folder) = &options.ui_pictures {
+            let now = Instant::now();
+            for (_, name) in due_pictures.iter().filter(|(at, _)| *at <= now) {
+                let path = folder.join(name);
+                match queqiao_display::save_screen_picture(window.hwnd(), &path) {
+                    Ok(()) => lines.push(format!(
+                        "{} ms: picture {}",
+                        started.elapsed().as_millis(),
+                        path.display()
+                    )),
+                    Err(error) => lines.push(format!("picture {name}: {error}")),
+                }
+            }
+            due_pictures.retain(|(at, _)| *at > now);
         }
         if let Some((folder, since)) = &tucked_picture
             && since.elapsed() > Duration::from_millis(2500)
@@ -2628,6 +2646,21 @@ fn run_session(
                     if stats.shown == 0 && !queqiao_codec::is_keyframe(codec, &data) {
                         stats.waiting_for_keyframe += 1;
                         peer.request_keyframe();
+                    }
+                    // Tests: a picture of the window just after the first two frames after a loss and the first
+                    // two keyframes after the first picture (what the person saw then).
+                    if options.ui_pictures.is_some() && stats.shown > 0 {
+                        let soon = Instant::now() + Duration::from_millis(30);
+                        if !contiguous && moment_pictures.0 < 2 {
+                            moment_pictures.0 += 1;
+                            due_pictures
+                                .push((soon, format!("after_loss_{}.bmp", moment_pictures.0)));
+                        }
+                        if queqiao_codec::is_keyframe(codec, &data) && moment_pictures.1 < 2 {
+                            moment_pictures.1 += 1;
+                            due_pictures
+                                .push((soon, format!("after_keyframe_{}.bmp", moment_pictures.1)));
+                        }
                     }
                     let decode_start = Instant::now();
                     decoder

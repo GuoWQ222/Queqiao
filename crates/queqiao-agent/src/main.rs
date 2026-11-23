@@ -2140,6 +2140,9 @@ fn session(
     let mut bitrate_changes = 0u32;
     let mut course: Vec<String> = Vec::new();
     let mut course_at = (Instant::now(), 0usize, 0u32, 0u32);
+    // The report: every frame's size and each keyframe's (kB).
+    let mut frame_sizes: Vec<f64> = Vec::new();
+    let mut keyframe_sizes: Vec<String> = Vec::new();
     let mut lowest_bitrate = encoder.bitrate();
     let mut last_bitrate_change: Option<Instant> = None;
 
@@ -3173,6 +3176,12 @@ fn session(
                 stats.sent += 1;
                 stats.bytes += frame.data.len();
                 stats.keyframes += u32::from(frame.keyframe);
+                if frame_sizes.len() < 200_000 {
+                    frame_sizes.push(frame.data.len() as f64 / 1e3);
+                }
+                if frame.keyframe && keyframe_sizes.len() < 100 {
+                    keyframe_sizes.push(format!("{:.0}", frame.data.len() as f64 / 1e3));
+                }
                 peer.send_video(frame.data, time_90khz, encoder.codec());
                 let origin = if screen_time != 0 {
                     screen_time
@@ -3289,6 +3298,11 @@ fn session(
     lines.push(format!(
         "bitrate course, every second (estimate/encoder/sent Mbit/s@frames, K a keyframe): {}",
         course.join(" ")
+    ));
+    lines.push(format!(
+        "frame size, kB: {}; keyframes, kB: {}",
+        summary(&mut frame_sizes),
+        keyframe_sizes.join(" ")
     ));
     lines.push(format!(
         "bitrate: started at {:.1}, lowest {:.1}, last {:.1}, highest allowed {:.1} Mbit/s; {bitrate_changes} changes",
