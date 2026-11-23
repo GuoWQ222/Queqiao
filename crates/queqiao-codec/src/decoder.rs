@@ -8,6 +8,7 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
 use windows::core::{Error, Result};
 
+use crate::amf_decode::AmfDecoder;
 use crate::format::Codec;
 use crate::mf_decode::MfDecoder;
 use crate::nvdec::NvdecDecoder;
@@ -25,6 +26,8 @@ pub enum DecoderChoice {
     Vpl,
     /// NVIDIA's decoder driven directly (NVDEC).
     Nvdec,
+    /// AMD's decoder driven directly (AMF).
+    Amf,
 }
 
 impl DecoderChoice {
@@ -35,6 +38,7 @@ impl DecoderChoice {
             Some("software") => Self::Software,
             Some("vpl") => Self::Vpl,
             Some("nvdec") => Self::Nvdec,
+            Some("amf") => Self::Amf,
             _ => Self::Auto,
         }
     }
@@ -58,6 +62,7 @@ enum Backend {
     Software(Box<SoftwareDecoder>),
     Vpl(Box<VplDecoder>),
     Nvdec(Box<NvdecDecoder>),
+    Amf(Box<AmfDecoder>),
 }
 
 pub struct H264Decoder {
@@ -88,6 +93,9 @@ impl H264Decoder {
         if choice == DecoderChoice::Nvdec && codec == crate::VideoCodec::H264 {
             return Self::nvdec(device, context, Codec::H264);
         }
+        if choice == DecoderChoice::Amf && codec == crate::VideoCodec::H264 {
+            return Self::amf(device, context, Codec::H264);
+        }
         // H.265: Intel's decoder takes every kind (4:4:4, 10-bit); Windows' H.265 decoder Main only (its pictures come
         // as NV12).
         if codec == crate::VideoCodec::H265 {
@@ -108,6 +116,15 @@ impl H264Decoder {
                     });
                 }
                 Err(error) => skipped.push(format!("NVIDIA NVDEC: {}", error.message())),
+            }
+            match AmfDecoder::open(device, context, Codec::H265) {
+                Ok(decoder) => {
+                    return Ok(Self {
+                        backend: Backend::Amf(Box::new(decoder)),
+                        skipped,
+                    });
+                }
+                Err(error) => skipped.push(format!("AMD AMF: {}", error.message())),
             }
             return match MfDecoder::open(device, context, codec) {
                 Ok(decoder) => Ok(Self {
@@ -185,12 +202,21 @@ impl H264Decoder {
         })
     }
 
+    /// AMD's AMF decoder for `codec` (8 or 10 bits, 4:2:0); its pictures come as NV12 or P010.
+    pub fn amf(device: &ID3D11Device, context: &ID3D11DeviceContext, codec: Codec) -> Result<Self> {
+        AmfDecoder::open(device, context, codec).map(|decoder| Self {
+            backend: Backend::Amf(Box::new(decoder)),
+            skipped: Vec::new(),
+        })
+    }
+
     pub fn name(&self) -> &str {
         match &self.backend {
             Backend::Hardware(decoder) => &decoder.name,
             Backend::Software(decoder) => &decoder.name,
             Backend::Vpl(decoder) => &decoder.name,
             Backend::Nvdec(decoder) => &decoder.name,
+            Backend::Amf(decoder) => &decoder.name,
         }
     }
 
@@ -200,6 +226,7 @@ impl H264Decoder {
         match &self.backend {
             Backend::Vpl(decoder) => decoder.stream.clone(),
             Backend::Nvdec(decoder) => decoder.stream(),
+            Backend::Amf(decoder) => decoder.stream(),
             _ => String::new(),
         }
     }
@@ -210,7 +237,7 @@ impl H264Decoder {
         match &self.backend {
             Backend::Hardware(decoder) => decoder.cpu_frames == 0,
             Backend::Software(_) => false,
-            Backend::Vpl(_) | Backend::Nvdec(_) => true,
+            Backend::Vpl(_) | Backend::Nvdec(_) | Backend::Amf(_) => true,
         }
     }
 
@@ -227,6 +254,7 @@ impl H264Decoder {
             Backend::Software(decoder) => decoder.decode(data, time, out),
             Backend::Vpl(decoder) => decoder.decode(data, time, out),
             Backend::Nvdec(decoder) => decoder.decode(data, time, out),
+            Backend::Amf(decoder) => decoder.decode(data, time, out),
         }
     }
 }

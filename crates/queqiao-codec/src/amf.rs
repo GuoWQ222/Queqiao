@@ -72,14 +72,14 @@ fn check(result: sys::AMF_RESULT, what: &str) -> Result<()> {
     }
 }
 
-fn int(value: i64) -> sys::AMFVariantStruct {
+pub(crate) fn int(value: i64) -> sys::AMFVariantStruct {
     let mut variant: sys::AMFVariantStruct = unsafe { zeroed() };
     variant.type_ = sys::AMF_VARIANT_INT64;
     variant.__bindgen_anon_1.int64Value = value;
     variant
 }
 
-fn boolean(value: bool) -> sys::AMFVariantStruct {
+pub(crate) fn boolean(value: bool) -> sys::AMFVariantStruct {
     let mut variant: sys::AMFVariantStruct = unsafe { zeroed() };
     variant.type_ = sys::AMF_VARIANT_BOOL;
     variant.__bindgen_anon_1.boolValue = u8::from(value);
@@ -152,6 +152,38 @@ const HEVC: Names = Names {
     force_picture: w!("HevcForcePictureType"),
 };
 
+/// AMD's runtime from the graphics driver (amfrt64.dll) and its factory, at the newest version both know.
+pub(crate) fn factory() -> Result<(HMODULE, *mut sys::AMFFactory)> {
+    let library = unsafe { LoadLibraryExW(w!("amfrt64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+        .map_err(|e| Error::new(e.code(), "no AMD graphics driver with AMF (amfrt64.dll)"))?;
+    let made = (|| {
+        let query = unsafe { GetProcAddress(library, s!("AMFQueryVersion")) }
+            .ok_or_else(|| Error::new(E_FAIL, "AMFQueryVersion missing"))?;
+        let query: QueryVersion = unsafe { std::mem::transmute::<_, QueryVersion>(query) };
+        let mut runtime = 0u64;
+        check(unsafe { query(&mut runtime) }, "runtime version")?;
+        if runtime < OLDEST {
+            return Err(Error::new(
+                E_FAIL,
+                format!("the AMD driver's AMF ({runtime:x}) is older than 1.4"),
+            ));
+        }
+        let init = unsafe { GetProcAddress(library, s!("AMFInit")) }
+            .ok_or_else(|| Error::new(E_FAIL, "AMFInit missing"))?;
+        let init: Init = unsafe { std::mem::transmute::<_, Init>(init) };
+        let mut factory: *mut sys::AMFFactory = null_mut();
+        check(unsafe { init(runtime.min(HEADERS), &mut factory) }, "init")?;
+        Ok(factory)
+    })();
+    match made {
+        Ok(factory) => Ok((library, factory)),
+        Err(error) => {
+            let _ = unsafe { FreeLibrary(library) };
+            Err(error)
+        }
+    }
+}
+
 type Init = unsafe extern "C" fn(u64, *mut *mut sys::AMFFactory) -> sys::AMF_RESULT;
 type QueryVersion = unsafe extern "C" fn(*mut u64) -> sys::AMF_RESULT;
 
@@ -181,11 +213,7 @@ impl AmfEncoder {
                 "AMD's encoders make H.264 in 8 bits only",
             ));
         }
-        let library =
-            unsafe { LoadLibraryExW(w!("amfrt64.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
-                .map_err(|e| {
-                    Error::new(e.code(), "no AMD graphics driver with AMF (amfrt64.dll)")
-                })?;
+        let (library, factory) = factory()?;
         let mut encoder = AmfEncoder {
             library,
             context: null_mut(),
@@ -200,27 +228,16 @@ impl AmfEncoder {
             format,
         };
         // From here on, Drop cleans up whatever was made.
-        encoder.start(device, config)?;
+        encoder.start(device, config, factory)?;
         Ok(encoder)
     }
 
-    fn start(&mut self, device: &ID3D11Device, config: &EncoderConfig) -> Result<()> {
-        let query = unsafe { GetProcAddress(self.library, s!("AMFQueryVersion")) }
-            .ok_or_else(|| Error::new(E_FAIL, "AMFQueryVersion missing"))?;
-        let query: QueryVersion = unsafe { std::mem::transmute::<_, QueryVersion>(query) };
-        let mut runtime = 0u64;
-        check(unsafe { query(&mut runtime) }, "runtime version")?;
-        if runtime < OLDEST {
-            return Err(Error::new(
-                E_FAIL,
-                format!("the AMD driver's AMF ({:x}) is older than 1.4", runtime),
-            ));
-        }
-        let init = unsafe { GetProcAddress(self.library, s!("AMFInit")) }
-            .ok_or_else(|| Error::new(E_FAIL, "AMFInit missing"))?;
-        let init: Init = unsafe { std::mem::transmute::<_, Init>(init) };
-        let mut factory: *mut sys::AMFFactory = null_mut();
-        check(unsafe { init(runtime.min(HEADERS), &mut factory) }, "init")?;
+    fn start(
+        &mut self,
+        device: &ID3D11Device,
+        config: &EncoderConfig,
+        factory: *mut sys::AMFFactory,
+    ) -> Result<()> {
         unsafe {
             check(call!(factory, CreateContext, &mut self.context)?, "context")?;
             check(

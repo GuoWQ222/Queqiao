@@ -593,7 +593,7 @@ fn judge(score: &Score, pattern: bool, stream: &str, wanted: EncodeFormat) -> (S
     )
 }
 
-/// The decoder decode= names: nvdec (NVIDIA's), else vpl (Intel's).
+/// The decoder decode= names: nvdec (NVIDIA's), amf (AMD's), else vpl (Intel's).
 fn probe_decoder(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
@@ -601,6 +601,7 @@ fn probe_decoder(
 ) -> Result<H264Decoder, String> {
     match std::env::var("QUEQIAO_PROBE_DECODE").as_deref() {
         Ok("nvdec") => H264Decoder::nvdec(device, context, codec),
+        Ok("amf") => H264Decoder::amf(device, context, codec),
         _ => H264Decoder::vpl(device, context, codec),
     }
     .map_err(describe)
