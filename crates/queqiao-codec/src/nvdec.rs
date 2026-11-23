@@ -231,7 +231,7 @@ fn check(result: sys::CUresult, what: &str) -> Result<()> {
 /// chroma interleaved (U V) at half size, 4:4:4 its U and V planes in full. BT.709, limited range.
 const SHADER: &str = r#"
 Texture2D<float> planes : register(t0);
-cbuffer Info : register(b0) { uint height; uint chroma444; uint unused0; uint unused1; };
+cbuffer Info : register(b0) { uint height; uint chroma444; uint ten_bit; uint unused; };
 float4 vs(uint id : SV_VertexID) : SV_Position {
     float2 uv = float2((id << 1) & 2, id & 2);
     return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
@@ -248,9 +248,13 @@ float4 ps(float4 position : SV_Position) : SV_Target {
         u = planes.Load(int3(c.x * 2, height + c.y, 0));
         v = planes.Load(int3(c.x * 2 + 1, height + c.y, 0));
     }
-    float l = (y - 16.0 / 255.0) * (255.0 / 219.0);
-    float cb = (u - 128.0 / 255.0) * (255.0 / 224.0);
-    float cr = (v - 128.0 / 255.0) * (255.0 / 224.0);
+    // The samples as code values: 8 bits (0-255), or 10 bits in the high bits of 16 (0-1023). Limited range: luma
+    // from 16 (64) over 219 (876) steps, chroma about 128 (512) over 224 (896).
+    float scale = ten_bit != 0 ? 65535.0 / 64.0 : 255.0;
+    float step = ten_bit != 0 ? 4.0 : 1.0;
+    float l = (y * scale - 16.0 * step) / (219.0 * step);
+    float cb = (u * scale - 128.0 * step) / (224.0 * step);
+    float cr = (v * scale - 128.0 * step) / (224.0 * step);
     return float4(saturate(l + 1.5748 * cr), saturate(l - 0.1873 * cb - 0.4681 * cr), saturate(l + 1.8556 * cb), 1);
 }
 "#;
@@ -584,7 +588,7 @@ impl NvdecDecoder {
         let copied = self.copy_planes(frame, pitch as usize, width, height, chroma444, depth);
         unsafe { (self.api.unmap_frame)(self.shared.decoder, frame) };
         copied?;
-        self.convert(width, height, chroma444, time)
+        self.convert(width, height, chroma444, depth > 0, time)
     }
 
     /// The textures for this shape (made again when it changes).
@@ -734,6 +738,7 @@ impl NvdecDecoder {
         width: u32,
         height: u32,
         chroma444: bool,
+        ten_bit: bool,
         time: i64,
     ) -> Result<DecodedFrame> {
         let surfaces = self
@@ -742,7 +747,7 @@ impl NvdecDecoder {
             .ok_or_else(|| Error::new(E_FAIL, "NVDEC: no textures"))?;
         let (texture, target) = surfaces.ring[surfaces.next].clone();
         surfaces.next = (surfaces.next + 1) % surfaces.ring.len();
-        let info: [u32; 4] = [height, u32::from(chroma444), 0, 0];
+        let info: [u32; 4] = [height, u32::from(chroma444), u32::from(ten_bit), 0];
         let viewport = D3D11_VIEWPORT {
             TopLeftX: 0.0,
             TopLeftY: 0.0,
