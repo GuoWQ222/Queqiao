@@ -1149,6 +1149,10 @@ fn dot(dc: HDC, area: &RECT, color: u32, ring: u32) {
 }
 
 fn text(dc: HDC, value: &str, area: RECT, font: HFONT, color: u32, flags: u32) {
+    // DrawTextW reads the text even when told it is 0 long: an empty Vec's dangling pointer crashes it.
+    if value.is_empty() {
+        return;
+    }
     let mut value: Vec<u16> = value.encode_utf16().collect();
     let mut area = area;
     unsafe {
@@ -1167,6 +1171,10 @@ fn text(dc: HDC, value: &str, area: RECT, font: HFONT, color: u32, flags: u32) {
 
 /// How wide `value` is in `font`, in pixels.
 fn text_width(dc: HDC, value: &str, font: HFONT) -> i32 {
+    // DrawTextW reads the text even when told it is 0 long: an empty Vec's dangling pointer crashes it.
+    if value.is_empty() {
+        return 0;
+    }
     let mut value: Vec<u16> = value.encode_utf16().collect();
     let mut area = RECT::default();
     unsafe {

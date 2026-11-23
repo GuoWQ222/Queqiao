@@ -1081,6 +1081,16 @@ pub fn pick_files(owner: Option<HWND>, title: &str) -> Vec<std::path::PathBuf> {
 
 /// Saves a window as it looks now (also when covered) as a 32-bit BMP file.
 pub fn save_window_picture(hwnd: HWND, path: &Path) -> std::io::Result<()> {
+    save_picture(hwnd, path, false)
+}
+
+/// As [`save_window_picture`], but copied from the screen: with what lies on top of the window (a session window's
+/// bar and card of figures, which are windows of their own).
+pub fn save_screen_picture(hwnd: HWND, path: &Path) -> std::io::Result<()> {
+    save_picture(hwnd, path, true)
+}
+
+fn save_picture(hwnd: HWND, path: &Path, from_screen: bool) -> std::io::Result<()> {
     let mut area = RECT::default();
     unsafe { GetWindowRect(hwnd, &mut area) }.map_err(std::io::Error::other)?;
     let (width, height) = (area.right - area.left, area.bottom - area.top);
@@ -1093,7 +1103,25 @@ pub fn save_window_picture(hwnd: HWND, path: &Path) -> std::io::Result<()> {
         let memory = CreateCompatibleDC(Some(screen));
         let bitmap = CreateCompatibleBitmap(screen, width, height);
         let old = SelectObject(memory, HGDIOBJ(bitmap.0));
-        let _ = PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT));
+        if from_screen {
+            // CAPTUREBLT: layered windows on top are copied too.
+            let _ = windows::Win32::Graphics::Gdi::BitBlt(
+                memory,
+                0,
+                0,
+                width,
+                height,
+                Some(screen),
+                area.left,
+                area.top,
+                windows::Win32::Graphics::Gdi::ROP_CODE(
+                    windows::Win32::Graphics::Gdi::SRCCOPY.0
+                        | windows::Win32::Graphics::Gdi::CAPTUREBLT.0,
+                ),
+            );
+        } else {
+            let _ = PrintWindow(hwnd, memory, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT));
+        }
         SelectObject(memory, old);
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {

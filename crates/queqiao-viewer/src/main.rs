@@ -57,6 +57,8 @@ const MENU_ACTUAL_SIZE: u16 = 0x1640;
 const MENU_HOTKEYS: u16 = 0x1650;
 const MENU_POINTER_SHAPE: u16 = 0x1660;
 const MENU_MICROPHONE: u16 = 0x16D0;
+/// The card of the session's figures at the bottom right (also on the bar).
+const MENU_FIGURES: u16 = 0x16E0;
 /// The picture's codec: (menu id, preference, label).
 const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 3] = [
     (
@@ -187,6 +189,10 @@ struct Options {
     width: Option<i32>,
     report: Option<PathBuf>,
     input_test: bool,
+    /// Tests: the card of figures on and the bar kept out from the start.
+    figures: bool,
+    /// Tests: a picture of the session window with its bar and card (viewer_session.bmp) into this folder.
+    ui_pictures: Option<PathBuf>,
     /// For tests: send a clipboard text once the data channel is open.
     clipboard_test: bool,
     /// Files to send once the session's files channel is open (tests; people drop files on the window).
@@ -322,12 +328,13 @@ impl TitleStatus {
         self.last.0 -= Duration::from_secs(1);
     }
 
-    fn update(&mut self, window: &Window, stats: &Stats) {
+    /// Once a second: the title anew; the frames per second and the data rate, for the card of figures.
+    fn update(&mut self, window: &Window, stats: &Stats) -> Option<(f64, String)> {
         let now = Instant::now();
         let (at, shown, bytes) = self.last;
         let seconds = now.duration_since(at).as_secs_f64();
         if seconds < 1.0 {
-            return;
+            return None;
         }
         let fps = f64::from(stats.shown.saturating_sub(shown)) / seconds;
         let kbit = stats.bytes.saturating_sub(bytes) as f64 * 8.0 / seconds / 1e3;
@@ -363,6 +370,7 @@ impl TitleStatus {
             self.title = title;
         }
         self.last = (now, stats.shown, stats.bytes);
+        Some((fps, rate))
     }
 }
 
@@ -513,6 +521,8 @@ fn test_switch(
         "--width" => options.width = args.next().and_then(|v| v.parse().ok()),
         "--report" => options.report = args.next().map(PathBuf::from),
         "--input-test" => options.input_test = true,
+        "--figures" => options.figures = true,
+        "--ui-pictures" => options.ui_pictures = Some(PathBuf::from(args.next()?)),
         "--clipboard-test" => options.clipboard_test = true,
         "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),
         "--sound-device" => options.sound_device = Some(args.next()?),
@@ -1578,6 +1588,7 @@ fn run_session(
         (MENU_FULL_SCREEN, full_screen_label.as_str()),
         (MENU_ON_TOP, tr("Always on top")),
         (MENU_SEND_FILES, tr("Send files...")),
+        (MENU_FIGURES, tr("Session figures")),
         (MENU_TRANSFERS, tr("Transfers...")),
         (MENU_CUSTOM_BITRATE, tr("Custom bitrate...")),
         (MENU_GAME_MOUSE, game_mouse_label.as_str()),
@@ -1729,12 +1740,104 @@ fn run_session(
     };
     // What the main window asked for, done once the session is up.
     let mut then = options.then;
+    // Queqiao's bar at the top (the session's commands, tucked away when the pointer leaves it) and the card of
+    // figures at the bottom right; the menu stays as it was.
+    use queqiao_display::{BAR_END, BAR_MORE, BarButton, Figures, SessionOverlay};
+    let mut overlay = SessionOverlay::new(
+        window.hwnd(),
+        agent,
+        vec![
+            BarButton {
+                glyph: "\u{E740}",
+                label: tr("Full screen").to_string(),
+                id: MENU_FULL_SCREEN,
+            },
+            BarButton {
+                glyph: "\u{E765}",
+                label: "Ctrl+Alt+Del".to_string(),
+                id: MENU_CTRL_ALT_DEL,
+            },
+            BarButton {
+                glyph: "\u{E898}",
+                label: tr("Send files").to_string(),
+                id: MENU_SEND_FILES,
+            },
+            BarButton {
+                glyph: "\u{E756}",
+                label: tr("Command line").to_string(),
+                id: MENU_TERMINAL,
+            },
+            BarButton {
+                glyph: "\u{E9D9}",
+                label: tr("Figures").to_string(),
+                id: MENU_FIGURES,
+            },
+            BarButton {
+                glyph: "\u{E712}",
+                label: String::new(),
+                id: BAR_MORE,
+            },
+            BarButton {
+                glyph: "\u{E711}",
+                label: tr("End").to_string(),
+                id: BAR_END,
+            },
+        ],
+    )
+    .map_err(|e| lines.push(format!("overlay: {}", describe(e))))
+    .ok();
+    if options.figures
+        && let Some(overlay) = overlay.as_mut()
+    {
+        overlay.set_card(true);
+        overlay.keep_bar_out(true);
+        // "Send files" as under the pointer: its highlight (and its tip on a bar without labels) in the picture.
+        overlay.hover_for_test(Some(2));
+        window.check_menu_item(MENU_FIGURES, true);
+    }
+    // Tests: the picture of the window with its overlays, taken once, a few seconds after the first picture.
+    let mut overlay_picture = options.ui_pictures.clone();
+    // Then one with the bar let go, tucked into its tab (unless the pointer is at the top of the window).
+    let mut tucked_picture: Option<(PathBuf, Instant)> = None;
     window.check_menu_item(MENU_PRIVACY, privacy_on);
     window.set_full_screen(options.full_screen);
     window.check_menu_item(MENU_SOUND, sound_on);
     let mut closed = None;
 
     'session: loop {
+        if let Some(overlay) = overlay.as_mut() {
+            overlay.tick();
+        }
+        if let Some(shown) = first_picture_after
+            && started.elapsed() > shown + Duration::from_secs(3)
+            && let Some(folder) = overlay_picture.take()
+        {
+            let path = folder.join("viewer_session.bmp");
+            match queqiao_display::save_screen_picture(window.hwnd(), &path) {
+                Ok(()) => lines.push(format!("session picture: {}", path.display())),
+                Err(error) => lines.push(format!("session picture: {error}")),
+            }
+            if let Some(overlay) = overlay.as_mut() {
+                for _ in 0..2 {
+                    if !overlay.click_for_test(MENU_FIGURES) {
+                        lines.push("bar: no Figures button to click".to_string());
+                    }
+                }
+                overlay.keep_bar_out(false);
+                overlay.hover_for_test(None);
+            }
+            tucked_picture = Some((folder, Instant::now()));
+        }
+        if let Some((folder, since)) = &tucked_picture
+            && since.elapsed() > Duration::from_millis(2500)
+        {
+            let path = folder.join("viewer_session_tucked.bmp");
+            match queqiao_display::save_screen_picture(window.hwnd(), &path) {
+                Ok(()) => lines.push(format!("session picture: {}", path.display())),
+                Err(error) => lines.push(format!("session picture: {error}")),
+            }
+            tucked_picture = None;
+        }
         // Files from the picker go as dropped ones do.
         while let Ok(paths) = picked.try_recv() {
             for path in &paths {
@@ -1744,7 +1847,29 @@ fn run_session(
                 }
             }
         }
-        status.update(&window, &stats);
+        if let Some((fps, rate)) = status.update(&window, &stats)
+            && let Some(overlay) = overlay.as_mut()
+        {
+            let codec = match decoder_codec {
+                queqiao_core::protocol::VideoCodec::Av1 => "AV1",
+                _ => "H.264",
+            };
+            let place = if decoder.name().contains("D3D11") {
+                "GPU"
+            } else {
+                "CPU"
+            };
+            overlay.set_figures(Figures {
+                relayed: status.relayed,
+                delay_ms: stats.rtt_ms.last().copied(),
+                fps,
+                rate,
+                codec: format!("{codec} · {place}"),
+                picture: picture_size,
+                elapsed: started.elapsed(),
+                delays: stats.rtt_ms.iter().rev().take(40).rev().copied().collect(),
+            });
+        }
         if end.is_some_and(|end| Instant::now() > end) {
             break;
         }
@@ -1805,6 +1930,15 @@ fn run_session(
                     }
                     MENU_SEND_FILES => {
                         start_picker();
+                        None
+                    }
+                    MENU_FIGURES => {
+                        if let Some(overlay) = overlay.as_mut() {
+                            let on = !overlay.card_shown();
+                            overlay.set_card(on);
+                            window.check_menu_item(MENU_FIGURES, on);
+                            lines.push(format!("card of figures: {}", if on { "on" } else { "off" }));
+                        }
                         None
                     }
                     MENU_COMMAND_LINES => {

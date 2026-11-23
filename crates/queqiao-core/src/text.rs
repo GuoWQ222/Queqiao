@@ -623,6 +623,16 @@ const CHINESE: &[(&str, &str)] = &[
     ("Send files...", "发送文件……"),
     ("Send files to {name}", "发送文件到 {name}"),
     ("All files", "所有文件"),
+    // The session window's bar and card of figures.
+    ("Full screen", "全屏"),
+    ("Figures", "数据"),
+    ("Session figures", "会话数据"),
+    ("Direct", "直连"),
+    ("Relayed", "中继"),
+    ("Data", "码率"),
+    ("Codec", "编码"),
+    ("Picture", "画面"),
+    ("Time", "时长"),
 ];
 
 #[cfg(test)]

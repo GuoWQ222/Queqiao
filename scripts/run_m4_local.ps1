@@ -201,7 +201,8 @@ try {
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0 --opacity 60 --boss-key-test' }
         if ($label -eq 'av1') { $viewerArgs += ' --codec av1 --mic-test' }
         # H.264 asked for (Automatic picks AV1 where both PCs have it on their GPUs): the H.264 path stays tested.
-        if ($label -eq 'direct') { $viewerArgs += ' --codec h264' }
+        # The bar and the card of figures on, and a picture of the window with them (viewer_session.bmp).
+        if ($label -eq 'direct') { $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out`"" }
         # Privacy screen: the agent shows a test square instead of darkening the monitors.
         if ($extra -like '*--privacy-test*') { $viewerArgs += " --privacy --max-bitrate 3000 --send-file `"$folderToAgent`" --clipboard-files-test `"$clipFile`"" }
         $soundTest = $AgentSoundDevice -and $ViewerSoundDevice
@@ -321,6 +322,13 @@ try {
                 $pathWord = if ($mode -eq 'network:relay') { 'relayed' } else { 'direct' }
                 $titlePattern = "^window title: Queqiao - .+ \| \d+ ms \| \d+ fps \| \d+(\.\d)? [kM]bit/s \| $pathWord"
                 if (-not ($text | Where-Object { $_ -match $titlePattern })) { $failed += "$label viewer (expected '$titlePattern')" }
+            }
+            # The session window's bar and card (the direct session has them on): pictures taken, "Figures" on the bar
+            # clicked twice (the card off, then on).
+            if ($label -eq 'direct' -and $program -eq 'viewer') {
+                foreach ($wanted in '^session picture: .+viewer_session\.bmp$', '^session picture: .+viewer_session_tucked\.bmp$', '^card of figures: off$', '^card of figures: on$') {
+                    if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label viewer (expected '$wanted')" }
+                }
             }
             if ($extra -like '*--clipboard-test*' -and -not ($text | Where-Object { $_ -match 'test image from the other side received: yes' })) {
                 $failed += "$label $program (expected the other side's test image)"
