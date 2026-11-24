@@ -32,8 +32,10 @@ mod nvdec;
 // dynlink_nvcuvid.h); regenerated with the relay's tools/gen_nvdec.ps1, never edited by hand.
 #[rustfmt::skip]
 #[allow(warnings, clippy::all)]
-#[cfg(windows)]
 mod nvdec_sys;
+// NVDEC on Linux: on CUDA, pictures into memory (Windows: nvdec.rs, into D3D11).
+#[cfg(target_os = "linux")]
+mod nvdec_linux;
 #[cfg(windows)]
 mod nvenc;
 mod nvenc_core;

@@ -11,7 +11,7 @@ use queqiao_core::text::tr;
 
 use crate::window::{
     FRAME_DETACH, FRAME_END, FRAME_EXIT, FRAME_INPUT, FRAME_OUTPUT, FRAME_RESIZE, FRAME_TITLE,
-    FRAME_TOKEN, TOKEN_VARIABLE, frame, read_frame,
+    FRAME_TOKEN, TOKEN_OPTION, frame, read_frame,
 };
 
 /// The terminal set raw while this lives; as it was again afterwards.
@@ -63,7 +63,11 @@ fn size() -> Option<(u16, u16)> {
 /// once).
 pub fn run_helper(socket: &str, title: &str, test: bool) -> i32 {
     set_title(title);
-    let token = std::env::var(TOKEN_VARIABLE).unwrap_or_default();
+    // The token the viewer put on this command line (after --terminal-token).
+    let token = std::env::args()
+        .skip_while(|arg| arg != TOKEN_OPTION)
+        .nth(1)
+        .unwrap_or_default();
     let Ok(mut stream) = UnixStream::connect(socket) else {
         write_text(&format!("{}\r\n", tr("Queqiao: the viewer is not there.")));
         std::thread::sleep(Duration::from_secs(5));

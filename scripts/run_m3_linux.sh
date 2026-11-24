@@ -9,7 +9,8 @@
 # viewer through its login form and device list as a person would, filled and pressed by the program, with pictures of
 # both: login.bmp and devices.bmp). Then the session's forms no session opens by itself (the transfer list, the
 # password form), by examples/linux_forms_probe, with pictures (transfers.bmp, password.bmp). main: the agent alone,
-# its main window's pages pictured (main_devices.bmp ...).
+# its main window's pages pictured (main_devices.bmp ...). h265: the viewer asks for H.265 (NVENC on the agent, NVDEC
+# on the viewer).
 # The agent's screen is Xvfb :91 with a clock and `top` (so the picture changes); the viewer's window is on Xvfb :92.
 # Everything the programs keep (the device's key, the saved logins, the single-instance lock) goes into the test's own
 # folder (XDG_CONFIG_HOME, XDG_STATE_HOME, XDG_RUNTIME_DIR), never the person's ~/.config/queqiao.
@@ -19,7 +20,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 seconds=${SECONDS_RUN:-20}
-sessions=${SESSIONS:-direct allowed declined ui main}
+sessions=${SESSIONS:-direct allowed declined ui main h265}
 out=/tmp/queqiao_m3
 rm -rf "$out"; mkdir -p "$out"
 export XDG_CONFIG_HOME=$out/config XDG_STATE_HOME=$out/state XDG_RUNTIME_DIR=$out/run
@@ -76,6 +77,9 @@ for label in $sessions; do
         # The agent alone (no viewer) for 10 s: its main window, each page pictured 3 s on.
         main) agent_extra="--test-main-window --ui-pictures $out --seconds 10"; viewer_extra='';
               agent_expects='main window: pictures of its pages saved'; viewer_expects=''; both_pass=yes ;;
+        # H.265 asked for: NVENC makes it, NVDEC decodes it (where the GPU has them; the H.264 sessions use NVDEC too).
+        h265) agent_extra=''; viewer_extra='--codec h265';
+              agent_expects='command from the viewer: picture: H.265'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
         ui) agent_extra=''; viewer_extra='';
             agent_expects='RESULT PASS'; viewer_expects='sessions from the device list'; both_pass=yes ;;
         *) echo "unknown session $label"; why="$why unknown-$label"; continue ;;

@@ -112,7 +112,11 @@ Command lines on the viewer side open in the desktop's terminal emulator (x-term
 Konsole, Xfce's, xterm) running the viewer's helper over a Unix socket in the private runtime folder (this user only,
 with a one-time token); --terminal-test passes in run_m3_linux.sh.
 
-Not yet on Linux: NVDEC and VA-API, Wayland, the privacy screen and input block, the service and packages.
+The viewer decodes on NVIDIA GPUs with NVDEC (CUDA; H.264 and H.265, 8-bit 4:2:0, pictures copied into memory as
+NV12 for the CPU presenter), else OpenH264; run_m3_linux.sh's h265 session has NVENC make H.265 and NVDEC show it.
+AV1 is not offered yet: NVDEC decodes it, but no AV1 stream has been through it here.
+
+Not yet on Linux: AV1 (encoding; decoding offered), 10-bit and 4:4:4, VA-API, Wayland, the privacy screen and input block, the service and packages.
 
 ## Order of the work
 

@@ -4,11 +4,11 @@
 //! helper_unix.rs), as Windows starts a console of its own. The terminal renders the command line's VT output and
 //! turns keys into VT input; the helper passes bytes along.
 //!
-//! Helper and viewer talk over one Unix socket in the private runtime folder (0700, this user's only). The viewer takes
-//! one client, of this user (SO_PEERCRED), with the one-time token it gave the helper in its environment (not on its
-//! command line, which other users can read in /proc), and removes the socket once it is connected. The helper may
-//! not be the viewer's child (GNOME Terminal's launcher hands it to a server and ends): it tells its exit code over
-//! the socket.
+//! Helper and viewer talk over one Unix socket in the private runtime folder (0700, this user's only): other users
+//! cannot reach it, and the viewer takes one client, of this user (SO_PEERCRED), with the one-time token it put on the
+//! helper's command line (not in its environment: GNOME Terminal, and Xfce's terminal with a session bus, hand a new
+//! window to a running instance, whose environment its command gets), and removes the socket once it is connected.
+//! The helper may not be the viewer's child (that same hand-over): it tells its exit code over the socket.
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -25,12 +25,12 @@ pub(crate) const FRAME_OUTPUT: u8 = 3;
 pub(crate) const FRAME_END: u8 = 4;
 pub(crate) const FRAME_TITLE: u8 = 5;
 pub(crate) const FRAME_DETACH: u8 = 6;
-/// The helper's first frame: the token from its environment.
+/// The helper's first frame: the token from its command line.
 pub(crate) const FRAME_TOKEN: u8 = 7;
 /// The helper's last: its exit code (u32 little-endian).
 pub(crate) const FRAME_EXIT: u8 = 8;
-/// Where the helper finds its token.
-pub(crate) const TOKEN_VARIABLE: &str = "QUEQIAO_TERMINAL_TOKEN";
+/// The helper's option with its token.
+pub(crate) const TOKEN_OPTION: &str = "--terminal-token";
 
 /// The helper must connect within this time.
 const CONNECT_LIMIT: Duration = Duration::from_secs(15);
@@ -77,11 +77,13 @@ impl TerminalWindow {
             socket.to_string_lossy().into_owned(),
             "--terminal-title".into(),
             title.clone(),
+            TOKEN_OPTION.into(),
+            token.clone(),
         ];
         if test {
             helper.push("--terminal-test".into());
         }
-        if let Err(error) = start_in_terminal(&helper, &title, &token) {
+        if let Err(error) = start_in_terminal(&helper, &title) {
             let _ = std::fs::remove_file(&socket);
             return Err(error);
         }
@@ -205,9 +207,9 @@ fn on_path(name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Starts `helper` (the program and its arguments) in the first terminal emulator found, with the token in its
-/// environment. Each takes the command its own way.
-fn start_in_terminal(helper: &[String], title: &str, token: &str) -> Result<(), String> {
+/// Starts `helper` (the program and its arguments) in the first terminal emulator found. Each takes the command its
+/// own way.
+fn start_in_terminal(helper: &[String], title: &str) -> Result<(), String> {
     let terminals: [(&str, Vec<&str>); 5] = [
         // Debian's policy: -T title, -e command and its arguments.
         ("x-terminal-emulator", vec!["-T", title, "-e"]),
@@ -228,7 +230,6 @@ fn start_in_terminal(helper: &[String], title: &str, token: &str) -> Result<(), 
     let mut child = Command::new(&program)
         .args(arguments)
         .args(helper)
-        .env(TOKEN_VARIABLE, token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

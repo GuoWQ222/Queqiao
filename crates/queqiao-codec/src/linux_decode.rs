@@ -1,6 +1,6 @@
-//! The viewer's decoder on Linux (docs/LINUX.md), with the API of Windows' `H264Decoder`: OpenH264 on the CPU (as
-//! Windows uses when no GPU decoder works), its I420 pictures packed to NV12 in memory, which the presenter draws.
-//! NVIDIA's NVDEC on CUDA and VA-API come next (H.265, AV1, decoding on the GPU).
+//! The viewer's decoder on Linux (docs/LINUX.md), with the API of Windows' `H264Decoder`: NVIDIA's NVDEC on CUDA
+//! (nvdec_linux.rs: H.264, H.265, AV1) where there is one, else OpenH264 on the CPU for H.264 (as Windows uses when no
+//! GPU decoder works). Either way the pictures are NV12 in memory, which the presenter draws. VA-API comes next.
 
 use openh264::OpenH264API;
 use openh264::decoder::{Decoder, DecoderConfig};
@@ -32,8 +32,13 @@ pub struct DecodedFrame {
     pub time: i64,
 }
 
+enum Inner {
+    OpenH264(Decoder),
+    Nvdec(crate::nvdec_linux::NvdecDecoder),
+}
+
 pub struct H264Decoder {
-    decoder: Decoder,
+    inner: Inner,
     name: String,
     skipped: Vec<String>,
 }
@@ -43,19 +48,31 @@ impl H264Decoder {
         Self::with_codec(VideoCodec::H264, device, context, choice)
     }
 
-    /// A decoder for `codec`: H.264 with OpenH264; H.265 and AV1 need a GPU decoder, not on Linux yet.
+    /// A decoder for `codec`: NVDEC where the GPU has it (Auto, Hardware, Nvdec), else OpenH264 for H.264 (Auto,
+    /// Software). H.265 and AV1 need NVDEC.
     pub fn with_codec(
         codec: VideoCodec,
         _device: &Device,
         _context: &Context,
         choice: DecoderChoice,
     ) -> Result<Self> {
-        if codec != VideoCodec::H264 {
-            return Err(Error::new(format!(
-                "{codec:?}: no decoder on Linux yet (NVDEC and VA-API come next)"
-            )));
-        }
         let mut skipped = Vec::new();
+        if matches!(
+            choice,
+            DecoderChoice::Auto | DecoderChoice::Hardware | DecoderChoice::Nvdec
+        ) {
+            match crate::nvdec_linux::NvdecDecoder::new(codec) {
+                Ok(decoder) => {
+                    return Ok(Self {
+                        name: decoder.name.clone(),
+                        inner: Inner::Nvdec(decoder),
+                        skipped,
+                    });
+                }
+                Err(error) if choice == DecoderChoice::Auto => skipped.push(error),
+                Err(error) => return Err(Error::new(error)),
+            }
+        }
         match choice {
             DecoderChoice::Auto | DecoderChoice::Software => {}
             other => {
@@ -64,13 +81,16 @@ impl H264Decoder {
                 )));
             }
         }
-        if choice == DecoderChoice::Auto {
-            skipped.push("GPU decoders: none on Linux yet".into());
+        if codec != VideoCodec::H264 {
+            return Err(Error::new(format!(
+                "{codec:?}: no decoder for it here ({})",
+                skipped.join("; ")
+            )));
         }
         let decoder = Decoder::with_api_config(OpenH264API::from_source(), DecoderConfig::new())
             .map_err(|e| Error::new(format!("OpenH264 decoder: {e}")))?;
         Ok(Self {
-            decoder,
+            inner: Inner::OpenH264(decoder),
             name: "OpenH264 decoder (software)".into(),
             skipped,
         })
@@ -82,11 +102,14 @@ impl H264Decoder {
 
     /// What the stream is, as the decoder sees it.
     pub fn stream(&self) -> String {
-        "H.264 4:2:0".into()
+        match &self.inner {
+            Inner::OpenH264(_) => "H.264 4:2:0".into(),
+            Inner::Nvdec(decoder) => decoder.stream(),
+        }
     }
 
     pub fn is_hardware(&self) -> bool {
-        false
+        matches!(self.inner, Inner::Nvdec(_))
     }
 
     /// Decoders tried before this one, each with the reason it was not used.
@@ -96,8 +119,11 @@ impl H264Decoder {
 
     /// Decodes one frame's data; the picture (if one came out) goes into `out`.
     pub fn decode(&mut self, data: &[u8], time: i64, out: &mut Vec<DecodedFrame>) -> Result<()> {
-        let decoded = self
-            .decoder
+        let decoder = match &mut self.inner {
+            Inner::Nvdec(decoder) => return decoder.decode(data, time, out).map_err(Error::new),
+            Inner::OpenH264(decoder) => decoder,
+        };
+        let decoded = decoder
             .decode(data)
             .map_err(|e| Error::new(format!("OpenH264 decoder: {e}")))?;
         let Some(yuv) = decoded else {
@@ -130,19 +156,30 @@ impl H264Decoder {
     }
 }
 
-/// Whether this PC can decode `codec` (H.264 always: OpenH264 is built in).
+/// Whether this PC can decode `codec`: H.264 always (OpenH264 is built in), H.265 with NVDEC. AV1 not yet: NVDEC decodes
+/// it (nvdec_linux.rs), but no AV1 stream has been through it end to end here (Linux makes none yet), so the viewer
+/// does not ask for it.
 pub fn can_decode(codec: VideoCodec) -> bool {
-    codec == VideoCodec::H264
+    let caps = crate::nvdec_linux::caps();
+    match codec {
+        VideoCodec::H264 => true,
+        VideoCodec::H265 => caps.is_some_and(|caps| caps[1]),
+        VideoCodec::Av1 => false,
+    }
 }
 
-/// Whether the GPU decodes AV1 itself: not on Linux yet.
+/// Whether the GPU decodes AV1 itself: not offered yet (see `can_decode`).
 pub fn av1_decodes_on_gpu(_device: &Device) -> bool {
     false
 }
 
-/// What H.265 this PC decodes (`protocol::hevc` bits): none on Linux yet.
+/// What H.265 this PC decodes (`protocol::hevc` bits): Main with NVDEC (the presenter draws 8-bit 4:2:0).
 pub fn hevc_decode_caps(_device: &Device, _context: &Context) -> u8 {
-    0
+    if crate::nvdec_linux::caps().is_some_and(|caps| caps[1]) {
+        queqiao_core::protocol::hevc::MAIN
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -176,9 +213,61 @@ mod tests {
             uv.iter().all(|&c| (i32::from(c) - 128).abs() <= 2),
             "UV {uv:?}"
         );
-        assert!(
+        // H.265 only where NVDEC decodes it.
+        assert_eq!(
             H264Decoder::with_codec(VideoCodec::H265, &Device, &Context, DecoderChoice::Auto)
-                .is_err()
+                .is_ok(),
+            can_decode(VideoCodec::H265)
         );
+    }
+
+    /// NVDEC, where this PC has it: H.264 and H.265 from the encoder decode to the grey they were made of. Without an
+    /// NVIDIA GPU the test says so and passes (the software path is tested above).
+    #[test]
+    fn nvdec_decodes_to_nv12_in_memory() {
+        let Some(caps) = crate::nvdec_linux::caps() else {
+            eprintln!("no NVDEC on this PC: skipped");
+            return;
+        };
+        let (width, height) = (1280usize, 720usize);
+        for (codec, supported) in [(VideoCodec::H264, caps[0]), (VideoCodec::H265, caps[1])] {
+            if !supported {
+                continue;
+            }
+            let Ok(mut encoder) = ScreenEncoder::with_codec(
+                &Device,
+                &Context,
+                (width as u32, height as u32),
+                30,
+                false,
+                None,
+                codec,
+            ) else {
+                eprintln!("{codec:?}: no encoder here: skipped");
+                continue;
+            };
+            let mut decoder =
+                H264Decoder::with_codec(codec, &Device, &Context, DecoderChoice::Nvdec).unwrap();
+            assert!(decoder.is_hardware(), "{}", decoder.name());
+            let pixels = vec![128u8; width * height * 4];
+            let mut out = Vec::new();
+            for index in 0..5 {
+                for frame in encoder.encode_bgra(&pixels, width * 4, index == 0).unwrap() {
+                    decoder.decode(&frame.data, frame.time, &mut out).unwrap();
+                }
+            }
+            assert!(out.len() >= 4, "{codec:?}: {} pictures", out.len());
+            let last = out.last().unwrap();
+            assert_eq!((last.width, last.height), (1280, 720), "{codec:?}");
+            let picture = &last.texture;
+            assert_eq!(picture.data.len(), width * height * 3 / 2);
+            let y = picture.data[width * height / 2 + width / 2];
+            let uv = &picture.data[width * height..width * height + 2];
+            assert!((i32::from(y) - 126).abs() <= 3, "{codec:?}: Y {y}");
+            assert!(
+                uv.iter().all(|&c| (i32::from(c) - 128).abs() <= 3),
+                "{codec:?}: UV {uv:?}"
+            );
+        }
     }
 }

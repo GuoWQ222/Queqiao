@@ -1,5 +1,5 @@
-//! The CUDA driver API, the part NVENC needs on Linux (docs/LINUX.md): a context on a GPU, pitched memory, and
-//! copies from memory into it. `libcuda.so.1` comes with NVIDIA's driver and is loaded at run time, so Queqiao
+//! The CUDA driver API, the part NVENC and NVDEC need on Linux (docs/LINUX.md): a context on a GPU, pitched memory,
+//! and copies between memory and the GPU. `libcuda.so.1` comes with NVIDIA's driver and is loaded at run time, so Queqiao
 //! starts on machines without it.
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
@@ -219,8 +219,53 @@ impl Cuda {
         })
     }
 
+    /// Copies `rows` rows of `width_bytes` from the GPU (`source`, rows `source_pitch` apart) into memory (`target`,
+    /// rows `target_pitch` apart). Returns when the copy is done.
+    pub(crate) fn download(
+        &self,
+        source: CuDevicePtr,
+        source_pitch: usize,
+        target: &mut [u8],
+        target_pitch: usize,
+        width_bytes: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        if rows == 0 {
+            return Ok(());
+        }
+        let needed = target_pitch * (rows - 1) + width_bytes;
+        if target.len() < needed || width_bytes > source_pitch.min(target_pitch) {
+            return Err(format!(
+                "download of {rows} rows of {width_bytes} bytes into {} bytes",
+                target.len()
+            ));
+        }
+        let copy = Memcpy2D {
+            src_x_in_bytes: 0,
+            src_y: 0,
+            src_memory_type: MEMORY_TYPE_DEVICE,
+            src_host: std::ptr::null(),
+            src_device: source,
+            src_array: std::ptr::null_mut(),
+            src_pitch: source_pitch,
+            dst_x_in_bytes: 0,
+            dst_y: 0,
+            dst_memory_type: MEMORY_TYPE_HOST,
+            dst_host: target.as_mut_ptr().cast(),
+            dst_device: 0,
+            dst_array: std::ptr::null_mut(),
+            dst_pitch: target_pitch,
+            width_in_bytes: width_bytes,
+            height: rows,
+        };
+        self.current(|| {
+            let code = unsafe { (self.api.memcpy_2d)(&copy) };
+            self.check(code, "cuMemcpy2D")
+        })
+    }
+
     /// Runs `work` with the context current on this thread.
-    fn current<T>(&self, work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    pub(crate) fn current<T>(&self, work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
         self.check(
             unsafe { (self.api.ctx_push)(self.context) },
             "cuCtxPushCurrent",
