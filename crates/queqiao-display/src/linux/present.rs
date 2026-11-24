@@ -4,7 +4,7 @@
 //! machines); drawing on the GPU comes with the GUI step.
 
 use queqiao_capture::{Context, Device};
-use queqiao_codec::Picture;
+use queqiao_codec::{Picture, PictureFormat};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::shm::ConnectionExt as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
@@ -107,7 +107,13 @@ impl Presenter {
     pub fn show(&mut self, picture: &Picture, size: (u32, u32), window: &Window) -> Result<()> {
         let (width, height) = window.client_size();
         let bytes = width as usize * height as usize * 4;
-        let need = Layout::Nv12.bytes(picture.pitch, picture.rows);
+        let layout = match picture.format {
+            PictureFormat::Nv12 => Layout::Nv12,
+            PictureFormat::P016 => Layout::P010,
+            PictureFormat::Yuv444 => Layout::Yuv444,
+            PictureFormat::Yuv444P16 => Layout::Yuv444P16,
+        };
+        let need = layout.bytes(picture.pitch, picture.rows);
         if picture.data.len() < need || size.0 as usize > picture.pitch {
             return Err(format!(
                 "a picture of {} bytes for {}x{} (pitch {})",
@@ -138,7 +144,7 @@ impl Presenter {
                     &picture.data,
                     picture.pitch,
                     picture.rows,
-                    Layout::Nv12,
+                    layout,
                     picture_size,
                     segment.bytes(),
                     window_size,
@@ -176,7 +182,7 @@ impl Presenter {
             &picture.data,
             picture.pitch,
             picture.rows,
-            Layout::Nv12,
+            layout,
             picture_size,
             &mut self.image,
             window_size,

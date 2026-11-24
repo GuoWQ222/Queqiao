@@ -1,8 +1,8 @@
 //! NVIDIA's decoder on Linux (docs/LINUX.md; Windows: nvdec.rs, which hands its pictures to D3D11): NVDEC through the
-//! driver's libnvcuvid.so.1 on a CUDA context of its own (cuda.rs): H.264, H.265 and AV1, 8-bit 4:2:0. Each picture
-//! is copied from NVDEC's surface into memory as NV12, as OpenH264's pictures are (linux_decode.rs), and the presenter
-//! converts it on the CPU. 10-bit and 4:4:4 streams are refused (the presenter draws 8-bit 4:2:0), and the viewer does
-//! not ask for them: `caps` reports 8-bit 4:2:0 only. Nothing of NVIDIA's is shipped: the types are FFmpeg's
+//! driver's libnvcuvid.so.1 on a CUDA context of its own (cuda.rs): H.264 and AV1 4:2:0, H.265 4:2:0 and 4:4:4, 8 and
+//! 10 bits, as the GPU decodes them (`caps`). Each picture is copied from NVDEC's surface into memory, its planes as
+//! NVDEC lays them out (NV12, P016, or three planes for 4:4:4: `PictureFormat`), and the presenter converts it on the
+//! CPU (yuv.rs, as Windows does when its GPU cannot). Nothing of NVIDIA's is shipped: the types are FFmpeg's
 //! nv-codec-headers (MIT, nvdec_sys.rs, shared with Windows: `unsigned long` is `c_ulong` there, so the layout follows
 //! the system), the functions come from the driver at run time.
 
@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use queqiao_core::protocol::VideoCodec;
 
 use crate::cuda::{Cuda, Library};
-use crate::linux_decode::{DecodedFrame, Picture};
+use crate::linux_decode::{DecodedFrame, Picture, PictureFormat};
 use crate::nvdec_sys as sys;
 
 type CuvidCreateParser =
@@ -90,35 +90,69 @@ fn codec_name(codec: VideoCodec) -> &'static str {
     }
 }
 
-/// What this PC's first NVIDIA GPU decodes at 8-bit 4:2:0 (H.264, H.265, AV1), found once; None without NVDEC (no
-/// NVIDIA driver, no GPU, or it failed).
-pub(crate) fn caps() -> Option<[bool; 3]> {
-    static CAPS: OnceLock<Option<[bool; 3]>> = OnceLock::new();
+/// What this PC's first NVIDIA GPU's NVDEC decodes, found once.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Caps {
+    /// H.264 8-bit 4:2:0.
+    pub(crate) h264: bool,
+    /// H.265 as `protocol::hevc` bits (Main, Main 10, 4:4:4, 4:4:4 10-bit).
+    pub(crate) hevc: u8,
+    /// AV1 8-bit 4:2:0.
+    pub(crate) av1: bool,
+}
+
+/// NVDEC's capabilities; None without NVDEC (no NVIDIA driver, no GPU, or it failed).
+pub(crate) fn caps() -> Option<Caps> {
+    static CAPS: OnceLock<Option<Caps>> = OnceLock::new();
     *CAPS.get_or_init(|| {
         let cuda = Cuda::open(0).ok()?;
         let api = Api::open().ok()?;
+        let decodes = |codec: VideoCodec, chroma444: bool, ten_bit: bool| {
+            let mut caps: sys::CUVIDDECODECAPS = unsafe { zeroed() };
+            caps.eCodecType = cuvid_codec(codec);
+            caps.eChromaFormat = if chroma444 {
+                sys::cudaVideoChromaFormat_444
+            } else {
+                sys::cudaVideoChromaFormat_420
+            };
+            caps.nBitDepthMinus8 = if ten_bit { 2 } else { 0 };
+            let result = unsafe { (api.caps)(&mut caps) };
+            result == sys::CUDA_SUCCESS && caps.bIsSupported != 0
+        };
         cuda.current(|| {
-            Ok(
-                [VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1].map(|codec| {
-                    let mut caps: sys::CUVIDDECODECAPS = unsafe { zeroed() };
-                    caps.eCodecType = cuvid_codec(codec);
-                    caps.eChromaFormat = sys::cudaVideoChromaFormat_420;
-                    caps.nBitDepthMinus8 = 0;
-                    let result = unsafe { (api.caps)(&mut caps) };
-                    result == sys::CUDA_SUCCESS && caps.bIsSupported != 0
-                }),
-            )
+            let mut hevc = 0;
+            for (chroma444, ten_bit) in [(false, false), (false, true), (true, false), (true, true)]
+            {
+                if decodes(VideoCodec::H265, chroma444, ten_bit) {
+                    hevc |= queqiao_core::protocol::hevc::bit(chroma444, ten_bit);
+                }
+            }
+            Ok(Caps {
+                h264: decodes(VideoCodec::H264, false, false),
+                hevc,
+                av1: decodes(VideoCodec::Av1, false, false),
+            })
         })
         .ok()
     })
+}
+
+/// The stream as the decoder was made for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Shape {
+    width: u32,
+    height: u32,
+    chroma444: bool,
+    /// Bits over 8 (0 or 2).
+    depth: u32,
+    surfaces: u32,
 }
 
 /// What the parser's callbacks share with the decoder (they run inside `cuvidParseVideoData`).
 struct Shared {
     api: *const Api,
     decoder: sys::CUvideodecoder,
-    /// The stream as the decoder was made for it: (width, height, surfaces).
-    shape: Option<(u32, u32, u32)>,
+    shape: Option<Shape>,
     /// Pictures to show, in order (NVDEC's surface indices).
     shown: VecDeque<i32>,
     error: Option<String>,
@@ -133,16 +167,18 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, format: *mut sys::CUVIDEOFOR
     let height = (area.bottom - area.top).max(0) as u32;
     let chroma444 = format.chroma_format == sys::cudaVideoChromaFormat_444;
     let depth = u32::from(format.bit_depth_luma_minus8);
-    if chroma444 || depth > 0 || format.chroma_format != sys::cudaVideoChromaFormat_420 {
-        shared.error = Some(format!(
-            "NVDEC on Linux decodes 8-bit 4:2:0 (this stream: {}, {} bits)",
-            if chroma444 { "4:4:4" } else { "not 4:2:0" },
-            8 + depth
-        ));
+    if !chroma444 && format.chroma_format != sys::cudaVideoChromaFormat_420 {
+        shared.error = Some("NVDEC: a stream neither 4:2:0 nor 4:4:4".into());
         return 0;
     }
     let surfaces = u32::from(format.min_num_decode_surfaces).max(4) + 2;
-    let shape = (width, height, surfaces);
+    let shape = Shape {
+        width,
+        height,
+        chroma444,
+        depth,
+        surfaces,
+    };
     if shared.shape == Some(shape) && !shared.decoder.is_null() {
         return surfaces as i32;
     }
@@ -153,8 +189,13 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, format: *mut sys::CUVIDEOFOR
     let mut create: sys::CUVIDDECODECREATEINFO = unsafe { zeroed() };
     create.CodecType = format.codec;
     create.ChromaFormat = format.chroma_format;
-    create.OutputFormat = sys::cudaVideoSurfaceFormat_NV12;
-    create.bitDepthMinus8 = 0;
+    create.OutputFormat = match (chroma444, depth > 0) {
+        (false, false) => sys::cudaVideoSurfaceFormat_NV12,
+        (false, true) => sys::cudaVideoSurfaceFormat_P016,
+        (true, false) => sys::cudaVideoSurfaceFormat_YUV444,
+        (true, true) => sys::cudaVideoSurfaceFormat_YUV444_16Bit,
+    };
+    create.bitDepthMinus8 = depth as _;
     create.DeinterlaceMode = sys::cudaVideoDeinterlaceMode_Weave;
     create.ulWidth = format.coded_width as _;
     create.ulHeight = format.coded_height as _;
@@ -173,7 +214,9 @@ unsafe extern "C" fn on_sequence(user: *mut c_void, format: *mut sys::CUVIDEOFOR
     let result = unsafe { (api.create_decoder)(&mut decoder, &mut create) };
     if result != sys::CUDA_SUCCESS {
         shared.error = Some(format!(
-            "NVDEC cannot decode this stream ({width}x{height}): CUDA error {result}"
+            "NVDEC cannot decode this stream ({width}x{height}, {}, {} bits): CUDA error {result}",
+            if chroma444 { "4:4:4" } else { "4:2:0" },
+            8 + depth
         ));
         return 0;
     }
@@ -216,15 +259,15 @@ pub(crate) struct NvdecDecoder {
 
 impl NvdecDecoder {
     pub(crate) fn new(codec: VideoCodec) -> Result<NvdecDecoder, String> {
-        let supported = caps().ok_or("NVDEC: no NVIDIA GPU with its decoder here")?;
-        let index = match codec {
-            VideoCodec::H264 => 0,
-            VideoCodec::H265 => 1,
-            VideoCodec::Av1 => 2,
+        let caps = caps().ok_or("NVDEC: no NVIDIA GPU with its decoder here")?;
+        let supported = match codec {
+            VideoCodec::H264 => caps.h264,
+            VideoCodec::H265 => caps.hevc != 0,
+            VideoCodec::Av1 => caps.av1,
         };
-        if !supported[index] {
+        if !supported {
             return Err(format!(
-                "NVDEC: this GPU does not decode {} 8-bit 4:2:0",
+                "NVDEC: this GPU does not decode {}",
                 codec_name(codec)
             ));
         }
@@ -264,12 +307,20 @@ impl NvdecDecoder {
         })
     }
 
-    /// What the stream is ("H.265 4:2:0").
+    /// What the stream turned out to be ("H.265 4:4:4 10-bit"), once its headers were read.
     pub(crate) fn stream(&self) -> String {
-        format!("{} 4:2:0", codec_name(self.codec))
+        match self.shared.shape {
+            Some(shape) => format!(
+                "{} {}{}",
+                codec_name(self.codec),
+                if shape.chroma444 { "4:4:4" } else { "4:2:0" },
+                if shape.depth > 0 { " 10-bit" } else { "" }
+            ),
+            None => String::new(),
+        }
     }
 
-    /// Decodes one access unit and appends its picture (NV12 in memory) to `out`.
+    /// Decodes one access unit and appends its picture (in memory) to `out`.
     pub(crate) fn decode(
         &mut self,
         data: &[u8],
@@ -299,7 +350,7 @@ impl NvdecDecoder {
     }
 }
 
-/// NVDEC's surface `index` copied into memory as NV12.
+/// NVDEC's surface `index` copied into memory: its planes one after another, as the picture's format says.
 fn show(
     api: &Api,
     cuda: &Cuda,
@@ -307,7 +358,7 @@ fn show(
     index: i32,
     time: i64,
 ) -> Result<DecodedFrame, String> {
-    let (width, height, _) = shared.shape.ok_or("NVDEC: a picture before the sequence")?;
+    let shape = shared.shape.ok_or("NVDEC: a picture before the sequence")?;
     let mut frame: u64 = 0;
     let mut pitch: u32 = 0;
     let mut process: sys::CUVIDPROCPARAMS = unsafe { zeroed() };
@@ -317,31 +368,48 @@ fn show(
     if mapped != sys::CUDA_SUCCESS {
         return Err(format!("NVDEC map picture: CUDA error {mapped}"));
     }
-    // The surface's chroma plane starts after its height of rows, made even (as on Windows); the picture keeps even
-    // sizes (NV12's chroma is 2x2).
-    let aligned = ((height + 1) & !1) as usize;
-    let (width, height) = ((width & !1) as usize, (height & !1) as usize);
-    let mut data = vec![0u8; width * height * 3 / 2];
-    let (luma, chroma) = data.split_at_mut(width * height);
-    let copied = cuda
-        .download(frame, pitch as usize, luma, width, width, height)
-        .and_then(|()| {
+    // The surface's planes start every `aligned` rows (its height, made even, as on Windows); the picture keeps even
+    // sizes (4:2:0's chroma is 2x2).
+    let aligned = ((shape.height + 1) & !1) as usize;
+    let (width, height) = ((shape.width & !1) as usize, (shape.height & !1) as usize);
+    let sample = if shape.depth > 0 { 2 } else { 1 };
+    let row = width * sample;
+    // (first row on the surface, rows) of each plane.
+    let planes: Vec<(usize, usize)> = if shape.chroma444 {
+        (0..3).map(|plane| (plane * aligned, height)).collect()
+    } else {
+        vec![(0, height), (aligned, height / 2)]
+    };
+    let mut data = vec![0u8; row * planes.iter().map(|(_, rows)| rows).sum::<usize>()];
+    let mut copied = Ok(());
+    let mut rest = data.as_mut_slice();
+    for (first, rows) in planes {
+        let (target, after) = rest.split_at_mut(row * rows);
+        rest = after;
+        copied = copied.and_then(|()| {
             cuda.download(
-                frame + (aligned * pitch as usize) as u64,
+                frame + (first * pitch as usize) as u64,
                 pitch as usize,
-                chroma,
-                width,
-                width,
-                height / 2,
+                target,
+                row,
+                row,
+                rows,
             )
         });
+    }
     unsafe { (api.unmap_frame)(shared.decoder, frame) };
     copied?;
     Ok(DecodedFrame {
         texture: Picture {
             data,
-            pitch: width,
+            pitch: row,
             rows: height,
+            format: match (shape.chroma444, shape.depth > 0) {
+                (false, false) => PictureFormat::Nv12,
+                (false, true) => PictureFormat::P016,
+                (true, false) => PictureFormat::Yuv444,
+                (true, true) => PictureFormat::Yuv444P16,
+            },
         },
         width: width as u32,
         height: height as u32,

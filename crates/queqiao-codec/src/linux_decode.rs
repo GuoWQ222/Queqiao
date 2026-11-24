@@ -14,12 +14,25 @@ use crate::linux_screen::{Error, Result};
 /// How many decoded pictures may be held at once (as Windows' ring of textures; here each frame owns its picture).
 pub const RING: usize = 4;
 
-/// A decoded picture in memory: NV12, rows `pitch` bytes apart, `rows` luma rows then half as many U V rows (Windows:
-/// an NV12 texture).
+/// How a picture's samples lie in memory (each plane `rows` rows, rows `pitch` bytes apart).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureFormat {
+    /// 8-bit luma, then 8-bit U V pairs, half as many rows (OpenH264's and NVDEC's 4:2:0).
+    Nv12,
+    /// 16-bit samples, 10 bits in the high bits, as NV12 (NVDEC's 10-bit 4:2:0).
+    P016,
+    /// Three 8-bit planes: Y, U, V (NVDEC's 4:4:4).
+    Yuv444,
+    /// Three 16-bit planes, 10 bits in the high bits (NVDEC's 10-bit 4:4:4).
+    Yuv444P16,
+}
+
+/// A decoded picture in memory (Windows: a texture).
 pub struct Picture {
     pub data: Vec<u8>,
     pub pitch: usize,
     pub rows: usize,
+    pub format: PictureFormat,
 }
 
 /// One decoded picture.
@@ -147,6 +160,7 @@ impl H264Decoder {
                 data: nv12,
                 pitch: width,
                 rows: height,
+                format: PictureFormat::Nv12,
             },
             width: width as u32,
             height: height as u32,
@@ -163,7 +177,7 @@ pub fn can_decode(codec: VideoCodec) -> bool {
     let caps = crate::nvdec_linux::caps();
     match codec {
         VideoCodec::H264 => true,
-        VideoCodec::H265 => caps.is_some_and(|caps| caps[1]),
+        VideoCodec::H265 => caps.is_some_and(|caps| caps.hevc != 0),
         VideoCodec::Av1 => false,
     }
 }
@@ -173,13 +187,9 @@ pub fn av1_decodes_on_gpu(_device: &Device) -> bool {
     false
 }
 
-/// What H.265 this PC decodes (`protocol::hevc` bits): Main with NVDEC (the presenter draws 8-bit 4:2:0).
+/// What H.265 this PC decodes (`protocol::hevc` bits): what NVDEC decodes (Main, Main 10, 4:4:4, 4:4:4 10-bit).
 pub fn hevc_decode_caps(_device: &Device, _context: &Context) -> u8 {
-    if crate::nvdec_linux::caps().is_some_and(|caps| caps[1]) {
-        queqiao_core::protocol::hevc::MAIN
-    } else {
-        0
-    }
+    crate::nvdec_linux::caps().map_or(0, |caps| caps.hevc)
 }
 
 #[cfg(test)]
@@ -221,20 +231,31 @@ mod tests {
         );
     }
 
-    /// NVDEC, where this PC has it: H.264 and H.265 from the encoder decode to the grey they were made of. Without an
-    /// NVIDIA GPU the test says so and passes (the software path is tested above).
+    /// NVDEC, where this PC has it: H.264, H.265 and H.265 4:4:4 from the encoder decode to the grey they were made of,
+    /// in the layout NVDEC gives (NV12, or three planes for 4:4:4). Without an NVIDIA GPU the test says so and passes
+    /// (the software path is tested above).
     #[test]
-    fn nvdec_decodes_to_nv12_in_memory() {
+    fn nvdec_decodes_into_memory() {
         let Some(caps) = crate::nvdec_linux::caps() else {
             eprintln!("no NVDEC on this PC: skipped");
             return;
         };
         let (width, height) = (1280usize, 720usize);
-        for (codec, supported) in [(VideoCodec::H264, caps[0]), (VideoCodec::H265, caps[1])] {
+        let hevc444 = caps.hevc & queqiao_core::protocol::hevc::CHROMA444 != 0;
+        for (name, supported) in [
+            ("h264", caps.h264),
+            ("hevc", caps.hevc != 0),
+            ("hevc444", hevc444),
+        ] {
             if !supported {
                 continue;
             }
-            let Ok(mut encoder) = ScreenEncoder::with_codec(
+            let format = crate::EncodeFormat::from_name(name).unwrap();
+            let codec = match format.codec {
+                crate::Codec::H264 => VideoCodec::H264,
+                crate::Codec::H265 => VideoCodec::H265,
+            };
+            let Ok(mut encoder) = ScreenEncoder::with_format(
                 &Device,
                 &Context,
                 (width as u32, height as u32),
@@ -242,8 +263,9 @@ mod tests {
                 false,
                 None,
                 codec,
+                format,
             ) else {
-                eprintln!("{codec:?}: no encoder here: skipped");
+                eprintln!("{name}: no encoder here: skipped");
                 continue;
             };
             let mut decoder =
@@ -256,17 +278,33 @@ mod tests {
                     decoder.decode(&frame.data, frame.time, &mut out).unwrap();
                 }
             }
-            assert!(out.len() >= 4, "{codec:?}: {} pictures", out.len());
+            assert!(out.len() >= 4, "{name}: {} pictures", out.len());
             let last = out.last().unwrap();
-            assert_eq!((last.width, last.height), (1280, 720), "{codec:?}");
+            assert_eq!((last.width, last.height), (1280, 720), "{name}");
             let picture = &last.texture;
-            assert_eq!(picture.data.len(), width * height * 3 / 2);
-            let y = picture.data[width * height / 2 + width / 2];
-            let uv = &picture.data[width * height..width * height + 2];
-            assert!((i32::from(y) - 126).abs() <= 3, "{codec:?}: Y {y}");
+            let plane = width * height;
+            let y = picture.data[plane / 2 + width / 2];
+            let (u, v) = if format.chroma444 {
+                assert_eq!(picture.format, PictureFormat::Yuv444, "{name}");
+                assert_eq!(picture.data.len(), plane * 3, "{name}");
+                (
+                    picture.data[plane + plane / 2],
+                    picture.data[2 * plane + plane / 2],
+                )
+            } else {
+                assert_eq!(picture.format, PictureFormat::Nv12, "{name}");
+                assert_eq!(picture.data.len(), plane * 3 / 2, "{name}");
+                (picture.data[plane], picture.data[plane + 1])
+            };
+            assert!((i32::from(y) - 126).abs() <= 3, "{name}: Y {y}");
             assert!(
-                uv.iter().all(|&c| (i32::from(c) - 128).abs() <= 3),
-                "{codec:?}: UV {uv:?}"
+                [u, v].iter().all(|&c| (i32::from(c) - 128).abs() <= 3),
+                "{name}: U V {u} {v}"
+            );
+            assert_eq!(
+                decoder.stream().contains("4:4:4"),
+                format.chroma444,
+                "{name}"
             );
         }
     }

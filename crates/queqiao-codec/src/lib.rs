@@ -84,7 +84,8 @@ pub use encoder::H264Encoder;
 pub use format::{Codec, EncodeFormat};
 #[cfg(target_os = "linux")]
 pub use linux_decode::{
-    DecodedFrame, H264Decoder, Picture, RING, av1_decodes_on_gpu, can_decode, hevc_decode_caps,
+    DecodedFrame, H264Decoder, Picture, PictureFormat, RING, av1_decodes_on_gpu, can_decode,
+    hevc_decode_caps,
 };
 #[cfg(target_os = "linux")]
 pub use linux_screen::{Error, H264Encoder, Result, ScreenEncoder, can_encode};

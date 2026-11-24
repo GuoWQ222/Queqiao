@@ -1,7 +1,7 @@
 //! Decoded pictures -> BGRA on the CPU with bilinear scaling, for devices without a video processor (or one that
 //! refuses the decoder's pictures). The pictures as the decoders give them: NV12 and P010 (4:2:0, 8 and 10 bits),
-//! AYUV and Y410 (4:4:4, 8 and 10 bits), BT.709 limited range in (as the encoders produce), full-range RGB out; and
-//! BGRA (NVIDIA's decoder converts itself), only scaled.
+//! AYUV and Y410 (4:4:4, 8 and 10 bits), the planar 4:4:4 NVDEC gives on Linux (8 and 16 bits), BT.709 limited range
+//! in (as the encoders produce), full-range RGB out; and BGRA (NVIDIA's decoder converts itself), only scaled.
 
 /// How a decoded picture lies in memory: rows `pitch` bytes apart; 4:2:0's colour rows (U V interleaved, half size)
 /// after its luma rows.
@@ -17,6 +17,10 @@ pub enum Layout {
     Y410,
     /// 4 bytes a pixel: blue, green, red, alpha.
     Bgra,
+    /// Three 8-bit planes, Y then U then V, each `rows` rows (NVDEC's 4:4:4 on Linux).
+    Yuv444,
+    /// Three 16-bit planes (10 bits in the high bits), Y then U then V, each `rows` rows.
+    Yuv444P16,
 }
 
 impl Layout {
@@ -26,6 +30,7 @@ impl Layout {
         match self {
             Layout::Nv12 | Layout::P010 => pitch * (rows + rows / 2),
             Layout::Ayuv | Layout::Y410 | Layout::Bgra => pitch * rows,
+            Layout::Yuv444 | Layout::Yuv444P16 => pitch * rows * 3,
         }
     }
 }
@@ -111,6 +116,8 @@ pub fn picture_to_bgra(
                     for x in 0..fit_w {
                         let (column, chroma_column) = (columns[x], chroma_columns[x]);
                         let (luma, colour) = (first_plane, chroma);
+                        // The planar layouts' V plane, after U.
+                        let v_plane = pitch * rows;
                         let [r, g, b] = match layout {
                             Layout::Nv12 => to_rgb(
                                 bilinear(|r, c| i32::from(luma[r * pitch + c]) * 4, row, column),
@@ -159,6 +166,24 @@ pub fn picture_to_bgra(
                                 bilinear(|r, c| packed(luma, r * pitch + c * 4, 10), row, column),
                                 bilinear(|r, c| packed(luma, r * pitch + c * 4, 0), row, column),
                                 bilinear(|r, c| packed(luma, r * pitch + c * 4, 20), row, column),
+                            ),
+                            Layout::Yuv444 => to_rgb(
+                                bilinear(|r, c| i32::from(luma[r * pitch + c]) * 4, row, column),
+                                bilinear(|r, c| i32::from(colour[r * pitch + c]) * 4, row, column),
+                                bilinear(
+                                    |r, c| i32::from(colour[v_plane + r * pitch + c]) * 4,
+                                    row,
+                                    column,
+                                ),
+                            ),
+                            Layout::Yuv444P16 => to_rgb(
+                                bilinear(|r, c| ten(luma, r * pitch + c * 2), row, column),
+                                bilinear(|r, c| ten(colour, r * pitch + c * 2), row, column),
+                                bilinear(
+                                    |r, c| ten(colour, v_plane + r * pitch + c * 2),
+                                    row,
+                                    column,
+                                ),
                             ),
                             Layout::Bgra => {
                                 let channel = |k: usize| {
@@ -277,6 +302,14 @@ mod tests {
         assert_eq!(shown(Layout::Y410, &y410, 16), red);
         let bgra = [0u8, 1, 255, 255].repeat(8);
         assert_eq!(shown(Layout::Bgra, &bgra, 16), red);
+        let planar = [[63u8; 8], [102; 8], [240; 8]].concat();
+        assert_eq!(shown(Layout::Yuv444, &planar, 4), red);
+        let planar16: Vec<u8> = [[252u16 << 6; 8], [408 << 6; 8], [960 << 6; 8]]
+            .concat()
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        assert_eq!(shown(Layout::Yuv444P16, &planar16, 8), red);
     }
 
     #[test]

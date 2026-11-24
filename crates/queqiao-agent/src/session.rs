@@ -223,16 +223,23 @@ pub(crate) fn hevc_format(can_decode: u8, chroma444: bool, ten_bit: bool) -> Enc
     }
 }
 
-/// What to try for `format`, best first: as it is, then 4:2:0 (AMD's encoders make no 4:4:4), then 8 bits.
+/// What to try for `format`, best first: as it is; 4:4:4 at 8 bits (Linux's NVENC path makes no 10-bit; 4:4:4 before
+/// 10 bits, as `hevc_format` prefers for a screen's text); 4:2:0 (AMD's encoders make no 4:4:4); then 8 bits. Only
+/// what the viewer decodes (`can_decode`: `protocol::hevc` bits).
 pub(crate) fn fallbacks(
     codec: queqiao_core::protocol::VideoCodec,
     format: EncodeFormat,
+    can_decode: u8,
 ) -> Vec<EncodeFormat> {
     if codec != queqiao_core::protocol::VideoCodec::H265 {
         return vec![format];
     }
     let mut list = vec![format];
     for next in [
+        EncodeFormat {
+            ten_bit: false,
+            ..format
+        },
         EncodeFormat {
             chroma444: false,
             ..format
@@ -243,7 +250,9 @@ pub(crate) fn fallbacks(
             ..format
         },
     ] {
-        if !list.contains(&next) {
+        let decodable =
+            can_decode & queqiao_core::protocol::hevc::bit(next.chroma444, next.ten_bit) != 0;
+        if decodable && !list.contains(&next) {
             list.push(next);
         }
     }
@@ -1205,7 +1214,7 @@ pub(crate) fn session(
                             // H.265: as asked, then with less (4:2:0, 8 bits) when this PC's encoder cannot.
                             let mut made = None;
                             let mut refused = Vec::new();
-                            for format in fallbacks(wanted, format) {
+                            for format in fallbacks(wanted, format, can_decode_hevc) {
                                 match ScreenEncoder::with_format(
                                     &device,
                                     &context,
@@ -2162,5 +2171,48 @@ pub(crate) fn clean_name(name: &str) -> String {
         format!("{}…", kept.chars().take(39).collect::<String>())
     } else {
         kept.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h265_falls_back_to_what_the_viewer_decodes() {
+        use queqiao_core::protocol::{VideoCodec, hevc};
+        let format = |chroma444, ten_bit| EncodeFormat {
+            codec: queqiao_codec::Codec::H265,
+            chroma444,
+            ten_bit,
+        };
+        let all = hevc::MAIN | hevc::MAIN10 | hevc::CHROMA444 | hevc::CHROMA444_10;
+        // 4:4:4 10-bit: then 4:4:4 at 8 bits, 4:2:0 10-bit, 4:2:0.
+        assert_eq!(
+            fallbacks(VideoCodec::H265, format(true, true), all),
+            vec![
+                format(true, true),
+                format(true, false),
+                format(false, true),
+                format(false, false)
+            ]
+        );
+        // Never what the viewer cannot decode (here no Main 10).
+        assert_eq!(
+            fallbacks(VideoCodec::H265, format(true, true), all & !hevc::MAIN10),
+            vec![
+                format(true, true),
+                format(true, false),
+                format(false, false)
+            ]
+        );
+        assert_eq!(
+            fallbacks(VideoCodec::H265, format(false, true), all),
+            vec![format(false, true), format(false, false)]
+        );
+        assert_eq!(
+            fallbacks(VideoCodec::H264, EncodeFormat::H264, 0),
+            vec![EncodeFormat::H264]
+        );
     }
 }
