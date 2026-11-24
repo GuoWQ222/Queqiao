@@ -212,8 +212,11 @@ pub(crate) fn gather_extra(
             return (candidates, notes);
         }
     }
-    // A server on this PC's loopback cannot be reached from another card's address.
-    let Some(server) = stun.filter(|server| !server.ip().is_loopback()) else {
+    // A server on this PC's loopback cannot be reached from another card's address; nor one of the other family (an
+    // IPv6 socket has no NAT to learn about, and the servers are IPv4).
+    let Some(server) =
+        stun.filter(|server| !server.ip().is_loopback() && server.is_ipv4() == host.is_ipv4())
+    else {
         return (candidates, notes);
     };
     let mut binding = Binding::new(server);

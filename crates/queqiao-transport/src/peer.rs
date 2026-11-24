@@ -235,7 +235,7 @@ impl Peer {
             IpAddr::V4(ip) if !ip.is_unspecified() => ip,
             _ => Ipv4Addr::UNSPECIFIED,
         };
-        let socket = bind_socket(bind_ip)?;
+        let socket = bind_socket(bind_ip.into())?;
         let port = socket.local_addr()?.port();
         let local = SocketAddr::new(local_ip, port);
         let servers = signal.ice_servers()?;
@@ -252,16 +252,17 @@ impl Peer {
             Vec::new()
         };
         let offered = crate::interfaces::offered(bind_ip, &uplinks, addresses == Addresses::All);
-        let extras: Vec<Extra> = offered
-            .iter()
-            .filter_map(|ip| {
-                let socket = bind_socket(*ip).ok()?;
-                let local = socket.local_addr().ok()?;
-                Some(Extra {
-                    socket: Arc::new(socket),
-                    local,
-                })
+        let extra = |ip: IpAddr| {
+            let socket = bind_socket(ip).ok()?;
+            let local = socket.local_addr().ok()?;
+            Some(Extra {
+                socket: Arc::new(socket),
+                local,
             })
+        };
+        let mut extras: Vec<Extra> = offered
+            .iter()
+            .filter_map(|ip| extra((*ip).into()))
             .collect();
         // Tests (QUEQIAO_FORCE=network:uplinks): this PC's uplinks first even when the server connection's address is
         // not a tunnel (on one PC it is the loopback): the session goes through the uplinks' sockets.
@@ -269,6 +270,21 @@ impl Peer {
             queqiao_core::forced("network").as_deref() == Some("uplinks") && !extras.is_empty();
         let main_is_tunnel =
             uplinks_forced || crate::interfaces::is_tunnel(bind_ip, &uplinks, extras.len());
+        // IPv6 (2026-11-24): this PC's public IPv6 addresses, for the account's own devices only (like its other
+        // uplinks: someone of another account does not learn them). No NAT there: two PCs with IPv6 connect directly,
+        // each firewall letting in the other's checks as answers once both have sent. After the IPv4 uplinks.
+        // Tests: QUEQIAO_FORCE=ipv6:off leaves them out; ipv6:any takes private ones too (Tailscale's, for a test on
+        // one PC); network:ipv6 offers them alone, no IPv4 candidate, to prove the path.
+        let ipv6_forced = queqiao_core::forced("ipv6");
+        let ipv6_only = queqiao_core::forced("network").as_deref() == Some("ipv6");
+        if addresses == Addresses::All && !relay_only && ipv6_forced.as_deref() != Some("off") {
+            let any = ipv6_forced.as_deref() == Some("any");
+            extras.extend(
+                crate::interfaces::ipv6_uplinks(any)
+                    .into_iter()
+                    .filter_map(|ip| extra(ip.into())),
+            );
+        }
         let stun = servers
             .stun
             .or(servers.turn.as_ref().map(|turn| turn.address));
@@ -334,7 +350,13 @@ impl Peer {
             (gathered.candidates, uplink_candidates)
         };
         for candidate in first.into_iter().chain(then) {
+            if ipv6_only && candidate.addr().is_ipv4() {
+                continue;
+            }
             rtc.add_local_candidate(candidate);
+        }
+        if ipv6_only {
+            notes.push("IPv6 candidates only (QUEQIAO_FORCE=network:ipv6)".into());
         }
 
         let (mut mid, mut audio_mid, mut channel) = (None, None, None);
@@ -746,9 +768,17 @@ fn receive_extra(
     }
 }
 
-fn bind_socket(ip: Ipv4Addr) -> Result<UdpSocket, Error> {
+fn bind_socket(ip: IpAddr) -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(SocketProtocol::UDP))?;
+    let socket = Socket::new(
+        Domain::for_address(SocketAddr::new(ip, 0)),
+        Type::DGRAM,
+        Some(SocketProtocol::UDP),
+    )?;
+    if ip.is_ipv6() {
+        // IPv6 only: an IPv4 packet must not reach it through a mapped address.
+        socket.set_only_v6(true)?;
+    }
     // A keyframe is a burst of a few hundred packets: Windows' default 64 KB buffers would drop some.
     let _ = socket.set_send_buffer_size(4 << 20);
     let _ = socket.set_recv_buffer_size(4 << 20);
