@@ -1,6 +1,6 @@
 [package]
 name = "queqiao-input"
-description = "Input on the controlled PC (SendInput) and the clipboard shared between viewer and agent"
+description = "Input on the controlled PC (SendInput on Windows, XTEST under X11) and the clipboard shared between viewer and agent"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -20,3 +20,7 @@ windows = { workspace = true, features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# X11 (docs/LINUX.md): the XTEST extension.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["xtest"] }

@@ -1,6 +1,6 @@
 [package]
 name = "queqiao-capture"
-description = "Screen capture: DXGI desktop duplication, frames stay on the GPU"
+description = "Screen capture: DXGI desktop duplication on Windows (frames stay on the GPU), MIT-SHM under X11 on Linux"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -26,3 +26,8 @@ windows = { workspace = true, features = [
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
 ] }
+
+# X11 (docs/LINUX.md): the protocol in Rust, with the extensions capture needs; shared memory through libc.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["shm", "xfixes", "randr", "damage"] }
+libc = "0.2"

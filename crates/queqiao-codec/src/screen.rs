@@ -10,11 +10,9 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID
 use windows::core::{Error, Result};
 
 use crate::{
-    EncodedFrame, EncoderChoice, EncoderConfig, H264Encoder, Nv12Converter, candidate_sizes,
+    EncodedFrame, EncoderChoice, EncoderConfig, H264Encoder, Nv12Converter, SOFTWARE_START,
+    candidate_sizes,
 };
-
-/// Software encoders (on the CPU) start at no more than this size (long side, short side) and rate.
-pub const SOFTWARE_START: (u32, u32, u32) = (1920, 1080, 30);
 
 pub struct ScreenEncoder {
     encoder: H264Encoder,

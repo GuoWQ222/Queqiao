@@ -3,6 +3,7 @@
 //! NV12, P010, AYUV (4:4:4) or Y410 (4:4:4 10-bit). RGB input instead, converted by the encoder, was measured
 //! wrong on Intel (2026-11-23): 8-bit RGB came out as 4:2:0, 10-bit RGB with red and blue swapped.
 
+#[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_AYUV, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_Y410,
 };
@@ -67,7 +68,8 @@ impl EncodeFormat {
         )
     }
 
-    /// The texture format the encoder takes.
+    /// The texture format the encoder takes (Windows: the converter makes it).
+    #[cfg(windows)]
     pub fn input(self) -> DXGI_FORMAT {
         match (self.chroma444, self.ten_bit) {
             (false, false) => DXGI_FORMAT_NV12,
@@ -102,6 +104,7 @@ mod tests {
         );
         assert_eq!(EncodeFormat::H264.name(), "H.264 4:2:0");
         assert!(EncodeFormat::from_name("h264_10").is_none());
+        #[cfg(windows)]
         assert_eq!(
             EncodeFormat::from_name("hevc10").map(EncodeFormat::input),
             Some(DXGI_FORMAT_P010)
