@@ -18,12 +18,14 @@ mod pty;
 mod terminals;
 #[cfg(windows)]
 mod window;
+#[cfg(target_os = "linux")]
+#[path = "window_unix.rs"]
+mod window;
 
 #[cfg(windows)]
 pub use helper::run_helper;
 pub use pty::Pty;
 pub use terminals::Terminals;
-#[cfg(windows)]
 pub use window::{TerminalWindow, WindowEvent};
 
 /// Output read from a command line goes out in pieces of at most this many bytes.

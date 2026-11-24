@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
+use crate::model::WindowEvent;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -27,44 +28,6 @@ static REGISTER: Once = Once::new();
 /// A message handled for longer than this is reported (`take_slow_messages`).
 const SLOW: Duration = Duration::from_millis(50);
 const CLASS: PCWSTR = w!("QueqiaoViewer");
-
-/// Input in the window. Positions are in pixels of the window's drawing area.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WindowEvent {
-    MouseMove {
-        x: i32,
-        y: i32,
-    },
-    /// 0 left, 1 right, 2 middle, 3 back (X1), 4 forward (X2).
-    MouseButton {
-        button: u8,
-        down: bool,
-    },
-    /// 120 = one notch.
-    Wheel {
-        delta: i16,
-        horizontal: bool,
-    },
-    /// Hardware scancode (set 1) and the "extended" flag, as Windows reports them.
-    Key {
-        scancode: u16,
-        extended: bool,
-        down: bool,
-    },
-    /// The window lost the keyboard: keys still held must be released on the remote side.
-    FocusLost,
-    /// Files (or folders) dropped on the window from Explorer: to send to the other PC.
-    FilesDropped(Vec<PathBuf>),
-    /// An item added with [`Window::add_menu_items`] was chosen.
-    Menu(u16),
-    /// Game mouse: the mouse moved by this much (raw counts), while the pointer is held in the window.
-    MouseDelta {
-        dx: i32,
-        dy: i32,
-    },
-    /// A hotkey registered with [`Window::register_hotkey`] was pressed (anywhere).
-    Hotkey(i32),
-}
 
 thread_local! {
     static EVENTS: RefCell<Vec<WindowEvent>> = const { RefCell::new(Vec::new()) };

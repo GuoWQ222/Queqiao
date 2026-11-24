@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LLKHF_UP, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
 };
 
-use crate::window::WindowEvent;
+use crate::model::WindowEvent;
 
 const VK_TAB: u32 = 0x09;
 const VK_ESCAPE: u32 = 0x1B;

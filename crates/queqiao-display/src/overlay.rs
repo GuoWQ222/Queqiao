@@ -5,6 +5,7 @@
 //! other programs; they are drawn with GDI into a 32-bit bitmap given per-pixel alpha (rounded, translucent). The bar
 //! sends its commands to the session window as its menu items do (WM_SYSCOMMAND), "More" opens that same menu.
 
+use crate::model::{BAR_END, BAR_MORE, BarButton, Figures};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::Once;
@@ -46,35 +47,6 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const BAR_STAYS: Duration = Duration::from_millis(1500);
 /// The pointer this near the top of the picture brings the bar out (96-DPI units).
 const BAR_REACH: i32 = 56;
-
-/// A button of the bar: its glyph (Segoe MDL2 Assets), its label, and the menu id it sends to the session window.
-/// `MORE` opens the session window's menu, `END` closes the session window.
-#[derive(Clone, Debug)]
-pub struct BarButton {
-    pub glyph: &'static str,
-    pub label: String,
-    pub id: u16,
-}
-
-/// Ids of the two buttons the bar handles itself.
-pub const BAR_MORE: u16 = 0xFFF0;
-pub const BAR_END: u16 = 0xFFE0;
-
-/// The session's figures as the card shows them.
-#[derive(Clone, Debug, Default)]
-pub struct Figures {
-    pub relayed: bool,
-    pub delay_ms: Option<f64>,
-    pub fps: f64,
-    /// "8.4 Mbit/s", "320 kbit/s".
-    pub rate: String,
-    /// "H.264 · GPU".
-    pub codec: String,
-    pub picture: (u32, u32),
-    pub elapsed: Duration,
-    /// The latest delays, oldest first.
-    pub delays: Vec<f64>,
-}
 
 /// What the bar's window procedure needs: its layout and the session window it serves.
 struct BarState {

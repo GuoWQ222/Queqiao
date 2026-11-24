@@ -166,6 +166,21 @@ impl Hotkey {
         let vk = unsafe { MapVirtualKeyW(code, MAPVK_VSC_TO_VK_EX) };
         (modifiers, vk)
     }
+
+    /// The X modifier bits (Control, Mod1 for Alt, Shift) and X keycode for a key grab on the root window (a boss
+    /// key works with the window hidden); keycode 0 for a key the evdev table does not know.
+    #[cfg(target_os = "linux")]
+    pub fn system(&self) -> (u32, u32) {
+        const SHIFT: u32 = 1;
+        const CONTROL: u32 = 4;
+        const MOD1: u32 = 8;
+        let modifiers = if self.alt { MOD1 } else { 0 }
+            | if self.ctrl { CONTROL } else { 0 }
+            | if self.shift { SHIFT } else { 0 };
+        let keycode =
+            queqiao_input::scancode::x11_keycode(self.scancode, self.extended).unwrap_or(0);
+        (modifiers, u32::from(keycode))
+    }
 }
 
 /// The keys as kept: names, so the file reads as the menu does. An empty boss key: none.

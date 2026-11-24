@@ -8,6 +8,8 @@ mod cursor;
 mod forms;
 #[cfg(windows)]
 mod icon;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
 mod main_window;
 mod model;
@@ -31,19 +33,25 @@ pub use cursor::RemoteCursor;
 pub use forms::{
     DeviceList, DeviceRow, HelpAction, HelpForm, ListAction, LoginAction, LoginFields, LoginForm,
     PICK_CLOSED, PasswordAction, PasswordForm, PickList, SetupAction, SetupForm, ask_secret,
-    ask_text, confirm, copy_text, pick_files, popup_menu, save_screen_picture, save_window_picture,
-    show_error, show_info,
+    ask_text, confirm, copy_text, owner_from_raw, pick_files, popup_menu, save_screen_picture,
+    save_window_picture, show_error, show_info,
 };
 #[cfg(windows)]
 pub use icon::app_icon;
+#[cfg(target_os = "linux")]
+pub use linux::{
+    Hwnd, PICK_CLOSED, PasswordAction, PasswordForm, PickList, Presenter, Rect, RemoteCursor,
+    SessionOverlay, Window, ask_text, fit, owner_from_raw, pick_files, popup_menu,
+    save_screen_picture, show_error, show_info,
+};
 #[cfg(windows)]
 pub use main_window::Page;
 pub use model::{
-    AccountState, ConnectionRow, HelpMode, MainDevice, PasswordCheck, PresenceEvent, TransferRow,
-    normalize_code,
+    AccountState, BAR_END, BAR_MORE, BarButton, ConnectionRow, Figures, HelpMode, MainDevice,
+    PasswordCheck, PresenceEvent, TransferRow, WindowEvent, normalize_code,
 };
 #[cfg(windows)]
-pub use overlay::{BAR_END, BAR_MORE, BarButton, Figures, SessionOverlay};
+pub use overlay::SessionOverlay;
 #[cfg(windows)]
 pub use presence::{
     Presence, SessionBanner, TEST_MENU_LOGIN, TEST_MENU_TERMINAL, TEST_MENU_UPDATE_CHECK,
@@ -54,5 +62,5 @@ pub use present::{Presenter, fit};
 #[cfg(windows)]
 pub use privacy::PrivacyScreen;
 #[cfg(windows)]
-pub use window::{Window, WindowEvent};
+pub use window::Window;
 pub use yuv::{Layout, nv12_to_bgra, picture_to_bgra};

@@ -1025,6 +1025,11 @@ impl DeviceList {
 
 /// The standard Open dialog for one or more files, owned by `owner`: the paths chosen (none if it was cancelled).
 /// Run it on a thread of its own when the caller must keep going meanwhile (a session keeps its picture).
+/// The window a dialog belongs to, from its number as it was sent to another thread (an HWND is not Send).
+pub fn owner_from_raw(raw: isize) -> HWND {
+    HWND(raw as *mut std::ffi::c_void)
+}
+
 pub fn pick_files(owner: Option<HWND>, title: &str) -> Vec<std::path::PathBuf> {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::UI::Controls::Dialogs::{

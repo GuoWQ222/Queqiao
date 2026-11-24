@@ -1023,10 +1023,13 @@ dependencies = [
 name = "queqiao-display"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "queqiao-capture",
  "queqiao-codec",
  "queqiao-core",
+ "queqiao-input",
  "windows",
+ "x11rb",
 ]
 
 [[package]]

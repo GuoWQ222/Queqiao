@@ -17,24 +17,28 @@
 //! version.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg(windows)]
+// On every system (docs/LINUX.md step 3): the command line, the session with an agent, the session's keys.
 mod hotkeys;
+mod options;
+mod session;
+
 #[cfg(windows)]
 mod win;
+/// What the session needs from the system it runs on (`describe`, `create_device`): win.rs or linux.rs.
+#[cfg(windows)]
+use win as platform;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
 
 #[cfg(windows)]
 fn main() {
     win::main()
 }
 
-/// Not yet written for this system (docs/LINUX.md): the banner for `--version`, otherwise a short notice.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn main() {
-    let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
-    if std::env::args().any(|argument| argument == "--version") {
-        println!("{banner}");
-        return;
-    }
-    eprintln!("{banner}: not available on this system yet (docs/LINUX.md)");
-    std::process::exit(2);
+    linux::main()
 }

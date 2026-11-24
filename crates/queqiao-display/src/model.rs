@@ -1,5 +1,8 @@
 //! What the tray, the banner and the main window report and show, on every system (docs/LINUX.md): the data, apart
-//! from the windows that show it (Windows: presence.rs, main_window.rs, forms.rs).
+//! from the windows that show it (Windows: presence.rs, main_window.rs, forms.rs, window.rs, overlay.rs; Linux: linux/).
+
+use std::path::PathBuf;
+use std::time::Duration;
 
 /// Checks a typed settings password.
 pub type PasswordCheck = Box<dyn Fn(&str) -> bool>;
@@ -136,4 +139,71 @@ pub fn normalize_code(typed: &str) -> String {
         .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_uppercase())
         .collect()
+}
+
+/// Input in the window. Positions are in pixels of the window's drawing area.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WindowEvent {
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    /// 0 left, 1 right, 2 middle, 3 back (X1), 4 forward (X2).
+    MouseButton {
+        button: u8,
+        down: bool,
+    },
+    /// 120 = one notch.
+    Wheel {
+        delta: i16,
+        horizontal: bool,
+    },
+    /// Hardware scancode (set 1) and the "extended" flag, as Windows reports them.
+    Key {
+        scancode: u16,
+        extended: bool,
+        down: bool,
+    },
+    /// The window lost the keyboard: keys still held must be released on the remote side.
+    FocusLost,
+    /// Files (or folders) dropped on the window from Explorer: to send to the other PC.
+    FilesDropped(Vec<PathBuf>),
+    /// An item added with [`Window::add_menu_items`] was chosen.
+    Menu(u16),
+    /// Game mouse: the mouse moved by this much (raw counts), while the pointer is held in the window.
+    MouseDelta {
+        dx: i32,
+        dy: i32,
+    },
+    /// A hotkey registered with [`Window::register_hotkey`] was pressed (anywhere).
+    Hotkey(i32),
+}
+
+/// A button of the bar: its glyph (Segoe MDL2 Assets), its label, and the menu id it sends to the session window.
+/// `MORE` opens the session window's menu, `END` closes the session window.
+#[derive(Clone, Debug)]
+pub struct BarButton {
+    pub glyph: &'static str,
+    pub label: String,
+    pub id: u16,
+}
+
+/// Ids of the two buttons the bar handles itself.
+pub const BAR_MORE: u16 = 0xFFF0;
+pub const BAR_END: u16 = 0xFFE0;
+
+/// The session's figures as the card shows them.
+#[derive(Clone, Debug, Default)]
+pub struct Figures {
+    pub relayed: bool,
+    pub delay_ms: Option<f64>,
+    pub fps: f64,
+    /// "8.4 Mbit/s", "320 kbit/s".
+    pub rate: String,
+    /// "H.264 · GPU".
+    pub codec: String,
+    pub picture: (u32, u32),
+    pub elapsed: Duration,
+    /// The latest delays, oldest first.
+    pub delays: Vec<f64>,
 }
