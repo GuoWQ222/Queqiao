@@ -22,11 +22,8 @@ mod window;
 pub use banner::{ConsentPrompt, SessionBanner};
 pub use cursor::RemoteCursor;
 pub use dialogs::{ask_secret, ask_text, show_error, show_info};
-pub use forms::{
-    PICK_CLOSED, PasswordAction, PasswordForm, PickList, owner_from_raw, pick_files, popup_menu,
-    save_screen_picture, save_window_picture,
-};
-pub use lists::{DeviceList, HelpForm};
+pub use forms::{owner_from_raw, pick_files, popup_menu, save_screen_picture, save_window_picture};
+pub use lists::{DeviceList, HelpForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList};
 pub use login::LoginForm;
 pub use overlay::SessionOverlay;
 pub use presence::{Presence, PrivacyScreen, show_running_main};

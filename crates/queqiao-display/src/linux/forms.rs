@@ -8,7 +8,6 @@ use std::process::{Command, Stdio};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
 
-use super::Result;
 use super::window::Hwnd;
 
 /// Runs zenity with `args`; its output when the person answered (OK, Yes), None otherwise or without zenity.
@@ -72,58 +71,6 @@ pub fn pick_files(_owner: Option<Hwnd>, title: &str) -> Vec<PathBuf> {
 /// A menu (Windows: at the pointer, owned by `owner`): the chosen item's id.
 pub fn popup_menu(_owner: Hwnd, items: &[(u16, &str, bool)]) -> Option<u16> {
     super::dialogs::menu(queqiao_core::text::tr("Queqiao"), items)
-}
-
-/// A list with buttons (the session's transfers): Queqiao's own forms come in step 5; until then it is refused.
-pub struct PickList {
-    never: std::convert::Infallible,
-}
-
-/// The id `PickList::next` gives when the list was closed.
-pub const PICK_CLOSED: u16 = 0xFFFF;
-
-impl PickList {
-    pub fn new(_title: &str, _heading: &str, _buttons: &[(u16, &str)]) -> Result<PickList> {
-        Err("lists: not on Linux yet".into())
-    }
-
-    pub fn set_items(&mut self, _items: Vec<String>) {
-        match self.never {}
-    }
-
-    pub fn selected(&self) -> Option<usize> {
-        match self.never {}
-    }
-
-    pub fn next(&mut self, _wait_ms: u32) -> Option<(u16, Option<usize>)> {
-        match self.never {}
-    }
-}
-
-/// What the person did in the password form.
-pub enum PasswordAction {
-    Submit(String),
-    Cancel,
-}
-
-/// The form asking for that PC's password (its lock screen): Queqiao's own forms come in step 5; until then it is
-/// refused, and the session says so.
-pub struct PasswordForm {
-    _never: std::convert::Infallible,
-}
-
-impl PasswordForm {
-    pub fn new(_title: &str, _text: &str) -> Result<PasswordForm> {
-        Err("the password form: not on Linux yet".into())
-    }
-
-    pub fn set_status(&self, _text: &str) {
-        match self._never {}
-    }
-
-    pub fn next(&mut self, _wait_ms: u32) -> Option<PasswordAction> {
-        match self._never {}
-    }
 }
 
 /// The window's picture as it is on the screen, as a bitmap file (32-bit, bottom-up).

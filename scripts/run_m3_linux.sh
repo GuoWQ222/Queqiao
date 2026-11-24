@@ -6,7 +6,8 @@
 # the bar out and tucked away, its Figures button clicked twice), allowed (the agent asks the person, who allows:
 # the consent prompt answered by the test), declined (who declines: neither side passes, both must say so), ui (the
 # viewer through its login form and device list as a person would, filled and pressed by the program, with pictures of
-# both: login.bmp and devices.bmp).
+# both: login.bmp and devices.bmp). Then the session's forms no session opens by itself (the transfer list, the
+# password form), by examples/linux_forms_probe, with pictures (transfers.bmp, password.bmp).
 # The agent's screen is Xvfb :91 with a clock and `top` (so the picture changes); the viewer's window is on Xvfb :92.
 # Everything the programs keep (the device's key, the saved logins, the single-instance lock) goes into the test's own
 # folder (XDG_CONFIG_HOME, XDG_STATE_HOME, XDG_RUNTIME_DIR), never the person's ~/.config/queqiao.
@@ -24,7 +25,8 @@ mkdir -p "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 started=$(date +%s)
 nice -n 10 cargo build -q --release --features queqiao-agent/test-switches,queqiao-viewer/test-switches \
-    -p queqiao-agent -p queqiao-viewer -p queqiao-server > "$out/build.log" 2>&1
+    -p queqiao-agent -p queqiao-viewer -p queqiao-server > "$out/build.log" 2>&1 \
+    && nice -n 10 cargo build -q --release -p queqiao-display --example linux_forms_probe >> "$out/build.log" 2>&1
 code=$?
 echo "build exit $code in $(( $(date +%s) - started )) s"
 if [ "$code" -ne 0 ]; then grep -E "^error" -A6 "$out/build.log" | head -30; echo M3_LINUX_FAIL build; exit 0; fi
@@ -108,5 +110,9 @@ for label in $sessions; do
         grep -q "RESULT PASS" "$out/agent_$label.txt" 2> /dev/null || why="$why $label-agent-result"
     fi
 done
-kill "$server" "$clock" "$term" 2> /dev/null
+kill "$server" 2> /dev/null
+echo "=== forms"
+DISPLAY=:92 timeout 60 "$bin/examples/linux_forms_probe" "$out" | tee "$out/forms.txt"
+grep -q FORMS_PASS "$out/forms.txt" || why="$why forms"
+kill "$clock" "$term" 2> /dev/null
 if [ -z "$why" ]; then echo M3_LINUX_PASS; else echo "M3_LINUX_FAIL$why"; fi

@@ -1,5 +1,6 @@
-//! The viewer's device list and the "help someone" form on Linux (Windows: forms.rs's DeviceList and HelpForm), with
-//! their API: polled with `next`, as on Windows.
+//! The viewer's lists and forms on Linux (Windows: forms.rs's DeviceList, HelpForm, PickList, PasswordForm), with their
+//! API: polled with `next`, as on Windows. The device list, the "help someone" form, the session's transfers (a list
+//! with buttons) and the form asking for that PC's password (its lock screen).
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -362,6 +363,262 @@ impl HelpForm {
     }
 
     pub fn next(&mut self, wait_ms: u32) -> Option<HelpAction> {
+        wait_for(&self.actions, wait_ms)
+    }
+}
+
+/// A button of the list pressed, and the row selected then.
+type Picked = (u16, Option<usize>);
+
+/// The id `PickList::next` gives when the list was closed.
+pub const PICK_CLOSED: u16 = 0xFFFF;
+
+#[derive(Default)]
+struct PickState {
+    items: Vec<String>,
+    selected: Option<usize>,
+}
+
+struct PickView {
+    title: String,
+    heading: String,
+    buttons: Vec<(u16, String)>,
+    state: Arc<Mutex<PickState>>,
+    actions: Arc<Mutex<Vec<Picked>>>,
+}
+
+impl PickView {
+    fn push(&self, id: u16) {
+        let selected = self.state.lock().ok().and_then(|state| state.selected);
+        if let Ok(mut actions) = self.actions.lock() {
+            actions.push((id, selected));
+        }
+    }
+}
+
+impl View for PickView {
+    fn builder(&self) -> egui::ViewportBuilder {
+        egui::ViewportBuilder::default()
+            .with_title(&self.title)
+            .with_inner_size([520.0, 320.0])
+    }
+
+    fn draw(&mut self, ctx: &egui::Context) -> bool {
+        let mut pressed = None;
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label(&self.heading);
+            ui.add_space(6.0);
+            if let Ok(mut state) = self.state.lock() {
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let items = state.items.clone();
+                        for (index, item) in items.iter().enumerate() {
+                            if ui
+                                .selectable_label(state.selected == Some(index), item)
+                                .clicked()
+                            {
+                                state.selected = Some(index);
+                            }
+                        }
+                    });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                for (id, text) in &self.buttons {
+                    if ui.button(text).clicked() {
+                        pressed = Some(*id);
+                    }
+                }
+            });
+        });
+        if let Some(id) = pressed {
+            self.push(id);
+        }
+        true
+    }
+
+    fn closed(&mut self) {
+        self.push(PICK_CLOSED);
+    }
+}
+
+/// A list with buttons (the session's transfers).
+pub struct PickList {
+    opened: Opened,
+    state: Arc<Mutex<PickState>>,
+    actions: Arc<Mutex<Vec<Picked>>>,
+}
+
+impl PickList {
+    pub fn new(title: &str, heading: &str, buttons: &[(u16, &str)]) -> Result<PickList> {
+        let state = Arc::new(Mutex::new(PickState::default()));
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let view = PickView {
+            title: title.to_string(),
+            heading: heading.to_string(),
+            buttons: buttons
+                .iter()
+                .map(|(id, text)| (*id, (*text).to_string()))
+                .collect(),
+            state: state.clone(),
+            actions: actions.clone(),
+        };
+        Ok(PickList {
+            opened: gui::open(Box::new(view))?,
+            state,
+            actions,
+        })
+    }
+
+    /// Shows `items`, keeping the selected row where it was.
+    pub fn set_items(&mut self, items: Vec<String>) {
+        if let Ok(mut state) = self.state.lock()
+            && state.items != items
+        {
+            state.selected = state.selected.filter(|index| *index < items.len());
+            state.items = items;
+            gui::repaint();
+        }
+    }
+
+    pub fn selected(&self) -> Option<usize> {
+        self.state.lock().ok().and_then(|state| state.selected)
+    }
+
+    /// For tests: the list's picture.
+    pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
+        self.opened.save_picture(path)
+    }
+
+    /// A button pressed (with the selected row), or None; Some((PICK_CLOSED, _)) when the window was closed.
+    pub fn next(&mut self, wait_ms: u32) -> Option<(u16, Option<usize>)> {
+        wait_for(&self.actions, wait_ms)
+    }
+}
+
+/// What the person did in the password form.
+pub enum PasswordAction {
+    Submit(String),
+    Cancel,
+}
+
+#[derive(Default)]
+struct PasswordState {
+    password: String,
+    status: String,
+    /// The field takes the keyboard (again, after a wrong password).
+    focus: bool,
+}
+
+struct PasswordView {
+    title: String,
+    text: String,
+    state: Arc<Mutex<PasswordState>>,
+    actions: Arc<Mutex<Vec<PasswordAction>>>,
+}
+
+impl View for PasswordView {
+    fn builder(&self) -> egui::ViewportBuilder {
+        egui::ViewportBuilder::default()
+            .with_title(&self.title)
+            .with_inner_size([420.0, 210.0])
+            .with_resizable(false)
+            .with_always_on_top()
+    }
+
+    fn draw(&mut self, ctx: &egui::Context) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        let mut action = None;
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            action = Some(PasswordAction::Cancel);
+        }
+        let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add(egui::Label::new(self.text.as_str()).wrap());
+            ui.add_space(8.0);
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut state.password)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            );
+            if state.focus {
+                field.request_focus();
+                state.focus = false;
+            }
+            ui.label(state.status.as_str());
+            ui.add_space(8.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if ui.button(tr("Cancel")).clicked() {
+                    action = Some(PasswordAction::Cancel);
+                }
+                if ui.button(tr("OK")).clicked() || enter {
+                    action = Some(PasswordAction::Submit(state.password.clone()));
+                }
+            });
+        });
+        drop(state);
+        if let Some(action) = action
+            && let Ok(mut actions) = self.actions.lock()
+        {
+            actions.push(action);
+        }
+        true
+    }
+
+    fn closed(&mut self) {
+        if let Ok(mut actions) = self.actions.lock() {
+            actions.push(PasswordAction::Cancel);
+        }
+    }
+}
+
+/// The form asking for that PC's password (its lock screen).
+pub struct PasswordForm {
+    opened: Opened,
+    state: Arc<Mutex<PasswordState>>,
+    actions: Arc<Mutex<Vec<PasswordAction>>>,
+}
+
+impl PasswordForm {
+    pub fn new(title: &str, text: &str) -> Result<PasswordForm> {
+        let state = Arc::new(Mutex::new(PasswordState {
+            focus: true,
+            ..PasswordState::default()
+        }));
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let view = PasswordView {
+            title: title.to_string(),
+            text: text.to_string(),
+            state: state.clone(),
+            actions: actions.clone(),
+        };
+        Ok(PasswordForm {
+            opened: gui::open(Box::new(view))?,
+            state,
+            actions,
+        })
+    }
+
+    /// A line under the field (the field is emptied).
+    pub fn set_status(&self, text: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            state.status = text.to_string();
+            state.password.clear();
+            state.focus = true;
+        }
+        gui::repaint();
+    }
+
+    /// For tests: the form's picture.
+    pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
+        self.opened.save_picture(path)
+    }
+
+    pub fn next(&mut self, wait_ms: u32) -> Option<PasswordAction> {
         wait_for(&self.actions, wait_ms)
     }
 }
