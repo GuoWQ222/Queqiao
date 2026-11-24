@@ -108,8 +108,11 @@ allowed and declined (the consent prompt; the banner and prompt pictured), ui (t
 device list, with pictures), main (the agent's main window, each page pictured), and the transfer list and password
 form (examples/linux_forms_probe), and passes on cc4-1. Updates come with the system's packages (step 6), not from Queqiao.
 
-Not yet on Linux: command-line
-windows on the viewer side, NVDEC and VA-API, Wayland, the privacy screen and input block, the service and packages.
+Command lines on the viewer side open in the desktop's terminal emulator (x-terminal-emulator, else GNOME Terminal,
+Konsole, Xfce's, xterm) running the viewer's helper over a Unix socket in the private runtime folder (this user only,
+with a one-time token); --terminal-test passes in run_m3_linux.sh.
+
+Not yet on Linux: NVDEC and VA-API, Wayland, the privacy screen and input block, the service and packages.
 
 ## Order of the work
 

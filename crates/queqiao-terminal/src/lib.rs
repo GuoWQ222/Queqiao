@@ -4,11 +4,15 @@
 //!   where there is no PowerShell; [`Terminals`] keeps them by number and turns their output into messages.
 //! - The controlling PC shows each in a console window of its own ([`window::TerminalWindow`]): a helper
 //!   process (the viewer started again with `--terminal-pipe`) whose console renders the VT output and turns
-//!   keys into VT input, connected to the viewer by two one-way named pipes.
+//!   keys into VT input, connected to the viewer by two one-way named pipes. On Linux the window is the desktop's
+//!   terminal emulator running that helper, connected by one Unix socket (window_unix.rs, helper_unix.rs).
 //!
 //! [`TerminalMessage`] is what goes between them; several command lines can be open at once.
 
 #[cfg(windows)]
+mod helper;
+#[cfg(target_os = "linux")]
+#[path = "helper_unix.rs"]
 mod helper;
 #[cfg(windows)]
 mod pty;
@@ -22,7 +26,6 @@ mod window;
 #[path = "window_unix.rs"]
 mod window;
 
-#[cfg(windows)]
 pub use helper::run_helper;
 pub use pty::Pty;
 pub use terminals::Terminals;

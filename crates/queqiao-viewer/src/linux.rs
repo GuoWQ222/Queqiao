@@ -23,6 +23,19 @@ pub(crate) fn create_device() -> Result<(Device, Context, String), String> {
 pub(crate) fn main() {
     queqiao_core::platform::install_crash_log("queqiao-viewer");
     let args: Vec<String> = std::env::args().collect();
+    // A terminal window (started by a session of this viewer, in a terminal emulator): it runs until its command line
+    // ends.
+    if args.get(1).map(String::as_str) == Some("--terminal-pipe")
+        && let Some(socket) = args.get(2)
+    {
+        let title = match args.iter().position(|arg| arg == "--terminal-title") {
+            Some(at) => args.get(at + 1).cloned().unwrap_or_default(),
+            None => String::new(),
+        };
+        let test =
+            cfg!(feature = "test-switches") && args.iter().any(|arg| arg == "--terminal-test");
+        std::process::exit(queqiao_terminal::run_helper(socket, &title, test));
+    }
     let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
     let parsed = match args.get(1).map(String::as_str) {
         Some("--invite") => Some(invitation_options(&args[2..])),

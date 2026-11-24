@@ -3,7 +3,8 @@
 # own on 127.0.0.1, as scripts\run_m4_local.ps1 does on Windows: the server made (init, a user), the agent logged in and
 # online, the viewer logged in and connected to it by name (--device), with the input test. Sessions (SESSIONS, default
 # "direct allowed declined ui"): direct (the clipboard both ways too; the session bar and card of figures, pictured with
-# the bar out and tucked away, its Figures button clicked twice), allowed (the agent asks the person, who allows:
+# the bar out and tucked away, its Figures button clicked twice; a command line on the agent in a terminal window
+# here, detached and shown again: --terminal-test), allowed (the agent asks the person, who allows:
 # the consent prompt answered by the test; pictures of the banner and the prompt), declined (who declines: neither side passes, both must say so), ui (the
 # viewer through its login form and device list as a person would, filled and pressed by the program, with pictures of
 # both: login.bmp and devices.bmp). Then the session's forms no session opens by itself (the transfer list, the
@@ -64,7 +65,7 @@ account="--server $listen --pin $pin --user alice --password $password"
 why=''
 for label in $sessions; do
     case $label in
-        direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out";
+        direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out --terminal-test";
                 agent_expects='test text from the other side received: yes'; viewer_expects='test text from the other side received: yes'; both_pass=yes ;;
         # The agent's banner and consent prompt pictured.
         allowed) agent_extra="--ask --answer allow --ui-pictures $out"; viewer_extra='';
@@ -112,7 +113,8 @@ for label in $sessions; do
         for picture in viewer_session viewer_session_tucked; do
             [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp" || why="$why direct-$picture-picture"
         done
-        grep -q "^bar: no Figures button|^overlay: " "$out/viewer_direct.txt" && why="$why direct-bar"
+        grep -qE "^bar: no Figures button|^overlay: " "$out/viewer_direct.txt" && why="$why direct-bar"
+        grep -q "^terminal test: PASS" "$out/viewer_direct.txt" || why="$why direct-terminal"
     fi
     pictures=''
     [ "$label" = allowed ] && pictures='banner prompt'

@@ -2036,10 +2036,11 @@ pub(crate) struct TerminalTest {
 /// What the terminal test types, by shell; its output differs from what is typed, so seeing it means the
 /// command ran.
 pub(crate) fn terminal_test_input(shell: &str) -> &'static str {
-    if shell == "PowerShell" {
-        "Write-Output ('queqiao' + '-terminal-ok')\r"
-    } else {
-        "echo queqiao^-terminal-ok\r"
+    match shell {
+        "PowerShell" => "Write-Output ('queqiao' + '-terminal-ok')\r",
+        "cmd" => "echo queqiao^-terminal-ok\r",
+        // bash, zsh, sh (Linux): two quotes end the word and start it again, as the caret does for cmd.
+        _ => "echo queqiao''-terminal-ok\r",
     }
 }
 
