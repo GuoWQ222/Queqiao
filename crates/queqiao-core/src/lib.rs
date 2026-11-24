@@ -7,6 +7,9 @@ pub mod account;
 pub mod invitation;
 #[cfg(windows)]
 pub mod platform;
+#[cfg(target_os = "linux")]
+#[path = "platform_linux.rs"]
+pub mod platform;
 pub mod protocol;
 pub mod stun;
 pub mod text;

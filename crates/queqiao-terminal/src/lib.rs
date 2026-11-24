@@ -7,16 +7,23 @@
 //!   keys into VT input, connected to the viewer by two one-way named pipes.
 //!
 //! [`TerminalMessage`] is what goes between them; several command lines can be open at once.
-// Windows only for now: the Linux layer comes in docs/LINUX.md step 2 (the platform API); until then this crate
-// is empty on Linux.
-#![cfg(windows)]
 
+#[cfg(windows)]
 mod helper;
+#[cfg(windows)]
 mod pty;
+#[cfg(target_os = "linux")]
+#[path = "pty_unix.rs"]
+mod pty;
+mod terminals;
+#[cfg(windows)]
 mod window;
 
+#[cfg(windows)]
 pub use helper::run_helper;
-pub use pty::{Pty, Terminals};
+pub use pty::Pty;
+pub use terminals::Terminals;
+#[cfg(windows)]
 pub use window::{TerminalWindow, WindowEvent};
 
 /// Output read from a command line goes out in pieces of at most this many bytes.
@@ -212,10 +219,14 @@ mod tests {
         let Some(TerminalMessage::Opened { shell, .. }) = replies.first() else {
             panic!("not opened: {replies:?}");
         };
+        // The command as typed must not show the expected text itself (the console echoes it).
         let input = if shell == "PowerShell" {
             "Write-Output ('queqiao' + '-terminal-ok')\r"
-        } else {
+        } else if shell == "cmd" {
             "echo queqiao^-terminal-ok\r"
+        } else {
+            // A POSIX shell (Linux).
+            "echo queqiao-''terminal-ok\r"
         };
         terminals.handle(TerminalMessage::Input {
             id: 1,

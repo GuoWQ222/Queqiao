@@ -18,3 +18,7 @@ windows = { workspace = true, features = [
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
+
+# Linux (docs/LINUX.md): pseudo terminals.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

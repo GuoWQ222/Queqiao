@@ -19,3 +19,7 @@ windows = { workspace = true, features = [
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+
+# Linux (docs/LINUX.md): libpulse-simple loaded at run time.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

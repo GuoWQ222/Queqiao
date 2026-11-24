@@ -4,6 +4,9 @@
 //!
 //! The password is checked by Windows itself (LogonUserW, for the account signed in here); a few tries per session and
 //! per PC, so that guessing never reaches Windows' own lockout of the account.
+//!
+//! On Linux (docs/LINUX.md) the gate is the same; the session counts as locked when logind says so (LockedHint), and
+//! no password opens it yet (PAM comes with the service): a locked Linux PC shows a viewer nothing.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -20,6 +23,7 @@ static FAILURES: Mutex<Vec<Instant>> = Mutex::new(Vec::new());
 static SIGN_IN_OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The agent for the sign-in screen: whose Windows password it asks for.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn set_sign_in_owner(account: &str) {
     let _ = SIGN_IN_OWNER.set(account.to_string());
 }
@@ -108,7 +112,7 @@ impl LockGate {
         }
         let right = match expected {
             Some(test) => password == test,
-            None => windows_password_ok(password, self.owner.as_deref()),
+            None => password_ok(password, self.owner.as_deref()),
         };
         if right {
             self.verified = true;
@@ -130,6 +134,7 @@ fn recent_failures() -> usize {
 }
 
 /// Whether this program's Windows session is locked (WTS session flags); None when Windows does not say.
+#[cfg(windows)]
 fn session_locked() -> Option<bool> {
     use windows::Win32::System::RemoteDesktop::{
         WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSFreeMemory, WTSINFOEXW,
@@ -165,7 +170,8 @@ fn session_locked() -> Option<bool> {
 
 /// Whether `password` is the Windows password of `account` ("DOMAIN\user"), or of the account signed in here
 /// (Windows checks it).
-fn windows_password_ok(password: &str, account: Option<&str>) -> bool {
+#[cfg(windows)]
+fn password_ok(password: &str, account: Option<&str>) -> bool {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::Authentication::Identity::{GetUserNameExW, NameSamCompatible};
     use windows::Win32::Security::{
@@ -213,6 +219,30 @@ fn windows_password_ok(password: &str, account: Option<&str>) -> bool {
             }
             ok
         })
+}
+
+/// Whether this login session is locked, as logind says (LockedHint, which the desktop's screen locker sets); None
+/// without logind (containers) or a session of its own.
+#[cfg(target_os = "linux")]
+fn session_locked() -> Option<bool> {
+    let session = std::env::var("XDG_SESSION_ID").ok()?;
+    let output = std::process::Command::new("loginctl")
+        .args(["show-session", &session, "--property=LockedHint", "--value"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// No password opens the gate on Linux yet: it fails closed (PAM, as the system's own lock screen checks, comes with
+/// the service in docs/LINUX.md step 6).
+#[cfg(target_os = "linux")]
+fn password_ok(_password: &str, _account: Option<&str>) -> bool {
+    false
 }
 
 #[cfg(test)]

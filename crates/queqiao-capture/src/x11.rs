@@ -53,6 +53,41 @@ pub struct Device;
 #[derive(Clone, Debug, Default)]
 pub struct Context;
 
+/// A screen's device and place without capturing it, as Windows opens one (for a process that sees no screens, and the
+/// encoder probe): on Linux the device is nothing to open, and the place comes from RandR.
+pub struct ScreenDevice {
+    pub device: Device,
+    pub context: Context,
+    pub info: OutputInfo,
+    pub index: usize,
+}
+
+/// Screen `index` (as `screens` counts them), or the primary one.
+pub fn screen_device(index: Option<usize>) -> Result<ScreenDevice> {
+    let index = match index {
+        Some(index) => index,
+        None => screens()?.iter().position(|s| s.primary).unwrap_or(0),
+    };
+    let duplicator = Duplicator::new(index)?;
+    Ok(ScreenDevice {
+        device: Device,
+        context: Context,
+        info: duplicator.info().clone(),
+        index,
+    })
+}
+
+/// The primary screen's device (Windows: a device on the first GPU for a process that sees no screens).
+pub fn first_device() -> Result<ScreenDevice> {
+    screen_device(None)
+}
+
+/// Another GPU that would be preferred to the one driving the screen (Windows: discrete before integrated); on Linux
+/// the screen's pictures are in memory, so none is.
+pub fn preferred_gpu_besides(_adapter: &str) -> Option<String> {
+    None
+}
+
 /// A System V shared memory segment attached here and to the X server.
 struct Segment {
     id: i32,
@@ -291,13 +326,41 @@ impl Duplicator {
     }
 
     /// The screen now, as a BGRA image (not counted as a frame).
-    pub fn snapshot_image(&mut self) -> Result<BgraImage> {
-        let first = self.first;
-        self.first = true;
-        let frame = self.acquire(0)?;
-        self.first = first;
-        let frame = frame.ok_or_else(|| Error::new("no picture".into()))?;
-        self.copy_to_cpu(&frame)
+    pub fn snapshot_image(&self) -> Result<BgraImage> {
+        // A plain GetImage of the monitor, apart from the shared memory and the changes counted (as Windows takes a GDI
+        // screenshot beside desktop duplication).
+        let info = &self.info;
+        let reply = xproto::get_image(
+            &self.connection,
+            ImageFormat::Z_PIXMAP,
+            self.root,
+            info.left as i16,
+            info.top as i16,
+            info.width as u16,
+            info.height as u16,
+            !0,
+        )
+        .map_err(Error::from_x11)?
+        .reply()
+        .map_err(Error::from_x11)?;
+        let size = info.width as usize * info.height as usize * 4;
+        if reply.depth < 24 || reply.data.len() < size {
+            return Err(Error::new(format!(
+                "a screenshot of depth {} with {} bytes",
+                reply.depth,
+                reply.data.len()
+            )));
+        }
+        let mut pixels = reply.data;
+        pixels.truncate(size);
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
+        Ok(BgraImage {
+            width: info.width,
+            height: info.height,
+            pixels,
+        })
     }
 
     /// A new pointer shape since it was last taken.

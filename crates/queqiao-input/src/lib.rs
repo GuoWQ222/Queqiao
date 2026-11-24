@@ -10,8 +10,11 @@
 
 #[cfg(windows)]
 mod block;
+mod clip;
 #[cfg(windows)]
 mod clipboard;
+#[cfg(target_os = "linux")]
+mod clipboard_x11;
 pub mod scancode;
 #[cfg(windows)]
 mod win;
@@ -20,9 +23,12 @@ mod x11;
 
 #[cfg(windows)]
 pub use block::LocalInputBlock;
+pub use clip::ClipContent;
 #[cfg(windows)]
-pub use clipboard::{
-    ClipContent, Clipboard, read_files as clipboard_files, read_text as clipboard_text,
+pub use clipboard::{Clipboard, read_files as clipboard_files, read_text as clipboard_text};
+#[cfg(target_os = "linux")]
+pub use clipboard_x11::{
+    Clipboard, LocalInputBlock, read_files as clipboard_files, read_text as clipboard_text,
 };
 #[cfg(windows)]
 pub use win::*;

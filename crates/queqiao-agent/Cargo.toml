@@ -42,3 +42,7 @@ windows = { workspace = true, features = [
     "Win32_System_Services",
     "Win32_System_Threading",
 ] }
+
+# Linux (docs/LINUX.md): the session banner on the X display.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"

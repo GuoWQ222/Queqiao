@@ -97,3 +97,32 @@ impl EncoderChoice {
         }
     }
 }
+
+/// Which kind of decoder to use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecoderChoice {
+    /// GPU first, OpenH264 if the GPU cannot decode.
+    Auto,
+    Hardware,
+    Software,
+    /// Intel's decoder driven directly (oneVPL), as NVENC/oneVPL encode.
+    Vpl,
+    /// NVIDIA's decoder driven directly (NVDEC).
+    Nvdec,
+    /// AMD's decoder driven directly (AMF).
+    Amf,
+}
+
+impl DecoderChoice {
+    /// `Auto`, unless the test switch `QUEQIAO_FORCE` says `decode:hardware` or `decode:software`.
+    pub fn from_env() -> Self {
+        match queqiao_core::forced("decode").as_deref() {
+            Some("hardware") => Self::Hardware,
+            Some("software") => Self::Software,
+            Some("vpl") => Self::Vpl,
+            Some("nvdec") => Self::Nvdec,
+            Some("amf") => Self::Amf,
+            _ => Self::Auto,
+        }
+    }
+}

@@ -32,7 +32,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
-use crate::presence::AccountState;
+use crate::model::AccountState;
+use crate::model::{ConnectionRow, MainDevice, TransferRow};
 
 const CLASS: PCWSTR = w!("QueqiaoMain");
 static REGISTER: Once = Once::new();
@@ -187,40 +188,10 @@ impl Page {
     }
 }
 
-/// One device in the sidebar.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MainDevice {
-    pub id: String,
-    pub name: String,
-    pub online: bool,
-    /// This PC itself (not to be connected to).
-    pub this_pc: bool,
-}
-
-/// One file in the Transfers page.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransferRow {
-    /// Received here (else sent from here).
-    pub received: bool,
-    pub name: String,
-    /// "from Office PC · 12.4 MB · 14:03" and the like.
-    pub detail: String,
-}
-
-/// One session this PC started, for a device's "Recent connections".
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConnectionRow {
-    pub device_id: String,
-    /// "Today 15:08", "2026-11-21 09:30".
-    pub when: String,
-    /// "12 min" and the like.
-    pub length: String,
-}
-
 /// The settings as the Settings page shows them (the tray menu's own copy is in Presence).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Shown {
-    pub help_mode: crate::presence::HelpMode,
+    pub help_mode: crate::model::HelpMode,
     pub help_files: bool,
     pub allow: bool,
     pub ask: bool,
@@ -815,13 +786,13 @@ impl MainWindow {
                 crate::presence::MENU_AUTOSTART => shown.autostart,
                 crate::presence::MENU_AUTO_UPDATE => shown.auto_update,
                 crate::presence::MENU_HELP_BOTH => {
-                    shown.help_mode == crate::presence::HelpMode::CodeAndAsk
+                    shown.help_mode == crate::model::HelpMode::CodeAndAsk
                 }
                 crate::presence::MENU_HELP_CODE_ONLY => {
-                    shown.help_mode == crate::presence::HelpMode::CodeOnly
+                    shown.help_mode == crate::model::HelpMode::CodeOnly
                 }
                 crate::presence::MENU_HELP_ASK_ONLY => {
-                    shown.help_mode == crate::presence::HelpMode::AskOnly
+                    shown.help_mode == crate::model::HelpMode::AskOnly
                 }
                 crate::presence::MENU_HELP_FILES => shown.help_files,
                 _ => false,
@@ -889,7 +860,7 @@ impl MainWindow {
                     .chars()
                     .filter(char::is_ascii_digit)
                     .collect();
-                let code = crate::forms::normalize_code(&crate::forms::text_of(self.help_code));
+                let code = crate::model::normalize_code(&crate::forms::text_of(self.help_code));
                 if help_id.is_empty() || code.is_empty() {
                     crate::forms::show_error(
                         tr("Queqiao"),

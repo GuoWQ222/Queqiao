@@ -48,6 +48,8 @@ mod nvenc_cuda;
 mod nvenc_sys;
 mod format;
 #[cfg(target_os = "linux")]
+mod linux_decode;
+#[cfg(target_os = "linux")]
 mod linux_screen;
 #[cfg(windows)]
 mod screen;
@@ -70,16 +72,20 @@ mod vpl_decode;
 #[cfg(windows)]
 mod vpl_sys;
 
-pub use config::{EncodedFrame, EncoderChoice, EncoderConfig, SoftwareTiming};
+pub use config::{DecoderChoice, EncodedFrame, EncoderChoice, EncoderConfig, SoftwareTiming};
 #[cfg(windows)]
 pub use convert::Nv12Converter;
 #[cfg(windows)]
-pub use decoder::{DecodedFrame, DecoderChoice, H264Decoder, RING};
+pub use decoder::{DecodedFrame, H264Decoder, RING};
 #[cfg(windows)]
 pub use encoder::H264Encoder;
 pub use format::{Codec, EncodeFormat};
 #[cfg(target_os = "linux")]
-pub use linux_screen::{Error, H264Encoder, Result, ScreenEncoder};
+pub use linux_decode::{
+    DecodedFrame, H264Decoder, Picture, RING, av1_decodes_on_gpu, can_decode, hevc_decode_caps,
+};
+#[cfg(target_os = "linux")]
+pub use linux_screen::{Error, H264Encoder, Result, ScreenEncoder, can_encode};
 #[cfg(windows)]
 pub use screen::ScreenEncoder;
 

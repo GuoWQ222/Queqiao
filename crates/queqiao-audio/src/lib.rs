@@ -9,12 +9,19 @@
 //!   heard on real speakers).
 //!
 //! Each runs on its own thread with its own COM apartment.
-// Windows only for now: the Linux layer comes in docs/LINUX.md step 2 (the platform API); until then this crate
-// is empty on Linux.
-#![cfg(windows)]
+//!
+//! The devices: WASAPI on Windows (wasapi.rs), PulseAudio on Linux (pulse.rs, docs/LINUX.md), both used as `device`
+//! with the same calls.
 
 mod opus;
+#[cfg(target_os = "linux")]
+mod pulse;
+#[cfg(windows)]
 mod wasapi;
+#[cfg(target_os = "linux")]
+use pulse as device;
+#[cfg(windows)]
+use wasapi as device;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-pub use wasapi::{render_devices, set_mute};
+pub use device::{render_devices, set_mute};
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
@@ -122,7 +129,7 @@ fn capture_thread(
         Source::Loopback(device) | Source::Microphone(device) => device.clone(),
         Source::Tone => None,
     };
-    let _com = wasapi::Com::init();
+    let _com = device::Com::init();
     let mut encoder = match opus::Encoder::new(BITRATE) {
         Ok(encoder) => encoder,
         Err(error) => {
@@ -141,8 +148,8 @@ fn capture_thread(
     }
     while !stop.load(Ordering::Relaxed) {
         let opened = match &source {
-            Source::Microphone(_) => wasapi::Stream::microphone(device.as_deref()),
-            _ => wasapi::Stream::loopback(device.as_deref()),
+            Source::Microphone(_) => device::Stream::microphone(device.as_deref()),
+            _ => device::Stream::loopback(device.as_deref()),
         };
         let stream = match opened {
             Ok(stream) => stream,
@@ -259,10 +266,18 @@ pub struct VirtualMicrophone {
     pub microphone: String,
 }
 
+#[cfg(windows)]
 pub fn virtual_microphone() -> Option<VirtualMicrophone> {
-    pair_virtual_microphone(&wasapi::render_devices(), &wasapi::capture_devices())
+    pair_virtual_microphone(&device::render_devices(), &device::capture_devices())
 }
 
+/// Linux: PulseAudio's own null sink, made when first needed (pulse.rs).
+#[cfg(target_os = "linux")]
+pub fn virtual_microphone() -> Option<VirtualMicrophone> {
+    device::virtual_microphone()
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
 fn pair_virtual_microphone(
     speakers: &[String],
     microphones: &[String],
@@ -291,8 +306,8 @@ fn pair_virtual_microphone(
 
 /// What a microphone hears for `duration` (48 kHz, interleaved stereo), for checks.
 pub fn record(microphone: &str, duration: Duration) -> Result<Vec<f32>, String> {
-    let _com = wasapi::Com::init();
-    let stream = wasapi::Stream::microphone(Some(microphone))?;
+    let _com = device::Com::init();
+    let stream = device::Stream::microphone(Some(microphone))?;
     let until = Instant::now() + duration;
     let (mut all, mut fresh) = (Vec::new(), Vec::new());
     while Instant::now() < until {
@@ -305,8 +320,8 @@ pub fn record(microphone: &str, duration: Duration) -> Result<Vec<f32>, String> 
 
 /// Listens to a microphone for `duration`: (10 ms frames with sound, frames that were mostly the test tone).
 pub fn listen_for_tone(microphone: &str, duration: Duration) -> Result<(u32, u32), String> {
-    let _com = wasapi::Com::init();
-    let stream = wasapi::Stream::microphone(Some(microphone))?;
+    let _com = device::Com::init();
+    let stream = device::Stream::microphone(Some(microphone))?;
     let until = Instant::now() + duration;
     let (mut heard, mut tone) = (0u32, 0u32);
     let (mut pending, mut fresh) = (Vec::new(), Vec::new());
@@ -440,7 +455,7 @@ fn play_thread(
     stats: &Mutex<PlayerStats>,
     notes: &Sender<String>,
 ) {
-    let _com = wasapi::Com::init();
+    let _com = device::Com::init();
     let mut decoder = match opus::Decoder::new() {
         Ok(decoder) => decoder,
         Err(error) => {
@@ -451,7 +466,7 @@ fn play_thread(
     let mut waiting: BTreeMap<u64, Arc<[u8]>> = BTreeMap::new();
     let mut pcm = vec![0f32; FRAME * CHANNELS];
     while !stop.load(Ordering::Relaxed) {
-        let stream = match wasapi::Stream::render(device.as_deref()) {
+        let stream = match device::Stream::render(device.as_deref()) {
             Ok(stream) => stream,
             Err(error) => {
                 let _ = notes.send(format!("sound: not played ({error}); trying again"));
@@ -587,8 +602,8 @@ impl Tone {
             std::thread::Builder::new()
                 .name("queqiao-test-tone".into())
                 .spawn(move || {
-                    let _com = wasapi::Com::init();
-                    let stream = match wasapi::Stream::render(device.as_deref()) {
+                    let _com = device::Com::init();
+                    let stream = match device::Stream::render(device.as_deref()) {
                         Ok(stream) => {
                             let _ = ready_sender.send(Ok(stream.name.clone()));
                             stream
@@ -731,7 +746,7 @@ mod mute_measurement {
     use super::*;
 
     fn loudness(device: &str, seconds: f32) -> f32 {
-        let stream = wasapi::Stream::loopback(Some(device)).expect("loopback");
+        let stream = device::Stream::loopback(Some(device)).expect("loopback");
         let (mut sum, mut count) = (0f64, 0usize);
         let mut fresh = Vec::new();
         let until = Instant::now() + Duration::from_secs_f32(seconds);
@@ -755,13 +770,13 @@ mod mute_measurement {
     fn loopback_while_muted() {
         let device = std::env::var("QUEQIAO_TEST_DEVICE")
             .unwrap_or_else(|_| "Steam Streaming Speakers".into());
-        let _com = wasapi::Com::init();
+        let _com = device::Com::init();
         let _tone = Tone::start(Some(device.clone()), TEST_TONE_HZ).expect("tone");
         std::thread::sleep(Duration::from_millis(300));
         let before = loudness(&device, 1.0);
-        wasapi::set_mute(Some(&device), true).expect("mute");
+        device::set_mute(Some(&device), true).expect("mute");
         let muted = loudness(&device, 1.0);
-        wasapi::set_mute(Some(&device), false).expect("unmute");
+        device::set_mute(Some(&device), false).expect("unmute");
         let after = loudness(&device, 1.0);
         println!("MUTE_MEASUREMENT before {before:.4} muted {muted:.4} after {after:.4}");
     }

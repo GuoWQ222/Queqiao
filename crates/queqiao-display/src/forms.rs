@@ -26,6 +26,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled,
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
+use crate::model::normalize_code;
+
 static REGISTER: Once = Once::new();
 const CLASS: PCWSTR = w!("QueqiaoForm");
 
@@ -721,16 +723,6 @@ impl HelpForm {
             _ => None,
         }
     }
-}
-
-/// A help code as typed (spaces, dashes, any case) in the form the server compares: letters and digits, upper
-/// case.
-pub fn normalize_code(typed: &str) -> String {
-    typed
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| c.to_ascii_uppercase())
-        .collect()
 }
 
 pub enum LoginAction {

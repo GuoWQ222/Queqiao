@@ -19,106 +19,10 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::forms::{Form, Kind, set_text};
-use crate::main_window::{
-    ConnectionRow, MainAction, MainDevice, MainWindow, Page, Shown, TransferRow,
+use crate::main_window::{MainAction, MainWindow, Page, Shown};
+use crate::model::{
+    AccountState, ConnectionRow, HelpMode, MainDevice, PasswordCheck, PresenceEvent, TransferRow,
 };
-
-/// What the person did.
-/// Checks a typed settings password.
-pub type PasswordCheck = Box<dyn Fn(&str) -> bool>;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PresenceEvent {
-    /// End the current session (banner or tray).
-    EndSession,
-    /// Quit Queqiao on this PC.
-    Quit,
-    /// Allow this account's devices to control the PC (true) or not.
-    SetAllow(bool),
-    /// Ask before each session (true) or not.
-    SetAsk(bool),
-    /// Share the clipboard with the controlling device (true) or not.
-    SetClipboard(bool),
-    /// Accept files from the controlling device (true) or not.
-    SetFiles(bool),
-    /// Allow remote command lines (true) or not.
-    SetTerminal(bool),
-    /// Start with Windows (true) or not.
-    SetAutostart(bool),
-    /// Lock this PC when a session ends (true) or not.
-    SetLockAfter(bool),
-    /// A setting was chosen while settings are locked (someone of another account is controlling, or the
-    /// settings password was not given): refused.
-    SettingsLocked,
-    /// A new settings password (Some), or none any more.
-    SetPassword(Option<String>),
-    /// "Let someone help me...": open help requests (show the help ID and a code).
-    OpenHelp,
-    /// The help window asks for a new code.
-    HelpNewCode,
-    /// The help window was closed: no more help requests.
-    HelpClose,
-    /// The answer to the prompt: allowed, or denied (also when the time ran out or it was closed).
-    Consent(bool),
-    /// "Log in...": the person wants to log this PC in to their account (offered while it is not online).
-    LogIn,
-    /// "Check for updates...".
-    CheckUpdates,
-    /// Install updates by itself (true) or only when asked.
-    SetAutoUpdate(bool),
-    /// A fixed help code for this PC (normalized: upper-case letters and digits), or none any more.
-    SetFixedHelpCode(Option<String>),
-    /// "Wake-on-LAN check...".
-    CheckWakeOnLan,
-    /// The main window: connect to this device of the account.
-    Connect(String),
-    /// The main window: connect to this device and send it files (a file picker in the session).
-    SendFiles(String),
-    /// The main window: connect to this device and open a command line on it.
-    OpenCommandLine(String),
-    /// The main window: wake this device up (Wake-on-LAN through a device of the account next to it).
-    Wake(String),
-    /// The main window: take this device out of the account (after the person confirmed it).
-    RemoveDevice(String),
-    /// The main window: help someone of another account with their help ID and code.
-    HelpSomeone { help_id: String, code: String },
-    /// The main window: log this PC's Queqiao out of the account.
-    LogOut,
-    /// The main window: a new help ID for this PC (the old one stops working).
-    NewHelpId,
-    /// The main window: open the folder received files go to.
-    OpenReceivedFiles,
-    /// The main window: forget the list of transfers.
-    ClearTransfers,
-    /// The main window was opened (the agent fills in what it shows).
-    MainShown,
-    /// How someone of another account may start helping (Settings).
-    SetHelpMode(HelpMode),
-    /// Files also while someone of another account helps (true) or not.
-    SetHelpFiles(bool),
-}
-
-/// How someone of another account may start helping this PC with its help ID: UU Remote's three ways.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum HelpMode {
-    /// The help code, then the person at this PC allows it (the default).
-    #[default]
-    CodeAndAsk,
-    /// The help code alone: no prompt.
-    CodeOnly,
-    /// No code: the person at this PC allows each request.
-    AskOnly,
-}
-
-/// How this PC stands with the account server (the tray menu's first line).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AccountState {
-    Online,
-    /// Logged in, but the server cannot be reached at the moment: Queqiao tries again.
-    Offline,
-    /// No login, or the server wants a new one: the menu offers "Log in...".
-    LoggedOut,
-}
 
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_ID: u32 = 1;
@@ -1031,7 +935,7 @@ impl Presence {
                 tr("A fixed help code (8 or more letters or digits):"),
                 "",
             )?;
-            let code = crate::forms::normalize_code(&typed);
+            let code = crate::model::normalize_code(&typed);
             if code.len() < MIN_FIXED_CODE {
                 crate::forms::show_error(
                     tr("Queqiao"),

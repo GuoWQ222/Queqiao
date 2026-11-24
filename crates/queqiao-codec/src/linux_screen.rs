@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use queqiao_capture::{Context, Device, Frame};
+use queqiao_capture::{BgraImage, Context, Device, Frame};
 
 use crate::config::{EncodedFrame, EncoderChoice, EncoderConfig, SoftwareTiming};
 use crate::cpu_convert::{Tap, bgra_to_nv12, taps};
@@ -178,6 +178,24 @@ impl H264Encoder {
             }
         }
         Ok(())
+    }
+}
+
+/// Whether this PC can encode `codec` (as Windows' can_encode): H.264 always (OpenH264 is built in), H.265 when NVENC
+/// opens (1280x720 at 60 fps, closed again), AV1 not on Linux yet.
+pub fn can_encode(codec: VideoCodec, _device: &Device) -> bool {
+    match codec {
+        VideoCodec::H264 => true,
+        VideoCodec::H265 => {
+            let format = EncodeFormat::from_name("hevc").unwrap_or(EncodeFormat::H264);
+            let config = EncoderConfig {
+                codec,
+                format,
+                ..EncoderConfig::for_screen(1280, 720, 60)
+            };
+            NvencCuda::open(CUDA_GPU, &config, format).is_ok()
+        }
+        VideoCodec::Av1 => false,
     }
 }
 
@@ -380,9 +398,10 @@ impl ScreenEncoder {
         result
     }
 
-    /// Converts and encodes `frame` (the screen's size) now.
-    pub fn encode(&mut self, frame: &Frame, keyframe: bool) -> Result<Vec<EncodedFrame>> {
-        self.encode_bgra(frame.pixels(), frame.stride, keyframe)
+    /// Converts and encodes `image` (the screen's size, the agent's latest picture) now, as Windows' encode takes the
+    /// agent's latest texture.
+    pub fn encode(&mut self, image: &BgraImage, keyframe: bool) -> Result<Vec<EncodedFrame>> {
+        self.encode_bgra(&image.pixels, image.width as usize * 4, keyframe)
     }
 
     /// Converts and encodes B, G, R, X pixels of the screen's size (rows `stride` bytes apart). Returns the frames
