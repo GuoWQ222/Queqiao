@@ -129,7 +129,7 @@ impl H264Encoder {
     pub fn name(&self) -> &str {
         match &self.backend {
             Backend::Hardware(encoder) => &encoder.name,
-            Backend::Nvenc(encoder) => &encoder.name,
+            Backend::Nvenc(encoder) => encoder.name(),
             Backend::Vpl(encoder) => &encoder.name,
             Backend::Amf(encoder) => &encoder.name,
             Backend::Software(encoder) => &encoder.core.name,
@@ -197,7 +197,7 @@ impl H264Encoder {
     /// What the encoder makes: H.264 4:2:0 but for the vendor encoders (NVENC, oneVPL) set otherwise.
     pub fn format(&self) -> EncodeFormat {
         match &self.backend {
-            Backend::Nvenc(encoder) => encoder.format,
+            Backend::Nvenc(encoder) => encoder.format(),
             Backend::Vpl(encoder) => encoder.format,
             Backend::Amf(encoder) => encoder.format,
             _ => EncodeFormat::H264,

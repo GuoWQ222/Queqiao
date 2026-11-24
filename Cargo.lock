@@ -929,11 +929,13 @@ dependencies = [
 name = "queqiao-codec"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "openh264",
  "openh264-sys2",
  "queqiao-capture",
  "queqiao-core",
  "windows",
+ "x11rb",
 ]
 
 [[package]]
