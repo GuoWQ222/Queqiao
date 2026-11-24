@@ -39,8 +39,8 @@ flow; the interface list and one timer call are Windows), `queqiao-local`, `queq
 | Colour conversion | D3D11 video processor | NVENC takes RGB itself; VA-API's video processor (VPP); a Vulkan compute shader; CPU fallback |
 | Encode | Media Foundation, NVENC, oneVPL, AMF, OpenH264 | NVENC on CUDA (same API as on Windows, CUDA device instead of D3D11), VA-API (Intel and AMD: H.264, H.265, AV1 where the GPU has them), OpenH264 |
 | Decode | MF, NVDEC, oneVPL, AMF | NVDEC on CUDA, VA-API, OpenH264 (H.264), dav1d (AV1, software); H.265 in software is left out (patents: hardware only, as on Windows) |
-| Showing pictures | D3D11 swap chain, video processor, NVDEC shader | wgpu (Vulkan, else OpenGL): the YUV planes drawn by our shader (BT.709, 4:2:0 interpolated as on Windows); DMA-BUF imported without a copy where the driver can; memory upload otherwise |
-| Windows, forms, main window | Win32 and GDI | winit + wgpu for the session window; egui for forms and the main window (same pages and texts as on Windows) |
+| Showing pictures | D3D11 swap chain, video processor, NVDEC shader | Now: the CPU's BT.709 conversion and scaling (yuv.rs, as Windows' CPU path) into an MIT-SHM image. Next: the GPU (OpenGL or Vulkan) drawing the YUV planes with our shader; DMA-BUF imported without a copy where the driver can |
+| Windows, forms, main window | Win32 and GDI | The session window: X11 through x11rb, a connection and window per session thread as on Windows (winit allows one event loop per process, which would not let sessions run on threads of their own); on Wayland through XWayland. Forms, the main window, prompts, the banner and the session bar: egui (eframe, OpenGL) on one GUI thread, as the agent's UI thread on Windows (same pages and texts as on Windows) |
 | Tray | Shell notify icon | StatusNotifierItem (KDE, Ubuntu's GNOME with its AppIndicator extension); without one, the main window stays open instead |
 | Notices | Toasts | org.freedesktop.Notifications |
 | Input injection | SendInput | X11: XTest. Wayland: the RemoteDesktop portal (libei, GNOME 45+, KDE 6). The service and the sign-in screen: uinput (root) |
@@ -50,7 +50,7 @@ flow; the interface list and one timer call are Windows), `queqiao-local`, `queq
 | Game mouse | Raw input, clipped cursor | Relative pointer + pointer constraints (Wayland), XInput2 raw motion + grab (X11) |
 | System sound | WASAPI loopback | PulseAudio / PipeWire: the default sink's monitor source |
 | Sound out | WASAPI | PulseAudio / PipeWire |
-| Mute that PC's speakers | Endpoint volume | The default sink muted, put back after |
+| Mute that PC's speakers | Endpoint volume | The sound moved, not muted: a PulseAudio monitor follows its sink's mute (measured: muted, the capture got silence), so the streams (and what starts meanwhile) go to a null sink whose monitor is captured; moved back after |
 | Microphone to the controlled PC | A virtual cable must be installed there | Queqiao makes its own: a null sink and a virtual source named "Queqiao microphone" for the session, removed after (no third-party driver) |
 | Clipboard | Text, images, CF_HDROP | X11 selections / Wayland data-control (or the portal's clipboard): `text/plain;charset=utf-8`, `image/png`, `text/uri-list` (+ `x-special/gnome-copied-files`) |
 | Files | Downloads\Queqiao | The XDG download folder + `/Queqiao` |
@@ -88,6 +88,16 @@ PipeWire), PulseAudio with null sinks, NVENC/NVDEC on the 4090s, Linux agent and
 and permission prompts, VA-API on Intel/AMD, uinput, the systemd service on a real greeter and lock screen, KMS
 capture, real sound devices. Windows <-> Linux sessions need both on one network (or a reachable test server).
 
+## Where it stands (2026-11-24)
+
+Steps 1 to 3 are in for X11: the capture, input, encoders (OpenH264, NVENC on CUDA), the OpenH264 decoder, sound
+(PulseAudio), the clipboard (X11 selections), files, command lines on the controlled side, and the agent's and
+viewer's sessions, shared with Windows. `scripts/run_m2_linux.sh` runs a Linux agent against a Linux viewer (video,
+input, clipboard, files, commands, sound with the speakers muted) and passes on cc4-1. Not yet on Linux: accounts
+(login, device list, help requests; they need the GUI), the GUI itself, command-line windows on the viewer side,
+NVDEC and VA-API, Wayland, the privacy screen and input block, the service. The GUI comes next (the user asked for
+it), then accounts on top of it.
+
 ## Order of the work
 
 1. Foundation: the workspace builds on Linux (Windows parts behind `cfg`), the portable crates' tests pass there,
@@ -97,7 +107,8 @@ capture, real sound devices. Windows <-> Linux sessions need both on one network
 3. Linux agent on X11: capture, OpenH264 + NVENC, XTest, sound, clipboard, files; Linux viewer: window, decode
    (OpenH264, NVDEC), input, sound, clipboard, file drop. `scripts/run_m4_local.sh` on cc4-1.
 4. Wayland (portal capture, libei input), VA-API, dav1d, H.265 / 4:4:4 / 10-bit where the hardware has them.
-5. The main window, forms, tray, settings, transfers, languages (egui).
+5. The main window, forms, tray, settings, transfers, languages (egui), the session bar; then accounts (the agent's
+   and viewer's account modes shared as the sessions are). Next, before step 4.
 6. The service (greeter, lock screen: KMS + uinput), autostart, .deb, self-update, power, Wake-on-LAN check,
    command lines, privacy screen and input block where Linux allows them, crash reports.
 7. Windows <-> Linux sessions both ways, and a Linux column in PARITY.md, on real Linux PCs.

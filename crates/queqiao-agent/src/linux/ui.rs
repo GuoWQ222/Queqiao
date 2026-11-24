@@ -1,7 +1,8 @@
 //! What the person at this PC sees, on Linux (docs/LINUX.md), with the API of Windows' ui.rs: nothing happens unseen.
-//! Under X11 for now: during every session a banner over the top of the screen names who controls the PC, and a click
-//! on it ends the session; a session whose banner cannot be shown is refused, as on Windows. The tray icon
-//! (StatusNotifierItem), the consent prompt and the privacy screen come with the GUI (step 5): asked for, they say so.
+//! During every session a banner at the top of the screen names who controls the PC; its End button ends the session
+//! (Queqiao's own window, queqiao_display::SessionBanner; where the GUI cannot start, a plain X11 bar that a click
+//! ends). A session whose banner cannot be shown is refused, as on Windows. The tray icon (StatusNotifierItem) and the
+//! privacy screen come with the rest of the GUI (step 5): asked for, they say so.
 //!
 //! Also the agent's settings, `agent_settings.json` in the data folder (~/.local/share/queqiao or as
 //! queqiao_account::data_folder says), with Windows' fields and defaults.
@@ -42,8 +43,14 @@ struct Banner {
     text: Vec<Char2b>,
 }
 
+/// The banner shown: Queqiao's own window, or the plain X11 bar.
+enum Shown {
+    Gui(queqiao_display::SessionBanner),
+    Plain(Box<Banner>),
+}
+
 pub struct Ui {
-    banner: RefCell<Option<Banner>>,
+    banner: RefCell<Option<Shown>>,
     events: RefCell<Vec<PresenceEvent>>,
     /// No tray icon on Linux yet.
     pub tray_shown: bool,
@@ -75,14 +82,19 @@ impl Ui {
 
     /// Shows the banner for a session with `viewer`; an error (and so no session) if it cannot be shown.
     pub fn session_started(&self, viewer: &str) -> Result<(), String> {
-        let banner = Banner::show(&crate::session::clean_name(viewer))
-            .map_err(|error| format!("no banner on this display: {error}"))?;
-        *self.banner.borrow_mut() = Some(banner);
+        let viewer = crate::session::clean_name(viewer);
+        let shown = match queqiao_display::SessionBanner::show(&viewer) {
+            Ok(banner) => Shown::Gui(banner),
+            Err(gui) => Shown::Plain(Box::new(Banner::show(&viewer).map_err(|error| {
+                format!("no banner on this display: {gui}; the plain bar: {error}")
+            })?)),
+        };
+        *self.banner.borrow_mut() = Some(shown);
         Ok(())
     }
 
     pub fn session_ended(&self) {
-        if let Some(banner) = self.banner.borrow_mut().take() {
+        if let Some(Shown::Plain(banner)) = self.banner.borrow_mut().take() {
             let _ = banner.connection.destroy_window(banner.window);
             let _ = banner.connection.flush();
         }
@@ -95,7 +107,13 @@ impl Ui {
 
     /// What the person did since the last call: a click on the banner ends the session.
     pub fn try_event(&self) -> Option<PresenceEvent> {
-        if let Some(banner) = self.banner.borrow().as_ref() {
+        if let Some(Shown::Gui(banner)) = self.banner.borrow().as_ref()
+            && banner.end_pressed(0)
+            && !self.events.borrow().contains(&PresenceEvent::EndSession)
+        {
+            self.events.borrow_mut().push(PresenceEvent::EndSession);
+        }
+        if let Some(Shown::Plain(banner)) = self.banner.borrow().as_ref() {
             let mut redraw = false;
             while let Ok(Some(event)) = banner.connection.poll_for_event() {
                 match event {

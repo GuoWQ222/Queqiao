@@ -40,9 +40,9 @@ pub use forms::{
 pub use icon::app_icon;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    Hwnd, PICK_CLOSED, PasswordAction, PasswordForm, PickList, Presenter, Rect, RemoteCursor,
-    SessionOverlay, Window, ask_text, fit, owner_from_raw, pick_files, popup_menu,
-    save_screen_picture, show_error, show_info,
+    ConsentPrompt, Hwnd, PICK_CLOSED, PasswordAction, PasswordForm, PickList, Presenter, Rect,
+    RemoteCursor, SessionBanner, SessionOverlay, Window, ask_text, fit, owner_from_raw, pick_files,
+    popup_menu, save_screen_picture, show_error, show_info,
 };
 #[cfg(windows)]
 pub use main_window::Page;

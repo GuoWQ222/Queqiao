@@ -4,12 +4,15 @@
 //! The forms, the main window and the session bar come with the GUI (docs/LINUX.md step 5); until then the bar is
 //! refused, and the few dialogs a session opens use zenity when it is there.
 
+mod banner;
 mod cursor;
 mod forms;
+mod gui;
 mod overlay;
 mod present;
 mod window;
 
+pub use banner::{ConsentPrompt, SessionBanner};
 pub use cursor::RemoteCursor;
 pub use forms::{
     PICK_CLOSED, PasswordAction, PasswordForm, PickList, ask_text, owner_from_raw, pick_files,
