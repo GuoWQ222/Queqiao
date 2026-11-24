@@ -159,6 +159,16 @@ pub fn save_screen_picture(window: Hwnd, path: &Path) -> std::io::Result<()> {
             "the window's picture is not 32 bits a pixel",
         ));
     }
+    drop(connection.flush());
+    std::fs::write(
+        path,
+        bitmap_file(width, height, &image.data[..width * height * 4]),
+    )
+}
+
+/// A bitmap file (32-bit, bottom-up) of `width` x `height` pixels given top row first, 4 bytes each: blue, green,
+/// red and one unused.
+pub(crate) fn bitmap_file(width: usize, height: usize, bgrx: &[u8]) -> Vec<u8> {
     let size = width * height * 4;
     let mut file = Vec::with_capacity(54 + size);
     file.extend_from_slice(b"BM");
@@ -174,7 +184,7 @@ pub fn save_screen_picture(window: Hwnd, path: &Path) -> std::io::Result<()> {
         file.extend_from_slice(&value.to_le_bytes());
     }
     for row in (0..height).rev() {
-        for pixel in image.data[row * width * 4..(row + 1) * width * 4]
+        for pixel in bgrx[row * width * 4..(row + 1) * width * 4]
             .as_chunks::<4>()
             .0
             .iter()
@@ -182,6 +192,5 @@ pub fn save_screen_picture(window: Hwnd, path: &Path) -> std::io::Result<()> {
             file.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
         }
     }
-    drop(connection.flush());
-    std::fs::write(path, file)
+    file
 }

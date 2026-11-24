@@ -3,7 +3,9 @@
 # own on 127.0.0.1, as scripts\run_m4_local.ps1 does on Windows: the server made (init, a user), the agent logged in and
 # online, the viewer logged in and connected to it by name (--device), with the input test. Sessions (SESSIONS, default
 # "direct allowed declined"): direct (the clipboard both ways too), allowed (the agent asks the person, who allows:
-# the consent prompt answered by the test), declined (who declines: neither side passes, both must say so).
+# the consent prompt answered by the test), declined (who declines: neither side passes, both must say so), ui (the
+# viewer through its login form and device list as a person would, filled and pressed by the program, with pictures of
+# both: login.bmp and devices.bmp).
 # The agent's screen is Xvfb :91 with a clock and `top` (so the picture changes); the viewer's window is on Xvfb :92.
 # Everything the programs keep (the device's key, the saved logins, the single-instance lock) goes into the test's own
 # folder (XDG_CONFIG_HOME, XDG_STATE_HOME, XDG_RUNTIME_DIR), never the person's ~/.config/queqiao.
@@ -13,7 +15,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 seconds=${SECONDS_RUN:-20}
-sessions=${SESSIONS:-direct allowed declined}
+sessions=${SESSIONS:-direct allowed declined ui}
 out=/tmp/queqiao_m3
 rm -rf "$out"; mkdir -p "$out"
 export XDG_CONFIG_HOME=$out/config XDG_STATE_HOME=$out/state XDG_RUNTIME_DIR=$out/run
@@ -65,6 +67,8 @@ for label in $sessions; do
         # Declined, the agent stays online until --seconds (a later --seconds wins): 30 s, then it writes its report.
         declined) agent_extra='--ask --answer deny --seconds 30'; viewer_extra='';
                   agent_expects='the person at this PC declined'; viewer_expects='the person at that PC declined'; both_pass='' ;;
+        ui) agent_extra=''; viewer_extra='';
+            agent_expects='RESULT PASS'; viewer_expects='sessions from the device list'; both_pass=yes ;;
         *) echo "unknown session $label"; why="$why unknown-$label"; continue ;;
     esac
     # shellcheck disable=SC2086
@@ -73,7 +77,9 @@ for label in $sessions; do
     agent=$!
     sleep 2
     # shellcheck disable=SC2086
-    DISPLAY=:92 "$bin/queqiao-viewer" $account --device "$device" --seconds "$seconds" --input-test --width 960 \
+    target=(--device "$device")
+    [ "$label" = ui ] && target=(--ui-test "$device")
+    DISPLAY=:92 "$bin/queqiao-viewer" $account "${target[@]}" --seconds "$seconds" --input-test --width 960 \
         --codec h264 --report "$out/viewer_$label.txt" $viewer_extra > "$out/viewer_$label.out" 2>&1
     viewer_code=$?
     # The agent leaves after its one session, or at its --seconds.
@@ -86,6 +92,11 @@ for label in $sessions; do
     echo "--- viewer"; cat "$out/viewer_$label.txt" 2> /dev/null || tail -20 "$out/viewer_$label.out"
     grep -q "$agent_expects" "$out/agent_$label.txt" 2> /dev/null || why="$why $label-agent"
     grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
+    if [ "$label" = ui ]; then
+        for picture in login devices; do
+            [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp $(stat -c %s "$out/$picture.bmp") bytes" || why="$why ui-$picture-picture"
+        done
+    fi
     if [ -n "$both_pass" ]; then
         grep -q "RESULT PASS" "$out/agent_$label.txt" 2> /dev/null || why="$why $label-agent-result"
     fi

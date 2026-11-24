@@ -135,7 +135,7 @@ impl View for ListView {
 }
 
 pub struct DeviceList {
-    _opened: Opened,
+    opened: Opened,
     state: Arc<Mutex<ListState>>,
     actions: Arc<Mutex<Vec<ListAction>>>,
 }
@@ -154,7 +154,7 @@ impl DeviceList {
             actions: actions.clone(),
         };
         Ok(DeviceList {
-            _opened: gui::open(Box::new(view))?,
+            opened: gui::open(Box::new(view))?,
             state,
             actions,
         })
@@ -214,8 +214,8 @@ impl DeviceList {
         gui::repaint();
     }
 
-    pub fn save_picture(&self, _path: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::other("pictures of forms: not on Linux yet"))
+    pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
+        self.opened.save_picture(path)
     }
 
     /// Greys the window out while a session runs.
@@ -302,7 +302,7 @@ impl View for HelpFormView {
 }
 
 pub struct HelpForm {
-    _opened: Opened,
+    opened: Opened,
     state: Arc<Mutex<HelpState>>,
     actions: Arc<Mutex<Vec<HelpAction>>>,
 }
@@ -317,7 +317,7 @@ impl HelpForm {
             focused: false,
         };
         Ok(HelpForm {
-            _opened: gui::open(Box::new(view))?,
+            opened: gui::open(Box::new(view))?,
             state,
             actions,
         })
@@ -350,8 +350,8 @@ impl HelpForm {
         }
     }
 
-    pub fn save_picture(&self, _path: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::other("pictures of forms: not on Linux yet"))
+    pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
+        self.opened.save_picture(path)
     }
 
     pub fn set_status(&self, text: &str) {

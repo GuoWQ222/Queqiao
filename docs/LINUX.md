@@ -93,10 +93,21 @@ capture, real sound devices. Windows <-> Linux sessions need both on one network
 Steps 1 to 3 are in for X11: the capture, input, encoders (OpenH264, NVENC on CUDA), the OpenH264 decoder, sound
 (PulseAudio), the clipboard (X11 selections), files, command lines on the controlled side, and the agent's and
 viewer's sessions, shared with Windows. `scripts/run_m2_linux.sh` runs a Linux agent against a Linux viewer (video,
-input, clipboard, files, commands, sound with the speakers muted) and passes on cc4-1. Not yet on Linux: accounts
-(login, device list, help requests; they need the GUI), the GUI itself, command-line windows on the viewer side,
-NVDEC and VA-API, Wayland, the privacy screen and input block, the service. The GUI comes next (the user asked for
-it), then accounts on top of it.
+input, clipboard, files, commands, sound with the speakers muted) and passes on cc4-1.
+
+Step 5 so far: the GUI (egui on one GUI thread; every window a viewport): the tray icon (StatusNotifierItem, the menu
+shared with Windows in tray.rs; without a tray the main window opens instead), the main window (Devices, Help,
+Transfers, Settings), the session banner and the consent prompt, the help window, the login form, the device list,
+the "help someone" form, the small dialogs and menus, and pictures of these windows for tests. The account mode is
+shared with Windows (the agent's and the viewer's account.rs): login, online, the device list, help requests,
+Wake-on-LAN (the cards from /sys/class/net; the check from sysfs and ethtool), start at sign-in (an XDG autostart
+entry), one agent per user (a lock in a private runtime folder; opened again, it shows the running one's window).
+`scripts/run_m3_linux.sh` runs both with a queqiao-server of their own on 127.0.0.1: direct (with the clipboard),
+allowed and declined (the consent prompt), and ui (the viewer through its login form and device list, with pictures),
+and passes on cc4-1. Updates come with the system's packages (step 6), not from Queqiao.
+
+Not yet on Linux: the session bar on the viewer, the session's transfer list (PickList) and password form, command-line
+windows on the viewer side, NVDEC and VA-API, Wayland, the privacy screen and input block, the service and packages.
 
 ## Order of the work
 

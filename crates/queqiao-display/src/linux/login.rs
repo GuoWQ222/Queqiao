@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use queqiao_core::text::tr;
 
+use super::Result;
 use super::gui::{self, Opened, View};
 use super::window::Hwnd;
-use super::{Error, Result};
 use crate::model::{LoginAction, LoginFields};
 
 #[derive(Default)]
@@ -125,7 +125,7 @@ fn trimmed(fields: &LoginFields) -> LoginFields {
 }
 
 pub struct LoginForm {
-    _opened: Opened,
+    opened: Opened,
     state: Arc<Mutex<State>>,
 }
 
@@ -141,7 +141,7 @@ impl LoginForm {
             focused: false,
         };
         Ok(LoginForm {
-            _opened: gui::open(Box::new(view))?,
+            opened: gui::open(Box::new(view))?,
             state,
         })
     }
@@ -214,10 +214,8 @@ impl LoginForm {
         }
     }
 
-    /// For tests: the form's picture (not for egui's windows here yet).
-    pub fn save_picture(&self, _path: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            Error::from("pictures of forms: not on Linux yet").message(),
-        ))
+    /// For tests: the form's picture.
+    pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
+        self.opened.save_picture(path)
     }
 }

@@ -7,8 +7,11 @@
 //! Chinese and Japanese texts (Queqiao's languages) need a font with those characters: the system's own, found
 //! through fontconfig, is added after egui's; none is bundled.
 
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use eframe::glow::{self, HasContext};
 use std::time::Duration;
 
 use eframe::egui;
@@ -27,7 +30,12 @@ pub(crate) trait View: Send {
 enum Request {
     Open(u64, Box<dyn View>),
     Close(u64),
+    /// A picture of the window, as egui draws it.
+    Picture(u64, Sender<Picture>),
 }
+
+/// A window's picture: width, height, and its pixels top row first, 4 bytes each (blue, green, red, unused).
+type Picture = (usize, usize, Vec<u8>);
 
 struct Gui {
     requests: Sender<Request>,
@@ -70,6 +78,7 @@ fn start() -> Result<Gui, String> {
                     Ok(Box::new(App {
                         incoming,
                         views: Vec::new(),
+                        pictures: Vec::new(),
                     }))
                 }),
             );
@@ -98,6 +107,23 @@ impl Drop for Opened {
     }
 }
 
+impl Opened {
+    /// A picture of the window as egui draws it (its contents, whatever lies on top), saved as a bitmap file (Windows:
+    /// the forms' save_picture).
+    pub(crate) fn save_picture(&self, path: &Path) -> std::io::Result<()> {
+        let gui = gui().map_err(std::io::Error::other)?;
+        let (sender, picture) = mpsc::channel();
+        gui.requests
+            .send(Request::Picture(self.id, sender))
+            .map_err(|_| std::io::Error::other("the GUI thread ended"))?;
+        gui.context.request_repaint();
+        let (width, height, bgrx) = picture
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| std::io::Error::other("no picture of the window within 5 s"))?;
+        std::fs::write(path, super::forms::bitmap_file(width, height, &bgrx))
+    }
+}
+
 /// Opens `view` as a window of its own.
 pub(crate) fn open(view: Box<dyn View>) -> Result<Opened, String> {
     let gui = gui()?;
@@ -123,6 +149,8 @@ pub(crate) fn repaint() {
 struct App {
     incoming: Receiver<Request>,
     views: Vec<(u64, Box<dyn View>)>,
+    /// Pictures asked for: the window and who waits.
+    pictures: Vec<(u64, Sender<Picture>)>,
 }
 
 impl eframe::App for App {
@@ -131,15 +159,24 @@ impl eframe::App for App {
             match request {
                 Request::Open(id, view) => self.views.push((id, view)),
                 Request::Close(id) => self.views.retain(|(open, _)| *open != id),
+                Request::Picture(id, sender) => self.pictures.push((id, sender)),
             }
         }
+        let pictures = &mut self.pictures;
         self.views.retain_mut(|(id, view)| {
+            let id = *id;
             let mut keep = true;
             // The same builder each time: egui applies only what changed.
             ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of(("queqiao", *id)),
+                egui::ViewportId::from_hash_of(("queqiao", id)),
                 view.builder(),
                 |ctx, _| {
+                    // A picture asked for: read once this frame is drawn (the callback comes last, on the top
+                    // layer).
+                    if let Some(at) = pictures.iter().position(|picture| picture.0 == id) {
+                        let (_, sender) = pictures.remove(at);
+                        take_picture(ctx, sender);
+                    }
                     if ctx.input(|i| i.viewport().close_requested()) {
                         view.closed();
                         keep = false;
@@ -150,9 +187,50 @@ impl eframe::App for App {
             );
             keep
         });
+        // Pictures of windows that closed meanwhile: nobody waits for them any more.
+        let open: Vec<u64> = self.views.iter().map(|(id, _)| *id).collect();
+        self.pictures.retain(|(id, _)| open.contains(id));
         // Requests from the handles wake the thread; a countdown or a status line asks for its own repaints.
         ctx.request_repaint_after(Duration::from_millis(250));
     }
+}
+
+/// Reads the window's picture at the end of this frame: a paint callback on the top layer, so everything else is
+/// drawn by then, reads the frame being drawn (OpenGL's back buffer) and sends it.
+fn take_picture(ctx: &egui::Context, sender: Sender<Picture>) {
+    let callback = eframe::egui_glow::CallbackFn::new(move |info, painter| {
+        let [width, height] = info.screen_size_px.map(|side| side as usize);
+        let mut rgba = vec![0u8; width * height * 4];
+        let gl = painter.gl();
+        unsafe {
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            gl.read_pixels(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut rgba)),
+            );
+        }
+        // OpenGL's rows go bottom up; the picture's top down, blue first.
+        let mut bgrx = Vec::with_capacity(rgba.len());
+        for row in rgba.chunks_exact(width * 4).rev() {
+            for pixel in row.as_chunks::<4>().0 {
+                bgrx.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+            }
+        }
+        let _ = sender.send((width, height, bgrx));
+    });
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Debug,
+        egui::Id::new("queqiao-picture"),
+    ))
+    .add(egui::PaintCallback {
+        rect: ctx.screen_rect(),
+        callback: Arc::new(callback),
+    });
 }
 
 /// The system's fonts for Chinese and Japanese, after egui's own (found through fontconfig's fc-match).
