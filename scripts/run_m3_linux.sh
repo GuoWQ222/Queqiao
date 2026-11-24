@@ -2,7 +2,8 @@
 # M3 on Linux (docs/LINUX.md step 5): the Linux agent and viewer with an account, through a queqiao-server of their
 # own on 127.0.0.1, as scripts\run_m4_local.ps1 does on Windows: the server made (init, a user), the agent logged in and
 # online, the viewer logged in and connected to it by name (--device), with the input test. Sessions (SESSIONS, default
-# "direct allowed declined"): direct (the clipboard both ways too), allowed (the agent asks the person, who allows:
+# "direct allowed declined ui"): direct (the clipboard both ways too; the session bar and card of figures, pictured with
+# the bar out and tucked away, its Figures button clicked twice), allowed (the agent asks the person, who allows:
 # the consent prompt answered by the test), declined (who declines: neither side passes, both must say so), ui (the
 # viewer through its login form and device list as a person would, filled and pressed by the program, with pictures of
 # both: login.bmp and devices.bmp).
@@ -60,7 +61,7 @@ account="--server $listen --pin $pin --user alice --password $password"
 why=''
 for label in $sessions; do
     case $label in
-        direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra='--clipboard-test --command lock';
+        direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out";
                 agent_expects='test text from the other side received: yes'; viewer_expects='test text from the other side received: yes'; both_pass=yes ;;
         allowed) agent_extra='--ask --answer allow'; viewer_extra='';
                  agent_expects='the person at this PC allowed'; viewer_expects='RESULT PASS'; both_pass=yes ;;
@@ -92,6 +93,12 @@ for label in $sessions; do
     echo "--- viewer"; cat "$out/viewer_$label.txt" 2> /dev/null || tail -20 "$out/viewer_$label.out"
     grep -q "$agent_expects" "$out/agent_$label.txt" 2> /dev/null || why="$why $label-agent"
     grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
+    if [ "$label" = direct ]; then
+        for picture in viewer_session viewer_session_tucked; do
+            [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp" || why="$why direct-$picture-picture"
+        done
+        grep -q "^bar: no Figures button|^overlay: " "$out/viewer_direct.txt" && why="$why direct-bar"
+    fi
     if [ "$label" = ui ]; then
         for picture in login devices; do
             [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp $(stat -c %s "$out/$picture.bmp") bytes" || why="$why ui-$picture-picture"

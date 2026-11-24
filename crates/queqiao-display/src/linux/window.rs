@@ -2,7 +2,8 @@
 //! (keys as the protocol's scancodes, through the evdev table), `pump` called from the session's own loop, full screen
 //! and "always on top" through the window manager (EWMH), the game mouse (the pointer held in the window, moves as
 //! deltas), shortcuts sent while the window has the keyboard (a keyboard grab), the boss key as a global key grab.
-//! The session menu is kept but not shown: it comes with the session bar (step 5).
+//! The session menu opens from the session bar's More (overlay.rs, whose clicks come as _QUEQIAO_BAR messages), in a
+//! window of its own while the session goes on.
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -33,6 +34,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_ABOVE,
         _NET_WM_WINDOW_OPACITY,
+        _QUEQIAO_BAR,
     }
 }
 
@@ -161,13 +163,38 @@ impl Window {
         Ok(window)
     }
 
-    /// The session menu's items: kept (no menu is shown on Linux yet).
+    /// The session menu's items (shown by the bar's More).
     pub fn add_menu_items(&self, items: &[(u16, &str)]) {
         self.menu.borrow_mut().extend(
             items
                 .iter()
                 .map(|(id, text)| (*id, text.to_string(), false)),
         );
+    }
+
+    /// The session menu, in a window of its own (the session goes on meanwhile); the choice comes back as the bar's
+    /// buttons do, a _QUEQIAO_BAR message to this window.
+    fn open_menu(&self) {
+        let items = self.menu.borrow().clone();
+        let (window, atom) = (self.window, self.atoms._QUEQIAO_BAR);
+        let _ = std::thread::Builder::new()
+            .name("queqiao-menu".into())
+            .spawn(move || {
+                let items: Vec<(u16, &str, bool)> = items
+                    .iter()
+                    .map(|(id, text, checked)| (*id, text.as_str(), *checked))
+                    .collect();
+                let Some(id) = super::dialogs::menu(queqiao_core::text::tr("Queqiao"), &items)
+                else {
+                    return;
+                };
+                if let Ok((connection, _)) = x11rb::connect(None) {
+                    let message =
+                        ClientMessageEvent::new(32, window, atom, [u32::from(id), 0, 0, 0, 0]);
+                    let _ = connection.send_event(false, window, EventMask::NO_EVENT, message);
+                    let _ = connection.flush();
+                }
+            });
     }
 
     pub fn add_submenu(&self, _title: &str, items: &[(u16, &str)]) {
@@ -595,6 +622,14 @@ impl Window {
                     && message.data.as_data32()[0] == self.atoms.WM_DELETE_WINDOW =>
             {
                 self.closed = true;
+            }
+            // The session bar: a button's command, as the menu gives it (End closes the window, More opens the menu).
+            Event::ClientMessage(message) if message.type_ == self.atoms._QUEQIAO_BAR => {
+                match message.data.as_data32()[0] as u16 {
+                    crate::model::BAR_END => self.closed = true,
+                    crate::model::BAR_MORE => self.open_menu(),
+                    id => self.events.borrow_mut().push(WindowEvent::Menu(id)),
+                }
             }
             _ => {}
         }

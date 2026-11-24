@@ -2770,7 +2770,9 @@ dependencies = [
 name = "queqiao-display"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "eframe",
+ "epaint_default_fonts",
  "ksni",
  "libc",
  "png 0.17.16",

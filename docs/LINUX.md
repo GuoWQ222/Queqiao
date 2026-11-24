@@ -98,7 +98,8 @@ input, clipboard, files, commands, sound with the speakers muted) and passes on 
 Step 5 so far: the GUI (egui on one GUI thread; every window a viewport): the tray icon (StatusNotifierItem, the menu
 shared with Windows in tray.rs; without a tray the main window opens instead), the main window (Devices, Help,
 Transfers, Settings), the session banner and the consent prompt, the help window, the login form, the device list,
-the "help someone" form, the small dialogs and menus, and pictures of these windows for tests. The account mode is
+the "help someone" form, the small dialogs and menus, the session bar and card of figures on the viewer (child windows
+of the session window, drawn on the CPU), and pictures of these windows for tests. The account mode is
 shared with Windows (the agent's and the viewer's account.rs): login, online, the device list, help requests,
 Wake-on-LAN (the cards from /sys/class/net; the check from sysfs and ethtool), start at sign-in (an XDG autostart
 entry), one agent per user (a lock in a private runtime folder; opened again, it shows the running one's window).
@@ -106,7 +107,7 @@ entry), one agent per user (a lock in a private runtime folder; opened again, it
 allowed and declined (the consent prompt), and ui (the viewer through its login form and device list, with pictures),
 and passes on cc4-1. Updates come with the system's packages (step 6), not from Queqiao.
 
-Not yet on Linux: the session bar on the viewer, the session's transfer list (PickList) and password form, command-line
+Not yet on Linux: the session's transfer list (PickList) and password form, command-line
 windows on the viewer side, NVDEC and VA-API, Wayland, the privacy screen and input block, the service and packages.
 
 ## Order of the work

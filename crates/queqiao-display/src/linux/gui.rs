@@ -233,31 +233,36 @@ fn take_picture(ctx: &egui::Context, sender: Sender<Picture>) {
     });
 }
 
-/// The system's fonts for Chinese and Japanese, after egui's own (found through fontconfig's fc-match).
+/// The system's font files for Chinese and Japanese (found through fontconfig's fc-match).
+pub(crate) fn system_font_files() -> Vec<String> {
+    ["sans-serif:lang=zh-cn", "sans-serif:lang=ja"]
+        .into_iter()
+        .filter_map(|pattern| {
+            std::process::Command::new("fc-match")
+                .args(["-f", "%{file}", pattern])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .filter(|path| !path.is_empty())
+        })
+        .collect()
+}
+
+/// The system's fonts for Chinese and Japanese, after egui's own.
 fn add_system_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    for (name, pattern) in [
-        ("cjk-sc", "sans-serif:lang=zh-cn"),
-        ("cjk-ja", "sans-serif:lang=ja"),
-    ] {
-        let Some(path) = std::process::Command::new("fc-match")
-            .args(["-f", "%{file}", pattern])
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-        else {
-            continue;
-        };
+    for (index, path) in system_font_files().into_iter().enumerate() {
+        let name = format!("system-{index}");
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
         fonts.font_data.insert(
-            name.into(),
+            name.clone(),
             std::sync::Arc::new(egui::FontData::from_owned(bytes)),
         );
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts.families.entry(family).or_default().push(name.into());
+            fonts.families.entry(family).or_default().push(name.clone());
         }
     }
     ctx.set_fonts(fonts);

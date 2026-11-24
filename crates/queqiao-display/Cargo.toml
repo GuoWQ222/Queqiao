@@ -47,7 +47,10 @@ windows = { workspace = true, features = [
 queqiao-capture.workspace = true
 queqiao-codec.workspace = true
 queqiao-input.workspace = true
-x11rb = { version = "0.13", features = ["shm", "randr", "render"] }
+x11rb = { version = "0.13", features = ["shm", "randr", "render", "shape"] }
+# The session bar's text (egui's font, already built for the GUI).
+ab_glyph = "0.2"
+epaint_default_fonts = "0.32"
 libc = "0.2"
 # The GUI (linux/gui.rs): egui through eframe (OpenGL), on a thread of its own (winit's any-thread event loop).
 eframe = { version = "0.32", default-features = false, features = ["glow", "x11", "wayland", "default_fonts"] }
