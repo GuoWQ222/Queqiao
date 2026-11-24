@@ -145,6 +145,8 @@ pub struct Stream {
     pub name: String,
     default: bool,
     record: bool,
+    /// A capture of an output: the mute generation it was opened at (it follows the sound when that changes).
+    follows: Option<u32>,
     shared: Arc<Shared>,
     /// Closed by the thread when it ends.
     ended: Option<mpsc::Receiver<()>>,
@@ -153,19 +155,35 @@ pub struct Stream {
 impl Stream {
     /// What the output plays (`device`: a sink's name; None: the default output).
     pub fn loopback(device: Option<&str>) -> Result<Stream, String> {
-        let source = device.map_or_else(
-            || "@DEFAULT_MONITOR@".to_string(),
-            |d| format!("{d}.monitor"),
-        );
-        Stream::open(Some(&source), device.is_none(), true)
+        let generation = MUTE_GENERATION.load(Ordering::Relaxed);
+        let sink = device.map(|wanted| find("sinks", wanted)).transpose()?;
+        // While this output's speakers are muted, its sound is in the null sink.
+        let muted = MUTED
+            .lock()
+            .ok()
+            .and_then(|muted| muted.as_ref().map(|m| m.sink.clone()));
+        let source = match (&sink, muted) {
+            (Some(sink), Some(real)) if *sink == real => format!("{MUTED_SINK}.monitor"),
+            (None, Some(_)) => format!("{MUTED_SINK}.monitor"),
+            (Some(sink), _) => format!("{sink}.monitor"),
+            (None, None) => "@DEFAULT_MONITOR@".to_string(),
+        };
+        let mut stream = Stream::open(Some(&source), device.is_none(), true)?;
+        stream.follows = Some(generation);
+        if let Some(sink) = sink {
+            stream.name = format!("{sink}.monitor");
+        }
+        Ok(stream)
     }
 
     pub fn render(device: Option<&str>) -> Result<Stream, String> {
-        Stream::open(device, device.is_none(), false)
+        let sink = device.map(|wanted| find("sinks", wanted)).transpose()?;
+        Stream::open(sink.as_deref(), device.is_none(), false)
     }
 
     pub fn microphone(device: Option<&str>) -> Result<Stream, String> {
-        Stream::open(device, device.is_none(), true)
+        let source = device.map(|wanted| find("sources", wanted)).transpose()?;
+        Stream::open(source.as_deref(), device.is_none(), true)
     }
 
     fn open(device: Option<&str>, default: bool, record: bool) -> Result<Stream, String> {
@@ -257,6 +275,7 @@ impl Stream {
             },
             default,
             record,
+            follows: None,
             shared,
             ended: Some(ended),
         })
@@ -282,6 +301,12 @@ impl Stream {
             return Err("not a capture stream".into());
         }
         self.failure()?;
+        if self
+            .follows
+            .is_some_and(|at| at != MUTE_GENERATION.load(Ordering::Relaxed))
+        {
+            return Err("the sound moved (this PC's speakers muted or back)".into());
+        }
         if let Ok(mut ring) = self.shared.ring.lock() {
             out.extend(ring.drain(..));
         }
@@ -381,18 +406,117 @@ fn playback_loop(api: &Api, simple: &Simple, shared: &Shared) {
     }
 }
 
-/// Mutes or unmutes an output (`device`: a sink's name; None: the default); returns whether it was muted before.
+/// Where the sound goes while this PC's speakers are muted: a null sink of PulseAudio's own.
+const MUTED_SINK: &str = "queqiao_muted";
+
+/// The muted output: its sink, the default output before, the null sink's module.
+struct Muted {
+    sink: String,
+    default: String,
+    module: String,
+}
+
+static MUTED: Mutex<Option<Muted>> = Mutex::new(None);
+/// Changes each time the sound moves (captures of an output open again).
+static MUTE_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// Mutes or unmutes an output's speakers (`device`: a sink by name or part of it; None: the default), as Windows
+/// does: silent here, still captured. Returns whether it was muted before.
 pub fn set_mute(device: Option<&str>, mute: bool) -> Result<bool, String> {
-    let sink = device.unwrap_or("@DEFAULT_SINK@");
-    let before = pactl(&["get-sink-mute", sink])?;
-    let was_muted = before.trim().ends_with("yes");
-    pactl(&["set-sink-mute", sink, if mute { "1" } else { "0" }])?;
-    Ok(was_muted)
+    let mut muted = MUTED
+        .lock()
+        .map_err(|_| "the mute state is poisoned".to_string())?;
+    if !mute {
+        let Some(state) = muted.take() else {
+            return Ok(false);
+        };
+        let moved = move_inputs(MUTED_SINK, &state.sink);
+        let _ = pactl(&["set-default-sink", &state.default]);
+        let _ = pactl(&["unload-module", &state.module]);
+        MUTE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        moved?;
+        return Ok(true);
+    }
+    if muted.is_some() {
+        return Ok(true);
+    }
+    let default = default_sink()?;
+    let sink = match device {
+        Some(wanted) => find("sinks", wanted)?,
+        None => default.clone(),
+    };
+    // Muted by the person already: nothing to do (and nothing to put back).
+    if pactl(&["get-sink-mute", &sink]).is_ok_and(|state| state.trim().ends_with("yes")) {
+        return Ok(true);
+    }
+    let module = pactl(&[
+        "load-module",
+        "module-null-sink",
+        &format!("sink_name={MUTED_SINK}"),
+        "sink_properties=device.description=Queqiao-speakers-muted",
+    ])?
+    .trim()
+    .to_string();
+    let moved = move_inputs(&sink, MUTED_SINK);
+    if sink == default {
+        let _ = pactl(&["set-default-sink", MUTED_SINK]);
+    }
+    *muted = Some(Muted {
+        sink,
+        default,
+        module,
+    });
+    MUTE_GENERATION.fetch_add(1, Ordering::Relaxed);
+    moved.map(|()| false)
+}
+
+/// The default output's name (`pactl info`: every PulseAudio and PipeWire version has it).
+fn default_sink() -> Result<String, String> {
+    pactl(&["info"])?
+        .lines()
+        .find_map(|line| line.strip_prefix("Default Sink: "))
+        .map(|name| name.trim().to_string())
+        .ok_or_else(|| "no default output".to_string())
+}
+
+/// Moves every stream playing into sink `from` to sink `to`.
+fn move_inputs(from: &str, to: &str) -> Result<(), String> {
+    let index = pactl(&["list", "short", "sinks"])?
+        .lines()
+        .find(|line| line.split('\t').nth(1) == Some(from))
+        .and_then(|line| line.split('\t').next().map(str::to_string))
+        .ok_or_else(|| format!("no output {from}"))?;
+    for line in pactl(&["list", "short", "sink-inputs"])?.lines() {
+        let mut fields = line.split('\t');
+        if let (Some(input), Some(sink)) = (fields.next(), fields.next())
+            && sink == index
+        {
+            pactl(&["move-sink-input", input, to])?;
+        }
+    }
+    Ok(())
 }
 
 /// The outputs (sinks), by name.
 pub fn render_devices() -> Vec<String> {
     list("sinks", |_| true)
+}
+
+/// The sink or source (`kind`: "sinks", "sources") named `wanted`, or the first whose name holds it (case aside), as
+/// Windows finds a device by part of its name.
+fn find(kind: &str, wanted: &str) -> Result<String, String> {
+    let names = list(kind, |_| true);
+    let lower = wanted.to_lowercase();
+    names
+        .iter()
+        .find(|name| *name == wanted)
+        .or_else(|| {
+            names
+                .iter()
+                .find(|name| name.to_lowercase().contains(&lower))
+        })
+        .cloned()
+        .ok_or_else(|| format!("no active sound device named like \"{wanted}\""))
 }
 
 fn list(kind: &str, keep: impl Fn(&str) -> bool) -> Vec<String> {
