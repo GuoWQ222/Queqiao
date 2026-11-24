@@ -16,7 +16,10 @@ use queqiao_display::{
     TransferRow,
 };
 use serde::{Deserialize, Serialize};
-use windows::Win32::Foundation::RECT;
+#[cfg(target_os = "linux")]
+type Area = queqiao_display::Rect;
+#[cfg(windows)]
+type Area = windows::Win32::Foundation::RECT;
 
 enum Command {
     SessionStarted(String, Sender<Result<(), String>>),
@@ -35,7 +38,8 @@ enum Command {
     Help(Option<(String, String)>),
     /// The privacy screen on (with how it looks) or off.
     Privacy(Option<PrivacyLook>, Sender<Result<bool, String>>),
-    /// Tests: the privacy screen hidden from capture or not.
+    /// Tests: the privacy screen hidden from capture or not (Windows: Linux has no privacy screen yet).
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     PrivacyExcluded(bool, Sender<Result<(), String>>),
     /// Online, offline (trying again) or not logged in.
     Account(AccountState),
@@ -57,7 +61,7 @@ enum Command {
 
 /// The privacy screen over all monitors (`area` None), or for tests a square of `color` (0x00BBGGRR).
 pub struct PrivacyLook {
-    pub area: Option<RECT>,
+    pub area: Option<Area>,
     pub color: u32,
 }
 
@@ -103,7 +107,8 @@ impl Ui {
 
     /// No windows at all, for the agent at the sign-in screen: it runs where nothing can be shown, and the service's
     /// desktop helper shows the session banner on the screen. Sessions start, nobody can be asked (asking fails, so
-    /// a session that needs it is refused), there is no privacy screen.
+    /// a session that needs it is refused), there is no privacy screen. Windows only so far (the service).
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub fn headless() -> Result<Ui, String> {
         let (command_sender, commands) = mpsc::channel::<Command>();
         let (_no_events, events) = mpsc::channel();
@@ -154,6 +159,7 @@ impl Ui {
             .map_err(|_| "the UI thread did not answer".to_string())?
     }
 
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub fn set_privacy_excluded(&self, excluded: bool) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
         self.send(Command::PrivacyExcluded(excluded, reply));
@@ -165,7 +171,11 @@ impl Ui {
     /// Shows the banner for a session with `viewer`; an error if it cannot be shown.
     pub fn session_started(&self, viewer: &str) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
-        self.send(Command::SessionStarted(viewer.to_string(), reply));
+        // The name as the banner shows it: no control or direction characters, at most 40 characters.
+        self.send(Command::SessionStarted(
+            crate::session::clean_name(viewer),
+            reply,
+        ));
         answer
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| "the UI thread did not answer".to_string())?
@@ -502,7 +512,10 @@ impl Settings {
     /// The fixed help code, decrypted (None: none, or it cannot be read).
     pub fn fixed_help_code(&self) -> Option<String> {
         let sealed = unhex(&self.fixed_help_code)?;
+        #[cfg(windows)]
         let plain = queqiao_update::release::unprotect(&sealed).ok()?;
+        #[cfg(target_os = "linux")]
+        let plain = queqiao_account::unprotect_secret(&sealed).ok()?;
         String::from_utf8(plain)
             .ok()
             .filter(|code| !code.is_empty())
@@ -510,7 +523,13 @@ impl Settings {
 
     pub fn set_fixed_help_code(&mut self, code: Option<&str>) -> Result<(), String> {
         self.fixed_help_code = match code {
+            #[cfg(windows)]
             Some(code) => queqiao_update::release::protect(code.as_bytes())?
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+            #[cfg(target_os = "linux")]
+            Some(code) => queqiao_account::protect_secret(code.as_bytes())?
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect(),

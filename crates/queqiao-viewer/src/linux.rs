@@ -1,7 +1,7 @@
-//! The Linux program (docs/LINUX.md step 3): the viewer by IP address (M2, `--connect` / `--listen` in a test build),
-//! with the session shared with Windows (session.rs). The account's device list, the login and the main window come
-//! with the GUI (step 5); started otherwise it says so. Also what the session needs from this system: the error text,
-//! the device (nothing to open: pictures are drawn on the CPU).
+//! The Linux program (docs/LINUX.md steps 3 and 5): the viewer with an account (account.rs, shared with Windows: the
+//! login, the device list, help links) or by IP address (M2, `--connect` / `--listen` in a test build), with the session
+//! shared with Windows (session.rs). Also what the session needs from this system: the error text, the device (nothing
+//! to open: pictures are drawn on the CPU).
 
 use std::time::Duration;
 
@@ -31,11 +31,17 @@ pub(crate) fn main() {
     let Some(options) = parsed else {
         println!("{banner}");
         if cfg!(feature = "test-switches") {
-            println!("usage: queqiao-viewer --listen <ip:port> | --connect <agent-ip:port>");
+            println!(
+                "usage: queqiao-viewer [--server <host:port> --pin <fingerprint> --user <name> --password <password>]"
+            );
+            println!(
+                "                      [--device <name or id> | --list | --logout | --ui-test <name or id>]"
+            );
+            println!("       queqiao-viewer --listen <ip:port> | --connect <agent-ip:port>");
             println!("       common: [--seconds N] [--width N] [--report <file>] [--input-test]");
         } else {
             println!(
-                "usage: queqiao-viewer (on Linux, by IP address in a test build so far: docs/LINUX.md)"
+                "usage: queqiao-viewer (the device list) | --invite <queqiao: link> | --open <device> | --help-connect <link>"
             );
         }
         let asked_version = args.get(1).map(String::as_str) == Some("--version");
@@ -69,38 +75,8 @@ pub(crate) fn main() {
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
-    // What needs the account or its forms: refused by name rather than left unheeded.
-    let unsupported = [
-        ("--server", options.server.is_some()),
-        ("--pin", options.pin.is_some()),
-        ("--user", options.user.is_some()),
-        ("--password", options.password.is_some()),
-        ("--signup", options.signup),
-        ("--trust-new-key", options.trust_new_key.is_some()),
-        ("--test-device", options.test_device.is_some()),
-        ("--also-device", options.also_device.is_some()),
-        ("--remove-device", options.remove_device.is_some()),
-        ("--help-id", options.help_id.is_some()),
-        ("--help-code", options.help_code.is_some()),
-        ("--test-submit-help", options.test_submit_help),
-    ];
-    let refused: Vec<&str> = unsupported
-        .iter()
-        .filter(|(_, given)| *given)
-        .map(|(name, _)| *name)
-        .collect();
-    if !refused.is_empty() {
-        return Err(format!(
-            "not on Linux yet (accounts and help links come next, docs/LINUX.md): {}",
-            refused.join(" ")
-        ));
-    }
     if !options.direct() {
-        return Err(
-            "on Linux the viewer connects by IP address so far (--connect or --listen, a test build); the device \
-             list, the login and help links come with the GUI (docs/LINUX.md)"
-                .into(),
-        );
+        return crate::account::run_account(options, lines);
     }
     let (device, context, gpu) = create_device()?;
     lines.push(format!("device: {gpu}"));

@@ -25,12 +25,12 @@ impl Segment {
     fn new(connection: &RustConnection, size: usize) -> Result<Segment> {
         let id = unsafe { libc::shmget(libc::IPC_PRIVATE, size, libc::IPC_CREAT | 0o600) };
         if id < 0 {
-            return Err(format!("shmget: {}", std::io::Error::last_os_error()));
+            return Err(format!("shmget: {}", std::io::Error::last_os_error()).into());
         }
         let address = unsafe { libc::shmat(id, std::ptr::null(), 0) };
         if address as isize == -1 {
             unsafe { libc::shmctl(id, libc::IPC_RMID, std::ptr::null_mut()) };
-            return Err(format!("shmat: {}", std::io::Error::last_os_error()));
+            return Err(format!("shmat: {}", std::io::Error::last_os_error()).into());
         }
         let segment = Segment {
             address: address.cast(),
@@ -115,7 +115,8 @@ impl Presenter {
                 size.0,
                 size.1,
                 picture.pitch
-            ));
+            )
+            .into());
         }
         let picture_size = (size.0 as usize, size.1 as usize);
         let window_size = (width as usize, height as usize);

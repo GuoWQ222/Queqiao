@@ -1,6 +1,6 @@
-//! The few forms a viewer's session opens, on Linux (Windows: forms.rs): until Queqiao's own (docs/LINUX.md step 5),
-//! zenity's dialogs where it is installed (GNOME's, often on other desktops too); without it the session goes on as if
-//! the person had cancelled. The session picture for tests is a bitmap file of the window, as on Windows.
+//! The forms a viewer's session opens, on Linux (Windows: forms.rs); the dialogs are in dialogs.rs. Picking files uses
+//! zenity's file chooser where it is installed (Queqiao has none of its own yet), else a typed path. The session bar's
+//! lists and the password form come with the rest of the GUI. The session picture for tests is a bitmap file of the window, as on Windows.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -31,47 +31,47 @@ pub fn owner_from_raw(raw: isize) -> Hwnd {
     Hwnd(raw as usize)
 }
 
-/// Files chosen to send (none if the person cancelled, or without zenity).
+/// Files chosen to send: zenity's file chooser where it is installed, else paths typed (separated by ";") in
+/// Queqiao's own dialog. None chosen when cancelled.
 pub fn pick_files(_owner: Option<Hwnd>, title: &str) -> Vec<PathBuf> {
-    zenity(&[
-        "--file-selection",
-        "--multiple",
-        "--separator=\n",
-        "--title",
-        title,
-    ])
-    .map(|chosen| {
-        chosen
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(PathBuf::from)
-            .collect()
-    })
-    .unwrap_or_default()
+    let has_zenity = Command::new("zenity")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    let chosen = if has_zenity {
+        zenity(&[
+            "--file-selection",
+            "--multiple",
+            "--separator=\n",
+            "--title",
+            title,
+        ])
+    } else {
+        super::dialogs::ask_text(
+            title,
+            queqiao_core::text::tr("Files to send (paths, separated by ;):"),
+            "",
+        )
+        .map(|typed| typed.replace(';', "\n"))
+    };
+    chosen
+        .map(|chosen| {
+            chosen
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-pub fn show_info(title: &str, text: &str) {
-    if zenity(&["--info", "--title", title, "--text", text]).is_none() {
-        eprintln!("{title}: {text}");
-    }
-}
-
-/// A line of text from the person (None: cancelled, or no zenity).
-pub fn ask_text(title: &str, prompt: &str, initial: &str) -> Option<String> {
-    zenity(&[
-        "--entry",
-        "--title",
-        title,
-        "--text",
-        prompt,
-        "--entry-text",
-        initial,
-    ])
-}
-
-/// A menu at the pointer: not on Linux yet (it comes with the session bar), so nothing is chosen.
-pub fn popup_menu(_owner: Hwnd, _items: &[(u16, &str, bool)]) -> Option<u16> {
-    None
+/// A menu (Windows: at the pointer, owned by `owner`): the chosen item's id.
+pub fn popup_menu(_owner: Hwnd, items: &[(u16, &str, bool)]) -> Option<u16> {
+    super::dialogs::menu(queqiao_core::text::tr("Queqiao"), items)
 }
 
 /// A list with buttons (the session's transfers): Queqiao's own forms come in step 5; until then it is refused.
@@ -97,12 +97,6 @@ impl PickList {
 
     pub fn next(&mut self, _wait_ms: u32) -> Option<(u16, Option<usize>)> {
         match self.never {}
-    }
-}
-
-pub fn show_error(title: &str, text: &str) {
-    if zenity(&["--error", "--title", title, "--text", text]).is_none() {
-        eprintln!("{title}: {text}");
     }
 }
 
@@ -133,6 +127,11 @@ impl PasswordForm {
 }
 
 /// The window's picture as it is on the screen, as a bitmap file (32-bit, bottom-up).
+/// The window's picture (Windows: without what lies on top; X11 gives the window's own contents either way).
+pub fn save_window_picture(window: Hwnd, path: &Path) -> std::io::Result<()> {
+    save_screen_picture(window, path)
+}
+
 pub fn save_screen_picture(window: Hwnd, path: &Path) -> std::io::Result<()> {
     let failed = |e: &dyn std::fmt::Display| std::io::Error::other(format!("X11: {e}"));
     let (connection, _) = x11rb::connect(None).map_err(|e| failed(&e))?;

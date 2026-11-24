@@ -82,7 +82,7 @@ impl DeviceIdentity {
         }
         let identity = DeviceIdentity {
             id: random_hex(16),
-            name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into()),
+            name: this_pc_name(),
             key: None,
             in_memory: false,
             preset_pins: None,
@@ -170,6 +170,22 @@ fn file_name(role: Role) -> &'static str {
     }
 }
 
+/// This PC's name as the account lists it: Windows' computer name.
+#[cfg(windows)]
+fn this_pc_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into())
+}
+
+/// This PC's name as the account lists it: the host name (the kernel's, as `hostname` prints it).
+#[cfg(unix)]
+fn this_pc_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .map(|name| name.trim().to_string())
+        .ok()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Linux PC".into())
+}
 /// `%APPDATA%\Queqiao`, where this device keeps its files.
 #[cfg(windows)]
 pub fn folder() -> Result<PathBuf, Error> {

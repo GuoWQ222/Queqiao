@@ -496,9 +496,9 @@ impl Window {
         let _ = self.connection.flush();
     }
 
-    /// Asks the person to confirm (yes / no): zenity's question when it is there, else no.
+    /// Asks the person to confirm (yes / no; no unless Yes is pressed).
     pub fn confirm(&self, title: &str, text: &str) -> bool {
-        super::forms::zenity(&["--question", "--title", title, "--text", text]).is_some()
+        super::dialogs::confirm(title, text)
     }
 
     pub fn hwnd(&self) -> Hwnd {

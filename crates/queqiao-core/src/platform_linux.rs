@@ -30,6 +30,26 @@ pub fn install_crash_log(program: &'static str) {
     }));
 }
 
+/// A folder only this user can reach, for the agent's single-instance lock and its "show your window" socket:
+/// $XDG_RUNTIME_DIR/queqiao (the sign-in session's own folder), else ~/.local/state/queqiao/run. None when it is not
+/// private: owned by someone else, or others may write in it (another user's program could then stand in for Queqiao).
+pub fn runtime_folder() -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let folder = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_dir())
+        .map(|path| path.join("queqiao"))
+        .or_else(|| Some(crash_folder()?.parent()?.join("run")))?;
+    let _ = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&folder);
+    // This process's own user: /proc/self belongs to it.
+    let me = std::fs::metadata("/proc/self").ok()?.uid();
+    let found = std::fs::symlink_metadata(&folder).ok()?;
+    (found.is_dir() && found.uid() == me && found.mode() & 0o077 == 0).then_some(folder)
+}
+
 /// Where crash reports go: `$XDG_STATE_HOME/queqiao/crashes`, else ~/.local/state/queqiao/crashes.
 pub fn crash_folder() -> Option<std::path::PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")

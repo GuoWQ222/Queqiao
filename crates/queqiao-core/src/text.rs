@@ -222,6 +222,13 @@ const CHINESE: &[(&str, &str)] = &[
     ("Receive files", "接收文件"),
     ("Allow remote command lines", "允许远程命令行"),
     ("Start with Windows", "开机自动启动"),
+    ("Start when I sign in", "登录时自动启动"),
+    ("Yes", "是"),
+    ("No", "否"),
+    (
+        "Files to send (paths, separated by ;):",
+        "要发送的文件（路径，用 ; 分隔）：",
+    ),
     ("Lock this PC when a session ends", "会话结束时锁定这台电脑"),
     (
         "Lock these settings with a password...",

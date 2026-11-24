@@ -19,53 +19,26 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::forms::{Form, Kind, set_text};
-use crate::main_window::{MainAction, MainWindow, Page, Shown};
+use crate::main_window::{MainAction, MainWindow, Shown};
 use crate::model::{
-    AccountState, ConnectionRow, HelpMode, MainDevice, PasswordCheck, PresenceEvent, TransferRow,
+    AccountState, ConnectionRow, HelpMode, MainDevice, Page, PasswordCheck, PresenceEvent,
+    TransferRow,
 };
+use crate::tray::*;
 
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_ID: u32 = 1;
-// Menu and button ids.
-const MENU_END: u16 = 200;
-pub(crate) const MENU_ALLOW: u16 = 201;
-pub(crate) const MENU_ASK: u16 = 202;
-const MENU_QUIT: u16 = 203;
-pub(crate) const MENU_CLIPBOARD: u16 = 204;
-pub(crate) const MENU_FILES: u16 = 205;
-pub(crate) const MENU_TERMINAL: u16 = 206;
-pub(crate) const MENU_AUTOSTART: u16 = 207;
+// The window's own ids (the menu's are in tray.rs).
 const ID_END: u16 = 210;
 pub(crate) const ID_NEW_CODE: u16 = 213;
 pub(crate) const ID_HELP_CLOSE: u16 = 214;
 const ID_COPY_INVITATION: u16 = 218;
-pub(crate) const MENU_HELP: u16 = 208;
-pub(crate) const MENU_LOCK_AFTER: u16 = 209;
-pub(crate) const MENU_LOGIN: u16 = 215;
-pub(crate) const MENU_UPDATE_CHECK: u16 = 216;
-pub(crate) const MENU_AUTO_UPDATE: u16 = 217;
-pub(crate) const MENU_FIXED_CODE: u16 = 219;
-pub(crate) const MENU_WOL_CHECK: u16 = 222;
-/// The shortest fixed help code (letters and digits).
-pub const MIN_FIXED_CODE: usize = 8;
-pub(crate) const MENU_PASSWORD: u16 = 220;
-/// Menu items tests can choose (the same path as a click).
-pub const TEST_MENU_TERMINAL: u16 = MENU_TERMINAL;
-pub const TEST_MENU_LOGIN: u16 = MENU_LOGIN;
-pub const TEST_MENU_UPDATE_CHECK: u16 = MENU_UPDATE_CHECK;
 const ID_ALLOW: u16 = 211;
 const ID_DENY: u16 = 212;
 /// The tray window asks for its menu (not a control id).
 const SHOW_MENU: u16 = 0xFFFE;
 /// A left click on the tray icon: the main window (not a control id).
 const SHOW_MAIN: u16 = 0xFFFC;
-/// "Open Queqiao" in the tray menu.
-const MENU_OPEN: u16 = 223;
-/// The help modes and files while someone helps (the main window's Settings page).
-pub(crate) const MENU_HELP_BOTH: u16 = 224;
-pub(crate) const MENU_HELP_CODE_ONLY: u16 = 225;
-pub(crate) const MENU_HELP_ASK_ONLY: u16 = 226;
-pub(crate) const MENU_HELP_FILES: u16 = 227;
 
 static REGISTER: std::sync::Once = std::sync::Once::new();
 const TRAY_CLASS: PCWSTR = w!("QueqiaoPresence");
@@ -81,6 +54,8 @@ struct Prompt {
 }
 
 pub struct Presence {
+    /// The menu: the settings it shows and changes, how things stand.
+    menu: Tray,
     tray: HWND,
     tray_shown: bool,
     banner: Option<Form>,
@@ -90,22 +65,6 @@ pub struct Presence {
     help_invitation: String,
     help_status: Option<HWND>,
     prompt: Option<Prompt>,
-    allow: bool,
-    ask: bool,
-    clipboard: bool,
-    files: bool,
-    terminal: bool,
-    autostart: bool,
-    lock_after: bool,
-    /// While someone of another account controls the PC, the settings (and Quit) cannot be changed from here:
-    /// they hold the mouse too.
-    settings_locked: bool,
-    /// Checks the settings password, when one is set: settings and Quit ask for it.
-    password_check: Option<PasswordCheck>,
-    viewer: Option<String>,
-    account: AccountState,
-    auto_update: bool,
-    fixed_code: bool,
     /// The main window, made when it is first opened.
     main: Option<MainWindow>,
     /// What it shows, kept also while it is closed.
@@ -118,8 +77,6 @@ pub struct Presence {
     version: String,
     /// Queqiao's own icon, for the tray.
     icon: HICON,
-    help_mode: HelpMode,
-    help_files: bool,
 }
 
 impl Presence {
@@ -185,19 +142,9 @@ impl Presence {
             help: None,
             help_invitation: String::new(),
             help_status: None,
-            allow,
-            ask,
-            clipboard,
-            files,
-            terminal,
-            autostart,
-            lock_after,
-            settings_locked: false,
-            password_check: None,
-            viewer: None,
-            account: AccountState::Online,
-            auto_update: true,
-            fixed_code: false,
+            menu: Tray::new(
+                allow, ask, clipboard, files, terminal, autostart, lock_after,
+            ),
             main: None,
             user: String::new(),
             devices: Vec::new(),
@@ -206,8 +153,6 @@ impl Presence {
             help_now: None,
             version: queqiao_core::VERSION.to_string(),
             icon: crate::icon::app_icon(unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16)),
-            help_mode: HelpMode::default(),
-            help_files: false,
         };
         presence.update_tray();
         Ok(presence)
@@ -220,13 +165,13 @@ impl Presence {
     }
 
     pub fn set_settings(&mut self, allow: bool, ask: bool) {
-        self.allow = allow;
-        self.ask = ask;
+        self.menu.allow = allow;
+        self.menu.ask = ask;
     }
 
     /// The banner for a session with `viewer`.
     pub fn session_started(&mut self, viewer: &str) -> Result<()> {
-        self.viewer = Some(viewer.to_string());
+        self.menu.viewer = Some(viewer.to_string());
         self.banner = None;
         let form = Form::create(tr("Queqiao"), 440, 40, Kind::Banner)?;
         form.label(
@@ -244,7 +189,7 @@ impl Presence {
     }
 
     pub fn session_ended(&mut self) {
-        self.viewer = None;
+        self.menu.viewer = None;
         self.banner = None;
         self.update_tray();
     }
@@ -405,7 +350,7 @@ impl Presence {
     pub fn show_main(&mut self, page: Option<Page>) -> Result<()> {
         if self.main.is_none() {
             let mut main = MainWindow::new(&self.version)?;
-            main.set_account(&self.user, self.account);
+            main.set_account(&self.user, self.menu.account);
             main.set_devices(self.devices.clone());
             main.set_transfers(self.transfers.clone());
             main.set_connections(self.connections.clone());
@@ -463,7 +408,7 @@ impl Presence {
     pub fn set_user(&mut self, user: &str) {
         self.user = user.to_string();
         if let Some(main) = self.main.as_mut() {
-            main.set_account(&self.user, self.account);
+            main.set_account(&self.user, self.menu.account);
         }
     }
 
@@ -493,25 +438,25 @@ impl Presence {
 
     /// The help mode and whether files go while someone helps (Settings).
     pub fn set_help_settings(&mut self, mode: HelpMode, files: bool) {
-        self.help_mode = mode;
-        self.help_files = files;
+        self.menu.help_mode = mode;
+        self.menu.help_files = files;
         self.refresh_main();
     }
 
     fn shown(&self) -> Shown {
         Shown {
-            help_mode: self.help_mode,
-            help_files: self.help_files,
-            allow: self.allow,
-            ask: self.ask,
-            clipboard: self.clipboard,
-            files: self.files,
-            terminal: self.terminal,
-            autostart: self.autostart,
-            lock_after: self.lock_after,
-            auto_update: self.auto_update,
-            password: self.password_check.is_some(),
-            fixed_code: self.fixed_code,
+            help_mode: self.menu.help_mode,
+            help_files: self.menu.help_files,
+            allow: self.menu.allow,
+            ask: self.menu.ask,
+            clipboard: self.menu.clipboard,
+            files: self.menu.files,
+            terminal: self.menu.terminal,
+            autostart: self.menu.autostart,
+            lock_after: self.menu.lock_after,
+            auto_update: self.menu.auto_update,
+            password: self.menu.password_check.is_some(),
+            fixed_code: self.menu.fixed_code,
         }
     }
 
@@ -520,7 +465,7 @@ impl Presence {
         let shown = self.shown();
         if let Some(main) = self.main.as_mut() {
             main.set_settings(shown);
-            main.set_account(&self.user, self.account);
+            main.set_account(&self.user, self.menu.account);
         }
     }
 
@@ -571,7 +516,7 @@ impl Presence {
             MainAction::NewHelpId => Some(PresenceEvent::NewHelpId),
             MainAction::OpenReceived => Some(PresenceEvent::OpenReceivedFiles),
             MainAction::ClearTransfers => Some(PresenceEvent::ClearTransfers),
-            MainAction::Account => match self.account {
+            MainAction::Account => match self.menu.account {
                 AccountState::LoggedOut => {
                     let event = self.choose(MENU_LOGIN);
                     self.refresh_main();
@@ -694,157 +639,42 @@ impl Presence {
 
     fn show_menu(&mut self) -> Option<PresenceEvent> {
         let menu = unsafe { CreatePopupMenu() }.ok()?;
-        let locked = self.settings_locked;
-        let checked = |on: bool| {
-            let flags = if on {
-                MF_STRING | MF_CHECKED
-            } else {
-                MF_STRING
-            };
-            if locked { flags | MF_GRAYED } else { flags }
-        };
-        let status = wide(&match (&self.viewer, self.account) {
-            (Some(viewer), _) => trf(
-                "Queqiao: {viewer} is controlling this PC",
-                &[("viewer", viewer)],
-            ),
-            (None, AccountState::Online) => tr("Queqiao: ready").into(),
-            (None, AccountState::Offline) => {
-                tr("Queqiao: cannot reach the server, trying again").into()
+        // The texts live until the menu is gone.
+        let mut texts = Vec::new();
+        for entry in self.menu.entries() {
+            unsafe {
+                let _ = match entry {
+                    Entry::Item {
+                        id,
+                        text,
+                        checked,
+                        enabled,
+                        default,
+                    } => {
+                        let mut flags = MF_STRING;
+                        if checked {
+                            flags |= MF_CHECKED;
+                        }
+                        if !enabled {
+                            flags |= MF_GRAYED;
+                        }
+                        if default {
+                            flags |= MF_DEFAULT;
+                        }
+                        texts.push(wide(&text));
+                        let text = texts.last().map_or(PCWSTR::null(), |t| PCWSTR(t.as_ptr()));
+                        AppendMenuW(menu, flags, usize::from(id), text)
+                    }
+                    Entry::Status(text) => {
+                        texts.push(wide(&text));
+                        let text = texts.last().map_or(PCWSTR::null(), |t| PCWSTR(t.as_ptr()));
+                        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, text)
+                    }
+                    Entry::Separator => AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()),
+                };
             }
-            (None, AccountState::LoggedOut) => tr("Queqiao: not logged in").into(),
-        });
-        let login = wide(tr("Log in..."));
-        let end = wide(tr("End the session"));
-        let allow = wide(tr("Let my account's devices control this PC"));
-        let ask = wide(tr("Ask me before each session"));
-        let clipboard = wide(tr("Share the clipboard"));
-        let files = wide(tr("Receive files"));
-        let terminal = wide(tr("Allow remote command lines"));
-        let autostart = wide(tr("Start with Windows"));
-        let lock_after = wide(tr("Lock this PC when a session ends"));
-        let quit = wide(tr("Quit Queqiao on this PC"));
-        let check_updates = wide(tr("Check for updates..."));
-        let wol_check = wide(tr("Wake-on-LAN check..."));
-        let auto_update = wide(tr("Install updates automatically"));
-        let password = wide(if self.password_check.is_some() {
-            tr("Remove the settings password...")
-        } else {
-            tr("Lock these settings with a password...")
-        });
-        let help = wide(tr("Let someone help me..."));
-        let fixed_code = wide(if self.fixed_code {
-            tr("Remove the fixed help code")
-        } else {
-            tr("A fixed help code for this PC...")
-        });
-        let open = wide(tr("Open Queqiao"));
+        }
         unsafe {
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING | MF_DEFAULT,
-                usize::from(MENU_OPEN),
-                PCWSTR(open.as_ptr()),
-            );
-            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            if self.viewer.is_some() {
-                let _ = AppendMenuW(menu, MF_STRING, usize::from(MENU_END), PCWSTR(end.as_ptr()));
-            }
-            if self.account != AccountState::Online {
-                let _ = AppendMenuW(
-                    menu,
-                    checked(false),
-                    usize::from(MENU_LOGIN),
-                    PCWSTR(login.as_ptr()),
-                );
-            }
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
-                usize::from(MENU_HELP),
-                PCWSTR(help.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(false),
-                usize::from(MENU_FIXED_CODE),
-                PCWSTR(fixed_code.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(self.allow),
-                usize::from(MENU_ALLOW),
-                PCWSTR(allow.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(self.ask),
-                usize::from(MENU_ASK),
-                PCWSTR(ask.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(self.clipboard),
-                usize::from(MENU_CLIPBOARD),
-                PCWSTR(clipboard.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(self.files),
-                usize::from(MENU_FILES),
-                PCWSTR(files.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(self.terminal),
-                usize::from(MENU_TERMINAL),
-                PCWSTR(terminal.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(self.autostart),
-                usize::from(MENU_AUTOSTART),
-                PCWSTR(autostart.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(self.lock_after),
-                usize::from(MENU_LOCK_AFTER),
-                PCWSTR(lock_after.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                checked(false),
-                usize::from(MENU_PASSWORD),
-                PCWSTR(password.as_ptr()),
-            );
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(
-                menu,
-                checked(self.auto_update),
-                usize::from(MENU_AUTO_UPDATE),
-                PCWSTR(auto_update.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
-                usize::from(MENU_UPDATE_CHECK),
-                PCWSTR(check_updates.as_ptr()),
-            );
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
-                usize::from(MENU_WOL_CHECK),
-                PCWSTR(wol_check.as_ptr()),
-            );
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
-                usize::from(MENU_QUIT),
-                PCWSTR(quit.as_ptr()),
-            );
             let mut at = POINT::default();
             let _ = GetCursorPos(&mut at);
             // The menu closes when clicking elsewhere only if its owner is in front.
@@ -867,151 +697,60 @@ impl Presence {
 
     /// The settings password's check (None: no password).
     pub fn set_password_check(&mut self, check: Option<PasswordCheck>) {
-        self.password_check = check;
+        self.menu.password_check = check;
         self.refresh_main();
     }
 
     /// Whether a fixed help code is set (the menu offers to remove it).
     pub fn set_fixed_code(&mut self, set: bool) {
-        self.fixed_code = set;
+        self.menu.fixed_code = set;
         self.refresh_main();
     }
 
     /// Whether updates are installed by themselves (the menu's check mark).
     pub fn set_auto_update(&mut self, on: bool) {
-        self.auto_update = on;
+        self.menu.auto_update = on;
         self.refresh_main();
     }
 
     /// How this PC stands with the account server (shown in the menu; "Log in..." while not online).
     pub fn set_account_state(&mut self, state: AccountState) {
-        self.account = state;
+        self.menu.account = state;
         self.refresh_main();
     }
 
     /// Locks the settings (true while someone of another account controls the PC) or unlocks them.
     pub fn set_settings_locked(&mut self, locked: bool) {
-        self.settings_locked = locked;
+        self.menu.settings_locked = locked;
     }
 
     /// What choosing tray menu item `item` does (also the path tests take).
     pub fn choose(&mut self, item: u16) -> Option<PresenceEvent> {
-        let setting = matches!(
-            item,
-            MENU_ALLOW
-                | MENU_ASK
-                | MENU_CLIPBOARD
-                | MENU_FILES
-                | MENU_TERMINAL
-                | MENU_AUTOSTART
-                | MENU_LOCK_AFTER
-                | MENU_AUTO_UPDATE
-                | MENU_QUIT
-                | MENU_HELP_BOTH
-                | MENU_HELP_CODE_ONLY
-                | MENU_HELP_ASK_ONLY
-                | MENU_HELP_FILES
-        );
-        let protected =
-            setting || item == MENU_PASSWORD || item == MENU_LOGIN || item == MENU_FIXED_CODE;
         if item == MENU_OPEN {
             return self.show_main(None).ok().map(|()| PresenceEvent::MainShown);
         }
-        if self.settings_locked && protected {
-            return Some(PresenceEvent::SettingsLocked);
-        }
-        if protected && let Some(check) = &self.password_check {
-            let typed = crate::forms::ask_secret(tr("Queqiao"), tr("The settings password:"));
-            if !typed.is_some_and(|typed| check(&typed)) {
-                return Some(PresenceEvent::SettingsLocked);
-            }
-        }
-        if item == MENU_FIXED_CODE {
-            if self.fixed_code {
-                return Some(PresenceEvent::SetFixedHelpCode(None));
-            }
-            let typed = crate::forms::ask_text(
-                tr("Queqiao"),
-                tr("A fixed help code (8 or more letters or digits):"),
-                "",
-            )?;
-            let code = crate::model::normalize_code(&typed);
-            if code.len() < MIN_FIXED_CODE {
-                crate::forms::show_error(
-                    tr("Queqiao"),
-                    tr("A fixed help code needs 8 or more letters or digits."),
-                );
-                return None;
-            }
-            return Some(PresenceEvent::SetFixedHelpCode(Some(code)));
-        }
-        if item == MENU_PASSWORD {
-            if self.password_check.is_some() {
-                return Some(PresenceEvent::SetPassword(None));
-            }
-            let first =
-                crate::forms::ask_secret(tr("Queqiao"), tr("A password for these settings:"))?;
-            let again = crate::forms::ask_secret(tr("Queqiao"), tr("The same password again:"))?;
-            return (!first.is_empty() && first == again)
-                .then_some(PresenceEvent::SetPassword(Some(first)));
-        }
-        {
-            match item {
-                MENU_END => Some(PresenceEvent::EndSession),
-                MENU_LOGIN => Some(PresenceEvent::LogIn),
-                MENU_HELP => Some(PresenceEvent::OpenHelp),
-                MENU_ALLOW => {
-                    self.allow = !self.allow;
-                    Some(PresenceEvent::SetAllow(self.allow))
-                }
-                MENU_ASK => {
-                    self.ask = !self.ask;
-                    Some(PresenceEvent::SetAsk(self.ask))
-                }
-                MENU_CLIPBOARD => {
-                    self.clipboard = !self.clipboard;
-                    Some(PresenceEvent::SetClipboard(self.clipboard))
-                }
-                MENU_FILES => {
-                    self.files = !self.files;
-                    Some(PresenceEvent::SetFiles(self.files))
-                }
-                MENU_TERMINAL => {
-                    self.terminal = !self.terminal;
-                    Some(PresenceEvent::SetTerminal(self.terminal))
-                }
-                MENU_AUTOSTART => {
-                    self.autostart = !self.autostart;
-                    Some(PresenceEvent::SetAutostart(self.autostart))
-                }
-                MENU_LOCK_AFTER => {
-                    self.lock_after = !self.lock_after;
-                    Some(PresenceEvent::SetLockAfter(self.lock_after))
-                }
-                MENU_AUTO_UPDATE => {
-                    self.auto_update = !self.auto_update;
-                    Some(PresenceEvent::SetAutoUpdate(self.auto_update))
-                }
-                MENU_UPDATE_CHECK => Some(PresenceEvent::CheckUpdates),
-                MENU_WOL_CHECK => Some(PresenceEvent::CheckWakeOnLan),
-                MENU_QUIT => Some(PresenceEvent::Quit),
-                MENU_HELP_BOTH | MENU_HELP_CODE_ONLY | MENU_HELP_ASK_ONLY => {
-                    self.help_mode = match item {
-                        MENU_HELP_CODE_ONLY => HelpMode::CodeOnly,
-                        MENU_HELP_ASK_ONLY => HelpMode::AskOnly,
-                        _ => HelpMode::CodeAndAsk,
-                    };
-                    Some(PresenceEvent::SetHelpMode(self.help_mode))
-                }
-                MENU_HELP_FILES => {
-                    self.help_files = !self.help_files;
-                    Some(PresenceEvent::SetHelpFiles(self.help_files))
-                }
-                _ => None,
-            }
-        }
+        self.menu.choose(item, &WindowsDialogs)
+    }
+}
+
+/// The tray model's forms, Windows' own.
+struct WindowsDialogs;
+
+impl Dialogs for WindowsDialogs {
+    fn ask_secret(&self, title: &str, prompt: &str) -> Option<String> {
+        crate::forms::ask_secret(title, prompt)
     }
 
+    fn ask_text(&self, title: &str, prompt: &str, initial: &str) -> Option<String> {
+        crate::forms::ask_text(title, prompt, initial)
+    }
+
+    fn show_error(&self, title: &str, text: &str) {
+        crate::forms::show_error(title, text)
+    }
+}
+
+impl Presence {
     fn update_countdown(&self) {
         if let Some(prompt) = &self.prompt {
             let left = prompt
@@ -1031,7 +770,7 @@ impl Presence {
 
     /// Adds the icon, or updates its tooltip.
     fn update_tray(&mut self) {
-        let tip = match &self.viewer {
+        let tip = match &self.menu.viewer {
             Some(viewer) => trf(
                 "Queqiao: {viewer} is controlling this PC",
                 &[("viewer", viewer)],

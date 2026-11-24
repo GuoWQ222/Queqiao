@@ -5,6 +5,16 @@
 //! The connection runs on its own thread ("queqiao-account"); the program talks to it through channels.
 
 mod config;
+/// Sealed for the person running this (Windows: DPAPI; Linux: their own key file and ChaCha20-Poly1305): for
+/// secrets in settings (a fixed help code).
+pub fn protect_secret(data: &[u8]) -> Result<Vec<u8>, String> {
+    config::protect(data).map_err(|e| e.to_string())
+}
+
+pub fn unprotect_secret(data: &[u8]) -> Result<Vec<u8>, String> {
+    config::unprotect(data).map_err(|e| e.to_string())
+}
+
 pub mod connections;
 mod keys;
 mod local_password;

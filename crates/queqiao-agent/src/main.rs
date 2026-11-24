@@ -14,10 +14,14 @@
 //! pointer move and the test key (F24) and puts the pointer back at the end. --version prints the version.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-// On every system (docs/LINUX.md step 3): the command line and the session with a viewer.
+// On every system (docs/LINUX.md steps 3 and 5): the command line, the session with a viewer, the account mode.
+mod account;
 mod lock_gate;
 mod options;
 mod session;
+mod ui;
+/// Wake-on-LAN: the magic packets, and this PC's cards (from Windows or from /sys/class/net).
+mod wake;
 
 // Windows: the program (win.rs) and what only Windows has.
 #[cfg(windows)]
@@ -27,11 +31,7 @@ mod power;
 #[cfg(windows)]
 mod service_link;
 #[cfg(windows)]
-mod ui;
-#[cfg(windows)]
 mod update;
-#[cfg(windows)]
-mod wake;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
@@ -43,6 +43,9 @@ use win as platform;
 
 // Linux: the program (linux.rs) and the same modules as Windows', for what the session uses of them.
 #[cfg(target_os = "linux")]
+#[path = "linux/autostart.rs"]
+mod autostart;
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 #[path = "linux/power.rs"]
@@ -51,8 +54,11 @@ mod power;
 #[path = "linux/service_link.rs"]
 mod service_link;
 #[cfg(target_os = "linux")]
-#[path = "linux/ui.rs"]
-mod ui;
+#[path = "linux/update.rs"]
+mod update;
+#[cfg(target_os = "linux")]
+#[path = "linux/wol_check.rs"]
+mod wol_check;
 #[cfg(target_os = "linux")]
 use linux as platform;
 

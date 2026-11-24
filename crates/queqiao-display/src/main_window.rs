@@ -33,7 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::model::AccountState;
-use crate::model::{ConnectionRow, MainDevice, TransferRow};
+use crate::model::{ConnectionRow, MainDevice, Page, TransferRow};
 
 const CLASS: PCWSTR = w!("QueqiaoMain");
 static REGISTER: Once = Once::new();
@@ -146,45 +146,13 @@ const DWMWA_BORDER_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(34);
 const DWMWA_CAPTION_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(35);
 const DWMWA_TEXT_COLOR: DWMWINDOWATTRIBUTE = DWMWINDOWATTRIBUTE(36);
 
-/// A page of the main window.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Page {
-    Devices,
-    Help,
-    Transfers,
-    Settings,
-}
-
-impl Page {
-    const ALL: [Page; 4] = [Page::Devices, Page::Help, Page::Transfers, Page::Settings];
-
-    fn title(self) -> &'static str {
-        match self {
-            Page::Devices => tr("Devices"),
-            Page::Help => tr("Help"),
-            Page::Transfers => tr("Transfers"),
-            Page::Settings => tr("Settings"),
-        }
-    }
-
-    fn glyph(self) -> &'static str {
-        match self {
-            Page::Devices => GLYPH_DEVICES,
-            Page::Help => GLYPH_HELP,
-            Page::Transfers => GLYPH_TRANSFERS,
-            Page::Settings => GLYPH_SETTINGS,
-        }
-    }
-
-    fn subtitle(self) -> &'static str {
-        match self {
-            Page::Devices => tr("Devices logged in to your account can control each other."),
-            Page::Help => tr(
-                "Help across accounts: always with the help ID and code, and only after an Allow.",
-            ),
-            Page::Transfers => tr("Files sent and received in sessions."),
-            Page::Settings => tr("What may happen on this PC, and how Queqiao runs."),
-        }
+/// The glyph (Segoe MDL2 Assets) of each page in the navigation.
+fn glyph(page: Page) -> &'static str {
+    match page {
+        Page::Devices => GLYPH_DEVICES,
+        Page::Help => GLYPH_HELP,
+        Page::Transfers => GLYPH_TRANSFERS,
+        Page::Settings => GLYPH_SETTINGS,
     }
 }
 
@@ -457,7 +425,7 @@ impl MainWindow {
             Page::Help,
             button(
                 tr("Let someone help me..."),
-                crate::presence::MENU_HELP,
+                crate::tray::MENU_HELP,
                 [LEFT + 20, 212, 200, 34],
             )?,
         );
@@ -478,7 +446,7 @@ impl MainWindow {
             Page::Help,
             button(
                 tr("Fixed help code..."),
-                crate::presence::MENU_FIXED_CODE,
+                crate::tray::MENU_FIXED_CODE,
                 [LEFT + CONTENT - 200, 212, 180, 34],
             )?,
         );
@@ -556,15 +524,15 @@ impl MainWindow {
         let mut checks = Vec::new();
         let this_pc = [
             (
-                crate::presence::MENU_ALLOW,
+                crate::tray::MENU_ALLOW,
                 tr("This account's devices may control this PC"),
             ),
-            (crate::presence::MENU_ASK, tr("Ask before each session")),
-            (crate::presence::MENU_CLIPBOARD, tr("Share the clipboard")),
-            (crate::presence::MENU_FILES, tr("Receive files")),
-            (crate::presence::MENU_TERMINAL, tr("Allow command lines")),
+            (crate::tray::MENU_ASK, tr("Ask before each session")),
+            (crate::tray::MENU_CLIPBOARD, tr("Share the clipboard")),
+            (crate::tray::MENU_FILES, tr("Receive files")),
+            (crate::tray::MENU_TERMINAL, tr("Allow command lines")),
             (
-                crate::presence::MENU_LOCK_AFTER,
+                crate::tray::MENU_LOCK_AFTER,
                 tr("Lock this PC after a session"),
             ),
         ];
@@ -582,13 +550,10 @@ impl MainWindow {
         }
         // Remote help: how someone of another account may start (UU's three ways), and files while they help.
         let ways = [
+            (crate::tray::MENU_HELP_BOTH, tr("The code, then I allow it")),
+            (crate::tray::MENU_HELP_CODE_ONLY, tr("The code alone")),
             (
-                crate::presence::MENU_HELP_BOTH,
-                tr("The code, then I allow it"),
-            ),
-            (crate::presence::MENU_HELP_CODE_ONLY, tr("The code alone")),
-            (
-                crate::presence::MENU_HELP_ASK_ONLY,
+                crate::tray::MENU_HELP_ASK_ONLY,
                 tr("No code: I allow each request"),
             ),
         ];
@@ -609,17 +574,17 @@ impl MainWindow {
             tr("Allow files while someone helps"),
             tab | BS_CHECKBOX,
             WINDOW_EX_STYLE(0),
-            crate::presence::MENU_HELP_FILES,
+            crate::tray::MENU_HELP_FILES,
             [LEFT + 320, 250, CONTENT - 324, 26],
         )?;
         checks.push((
-            crate::presence::MENU_HELP_FILES,
+            crate::tray::MENU_HELP_FILES,
             place(Page::Settings, files_while_helping),
         ));
         let program = [
-            (crate::presence::MENU_AUTOSTART, tr("Start with Windows")),
+            (crate::tray::MENU_AUTOSTART, crate::tray::autostart_text()),
             (
-                crate::presence::MENU_AUTO_UPDATE,
+                crate::tray::MENU_AUTO_UPDATE,
                 tr("Install updates automatically"),
             ),
         ];
@@ -639,7 +604,7 @@ impl MainWindow {
             Page::Settings,
             button(
                 tr("Check for updates"),
-                crate::presence::MENU_UPDATE_CHECK,
+                crate::tray::MENU_UPDATE_CHECK,
                 [LEFT + 320, 390, 170, 30],
             )?,
         );
@@ -647,7 +612,7 @@ impl MainWindow {
             Page::Settings,
             button(
                 tr("Lock settings with a password..."),
-                crate::presence::MENU_PASSWORD,
+                crate::tray::MENU_PASSWORD,
                 [LEFT, 440, 260, 34],
             )?,
         );
@@ -655,7 +620,7 @@ impl MainWindow {
             Page::Settings,
             button(
                 tr("Wake-on-LAN check..."),
-                crate::presence::MENU_WOL_CHECK,
+                crate::tray::MENU_WOL_CHECK,
                 [LEFT + 272, 440, 200, 34],
             )?,
         );
@@ -777,24 +742,24 @@ impl MainWindow {
     pub(crate) fn set_settings(&mut self, shown: Shown) {
         for (id, hwnd) in &self.checks {
             let on = match *id {
-                crate::presence::MENU_ALLOW => shown.allow,
-                crate::presence::MENU_ASK => shown.ask,
-                crate::presence::MENU_CLIPBOARD => shown.clipboard,
-                crate::presence::MENU_FILES => shown.files,
-                crate::presence::MENU_TERMINAL => shown.terminal,
-                crate::presence::MENU_LOCK_AFTER => shown.lock_after,
-                crate::presence::MENU_AUTOSTART => shown.autostart,
-                crate::presence::MENU_AUTO_UPDATE => shown.auto_update,
-                crate::presence::MENU_HELP_BOTH => {
+                crate::tray::MENU_ALLOW => shown.allow,
+                crate::tray::MENU_ASK => shown.ask,
+                crate::tray::MENU_CLIPBOARD => shown.clipboard,
+                crate::tray::MENU_FILES => shown.files,
+                crate::tray::MENU_TERMINAL => shown.terminal,
+                crate::tray::MENU_LOCK_AFTER => shown.lock_after,
+                crate::tray::MENU_AUTOSTART => shown.autostart,
+                crate::tray::MENU_AUTO_UPDATE => shown.auto_update,
+                crate::tray::MENU_HELP_BOTH => {
                     shown.help_mode == crate::model::HelpMode::CodeAndAsk
                 }
-                crate::presence::MENU_HELP_CODE_ONLY => {
+                crate::tray::MENU_HELP_CODE_ONLY => {
                     shown.help_mode == crate::model::HelpMode::CodeOnly
                 }
-                crate::presence::MENU_HELP_ASK_ONLY => {
+                crate::tray::MENU_HELP_ASK_ONLY => {
                     shown.help_mode == crate::model::HelpMode::AskOnly
                 }
-                crate::presence::MENU_HELP_FILES => shown.help_files,
+                crate::tray::MENU_HELP_FILES => shown.help_files,
                 _ => false,
             };
             unsafe { SendMessageW(*hwnd, BM_SETCHECK, Some(WPARAM(usize::from(on))), None) };
@@ -1331,7 +1296,7 @@ fn paint_sidebar(dc: HDC, state: &State) {
         };
         text(
             dc,
-            page.glyph(),
+            glyph(*page),
             rect(26, y, 24, NAV_HEIGHT, s),
             f.glyph,
             color,

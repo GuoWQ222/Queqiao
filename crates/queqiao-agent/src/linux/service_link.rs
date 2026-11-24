@@ -41,6 +41,13 @@ impl ServiceLink {
     pub fn restart(&mut self) -> Result<(), String> {
         match self.never {}
     }
+
+    pub fn offer_logon(
+        &mut self,
+        _identity: Option<queqiao_local::LogonIdentity>,
+    ) -> Result<(), String> {
+        match self.never {}
+    }
 }
 
 pub struct DesktopLink {

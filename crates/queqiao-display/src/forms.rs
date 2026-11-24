@@ -26,7 +26,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled,
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
-use crate::model::normalize_code;
+use crate::model::{DeviceRow, HelpAction, ListAction, LoginAction, LoginFields, normalize_code};
 
 static REGISTER: Once = Once::new();
 const CLASS: PCWSTR = w!("QueqiaoForm");
@@ -465,17 +465,6 @@ impl PasswordForm {
     }
 }
 
-/// What the login form asks for.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LoginFields {
-    /// host:port of queqiao-server.
-    pub server: String,
-    /// The server certificate's SHA-256 fingerprint, as queqiao-server prints it.
-    pub pin: String,
-    pub user: String,
-    pub password: String,
-}
-
 /// A menu at the mouse pointer, owned by `owner`; the chosen item's id.
 pub fn popup_menu(owner: HWND, items: &[(u16, &str, bool)]) -> Option<u16> {
     let menu = unsafe { CreatePopupMenu() }.ok()?;
@@ -637,15 +626,6 @@ impl PickList {
 /// What a closed PickList reports.
 pub const PICK_CLOSED: u16 = CLOSED;
 
-pub enum HelpAction {
-    /// The help ID (digits only) and the code (letters and digits, upper case).
-    Submit {
-        help_id: String,
-        code: String,
-    },
-    Cancel,
-}
-
 /// Asks for the help ID and code of someone to help (another account's device).
 pub struct HelpForm {
     form: Form,
@@ -723,13 +703,6 @@ impl HelpForm {
             _ => None,
         }
     }
-}
-
-pub enum LoginAction {
-    Submit(LoginFields),
-    /// "Create an account": a new account with these fields (on a server that takes new accounts).
-    Register(LoginFields),
-    Cancel,
 }
 
 pub struct LoginForm {
@@ -854,27 +827,6 @@ impl LoginForm {
     pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
         save_window_picture(self.form.hwnd, path)
     }
-}
-
-pub enum ListAction {
-    /// Connect to the device with this id (double-click, Enter or the Connect button).
-    Connect(String),
-    /// "Help someone...": connect to another account's device with its help ID and code.
-    Help,
-    /// Wake the device with this id (Wake-on-LAN through another device on its network).
-    Wake(String),
-    /// "More..." for the device with this id (rename, favourite, remove).
-    More(String),
-    LogOut,
-    Closed,
-}
-
-/// One line of the device list.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeviceRow {
-    pub id: String,
-    pub name: String,
-    pub status: String,
 }
 
 pub struct DeviceList {

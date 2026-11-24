@@ -52,3 +52,6 @@ libc = "0.2"
 # The GUI (linux/gui.rs): egui through eframe (OpenGL), on a thread of its own (winit's any-thread event loop).
 eframe = { version = "0.32", default-features = false, features = ["glow", "x11", "wayland", "default_fonts"] }
 winit = { version = "0.30", default-features = false, features = ["x11", "wayland", "rwh_06"] }
+# The tray icon: a StatusNotifierItem over D-Bus (pure Rust); the icon's PNG images.
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+png = "0.17"

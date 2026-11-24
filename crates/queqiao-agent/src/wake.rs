@@ -3,18 +3,48 @@
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 
+#[cfg(windows)]
 use windows::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses,
     IP_ADAPTER_ADDRESSES_LH,
 };
+#[cfg(windows)]
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+#[cfg(windows)]
 use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
 /// Interface types that can wake a PC: Ethernet and Wi-Fi.
+#[cfg(windows)]
 const ETHERNET: u32 = 6;
+#[cfg(windows)]
 const WIFI: u32 = 71;
 
+/// The MAC addresses ("AA-BB-CC-DD-EE-FF") of this PC's cards that are up, on Linux: the physical ones in
+/// /sys/class/net (a device behind them; bridges, VPNs and containers' virtual cards have none).
+#[cfg(target_os = "linux")]
+pub fn macs() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/net") else {
+        return Vec::new();
+    };
+    let mut macs: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let card = entry.path();
+            if !card.join("device").exists() {
+                return None;
+            }
+            let up = std::fs::read_to_string(card.join("operstate")).ok()?.trim() == "up";
+            let mac = std::fs::read_to_string(card.join("address")).ok()?;
+            let mac = mac.trim().to_uppercase().replace(':', "-");
+            (up && mac.split('-').count() == 6 && mac != "00-00-00-00-00-00").then_some(mac)
+        })
+        .collect();
+    macs.sort();
+    macs
+}
+
 /// The MAC addresses ("AA-BB-CC-DD-EE-FF") of this PC's Ethernet and Wi-Fi cards that are up.
+#[cfg(windows)]
 pub fn macs() -> Vec<String> {
     let mut size = 16 * 1024u32;
     for _ in 0..3 {

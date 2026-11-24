@@ -2,6 +2,8 @@
 //! from the windows that show it (Windows: presence.rs, main_window.rs, forms.rs, window.rs, overlay.rs; Linux: linux/).
 
 use std::path::PathBuf;
+
+use queqiao_core::text::tr;
 use std::time::Duration;
 
 /// Checks a typed settings password.
@@ -206,4 +208,88 @@ pub struct Figures {
     pub elapsed: Duration,
     /// The latest delays, oldest first.
     pub delays: Vec<f64>,
+}
+
+/// A page of the main window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Devices,
+    Help,
+    Transfers,
+    Settings,
+}
+
+impl Page {
+    pub(crate) const ALL: [Page; 4] = [Page::Devices, Page::Help, Page::Transfers, Page::Settings];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Page::Devices => tr("Devices"),
+            Page::Help => tr("Help"),
+            Page::Transfers => tr("Transfers"),
+            Page::Settings => tr("Settings"),
+        }
+    }
+
+    pub(crate) fn subtitle(self) -> &'static str {
+        match self {
+            Page::Devices => tr("Devices logged in to your account can control each other."),
+            Page::Help => tr(
+                "Help across accounts: always with the help ID and code, and only after an Allow.",
+            ),
+            Page::Transfers => tr("Files sent and received in sessions."),
+            Page::Settings => tr("What may happen on this PC, and how Queqiao runs."),
+        }
+    }
+}
+
+/// What the login form asks for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoginFields {
+    /// host:port of queqiao-server.
+    pub server: String,
+    /// The server certificate's SHA-256 fingerprint, as queqiao-server prints it.
+    pub pin: String,
+    pub user: String,
+    pub password: String,
+}
+
+/// What the person did in the login form.
+pub enum LoginAction {
+    Submit(LoginFields),
+    /// "Create an account": a new account with these fields (on a server that takes new accounts).
+    Register(LoginFields),
+    Cancel,
+}
+
+/// What the person did in the "help someone" form.
+pub enum HelpAction {
+    /// The help ID (digits only) and the code (letters and digits, upper case).
+    Submit {
+        help_id: String,
+        code: String,
+    },
+    Cancel,
+}
+
+/// What the person did in the device list.
+pub enum ListAction {
+    /// Connect to the device with this id (double-click, Enter or the Connect button).
+    Connect(String),
+    /// "Help someone...": connect to another account's device with its help ID and code.
+    Help,
+    /// Wake the device with this id (Wake-on-LAN through another device on its network).
+    Wake(String),
+    /// "More..." for the device with this id (rename, favourite, remove).
+    More(String),
+    LogOut,
+    Closed,
+}
+
+/// One line of the device list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceRow {
+    pub id: String,
+    pub name: String,
+    pub status: String,
 }

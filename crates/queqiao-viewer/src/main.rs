@@ -18,6 +18,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 // On every system (docs/LINUX.md step 3): the command line, the session with an agent, the session's keys.
+/// The account mode, on every system.
+mod account;
 mod hotkeys;
 mod options;
 mod session;
