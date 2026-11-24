@@ -7,6 +7,8 @@ publish.workspace = true
 
 [dependencies]
 queqiao-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -14,3 +16,6 @@ windows = { workspace = true, features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

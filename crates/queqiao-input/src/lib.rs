@@ -4,6 +4,9 @@
 //! are mapped onto the whole Windows desktop, so any screen of a multi-monitor PC works. Keys arrive as
 //! hardware scancodes, so the controlled PC's keyboard layout decides the characters. The process must
 //! be per-monitor DPI aware (the agent is), so desktop positions are physical pixels.
+// Windows only for now: the Linux layer comes in docs/LINUX.md step 2 (the platform API); until then this crate
+// is empty on Linux.
+#![cfg(windows)]
 
 mod block;
 mod clipboard;

@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 # libopus built from its bundled source with CMake (Visual Studio's Build Tools include CMake).
 opusic-sys = "0.7"
+
+[target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Devices_FunctionDiscovery",
     "Win32_Media_Audio",

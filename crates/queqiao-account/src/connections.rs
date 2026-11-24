@@ -30,11 +30,7 @@ fn path() -> Option<PathBuf> {
 
 /// This PC's local time now, as `Connection::when` has it.
 pub fn local_now() -> String {
-    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}",
-        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute
-    )
+    queqiao_core::local_time_minutes()
 }
 
 /// Notes a session that ended.

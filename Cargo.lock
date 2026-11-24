@@ -373,6 +373,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "foreign-types"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
+dependencies = [
+ "foreign-types-shared",
+]
+
+[[package]]
+name = "foreign-types-shared"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -580,6 +595,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "lz4_flex"
+version = "0.11.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13591d77a9b6d941f7e6fcade7f9dfd9e801308752bde50c0a9bb5852778c22c"
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -708,6 +729,43 @@ dependencies = [
  "cc",
  "nasm-rs",
  "walkdir",
+]
+
+[[package]]
+name = "openssl"
+version = "0.10.82"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4de8111e94a56adca7ebfe6c365b6d42f99deb69b74b6becacd4204e2f193aa2"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "foreign-types",
+ "libc",
+ "openssl-macros",
+ "openssl-sys",
+]
+
+[[package]]
+name = "openssl-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.118"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19c413d6ec9ebaf5e1c829d355cb3e9f783778d700f135be0921d52fce3c60ae"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -856,6 +914,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "hmac",
+ "libc",
  "md-5",
  "serde",
  "serde_json",
@@ -877,6 +936,9 @@ dependencies = [
 name = "queqiao-files"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "lz4_flex",
+ "queqiao-core",
  "sha2",
  "windows",
 ]
@@ -893,6 +955,7 @@ dependencies = [
 name = "queqiao-local"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "queqiao-core",
  "windows",
 ]
@@ -954,6 +1017,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "getrandom 0.3.4",
+ "libc",
  "queqiao-core",
  "quinn-proto",
  "rcgen",
@@ -1362,10 +1426,24 @@ dependencies = [
  "is",
  "sctp-proto",
  "serde",
+ "str0m-openssl",
  "str0m-proto",
  "str0m-wincrypto",
  "subtle",
  "time",
+ "tracing",
+]
+
+[[package]]
+name = "str0m-openssl"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c4fd2de0fd9f7a6c05f620bbfe19d6b6551d16520ebf3620e770d5471a9f9a3"
+dependencies = [
+ "libc",
+ "openssl",
+ "openssl-sys",
+ "str0m-proto",
  "tracing",
 ]
 
@@ -1378,6 +1456,7 @@ dependencies = [
  "base64ct",
  "dimpl",
  "fastrand",
+ "openssl",
  "serde",
  "subtle",
  "time",

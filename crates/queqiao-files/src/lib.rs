@@ -477,16 +477,38 @@ const MAX_INCOMING: usize = 16;
 /// Disk space a received file must leave free.
 const DISK_RESERVE: u64 = 1 << 30;
 
-/// Bytes free for this user on the disk of `folder`.
 /// The mark Windows puts on downloaded files (the Internet zone): SmartScreen and Office's Protected View then treat
 /// a received file as one from elsewhere (the security review of 2026-11-22). Left out on drives without alternate
 /// data streams (FAT).
+#[cfg(windows)]
 fn mark_from_elsewhere(path: &Path) {
     let mut stream = path.as_os_str().to_owned();
     stream.push(":Zone.Identifier");
     let _ = std::fs::write(PathBuf::from(stream), "[ZoneTransfer]\r\nZoneId=3\r\n");
 }
 
+/// Linux has no zone a program must honour; the origin is noted where browsers note theirs (the extended attribute
+/// `user.xdg.origin.url`, which file managers show). Left out where the file system has no user attributes.
+#[cfg(unix)]
+fn mark_from_elsewhere(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(name) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    let value = b"queqiao://transfer";
+    unsafe {
+        libc::setxattr(
+            name.as_ptr(),
+            c"user.xdg.origin.url".as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+}
+
+/// Bytes free for this user on the disk of `folder`.
+#[cfg(windows)]
 fn free_space(folder: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     let wide: Vec<u16> = folder.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -501,6 +523,18 @@ fn free_space(folder: &Path) -> Option<u64> {
     }
     .ok()?;
     Some(free)
+}
+
+/// Bytes free for this user on the disk of `folder` (blocks available to unprivileged users).
+#[cfg(unix)]
+fn free_space(folder: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(folder.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(name.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    Some(stats.f_bavail as u64 * stats.f_frsize as u64)
 }
 
 struct Incoming {
@@ -1046,6 +1080,7 @@ fn unique(path: &Path) -> PathBuf {
 }
 
 /// The person's Downloads folder (where Windows has it, also when moved), then `Queqiao` inside it.
+#[cfg(windows)]
 pub fn downloads_folder() -> PathBuf {
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
@@ -1063,9 +1098,96 @@ pub fn downloads_folder() -> PathBuf {
     downloads.join("Queqiao")
 }
 
+/// The person's download folder as the desktop names it (`XDG_DOWNLOAD_DIR` in `user-dirs.dirs`, translated names
+/// included), else `~/Downloads`; then `Queqiao` inside it.
+#[cfg(unix)]
+pub fn downloads_folder() -> PathBuf {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()));
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let named = std::fs::read_to_string(config.join("user-dirs.dirs"))
+        .ok()
+        .and_then(|text| xdg_download_dir(&text, &home));
+    named
+        .unwrap_or_else(|| home.join("Downloads"))
+        .join("Queqiao")
+}
+
+/// `XDG_DOWNLOAD_DIR` from the text of `user-dirs.dirs`: a quoted path, absolute or starting with `$HOME/`.
+#[cfg(unix)]
+fn xdg_download_dir(text: &str, home: &Path) -> Option<PathBuf> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("XDG_DOWNLOAD_DIR="))?;
+    let value = line["XDG_DOWNLOAD_DIR=".len()..].trim().trim_matches('"');
+    let path = if let Some(rest) = value.strip_prefix("$HOME/") {
+        home.join(rest)
+    } else if value == "$HOME" {
+        // The desktop's way of saying it has no download folder of its own.
+        return None;
+    } else {
+        PathBuf::from(value)
+    };
+    path.is_absolute().then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The origin mark a received file got on Linux (`user.xdg.origin.url`), if any.
+    #[cfg(unix)]
+    fn origin_mark(path: &Path) -> Option<String> {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut buffer = [0u8; 64];
+        let read = unsafe {
+            libc::getxattr(
+                name.as_ptr(),
+                c"user.xdg.origin.url".as_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        (read >= 0).then(|| String::from_utf8_lossy(&buffer[..read as usize]).into_owned())
+    }
+
+    /// Whether the file system of `path` keeps user attributes: one set and read back on it.
+    #[cfg(unix)]
+    fn user_attributes_kept(path: &Path) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let set = unsafe {
+            libc::setxattr(
+                name.as_ptr(),
+                c"user.queqiao.probe".as_ptr(),
+                b"1".as_ptr().cast(),
+                1,
+                0,
+            )
+        };
+        set == 0
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_folder_as_the_desktop_names_it() {
+        let home = Path::new("/home/someone");
+        let text = "# written by xdg-user-dirs-update\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/下载\"\n";
+        assert_eq!(xdg_download_dir(text, home), Some(home.join("下载")));
+        assert_eq!(
+            xdg_download_dir("XDG_DOWNLOAD_DIR=\"/data/dl\"", home),
+            Some(PathBuf::from("/data/dl"))
+        );
+        // No download folder of its own, a relative path, none at all: the fallback.
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"$HOME\"", home), None);
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"dl\"", home), None);
+        assert_eq!(xdg_download_dir("", home), None);
+        assert!(downloads_folder().ends_with("Queqiao"));
+    }
 
     fn temp(label: &str) -> PathBuf {
         let dir =
@@ -1125,11 +1247,19 @@ mod tests {
             assert_eq!(*size, content.len() as u64);
             assert_eq!(std::fs::read(path).unwrap(), content);
             // Marked as from elsewhere, as a download is.
-            let mut stream = path.as_os_str().to_owned();
-            stream.push(":Zone.Identifier");
-            let mark =
-                std::fs::read_to_string(std::path::PathBuf::from(stream)).unwrap_or_default();
-            assert!(mark.contains("ZoneId=3"), "{mark:?}");
+            #[cfg(windows)]
+            {
+                let mut stream = path.as_os_str().to_owned();
+                stream.push(":Zone.Identifier");
+                let mark =
+                    std::fs::read_to_string(std::path::PathBuf::from(stream)).unwrap_or_default();
+                assert!(mark.contains("ZoneId=3"), "{mark:?}");
+            }
+            // Where the file system keeps user attributes (ext4, xfs, tmpfs do), the origin must be there.
+            #[cfg(unix)]
+            if user_attributes_kept(&source) {
+                assert_eq!(origin_mark(path).as_deref(), Some("queqiao://transfer"));
+            }
         }
         let names: Vec<String> = std::fs::read_dir(&inbox_dir)
             .unwrap()

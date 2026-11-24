@@ -10,6 +10,8 @@ queqiao-core.workspace = true
 queqiao-display.workspace = true
 queqiao-update.workspace = true
 sha2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Com",

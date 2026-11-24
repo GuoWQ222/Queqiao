@@ -9,6 +9,9 @@
 //!   heard on real speakers).
 //!
 //! Each runs on its own thread with its own COM apartment.
+// Windows only for now: the Linux layer comes in docs/LINUX.md step 2 (the platform API); until then this crate
+// is empty on Linux.
+#![cfg(windows)]
 
 mod opus;
 mod wasapi;

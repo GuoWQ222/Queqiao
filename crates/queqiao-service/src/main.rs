@@ -10,49 +10,40 @@
 //!   by an administrator. The programs must be in a folder only administrators can change.
 //! - `queqiao-service desktop --channel <read>,<write>`: the desktop helper; only the service starts it.
 
+#[cfg(windows)]
 mod helper;
+#[cfg(windows)]
 mod install;
+#[cfg(windows)]
 mod launch;
+#[cfg(windows)]
 mod log;
+#[cfg(windows)]
 mod logon;
+#[cfg(windows)]
 mod secure_folder;
+#[cfg(windows)]
 mod service;
+#[cfg(windows)]
 mod update;
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+pub use win::NAME;
 
-/// The service's name, and the registry key under Services that holds its settings.
-pub const NAME: &str = "Queqiao";
-
-fn usage() -> String {
-    format!(
-        "{}\nusage: queqiao-service install [--agent-arguments \"<arguments>\"] [--logon-arguments \"<arguments>\"] [--no-restart]\n       queqiao-service uninstall | status\n(Windows starts it as a service; `desktop` is for the service only.)",
-        queqiao_core::banner(env!("CARGO_PKG_NAME"))
-    )
+#[cfg(windows)]
+fn main() {
+    win::main()
 }
 
+/// Not yet written for this system (docs/LINUX.md): the banner for `--version`, otherwise a short notice.
+#[cfg(not(windows))]
 fn main() {
-    // Run as SYSTEM or an administrator: DLLs only from System32.
-    queqiao_core::platform::system32_dlls_only();
-    queqiao_core::platform::install_crash_log("queqiao-service");
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        Some("install") => install::install(&args[1..]),
-        Some("uninstall") => install::uninstall(),
-        Some("status") => install::status(),
-        Some("desktop") => helper::run(&args[1..]),
-        Some("--version" | "--help") => {
-            println!("{}", usage());
-            Ok(())
-        }
-        // Started by hand: what this program is for.
-        None => service::dispatch().map(|was_service| {
-            if !was_service {
-                println!("{}", usage());
-            }
-        }),
-        _ => Err(usage()),
-    };
-    if let Err(error) = result {
-        eprintln!("{error}");
-        std::process::exit(1);
+    let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
+    if std::env::args().any(|argument| argument == "--version") {
+        println!("{banner}");
+        return;
     }
+    eprintln!("{banner}: not available on this system yet (docs/LINUX.md)");
+    std::process::exit(2);
 }

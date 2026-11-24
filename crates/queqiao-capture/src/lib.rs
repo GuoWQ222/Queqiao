@@ -4,6 +4,9 @@
 //! duplicator's device, where the encoder will read it. Needs a Direct3D 11 GPU and a process in the
 //! interactive session (not session 0, so not straight from an SSH shell). The process should be
 //! per-monitor DPI aware so that sizes are real pixels.
+// Windows only for now: the Linux layer comes in docs/LINUX.md step 2 (the platform API); until then this crate
+// is empty on Linux.
+#![cfg(windows)]
 
 use windows::Win32::Foundation::{E_UNEXPECTED, HMODULE, POINT};
 use windows::Win32::Graphics::Direct3D::*;

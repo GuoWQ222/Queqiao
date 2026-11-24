@@ -1,13 +1,13 @@
-//! Clipboard images between the two sides, on the session's "clipboard" stream: compressed with Windows' own
-//! XPRESS Huffman, sent in pieces, checked with SHA-256 at the end. A newer image replaces one not yet sent.
+//! Clipboard images between the two sides, on the session's "clipboard" stream: compressed with LZ4 (the block
+//! format; the size travels with the image), sent in pieces, checked with SHA-256 at the end. A newer image
+//! replaces one not yet sent.
+//!
+//! LZ4 since 2026-11-24, on Windows and Linux alike (Windows' XPRESS Huffman before: Linux has no decoder for it).
+//! Decoding is `lz4_flex`'s safe Rust, as the data comes from the other side.
 
 use std::collections::VecDeque;
 
 use sha2::{Digest, Sha256};
-use windows::Win32::Storage::Compression::{
-    COMPRESS_ALGORITHM_XPRESS_HUFF, COMPRESSOR_HANDLE, CloseCompressor, CloseDecompressor,
-    Compress, CreateCompressor, CreateDecompressor, DECOMPRESSOR_HANDLE, Decompress,
-};
 
 /// Images larger than this (uncompressed) are not sent or accepted: 64 MB, an 8K screenshot.
 pub const MAX_IMAGE: usize = 64 << 20;
@@ -91,46 +91,18 @@ impl ClipMessage {
 }
 
 fn compress(data: &[u8]) -> Result<Vec<u8>, String> {
-    let mut handle = COMPRESSOR_HANDLE::default();
-    unsafe { CreateCompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, None, &mut handle) }
-        .map_err(|e| e.message())?;
-    // The worst case is a little over the input: room for it, then the real size.
-    let mut out = vec![0u8; data.len() + data.len() / 8 + 4096];
-    let mut written = 0usize;
-    let result = unsafe {
-        Compress(
-            handle,
-            Some(data.as_ptr().cast()),
-            data.len(),
-            Some(out.as_mut_ptr().cast()),
-            out.len(),
-            &mut written,
-        )
-    };
-    let _ = unsafe { CloseCompressor(handle) };
-    result.map_err(|e| e.message())?;
-    out.truncate(written);
-    Ok(out)
+    Ok(lz4_flex::block::compress(data))
 }
 
+/// Unpacks an image the other side says is `size` bytes (at most MAX_IMAGE, checked before): never more is
+/// allocated or written, and anything but exactly `size` bytes is refused.
 fn decompress(data: &[u8], size: usize) -> Result<Vec<u8>, String> {
-    let mut handle = DECOMPRESSOR_HANDLE::default();
-    unsafe { CreateDecompressor(COMPRESS_ALGORITHM_XPRESS_HUFF, None, &mut handle) }
-        .map_err(|e| e.message())?;
+    if size > MAX_IMAGE {
+        return Err(format!("an image of {size} bytes is too large"));
+    }
     let mut out = vec![0u8; size];
-    let mut written = 0usize;
-    let result = unsafe {
-        Decompress(
-            handle,
-            Some(data.as_ptr().cast()),
-            data.len(),
-            Some(out.as_mut_ptr().cast()),
-            out.len(),
-            Some(&mut written),
-        )
-    };
-    let _ = unsafe { CloseDecompressor(handle) };
-    result.map_err(|e| e.message())?;
+    let written = lz4_flex::block::decompress_into(data, &mut out)
+        .map_err(|e| format!("the image did not unpack: {e}"))?;
     if written != size {
         return Err(format!("the image unpacked to {written} bytes, not {size}"));
     }

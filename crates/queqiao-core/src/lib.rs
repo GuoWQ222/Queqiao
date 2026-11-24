@@ -46,6 +46,34 @@ pub fn set_forced(spec: &str) {
     let _ = FORCED.set(spec.to_string());
 }
 
+/// This PC's local time now, to the minute, as the logs and lists show it ("2026-11-23 15:04").
+pub fn local_time_minutes() -> String {
+    #[cfg(windows)]
+    {
+        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute
+        )
+    }
+    #[cfg(unix)]
+    {
+        let now: libc::time_t = unsafe { libc::time(std::ptr::null_mut()) };
+        let mut t: libc::tm = unsafe { std::mem::zeroed() };
+        if unsafe { libc::localtime_r(&now, &mut t) }.is_null() {
+            return String::new();
+        }
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            t.tm_year + 1900,
+            t.tm_mon + 1,
+            t.tm_mday,
+            t.tm_hour,
+            t.tm_min
+        )
+    }
+}
+
 fn forced_in(spec: &str, stage: &str) -> Option<String> {
     spec.split(',')
         .filter_map(|item| item.split_once(':'))
@@ -71,5 +99,26 @@ mod tests {
         assert_eq!(forced_in(spec, "ADAPTER").as_deref(), Some("warp"));
         assert_eq!(forced_in(spec, "capture"), None);
         assert_eq!(forced_in("", "encode"), None);
+    }
+
+    #[test]
+    fn local_time_has_the_list_form() {
+        let text = local_time_minutes();
+        let bytes = text.as_bytes();
+        assert_eq!(bytes.len(), 16, "{text}");
+        assert!(text.starts_with("20"), "{text}");
+        for (index, byte) in bytes.iter().enumerate() {
+            let want = match index {
+                4 | 7 => b'-',
+                10 => b' ',
+                13 => b':',
+                _ => b'0',
+            };
+            if want == b'0' {
+                assert!(byte.is_ascii_digit(), "{text}");
+            } else {
+                assert_eq!(*byte, want, "{text}");
+            }
+        }
     }
 }

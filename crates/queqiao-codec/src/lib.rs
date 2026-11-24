@@ -1,6 +1,9 @@
 //! Video codec for Queqiao: BGRA -> NV12 conversion ([`Nv12Converter`]), the H.264 encoder
 //! ([`H264Encoder`]: Media Foundation hardware of any vendor, NVIDIA NVENC directly, OpenH264) and the
 //! decoder ([`H264Decoder`]). Frames stay on the GPU from capture to the encoder's output.
+// Windows only for now: the Linux layer comes in docs/LINUX.md step 2 (the platform API); until then this crate
+// is empty on Linux.
+#![cfg(windows)]
 
 mod amf;
 mod amf_decode;

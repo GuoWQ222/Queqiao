@@ -30,10 +30,14 @@ pub const SIGNATURE: &str = "queqiao-update.json.sig";
 /// The most an installer may be.
 pub const MAX_INSTALLER: u64 = 256 << 20;
 /// The most a manifest or signature may be.
+// The limits of the downloads: Linux's downloader comes with self-update there (docs/LINUX.md step 6).
+#[cfg_attr(not(windows), allow(dead_code))]
 const MAX_SMALL: u64 = 64 * 1024;
 /// How long fetching a manifest or signature, and an installer, may take in all (the security review of 2026-11-22:
 /// a feed that sent a byte now and then held the update thread for ever).
+#[cfg_attr(not(windows), allow(dead_code))]
 const SMALL_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg_attr(not(windows), allow(dead_code))]
 const INSTALLER_TIME: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -135,11 +135,7 @@ fn parse(line: &str) -> Option<Entry> {
 }
 
 fn local_now() -> String {
-    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}",
-        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute
-    )
+    queqiao_core::local_time_minutes()
 }
 
 #[cfg(test)]

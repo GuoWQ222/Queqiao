@@ -225,8 +225,12 @@ impl Peer {
         static PROCESS_SETUP: Once = Once::new();
         PROCESS_SETUP.call_once(|| {
             str0m::crypto::from_feature_flags().install_process_default();
-            // 1 ms timer resolution for this process: str0m's timers and pacing need it.
-            unsafe { windows::Win32::Media::timeBeginPeriod(1) };
+            // 1 ms timer resolution for this process: str0m's timers and pacing need it (Linux's timers are that
+            // fine already).
+            #[cfg(windows)]
+            unsafe {
+                windows::Win32::Media::timeBeginPeriod(1)
+            };
         });
         let local_ip = signal.local_ip()?;
         // Bound to the address the server connection leaves from: a socket on "any" would send out of whatever

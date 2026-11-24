@@ -7,6 +7,9 @@
 //!   keys into VT input, connected to the viewer by two one-way named pipes.
 //!
 //! [`TerminalMessage`] is what goes between them; several command lines can be open at once.
+// Windows only for now: the Linux layer comes in docs/LINUX.md step 2 (the platform API); until then this crate
+// is empty on Linux.
+#![cfg(windows)]
 
 mod helper;
 mod pty;

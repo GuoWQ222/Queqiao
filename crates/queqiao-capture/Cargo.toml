@@ -6,6 +6,10 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+
+[target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -16,7 +20,7 @@ windows = { workspace = true, features = [
     "Win32_System_Performance",
 ] }
 
-[dev-dependencies]
+[target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = [
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
