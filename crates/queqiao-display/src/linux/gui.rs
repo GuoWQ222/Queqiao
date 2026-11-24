@@ -107,21 +107,34 @@ impl Drop for Opened {
     }
 }
 
+/// The bit that marks a handle (Hwnd) as one of these windows rather than an X window (whose ids stay below 2^32).
+pub(crate) const GUI_WINDOW: usize = 1 << 40;
+
 impl Opened {
+    /// A handle for this window, for what takes an X window's (save_window_picture).
+    pub(crate) fn hwnd(&self) -> super::window::Hwnd {
+        super::window::Hwnd(GUI_WINDOW | self.id as usize)
+    }
+
     /// A picture of the window as egui draws it (its contents, whatever lies on top), saved as a bitmap file (Windows:
     /// the forms' save_picture).
     pub(crate) fn save_picture(&self, path: &Path) -> std::io::Result<()> {
-        let gui = gui().map_err(std::io::Error::other)?;
-        let (sender, picture) = mpsc::channel();
-        gui.requests
-            .send(Request::Picture(self.id, sender))
-            .map_err(|_| std::io::Error::other("the GUI thread ended"))?;
-        gui.context.request_repaint();
-        let (width, height, bgrx) = picture
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| std::io::Error::other("no picture of the window within 5 s"))?;
-        std::fs::write(path, super::forms::bitmap_file(width, height, &bgrx))
+        save_picture_of(self.id, path)
     }
+}
+
+/// The picture of window `id` (see `Opened::save_picture`).
+pub(crate) fn save_picture_of(id: u64, path: &Path) -> std::io::Result<()> {
+    let gui = gui().map_err(std::io::Error::other)?;
+    let (sender, picture) = mpsc::channel();
+    gui.requests
+        .send(Request::Picture(id, sender))
+        .map_err(|_| std::io::Error::other("the GUI thread ended"))?;
+    gui.context.request_repaint();
+    let (width, height, bgrx) = picture
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| std::io::Error::other("no picture of the window within 5 s"))?;
+    std::fs::write(path, super::forms::bitmap_file(width, height, &bgrx))
 }
 
 /// Opens `view` as a window of its own.

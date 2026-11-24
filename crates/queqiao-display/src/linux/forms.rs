@@ -80,6 +80,10 @@ pub fn save_window_picture(window: Hwnd, path: &Path) -> std::io::Result<()> {
 }
 
 pub fn save_screen_picture(window: Hwnd, path: &Path) -> std::io::Result<()> {
+    // One of Queqiao's egui windows (the banner, the prompt, the forms): its picture as egui draws it.
+    if window.0 & super::gui::GUI_WINDOW != 0 {
+        return super::gui::save_picture_of((window.0 & !super::gui::GUI_WINDOW) as u64, path);
+    }
     let failed = |e: &dyn std::fmt::Display| std::io::Error::other(format!("X11: {e}"));
     let (connection, _) = x11rb::connect(None).map_err(|e| failed(&e))?;
     let geometry = connection

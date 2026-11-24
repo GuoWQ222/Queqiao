@@ -12,6 +12,7 @@ use x11rb::connection::Connection;
 
 use super::Result;
 use super::gui::{self, Opened, View};
+use super::window::Hwnd;
 
 /// The banner's look: a dark bar, 440 x 40 as on Windows, at the top in the middle.
 const BANNER_SIZE: [f32; 2] = [440.0, 40.0];
@@ -107,6 +108,11 @@ impl SessionBanner {
             _opened: gui::open(Box::new(view))?,
             state,
         })
+    }
+
+    /// The banner's handle (for its picture).
+    pub fn hwnd(&self) -> Hwnd {
+        self._opened.hwnd()
     }
 
     /// True once End was pressed (`wait_ms`: Windows pumps its window that long; here the GUI thread draws it).
@@ -217,6 +223,11 @@ impl ConsentPrompt {
             _opened: gui::open(Box::new(view))?,
             state,
         })
+    }
+
+    /// The prompt's handle (for its picture).
+    pub fn hwnd(&self) -> Hwnd {
+        self._opened.hwnd()
     }
 
     /// The answer once given: Some(true) allowed, Some(false) denied (also by the countdown or closing it).

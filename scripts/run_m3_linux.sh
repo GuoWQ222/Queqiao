@@ -4,10 +4,11 @@
 # online, the viewer logged in and connected to it by name (--device), with the input test. Sessions (SESSIONS, default
 # "direct allowed declined ui"): direct (the clipboard both ways too; the session bar and card of figures, pictured with
 # the bar out and tucked away, its Figures button clicked twice), allowed (the agent asks the person, who allows:
-# the consent prompt answered by the test), declined (who declines: neither side passes, both must say so), ui (the
+# the consent prompt answered by the test; pictures of the banner and the prompt), declined (who declines: neither side passes, both must say so), ui (the
 # viewer through its login form and device list as a person would, filled and pressed by the program, with pictures of
 # both: login.bmp and devices.bmp). Then the session's forms no session opens by itself (the transfer list, the
-# password form), by examples/linux_forms_probe, with pictures (transfers.bmp, password.bmp).
+# password form), by examples/linux_forms_probe, with pictures (transfers.bmp, password.bmp). main: the agent alone,
+# its main window's pages pictured (main_devices.bmp ...).
 # The agent's screen is Xvfb :91 with a clock and `top` (so the picture changes); the viewer's window is on Xvfb :92.
 # Everything the programs keep (the device's key, the saved logins, the single-instance lock) goes into the test's own
 # folder (XDG_CONFIG_HOME, XDG_STATE_HOME, XDG_RUNTIME_DIR), never the person's ~/.config/queqiao.
@@ -17,7 +18,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 seconds=${SECONDS_RUN:-20}
-sessions=${SESSIONS:-direct allowed declined ui}
+sessions=${SESSIONS:-direct allowed declined ui main}
 out=/tmp/queqiao_m3
 rm -rf "$out"; mkdir -p "$out"
 export XDG_CONFIG_HOME=$out/config XDG_STATE_HOME=$out/state XDG_RUNTIME_DIR=$out/run
@@ -65,26 +66,36 @@ for label in $sessions; do
     case $label in
         direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out";
                 agent_expects='test text from the other side received: yes'; viewer_expects='test text from the other side received: yes'; both_pass=yes ;;
-        allowed) agent_extra='--ask --answer allow'; viewer_extra='';
+        # The agent's banner and consent prompt pictured.
+        allowed) agent_extra="--ask --answer allow --ui-pictures $out"; viewer_extra='';
                  agent_expects='the person at this PC allowed'; viewer_expects='RESULT PASS'; both_pass=yes ;;
         # Declined, the agent stays online until --seconds (a later --seconds wins): 30 s, then it writes its report.
         declined) agent_extra='--ask --answer deny --seconds 30'; viewer_extra='';
                   agent_expects='the person at this PC declined'; viewer_expects='the person at that PC declined'; both_pass='' ;;
+        # The agent alone (no viewer) for 10 s: its main window, each page pictured 3 s on.
+        main) agent_extra="--test-main-window --ui-pictures $out --seconds 10"; viewer_extra='';
+              agent_expects='main window: pictures of its pages saved'; viewer_expects=''; both_pass=yes ;;
         ui) agent_extra=''; viewer_extra='';
             agent_expects='RESULT PASS'; viewer_expects='sessions from the device list'; both_pass=yes ;;
         *) echo "unknown session $label"; why="$why unknown-$label"; continue ;;
     esac
+    # One session, where a viewer comes (main has none).
+    agent_sessions=(--sessions 1)
+    [ "$label" = main ] && agent_sessions=()
     # shellcheck disable=SC2086
-    DISPLAY=:91 "$bin/queqiao-agent" $account --sessions 1 --seconds $(( seconds + 60 )) --verify-input \
+    DISPLAY=:91 "$bin/queqiao-agent" $account "${agent_sessions[@]}" --seconds $(( seconds + 60 )) --verify-input \
         --report "$out/agent_$label.txt" $agent_extra > "$out/agent_$label.out" 2>&1 &
     agent=$!
     sleep 2
     # shellcheck disable=SC2086
     target=(--device "$device")
     [ "$label" = ui ] && target=(--ui-test "$device")
+    viewer_code=none
+    if [ "$label" != main ]; then
     DISPLAY=:92 "$bin/queqiao-viewer" $account "${target[@]}" --seconds "$seconds" --input-test --width 960 \
         --codec h264 --report "$out/viewer_$label.txt" $viewer_extra > "$out/viewer_$label.out" 2>&1
     viewer_code=$?
+    fi
     # The agent leaves after its one session, or at its --seconds.
     for _ in $(seq $(( (seconds + 70) * 5 ))); do kill -0 "$agent" 2> /dev/null || break; sleep 0.2; done
     kill "$agent" 2> /dev/null
@@ -94,13 +105,21 @@ for label in $sessions; do
     echo "--- agent"; cat "$out/agent_$label.txt" 2> /dev/null || tail -20 "$out/agent_$label.out"
     echo "--- viewer"; cat "$out/viewer_$label.txt" 2> /dev/null || tail -20 "$out/viewer_$label.out"
     grep -q "$agent_expects" "$out/agent_$label.txt" 2> /dev/null || why="$why $label-agent"
-    grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
+    if [ -n "$viewer_expects" ]; then
+        grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
+    fi
     if [ "$label" = direct ]; then
         for picture in viewer_session viewer_session_tucked; do
             [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp" || why="$why direct-$picture-picture"
         done
         grep -q "^bar: no Figures button|^overlay: " "$out/viewer_direct.txt" && why="$why direct-bar"
     fi
+    pictures=''
+    [ "$label" = allowed ] && pictures='banner prompt'
+    [ "$label" = main ] && pictures='main_devices main_help main_transfers main_settings'
+    for picture in $pictures; do
+        [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp" || why="$why $label-$picture-picture"
+    done
     if [ "$label" = ui ]; then
         for picture in login devices; do
             [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp $(stat -c %s "$out/$picture.bmp") bytes" || why="$why ui-$picture-picture"

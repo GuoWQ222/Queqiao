@@ -104,8 +104,9 @@ shared with Windows (the agent's and the viewer's account.rs): login, online, th
 Wake-on-LAN (the cards from /sys/class/net; the check from sysfs and ethtool), start at sign-in (an XDG autostart
 entry), one agent per user (a lock in a private runtime folder; opened again, it shows the running one's window).
 `scripts/run_m3_linux.sh` runs both with a queqiao-server of their own on 127.0.0.1: direct (with the clipboard),
-allowed and declined (the consent prompt), and ui (the viewer through its login form and device list, with pictures),
-and passes on cc4-1. Updates come with the system's packages (step 6), not from Queqiao.
+allowed and declined (the consent prompt; the banner and prompt pictured), ui (the viewer through its login form and
+device list, with pictures), main (the agent's main window, each page pictured), and the transfer list and password
+form (examples/linux_forms_probe), and passes on cc4-1. Updates come with the system's packages (step 6), not from Queqiao.
 
 Not yet on Linux: command-line
 windows on the viewer side, NVDEC and VA-API, Wayland, the privacy screen and input block, the service and packages.

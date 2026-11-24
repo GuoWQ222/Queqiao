@@ -293,11 +293,11 @@ impl Presence {
 
     /// The banner's and the prompt's windows, for the tests' pictures: not known for egui's windows here.
     pub fn banner_window(&self) -> Option<Hwnd> {
-        None
+        self.banner.as_ref().map(SessionBanner::hwnd)
     }
 
     pub fn prompt_window(&self) -> Option<Hwnd> {
-        None
+        self.prompt.as_ref().map(ConsentPrompt::hwnd)
     }
 
     /// The help window with this PC's help ID and code.
@@ -346,11 +346,29 @@ impl Presence {
         Ok(())
     }
 
-    /// Tests: pictures of the main window's pages (not on Linux yet).
-    pub fn save_main_pictures(&mut self, _folder: &Path) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            "pictures of the main window: not on Linux yet",
-        ))
+    /// Tests: pictures of the main window's pages (main_devices.bmp, main_help.bmp ...) into `folder`, as on Windows.
+    pub fn save_main_pictures(&mut self, folder: &Path) -> std::io::Result<()> {
+        self.show_main(None)
+            .map_err(|e| std::io::Error::other(e.message()))?;
+        let back = self.shown.lock().map_or(Page::Devices, |shown| shown.page);
+        for page in Page::ALL {
+            if let Ok(mut shown) = self.shown.lock() {
+                shown.page = page;
+            }
+            gui::repaint();
+            // A frame or two with the page (the GUI thread draws it).
+            std::thread::sleep(Duration::from_millis(300));
+            let name = format!("main_{}.bmp", format!("{page:?}").to_lowercase());
+            self.main
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("the main window closed"))?
+                .save_picture(&folder.join(name))?;
+        }
+        if let Ok(mut shown) = self.shown.lock() {
+            shown.page = back;
+        }
+        gui::repaint();
+        Ok(())
     }
 
     /// A notification (the desktop's, through notify-send where it is there).
