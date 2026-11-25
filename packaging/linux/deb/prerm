@@ -1,0 +1,7 @@
+#!/bin/sh
+# Before the package goes (not before an upgrade: the new one's postinst restarts the service).
+set -e
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl disable --now queqiao.service || true
+fi
+exit 0

@@ -107,8 +107,7 @@ impl Ui {
 
     /// No windows at all, for the agent at the sign-in screen: it runs where nothing can be shown, and the service's
     /// desktop helper shows the session banner on the screen. Sessions start, nobody can be asked (asking fails, so
-    /// a session that needs it is refused), there is no privacy screen. Windows only so far (the service).
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    /// a session that needs it is refused), there is no privacy screen.
     pub fn headless() -> Result<Ui, String> {
         let (command_sender, commands) = mpsc::channel::<Command>();
         let (_no_events, events) = mpsc::channel();

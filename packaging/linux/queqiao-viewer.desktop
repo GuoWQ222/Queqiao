@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Queqiao viewer
+Comment=Opens Queqiao help links
+Exec=/usr/lib/queqiao/queqiao-viewer --invite %u
+Icon=queqiao
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/queqiao;

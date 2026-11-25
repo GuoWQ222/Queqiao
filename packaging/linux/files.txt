@@ -1,0 +1,15 @@
+# What the Linux packages install, for scripts/package_linux.sh: one file per line, "<source> <target> <mode>". A
+# source starting with "@" is made by the script (the programs, the icons, the PAM file for that kind of package).
+@queqiao-agent /usr/lib/queqiao/queqiao-agent 0755
+@queqiao-viewer /usr/lib/queqiao/queqiao-viewer 0755
+@queqiao-service /usr/lib/queqiao/queqiao-service 0755
+packaging/linux/queqiao.service /usr/lib/systemd/system/queqiao.service 0644
+packaging/linux/queqiao.sysusers /usr/lib/sysusers.d/queqiao.conf 0644
+packaging/linux/queqiao.tmpfiles /usr/lib/tmpfiles.d/queqiao.conf 0644
+packaging/linux/queqiao.modules-load /usr/lib/modules-load.d/queqiao.conf 0644
+packaging/linux/queqiao.desktop /usr/share/applications/queqiao.desktop 0644
+packaging/linux/queqiao-viewer.desktop /usr/share/applications/queqiao-viewer.desktop 0644
+@pam /etc/pam.d/queqiao 0644
+@icons /usr/share/icons/hicolor 0644
+LICENSE /usr/share/doc/queqiao/copyright 0644
+THIRD_PARTY_NOTICES.md /usr/share/doc/queqiao/THIRD_PARTY_NOTICES.md 0644

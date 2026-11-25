@@ -5,6 +5,10 @@
 
 pub mod account;
 pub mod invitation;
+/// A Linux account's password, checked by PAM (the lock screen's gate, the sign-in screen).
+#[cfg(target_os = "linux")]
+#[path = "pam_linux.rs"]
+pub mod pam;
 #[cfg(windows)]
 pub mod platform;
 #[cfg(target_os = "linux")]

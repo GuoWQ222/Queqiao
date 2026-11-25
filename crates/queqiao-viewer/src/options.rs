@@ -72,6 +72,10 @@ pub(crate) struct Options {
     /// Tests of the sign-in screens through the service: Ctrl+Alt+Del 3 s after the data channel opens, Escape
     /// (which closes that screen) 2 s later; the pictures shown meanwhile and after are reported.
     pub(crate) secure_test: bool,
+    /// Tests of a Linux PC's sign-in and lock screens through the service: 3 s after the first picture Enter (GDM:
+    /// the user in focus; GNOME's lock screen: its password field), 2 s later this text (a US keyboard's letters,
+    /// digits, '-', '.' and spaces) and Enter, as a person signing in or unlocking there would type it.
+    pub(crate) type_test: Option<String>,
     /// Send this file as a clipboard copy (tests: the other side must put it on its clipboard).
     pub(crate) clipboard_files_test: Option<PathBuf>,
     /// The picture's short side at most this (720, 1080) from the start; 0 or none: the screen's own.
@@ -217,6 +221,7 @@ pub(crate) fn test_switch(
         "--mute-speakers" => options.mute_speakers = true,
         "--cancel-test" => options.cancel_test = true,
         "--secure-test" => options.secure_test = true,
+        "--type-test" => options.type_test = Some(args.next()?),
         "--clipboard-files-test" => {
             options.clipboard_files_test = Some(PathBuf::from(args.next()?))
         }

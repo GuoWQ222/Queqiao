@@ -1,5 +1,6 @@
-//! queqiao-service: the Windows service (LocalSystem) on a controlled PC, and its desktop helper. It has no
-//! network of its own: everything from the network goes through the agent, which runs as the person signed in.
+//! queqiao-service: the service on a controlled PC (Windows: LocalSystem; Linux: root under systemd, linux/mod.rs),
+//! and its desktop helper. It has no network of its own: everything from the network goes through the agent, which
+//! runs as the person signed in.
 //!
 //! - Started by Windows: in the session at the PC's screen (the console session) it keeps two processes
 //!   running, with a private channel between them: the desktop helper (SYSTEM, the only account that may see and
@@ -36,14 +37,10 @@ fn main() {
     win::main()
 }
 
-/// Not yet written for this system (docs/LINUX.md): the banner for `--version`, otherwise a short notice.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(target_os = "linux")]
 fn main() {
-    let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
-    if std::env::args().any(|argument| argument == "--version") {
-        println!("{banner}");
-        return;
-    }
-    eprintln!("{banner}: not available on this system yet (docs/LINUX.md)");
-    std::process::exit(2);
+    linux::main()
 }

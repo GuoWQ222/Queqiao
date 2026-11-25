@@ -1,0 +1,3 @@
+# The service's state (root; the private files in it are 0600) and the sign-in screen agent's own folder.
+d /var/lib/queqiao 0755 root root -
+d /var/lib/queqiao-signin 0700 queqiao queqiao -

@@ -1,0 +1,70 @@
+# Queqiao's .rpm (scripts/package_linux.sh fills in @VERSION@ and @STAGE@, the folder it laid the files out in).
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+
+Name:           queqiao
+Version:        @VERSION@
+Release:        1
+Summary:        Queqiao remote control
+License:        Proprietary
+URL:            https://github.com/GuoWQ222/Queqiao
+BuildArch:      x86_64
+Requires:       curl
+Requires:       systemd
+Requires:       glibc >= 2.35
+Recommends:     pulseaudio-libs
+Recommends:     pipewire-libs
+Recommends:     libxkbcommon
+Recommends:     libglvnd-egl
+Recommends:     zenity
+Recommends:     libnotify
+Recommends:     xdg-desktop-portal
+
+%description
+Queqiao remote control: control your own devices, or help someone. The Queqiao service runs Queqiao for the person
+signed in, and lets the account's own devices use the sign-in and lock screens when the person allows it.
+
+%install
+cp -a @STAGE@/. %{buildroot}/
+
+%files
+%dir /usr/lib/queqiao
+/usr/lib/queqiao/queqiao-agent
+/usr/lib/queqiao/queqiao-viewer
+/usr/lib/queqiao/queqiao-service
+/usr/lib/systemd/system/queqiao.service
+/usr/lib/sysusers.d/queqiao.conf
+/usr/lib/tmpfiles.d/queqiao.conf
+/usr/lib/modules-load.d/queqiao.conf
+/usr/share/applications/queqiao.desktop
+/usr/share/applications/queqiao-viewer.desktop
+/usr/share/icons/hicolor/*/apps/queqiao.png
+%config(noreplace) /etc/pam.d/queqiao
+%doc /usr/share/doc/queqiao
+
+%post
+systemd-sysusers queqiao.conf || true
+systemd-tmpfiles --create queqiao.conf || true
+modprobe uinput 2> /dev/null || true
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    if [ "$1" -eq 1 ]; then
+        systemctl enable --now queqiao.service || true
+    else
+        systemctl try-restart queqiao.service || true
+    fi
+fi
+
+%preun
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ]; then
+    systemctl disable --now queqiao.service || true
+fi
+
+%postun
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+if [ "$1" -eq 0 ]; then
+    rm -rf /var/lib/queqiao /var/lib/queqiao-signin
+    userdel queqiao 2> /dev/null || true
+fi

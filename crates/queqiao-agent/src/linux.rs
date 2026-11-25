@@ -1,8 +1,8 @@
-//! The Linux program (docs/LINUX.md steps 3 and 5): the agent with an account (account.rs, shared with Windows), or by
-//! IP address (M2, `--connect` / `--listen` in a test build), with the session shared with Windows (session.rs). The
-//! Queqiao service (its sign-in screen agent) comes in step 6. Also what the session and the account mode need from
-//! this system: the picture to encode (in memory), the error text, the privacy test (not here yet), the file manager,
-//! the viewer.
+//! The Linux program (docs/LINUX.md steps 3, 5 and 6): the agent with an account (account.rs, shared with Windows), or
+//! by IP address (M2, `--connect` / `--listen` in a test build), with the session shared with Windows (session.rs);
+//! started by the Queqiao service it has its channels, and as the system user `queqiao` it is the agent for the
+//! sign-in screen. Also what the session and the account mode need from this system: the picture to encode (in
+//! memory), the error text, the privacy test (not here yet), the file manager, the viewer.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -14,7 +14,31 @@ use queqiao_transport::{Signal, Signaling};
 use crate::options::{Options, parse};
 use crate::service_link::Links;
 use crate::session::{Permissions, session};
-use crate::{autostart, ui, wol_check};
+use crate::{autostart, lock_gate, ui, wol_check};
+
+/// The system user the Queqiao service runs the agent for the sign-in screen as (made by the package).
+const SIGN_IN_USER: &str = "queqiao";
+
+/// This process's account name (from the user database, not the environment).
+pub(crate) fn own_account() -> Option<String> {
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buffer = vec![0 as libc::c_char; 16384];
+    let mut found = std::ptr::null_mut();
+    unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut entry,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut found,
+        )
+    };
+    (!found.is_null() && !entry.pw_name.is_null()).then(|| {
+        unsafe { std::ffi::CStr::from_ptr(entry.pw_name) }
+            .to_string_lossy()
+            .into_owned()
+    })
+}
 
 /// The picture to encode next: an image in memory (Windows: a texture on the screen's GPU).
 pub(crate) type Latest = BgraImage;
@@ -115,48 +139,104 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         lines.extend(wol_check::advice(&check).lines().map(str::to_string));
         return Ok(true);
     }
-    // Windows' own (the service's sign-in screen agent, integrity levels): refused by name rather than left unheeded.
-    let unsupported = [
-        ("--logon", options.logon),
-        ("--test-start-program", options.test_start_program),
-    ];
+    // Windows' own (integrity levels): refused by name rather than left unheeded.
+    let unsupported = [("--test-start-program", options.test_start_program)];
     let refused: Vec<&str> = unsupported
         .iter()
         .filter(|(_, given)| *given)
         .map(|(name, _)| *name)
         .collect();
     if !refused.is_empty() {
-        return Err(format!(
-            "not on Linux (the Queqiao service comes with docs/LINUX.md step 6): {}",
-            refused.join(" ")
-        ));
+        return Err(format!("not on Linux: {}", refused.join(" ")));
     }
     let mut links = Links::open(
         options.service_channel.as_deref(),
         options.desktop_channel.as_deref(),
     )?;
+    if links.service.is_some() {
+        // Started by the service, not by the person: nothing of theirs (a debugger, another program of theirs) may
+        // read or change this process (its keys, the session); the agent at High integrity on Windows.
+        unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+        lines.push(
+            "started by the Queqiao service: the sign-in and lock screens come through its desktop helper".into(),
+        );
+    }
+    let handed = if options.logon {
+        // The service starts this agent as its system user, which no program of a person can be: started otherwise,
+        // a program could hand it a login of its own over pipes it made and have it run unseen (as on Windows).
+        if own_account().as_deref() != Some(SIGN_IN_USER) {
+            return Err(format!(
+                "the agent for the sign-in screen runs as the system user {SIGN_IN_USER} only (the Queqiao service starts it)"
+            ));
+        }
+        let service = links
+            .service
+            .as_mut()
+            .ok_or("--logon is for the Queqiao service only")?;
+        let identity = service.identity(Duration::from_secs(10))?;
+        // Nobody is signed in: a viewer gives the password of the one who set this up (as UU).
+        lock_gate::set_sign_in_owner(&identity.owner_account);
+        lines.push(format!(
+            "the agent for the sign-in screen, as {} ({})",
+            identity.device_name, identity.device_id
+        ));
+        Some(identity)
+    } else {
+        None
+    };
     // Started without options (at sign-in, or by hand): one agent per user; opened again, it shows the running one.
-    if options.server.is_none()
+    if !options.logon
+        && options.server.is_none()
         && options.connect.is_none()
         && options.listen.is_none()
-        && let Err(error) = autostart::claim_single_instance()
     {
-        if options.show && queqiao_display::show_running_main() {
-            lines.push("Queqiao runs already here: its main window is shown".into());
+        // With the Queqiao service running, Queqiao for the person signed in is the one it starts (the copy started
+        // at sign-in leaves).
+        if options.service_channel.is_none() && autostart::service_runs() {
+            if options.show {
+                queqiao_display::show_running_main();
+            }
+            lines.push("the Queqiao service runs Queqiao on this PC: this copy leaves".into());
             return Ok(true);
         }
-        return Err(error);
+        // Not for the agent the service started: a program of the person that took the lock first would otherwise
+        // keep it from running.
+        if options.service_channel.is_none()
+            && let Err(error) = autostart::claim_single_instance()
+        {
+            if options.show && queqiao_display::show_running_main() {
+                lines.push("Queqiao runs already here: its main window is shown".into());
+                return Ok(true);
+            }
+            return Err(error);
+        }
     }
     let end = options
         .seconds
         .map(|s| Instant::now() + Duration::from_secs(s));
     // Nothing happens unseen: the tray icon (or the main window) whenever the agent runs, a banner during every
     // session.
-    let settings = ui::Settings::load();
+    // At the sign-in screen: only what the person allowed (sessions from the account's devices without asking),
+    // nothing that needs someone signed in (clipboard, files, command lines).
+    let settings = match &handed {
+        Some(handed) => ui::Settings {
+            allow_account_control: handed.allow_account_control,
+            ask_before_session: false,
+            share_clipboard: false,
+            receive_files: false,
+            allow_terminal: false,
+            ..ui::Settings::default()
+        },
+        None => ui::Settings::load(),
+    };
     let mut shown = settings.clone();
     shown.ask_before_session |= options.ask;
-    let ui = ui::Ui::start(&shown, options.ui_pictures.clone())?;
-    if options.show {
+    let ui = if options.logon {
+        ui::Ui::headless()?
+    } else {
+        ui::Ui::start(&shown, options.ui_pictures.clone())?
+    };
+    if options.show && !options.logon {
         ui.show_main(None);
     }
     lines.push(format!(
@@ -196,7 +276,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         },
     ));
     if options.connect.is_none() && options.listen.is_none() {
-        return crate::account::run_account(options, end, &ui, settings, &mut links, None, lines);
+        return crate::account::run_account(options, end, &ui, settings, &mut links, handed, lines);
     }
     let mut signal = match (&options.connect, &options.listen) {
         (Some(address), _) => Signal::connect(address, Duration::from_secs(60)),

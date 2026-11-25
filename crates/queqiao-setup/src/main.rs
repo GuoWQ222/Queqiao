@@ -17,6 +17,8 @@
 //!   public half (for queqiao_update::RELEASE_KEY).
 //! - `release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]`: the update feed
 //!   for that installer: the installer as queqiao-setup-<x.y.z>.exe, queqiao-update.json and its signature.
+//! - `release-package --key <file> --package <name> --size <bytes> --sha256 <hex> --version <x.y.z> --output <folder>`:
+//!   the manifest and signature for a Linux package (queqiao-update-deb.json or -rpm.json); the package goes beside.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]

@@ -36,23 +36,32 @@ fn ends(argument: &str, what: &str) -> Result<Ends, String> {
 pub struct ServiceLink {
     writer: Writer,
     replies: Receiver<FromService>,
+    /// What the service hands over by itself (Linux: the sign-in screen was used where no notice could be shown).
+    notices: Receiver<String>,
 }
 
 impl ServiceLink {
     fn open(argument: &str) -> Result<ServiceLink, String> {
         let (mut reader, writer) = ends(argument, "--service-channel")?.split();
         let (sender, replies) = mpsc::channel();
+        let (notice_sender, notices) = mpsc::channel();
         std::thread::spawn(move || {
             while let Ok(message) = reader.read() {
-                let Some(reply) = FromService::decode(&message) else {
-                    break;
+                let sent = match FromService::decode(&message) {
+                    Some(FromService::Notice(notice)) => notice_sender.send(notice).is_ok(),
+                    Some(reply) => sender.send(reply).is_ok(),
+                    None => false,
                 };
-                if sender.send(reply).is_err() {
+                if !sent {
                     break;
                 }
             }
         });
-        Ok(ServiceLink { writer, replies })
+        Ok(ServiceLink {
+            writer,
+            replies,
+            notices,
+        })
     }
 
     /// The agent at the sign-in screen: who to be, as the service hands it over right after the start.
@@ -82,7 +91,7 @@ impl ServiceLink {
         }
         match self.replies.recv_timeout(Duration::from_secs(3)) {
             Ok(FromService::Reply(reply)) => reply,
-            Ok(FromService::Identity(_)) => "the Queqiao service answered something else".into(),
+            Ok(_) => "the Queqiao service answered something else".into(),
             Err(_) => "the Queqiao service did not answer".into(),
         }
     }
@@ -104,9 +113,7 @@ impl ServiceLink {
         match self.replies.recv_timeout(Duration::from_secs(30)) {
             Ok(FromService::Reply(reply)) if reply.starts_with("refused") => Err(reply),
             Ok(FromService::Reply(reply)) => Ok(reply),
-            Ok(FromService::Identity(_)) => {
-                Err("the Queqiao service answered something else".into())
-            }
+            Ok(_) => Err("the Queqiao service answered something else".into()),
             Err(_) => Err("the Queqiao service did not answer".into()),
         }
     }
@@ -114,6 +121,33 @@ impl ServiceLink {
     /// Asks the service to end this agent and its helper and start both again.
     pub fn restart(&mut self) -> Result<(), String> {
         self.writer.write(&ToService::Restart.encode())
+    }
+
+    /// Linux: whether `password` is that of the account this agent is for, as the service checks it (PAM, as root;
+    /// which account is the service's choice). It can take a few seconds (PAM's delay after a wrong one).
+    #[cfg_attr(windows, allow(dead_code))]
+    pub fn check_password(&mut self, password: &str) -> Result<bool, String> {
+        while self.replies.try_recv().is_ok() {}
+        self.writer
+            .write(&ToService::CheckPassword(password.to_string()).encode())?;
+        match self.replies.recv_timeout(Duration::from_secs(20)) {
+            Ok(FromService::Password(right)) => Ok(right),
+            Ok(_) => Err("the Queqiao service answered something else".into()),
+            Err(_) => Err("the Queqiao service did not answer".into()),
+        }
+    }
+
+    /// Linux, the agent for the sign-in screen: tells the service what the next person to sign in is to be shown.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub fn leave_notice(&mut self, notice: &str) -> Result<(), String> {
+        self.writer
+            .write(&ToService::Notice(notice.to_string()).encode())
+    }
+
+    /// What the service handed over by itself since the last call.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub fn notices(&mut self) -> Vec<String> {
+        self.notices.try_iter().collect()
     }
 }
 

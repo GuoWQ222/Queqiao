@@ -77,9 +77,27 @@ pub fn screen_device(index: Option<usize>) -> Result<ScreenDevice> {
     })
 }
 
-/// The primary screen's device (Windows: a device on the first GPU for a process that sees no screens).
+/// The primary screen's device; for a process that sees no screens (the Queqiao service's agent for the sign-in
+/// screen, which has no display of its own), one whose place the desktop helper gives.
 pub fn first_device() -> Result<ScreenDevice> {
-    screen_device(None)
+    screen_device(None).or_else(|_| {
+        Ok(ScreenDevice {
+            device: Device,
+            context: Context,
+            info: OutputInfo {
+                adapter: "KMS".into(),
+                output: "the screen (through the desktop helper)".into(),
+                width: 0,
+                height: 0,
+                refresh_hz: 60.0,
+                rotation: 0,
+                method: "the desktop helper (KMS)",
+                left: 0,
+                top: 0,
+            },
+            index: 0,
+        })
+    })
 }
 
 /// Another GPU that would be preferred to the one driving the screen (Windows: discrete before integrated); on Linux

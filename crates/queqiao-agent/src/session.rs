@@ -595,6 +595,11 @@ pub(crate) fn session(
     // This PC's own capture; none while another desktop takes input (the sign-in, lock, Ctrl+Alt+Del or UAC
     // screen), whose pictures come from the service's desktop helper.
     let (mut secure_switches, mut secure_frames, mut secure_inputs) = (0u32, 0u32, 0u32);
+    // Linux: since when, and on which screen, the helper showed a viewer a screen off the person's own desktop (the
+    // sign-in or lock screen, where GNOME shows no notice): told to the person afterwards.
+    let mut unseen: Option<(String, String)> = None;
+    // The agent for the sign-in screen tells at once (the service ends it as soon as someone signs in there).
+    let mut sign_in_told = false;
     if let Some(link) = links.desktop.as_mut() {
         for name in link.poll_desktop() {
             lines.push(format!("input desktop: {name}"));
@@ -602,8 +607,19 @@ pub(crate) fn session(
         link.session(true);
         link.banner(Some(viewer));
     }
-    let (mut duplicator, mut info, mut device, mut context, snapshot) = match Duplicator::primary()
-    {
+    // Linux: a session that starts on the lock or sign-in screen goes to the helper at once (this PC's own capture
+    // would work there too, and on GNOME would ask the person through the portal, on a screen nobody can answer).
+    let off_own_desktop = cfg!(target_os = "linux")
+        && links
+            .desktop
+            .as_ref()
+            .is_some_and(|link| !link.closed && !link.on_own_desktop());
+    let own = if off_own_desktop {
+        Err("another screen takes input".to_string())
+    } else {
+        Duplicator::primary().map_err(describe)
+    };
+    let (mut duplicator, mut info, mut device, mut context, snapshot) = match own {
         Ok(own) => {
             let snapshot = own.snapshot_image().map_err(describe)?;
             let (info, device, context) = (
@@ -615,7 +631,7 @@ pub(crate) fn session(
         }
         Err(error) => {
             let Some(link) = links.desktop.as_mut() else {
-                return Err(describe(error));
+                return Err(error);
             };
             // No screens to see from here (the agent at the sign-in screen runs in session 0): a device on the first
             // GPU, and the screen's place as the helper says.
@@ -635,7 +651,7 @@ pub(crate) fn session(
             secure_switches += 1;
             lines.push(format!(
                 "this PC's own desktop does not take input now ({}): pictures and input through the desktop helper",
-                describe(error)
+                error
             ));
             (None, info, opened.device, opened.context, snapshot)
         }
@@ -874,7 +890,7 @@ pub(crate) fn session(
             };
             peer.send_data(Message::PasswordNeeded { reason, tries_left }.encode());
             lines.push(format!(
-                "lock: this PC is locked: its picture and input wait for its Windows password ({tries_left} tries)"
+                "lock: this PC is locked: its picture and input wait for its account's password ({tries_left} tries)"
             ));
         }
         if end.is_some_and(|end| Instant::now() > end) {
@@ -929,16 +945,24 @@ pub(crate) fn session(
             ended_here = true;
             break 'session;
         }
-        // The helper could not show its banner on the screen taking input (sign-in, lock, UAC): nothing goes on unseen.
+        // The helper could not show its banner on the screen taking input (sign-in, lock, UAC): on Windows nothing goes
+        // on unseen; on Linux (GNOME shows no other program on its sign-in and lock screens) the session goes on and
+        // the person is told afterwards (their choice, 2026-11-25).
         if let Some(reason) = links
             .desktop
             .as_mut()
             .and_then(|link| link.no_banner.take())
         {
-            closed = Some(format!(
-                "the banner could not be shown on the screen in use ({reason}): ended"
+            if !cfg!(target_os = "linux") {
+                closed = Some(format!(
+                    "the banner could not be shown on the screen in use ({reason}): ended"
+                ));
+                break 'session;
+            }
+            lines.push(format!(
+                "{} ms: no banner on that screen ({reason}): the person is told afterwards",
+                started.elapsed().as_millis()
             ));
-            break 'session;
         }
         if connected_after.is_none() && started.elapsed() > CONNECT_LIMIT {
             closed = Some(format!(
@@ -1011,7 +1035,17 @@ pub(crate) fn session(
                     }
                     // Only while asked for, and never from someone helping.
                     Some(Message::Password(password)) if !helper && gate.closed() => {
-                        let right = gate.check(&password, options.test_password.as_deref());
+                        let right = match links.service.as_mut() {
+                            // Linux: the service checks it (PAM as root; it decides whose password it is).
+                            Some(service)
+                                if cfg!(target_os = "linux") && options.test_password.is_none() =>
+                            {
+                                gate.check_by(&password, |password| {
+                                    service.check_password(password).unwrap_or(false)
+                                })
+                            }
+                            _ => gate.check(&password, options.test_password.as_deref()),
+                        };
                         let tries_left = gate.tries_left();
                         peer.send_data(
                             Message::PasswordResult {
@@ -1022,7 +1056,7 @@ pub(crate) fn session(
                         );
                         if right {
                             lines.push(format!(
-                                "lock: the viewer gave this PC's Windows password ({} frames sent before)",
+                                "lock: the viewer gave this PC's account password ({} frames sent before)",
                                 stats.sent
                             ));
                             force_keyframe = true;
@@ -1758,9 +1792,11 @@ pub(crate) fn session(
                     return Err("nothing captures this PC's screen".into());
                 };
                 let gap = last_own_try.elapsed();
+                // Linux: this PC's own capture works on a locked session too, so only the helper's word brings it
+                // back (Windows: a failed capture is how a secure desktop shows).
                 let back = ((link.on_own_desktop() || link.closed)
                     && gap >= Duration::from_millis(250))
-                    || gap >= Duration::from_secs(3);
+                    || (gap >= Duration::from_secs(3) && !cfg!(target_os = "linux"));
                 if back {
                     last_own_try = Instant::now();
                     if let Ok(opened) =
@@ -1772,6 +1808,7 @@ pub(crate) fn session(
                             "{} ms: this PC's own desktop takes input again: captured here",
                             started.elapsed().as_millis()
                         ));
+                        tell_afterwards(&mut unseen, viewer, options.logon, ui, links, lines);
                     }
                 }
                 if let Some(link) = links.desktop.as_mut().filter(|_| duplicator.is_none()) {
@@ -1798,6 +1835,12 @@ pub(crate) fn session(
                                 )?;
                                 stats.captured += 1;
                                 secure_frames += 1;
+                                if unseen.is_none() && cfg!(target_os = "linux") && !sign_in_told {
+                                    unseen = Some((
+                                        queqiao_core::local_time_minutes(),
+                                        link.desktop.clone(),
+                                    ));
+                                }
                                 waiting = Some((0, qpc_now()));
                             } else if !size_noted {
                                 size_noted = true;
@@ -1825,6 +1868,10 @@ pub(crate) fn session(
                 }
             }
         }
+        if options.logon && unseen.is_some() && !sign_in_told {
+            sign_in_told = true;
+            tell_afterwards(&mut unseen, viewer, options.logon, ui, links, lines);
+        }
         // While capturing here: the helper's word on desktop changes (and no pictures).
         if duplicator.is_some()
             && let Some(link) = links.desktop.as_mut()
@@ -1833,6 +1880,19 @@ pub(crate) fn session(
                 lines.push(format!(
                     "{} ms: input desktop: {name}",
                     started.elapsed().as_millis()
+                ));
+            }
+            // Linux: a lock screen does not stop this PC's own capture (X11 and the portals go on), so the helper's
+            // word decides: off the person's own desktop, pictures and input go through it.
+            if cfg!(target_os = "linux") && !link.closed && !link.on_own_desktop() {
+                duplicator = None;
+                link.capture(screen_index);
+                secure_switches += 1;
+                last_own_try = Instant::now();
+                lines.push(format!(
+                    "{} ms: another screen takes input ({}): pictures and input through the desktop helper",
+                    started.elapsed().as_millis(),
+                    link.desktop
                 ));
             }
         }
@@ -1894,6 +1954,7 @@ pub(crate) fn session(
             "desktop helper: {secure_switches} switches to another desktop, {secure_frames} pictures from it, {secure_inputs} inputs passed to it"
         ));
     }
+    tell_afterwards(&mut unseen, viewer, options.logon, ui, links, lines);
     if closed.is_none() || ended_here {
         // Our end (time is up, or the person here ended it): tell the viewer at once.
         peer.send_data(Message::Leave.encode());
@@ -2177,6 +2238,45 @@ pub(crate) fn clean_name(name: &str) -> String {
         format!("{}…", kept.chars().take(39).collect::<String>())
     } else {
         kept.to_string()
+    }
+}
+
+/// Linux: tells the person what a viewer did on the sign-in or lock screen, where no notice could be shown (the
+/// person's choice, 2026-11-25): a notification from this agent, or, from the agent for the sign-in screen, through
+/// the service to whoever signs in next.
+fn tell_afterwards(
+    unseen: &mut Option<(String, String)>,
+    viewer: &str,
+    logon: bool,
+    ui: &ui::Ui,
+    links: &mut Links,
+    lines: &mut Vec<String>,
+) {
+    let Some((since, screen)) = unseen.take() else {
+        return;
+    };
+    let screen = match screen.as_str() {
+        "Greeter" => "sign-in screen",
+        "Lock" => "lock screen",
+        _ => "screen (another session's)",
+    };
+    let now = queqiao_core::local_time_minutes();
+    let when = if now == since {
+        format!("at {since}")
+    } else {
+        format!("from {since} to {now}")
+    };
+    let notice = format!(
+        "{viewer} used this PC's {screen} remotely {when}. Queqiao could not show its notice there."
+    );
+    if let Some(service) = links.service.as_mut().filter(|_| logon) {
+        lines.push(match service.leave_notice(&notice) {
+            Ok(()) => format!("notice left for the next person to sign in: {notice}"),
+            Err(error) => format!("the notice could not be left with the service: {error}"),
+        });
+    } else {
+        ui.notify(&notice);
+        lines.push(format!("notice shown: {notice}"));
     }
 }
 

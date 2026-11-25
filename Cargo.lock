@@ -2719,6 +2719,7 @@ dependencies = [
 name = "queqiao-agent"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "queqiao-account",
  "queqiao-audio",
  "queqiao-capture",
@@ -2874,6 +2875,7 @@ dependencies = [
 name = "queqiao-service"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "queqiao-capture",
  "queqiao-core",
  "queqiao-display",
@@ -2881,6 +2883,7 @@ dependencies = [
  "queqiao-local",
  "queqiao-update",
  "windows",
+ "zbus",
 ]
 
 [[package]]

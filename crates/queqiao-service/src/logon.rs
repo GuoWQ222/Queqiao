@@ -49,7 +49,7 @@ pub fn load() -> Option<LogonIdentity> {
     let plain = unprotect(&sealed).ok()?;
     match FromService::decode(&plain)? {
         FromService::Identity(identity) => Some(identity),
-        FromService::Reply(_) => None,
+        _ => None,
     }
 }
 

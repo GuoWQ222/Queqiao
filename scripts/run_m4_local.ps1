@@ -619,7 +619,7 @@ try {
         $viewerText | Where-Object { $_ -match '^(password|RESULT)' }
         if (-not ($agentText | Where-Object { $_ -match '^lock: this PC is locked: .*\(5 tries\)$' })) { $failed += 'locked agent (did not ask)' }
         if (-not ($agentText | Where-Object { $_ -eq 'lock: wrong password (4 tries left)' })) { $failed += 'locked agent (the wrong password was not refused)' }
-        if (-not ($agentText | Where-Object { $_ -eq "lock: the viewer gave this PC's Windows password (0 frames sent before)" })) { $failed += 'locked agent (pictures went before the password, or it was not taken)' }
+        if (-not ($agentText | Where-Object { $_ -eq "lock: the viewer gave this PC's account password (0 frames sent before)" })) { $failed += 'locked agent (pictures went before the password, or it was not taken)' }
         if (-not ($viewerText | Where-Object { $_ -eq 'password: right (4 tries left)' })) { $failed += 'locked viewer (no right answer)' }
         if ($viewerText[-1] -ne 'RESULT PASS') { $failed += 'locked viewer (no pictures after the password)' }
     }

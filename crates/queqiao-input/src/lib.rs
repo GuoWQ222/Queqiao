@@ -16,6 +16,9 @@ mod clipboard;
 #[cfg(target_os = "linux")]
 mod clipboard_x11;
 pub mod scancode;
+/// The kernel's virtual devices, for the Queqiao service's desktop helper (root).
+#[cfg(target_os = "linux")]
+mod uinput;
 #[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(windows)]
@@ -32,6 +35,8 @@ pub use clipboard::{Clipboard, read_files as clipboard_files, read_text as clipb
 pub use clipboard_x11::{
     Clipboard, LocalInputBlock, read_files as clipboard_files, read_text as clipboard_text,
 };
+#[cfg(target_os = "linux")]
+pub use uinput::UinputInjector;
 #[cfg(windows)]
 pub use win::*;
 #[cfg(target_os = "linux")]

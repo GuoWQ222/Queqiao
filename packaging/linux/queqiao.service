@@ -1,0 +1,26 @@
+# The Queqiao service (docs/LINUX.md): for the session on the PC's own screen it runs the desktop helper (root,
+# reduced: KMS and uinput for the sign-in and lock screens) and Queqiao for the person signed in (as them), or, at the
+# sign-in screen, the agent for it (as the system user queqiao). It has no network of its own.
+#
+# No sandboxing options here: systemd applies them to every process of the unit, and the agent it starts for the
+# person is theirs (a command line from a viewer runs their programs, sudo included). The service reduces its helper
+# and its sign-in agent itself (bounding set, no new privileges, another user).
+[Unit]
+Description=Queqiao remote control (sign-in and lock screens, Queqiao for the person signed in)
+Documentation=https://github.com/GuoWQ222/Queqiao
+After=systemd-logind.service systemd-user-sessions.service dbus.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/queqiao/queqiao-service run
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+RuntimeDirectory=queqiao
+RuntimeDirectoryMode=0755
+StateDirectory=queqiao
+StateDirectoryMode=0755
+
+[Install]
+WantedBy=graphical.target

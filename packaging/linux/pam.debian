@@ -1,0 +1,3 @@
+# The password a viewer gives for a locked PC or its sign-in screen (Queqiao checks it; it does not sign in or unlock).
+@include common-auth
+@include common-account

@@ -543,6 +543,10 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
                     };
                     stalled |= !current.to_agent.send(FromService::Reply(reply).encode());
                 }
+                // Linux's (PAM, the sign-in screen's notice): Windows' agents check passwords themselves.
+                ToService::CheckPassword(_) | ToService::Notice(_) => {
+                    log::line("the agent sent a request for the Linux service: ignored");
+                }
                 ToService::ForgetLogon => {
                     let kept_owner = logon::load().map(|kept| kept.owner_sid);
                     if logon::stored() && !logon::may_hand_over(kept_owner.as_deref(), &current.sid)

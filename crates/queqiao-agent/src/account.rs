@@ -172,6 +172,14 @@ pub(crate) fn run_account(
         }
         // What the person did in the tray (also during the last session).
         deferred.extend(std::iter::from_fn(|| ui.try_event()));
+        // What the service handed over by itself (Linux: the sign-in screen was used where no notice could be shown
+        // there): told to the person now.
+        if let Some(service) = links.service.as_mut() {
+            for notice in service.notices() {
+                ui.notify(&notice);
+                lines.push(format!("notice from the Queqiao service: {notice}"));
+            }
+        }
         let mut quit = false;
         for event in deferred.drain(..) {
             match event {

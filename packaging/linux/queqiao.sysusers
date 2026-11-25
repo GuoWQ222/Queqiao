@@ -1,0 +1,2 @@
+# The system user the Queqiao service runs the agent for the sign-in screen as: no login, no files but its own folder.
+u queqiao - "Queqiao sign-in screen" /var/lib/queqiao-signin /usr/sbin/nologin

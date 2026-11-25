@@ -516,6 +516,8 @@ pub(crate) fn run_session(
     let mut cancel_test_done = false;
     // The secure-desktop test: when it started, its step, and the pictures shown when that step began.
     let mut secure_test: Option<(Instant, u8, u64)> = None;
+    // The typing test (Linux sign-in and lock screens): when the first picture came, and the step.
+    let mut type_test: Option<(Instant, u8)> = None;
     let mut speakers_muted = options.mute_speakers;
     window.check_menu_item(MENU_MUTE_SPEAKERS, speakers_muted);
     let fps_items: Vec<(u16, &str)> = MENU_FPS
@@ -1272,6 +1274,60 @@ pub(crate) fn run_session(
             next_ping = Instant::now() + Duration::from_millis(500);
         }
 
+        // Test: Enter, then a text and Enter, on a Linux PC's sign-in or lock screen.
+        if let Some(text) = &options.type_test {
+            if type_test.is_none() && stats.shown > 0 {
+                type_test = Some((Instant::now(), 0));
+            }
+            if let Some((began, step)) = type_test {
+                let press = |peer: &Peer, scancode: u16, shift: bool| {
+                    let mut keys = Vec::new();
+                    if shift {
+                        keys.push((0x2A, true));
+                    }
+                    keys.extend([(scancode, true), (scancode, false)]);
+                    if shift {
+                        keys.push((0x2A, false));
+                    }
+                    for (scancode, down) in keys {
+                        let key = InputEvent::Key {
+                            scancode,
+                            extended: false,
+                            down,
+                        };
+                        peer.send_data(Message::Input(key).encode());
+                        std::thread::sleep(Duration::from_millis(30));
+                    }
+                };
+                if step == 0 && began.elapsed() >= Duration::from_secs(3) {
+                    press(&peer, 0x1C, false);
+                    lines.push("type test: sent Enter".into());
+                    type_test = Some((began, 1));
+                } else if step == 1 && began.elapsed() >= Duration::from_secs(5) {
+                    let rows = ["1234567890-", "qwertyuiop", "asdfghjkl", "zxcvbnm"];
+                    let starts = [0x02u16, 0x10, 0x1E, 0x2C];
+                    for c in text.chars() {
+                        let lower = c.to_ascii_lowercase();
+                        let scancode = match lower {
+                            ' ' => Some(0x39),
+                            '.' => Some(0x34),
+                            _ => rows.iter().zip(starts).find_map(|(row, start)| {
+                                row.find(lower).map(|at| start + at as u16)
+                            }),
+                        };
+                        if let Some(scancode) = scancode {
+                            press(&peer, scancode, c.is_ascii_uppercase());
+                        }
+                    }
+                    press(&peer, 0x1C, false);
+                    lines.push(format!(
+                        "type test: sent {} characters and Enter",
+                        text.chars().count()
+                    ));
+                    type_test = Some((began, 2));
+                }
+            }
+        }
         // Test: Ctrl+Alt+Del, then Escape, then a look at what came back.
         if let Some((began, step, shown_before)) = secure_test {
             let at = began.elapsed();
@@ -1671,10 +1727,10 @@ pub(crate) fn run_session(
                         lines.push(format!("password: asked ({reason:?}, {tries_left} tries)"));
                         let text = match reason {
                             PasswordReason::Locked => tr(
-                                "That PC is locked. Type its Windows password to show that it is you (this does not unlock it: unlock it on its own screen then).",
+                                "That PC is locked. Type the password of its account to show that it is you (this does not unlock it: unlock it on its own screen then).",
                             ),
                             PasswordReason::SignedOut => tr(
-                                "Nobody is signed in on that PC. Type the password of its Windows account to show that it is you.",
+                                "Nobody is signed in on that PC. Type the password of the account that set up Queqiao there to show that it is you.",
                             ),
                             PasswordReason::OnlyTheOwner => {
                                 tr("That PC is locked: only the person there can unlock it.")

@@ -18,6 +18,8 @@
 mod account;
 mod lock_gate;
 mod options;
+/// The Queqiao service's channels (requests, the desktop helper), on both systems.
+mod service_link;
 mod session;
 mod ui;
 /// Wake-on-LAN: the magic packets, and this PC's cards (from Windows or from /sys/class/net).
@@ -28,8 +30,6 @@ mod wake;
 mod autostart;
 #[cfg(windows)]
 mod power;
-#[cfg(windows)]
-mod service_link;
 #[cfg(windows)]
 mod update;
 #[cfg(windows)]
@@ -50,9 +50,6 @@ mod linux;
 #[cfg(target_os = "linux")]
 #[path = "linux/power.rs"]
 mod power;
-#[cfg(target_os = "linux")]
-#[path = "linux/service_link.rs"]
-mod service_link;
 #[cfg(target_os = "linux")]
 #[path = "linux/update.rs"]
 mod update;

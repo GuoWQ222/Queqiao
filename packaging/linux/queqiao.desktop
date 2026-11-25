@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Queqiao
+Comment=Remote control: control your devices, or help someone
+Exec=/usr/lib/queqiao/queqiao-agent --show
+Icon=queqiao
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupNotify=false

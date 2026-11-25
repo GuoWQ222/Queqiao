@@ -1,0 +1,13 @@
+#!/bin/sh
+# After the package went: on purge, everything it made (the service's state, the sign-in agent's folder and user).
+set -e
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+if [ "$1" = purge ]; then
+    rm -rf /var/lib/queqiao /var/lib/queqiao-signin
+    if getent passwd queqiao > /dev/null; then
+        userdel queqiao || true
+    fi
+fi
+exit 0

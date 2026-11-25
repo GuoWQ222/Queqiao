@@ -1,0 +1,24 @@
+#!/bin/sh
+# After the package is in place: the system user, the folders, the uinput module, the service (started, or restarted
+# with the new programs).
+set -e
+if [ "$1" = configure ]; then
+    if command -v systemd-sysusers > /dev/null 2>&1; then
+        systemd-sysusers queqiao.conf
+    elif ! getent passwd queqiao > /dev/null; then
+        adduser --system --group --home /var/lib/queqiao-signin --no-create-home --shell /usr/sbin/nologin queqiao
+    fi
+    if command -v systemd-tmpfiles > /dev/null 2>&1; then
+        systemd-tmpfiles --create queqiao.conf || true
+    fi
+    modprobe uinput 2> /dev/null || true
+    if command -v update-desktop-database > /dev/null 2>&1; then
+        update-desktop-database -q /usr/share/applications || true
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        systemctl enable queqiao.service
+        systemctl restart queqiao.service || true
+    fi
+fi
+exit 0

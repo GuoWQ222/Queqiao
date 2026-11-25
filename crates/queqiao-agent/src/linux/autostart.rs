@@ -57,6 +57,19 @@ pub fn set(on: bool) -> Result<(), String> {
     std::fs::write(&entry, text).map_err(|e| e.to_string())
 }
 
+/// Whether the Queqiao service runs (its process number in /run/queqiao, as systemd's runtime folder for it, and that
+/// process still there): then Queqiao for the person signed in is the one it starts.
+pub fn service_runs() -> bool {
+    std::fs::read_to_string("/run/queqiao/service.pid")
+        .ok()
+        .and_then(|pid| pid.trim().parse::<i32>().ok())
+        .is_some_and(|pid| {
+            pid > 1
+                && (unsafe { libc::kill(pid, 0) } == 0
+                    || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+        })
+}
+
 /// The error when another agent runs for this user.
 pub const ALREADY_RUNNING: &str = "Queqiao is running already";
 

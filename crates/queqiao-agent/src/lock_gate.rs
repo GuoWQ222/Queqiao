@@ -6,7 +6,8 @@
 //! per PC, so that guessing never reaches Windows' own lockout of the account.
 //!
 //! On Linux (docs/LINUX.md) the gate is the same; the session counts as locked when logind says so (LockedHint), and
-//! no password opens it yet (PAM comes with the service): a locked Linux PC shows a viewer nothing.
+//! the password is checked by PAM: by the Queqiao service where it started this agent (it decides whose password it
+//! is), else by this agent for its own account.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -107,13 +108,19 @@ impl LockGate {
     /// A password from the viewer: right (the gate opens for this session) or wrong (one try less). `expected` is the
     /// tests' password instead of Windows' check.
     pub fn check(&mut self, password: &str, expected: Option<&str>) -> bool {
+        let owner = self.owner.clone();
+        self.check_by(password, |password| match expected {
+            Some(test) => password == test,
+            None => password_ok(password, owner.as_deref()),
+        })
+    }
+
+    /// The same, with the password checked by `verify` (Linux: the Queqiao service's PAM check).
+    pub fn check_by(&mut self, password: &str, verify: impl FnOnce(&str) -> bool) -> bool {
         if self.tries_left() == 0 {
             return false;
         }
-        let right = match expected {
-            Some(test) => password == test,
-            None => password_ok(password, self.owner.as_deref()),
-        };
+        let right = verify(password);
         if right {
             self.verified = true;
         } else {
@@ -238,11 +245,15 @@ fn session_locked() -> Option<bool> {
     }
 }
 
-/// No password opens the gate on Linux yet: it fails closed (PAM, as the system's own lock screen checks, comes with
-/// the service in docs/LINUX.md step 6).
+/// This agent's own account's password, as PAM checks it (pam_unix checks a person's own password for them). The
+/// sign-in screen's owner's password is the service's to check: without it, nothing opens that gate.
 #[cfg(target_os = "linux")]
-fn password_ok(_password: &str, _account: Option<&str>) -> bool {
-    false
+fn password_ok(password: &str, account: Option<&str>) -> bool {
+    if account.is_some() {
+        return false;
+    }
+    crate::linux::own_account()
+        .is_some_and(|user| queqiao_core::pam::password_ok(&user, password).unwrap_or(false))
 }
 
 #[cfg(test)]

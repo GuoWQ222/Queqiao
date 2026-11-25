@@ -6,14 +6,20 @@
 //! than the newest one this PC has seen (an old feed served again cannot hold back a later release once seen).
 //!
 //! The feed is the latest GitHub release's files ([`FEED`]); tests point the agent at their own (HTTPS, or HTTP on
-//! this PC only). Downloads use WinHTTP: the system's proxy settings and certificate store, redirects followed but
-//! never from HTTPS to HTTP, limited in size and time (each step, and the whole download).
+//! this PC only). Downloads use WinHTTP on Windows and curl on Linux: the system's proxy settings and certificates,
+//! redirects followed but never from HTTPS to HTTP, limited in size and time (each step, and the whole download).
+//!
+//! Linux packages have manifests of their own beside Windows' ([`MANIFEST_DEB`], [`MANIFEST_RPM`]), the same form and
+//! the same key, naming a .deb or an .rpm.
 
 #[cfg(windows)]
 mod fetch;
+#[cfg(target_os = "linux")]
+#[path = "fetch_curl.rs"]
+mod fetch;
 pub mod release;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub use fetch::fetch;
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
@@ -27,17 +33,19 @@ pub const RELEASE_KEY: &str = "bdc28c264efc9010627d737039537d129f763dd85f5339abb
 pub const FEED: &str = "https://github.com/GuoWQ222/Queqiao/releases/latest/download/";
 pub const MANIFEST: &str = "queqiao-update.json";
 pub const SIGNATURE: &str = "queqiao-update.json.sig";
+/// Linux: the manifests for the .deb and the .rpm (each with its signature: the name and ".sig").
+pub const MANIFEST_DEB: &str = "queqiao-update-deb.json";
+pub const MANIFEST_RPM: &str = "queqiao-update-rpm.json";
 /// The most an installer may be.
 pub const MAX_INSTALLER: u64 = 256 << 20;
 /// The most a manifest or signature may be.
-// The limits of the downloads: Linux's downloader comes with self-update there (docs/LINUX.md step 6).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 const MAX_SMALL: u64 = 64 * 1024;
 /// How long fetching a manifest or signature, and an installer, may take in all (the security review of 2026-11-22:
 /// a feed that sent a byte now and then held the update thread for ever).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 const SMALL_TIME: std::time::Duration = std::time::Duration::from_secs(60);
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 const INSTALLER_TIME: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +63,16 @@ pub struct Manifest {
     /// When it was signed (Unix seconds; 0 in manifests from before this field).
     #[serde(default)]
     pub published: u64,
+}
+
+/// The file names a release's installers have: Windows' setup, the .deb and the .rpm (as scripts/package_linux.sh
+/// names them). A manifest names one of them, nothing else.
+pub fn installer_names(version: &str) -> [String; 3] {
+    [
+        format!("queqiao-setup-{version}.exe"),
+        format!("queqiao_{version}_amd64.deb"),
+        format!("queqiao-{version}-1.x86_64.rpm"),
+    ]
 }
 
 /// major.minor.patch as numbers; None for anything else.
@@ -118,10 +136,10 @@ pub fn verify_manifest_with(
             manifest.version
         ));
     }
-    if manifest.installer != format!("queqiao-setup-{}.exe", manifest.version) {
+    if !installer_names(&manifest.version).contains(&manifest.installer) {
         return Err(format!(
-            "the update's installer is not queqiao-setup-{}.exe",
-            manifest.version
+            "the update's installer {:?} is not one of {}'s",
+            manifest.installer, manifest.version
         ));
     }
     if manifest.size == 0 || manifest.size > MAX_INSTALLER {
@@ -231,9 +249,20 @@ pub fn check_fresh(manifest: &Manifest, newest_seen: u64) -> Result<(), String> 
 /// What the feed offers, if it is later than `current`, verified, and published no earlier than `newest_seen`.
 #[cfg(windows)]
 pub fn check(feed: &str, current: &str, newest_seen: u64) -> Result<Checked, String> {
+    check_manifest(feed, MANIFEST, current, newest_seen)
+}
+
+/// The same for the manifest `manifest` of the feed (Linux: the .deb's or the .rpm's), signed in `<manifest>.sig`.
+#[cfg(any(windows, target_os = "linux"))]
+pub fn check_manifest(
+    feed: &str,
+    manifest: &str,
+    current: &str,
+    newest_seen: u64,
+) -> Result<Checked, String> {
     check_feed(feed)?;
-    let raw = fetch(&format!("{feed}{MANIFEST}"), MAX_SMALL, SMALL_TIME)?;
-    let signature = fetch(&format!("{feed}{SIGNATURE}"), MAX_SMALL, SMALL_TIME)?;
+    let raw = fetch(&format!("{feed}{manifest}"), MAX_SMALL, SMALL_TIME)?;
+    let signature = fetch(&format!("{feed}{manifest}.sig"), MAX_SMALL, SMALL_TIME)?;
     let signature = String::from_utf8(signature)
         .map_err(|_| "the update signature is not text")?
         .trim()
@@ -250,7 +279,7 @@ pub fn check(feed: &str, current: &str, newest_seen: u64) -> Result<Checked, Str
 }
 
 /// Downloads the installer `manifest` names into `folder` and checks it; its path.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 pub fn download(
     feed: &str,
     manifest: &Manifest,

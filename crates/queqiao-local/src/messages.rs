@@ -82,6 +82,14 @@ pub enum ToService {
         signature: String,
         installer: Vec<u8>,
     },
+    /// Linux: is this the password of the account this agent is for (the person signed in; at the sign-in screen,
+    /// the one who set it up)? The service decides which account, never the agent; it answers with
+    /// [`FromService::Password`]. Windows' agents check it themselves (LogonUserW).
+    CheckPassword(String),
+    /// Linux, from the agent for the sign-in screen: that screen was used from a viewer where no notice could be
+    /// shown on it (GNOME shows no other program there); the service hands the text to the agent of whoever signs in
+    /// next ([`FromService::Notice`]), as the person chose (2026-11-25).
+    Notice(String),
 }
 
 /// The most an update's manifest may be in a message.
@@ -98,6 +106,11 @@ pub enum FromService {
     Reply(String),
     /// To the agent for the sign-in screen, right after it starts: who to be.
     Identity(LogonIdentity),
+    /// The answer to [`ToService::CheckPassword`].
+    Password(bool),
+    /// To the agent of the person who signed in, right after it starts: what happened at the sign-in screen while no
+    /// notice could be shown there, to show them.
+    Notice(String),
 }
 
 /// This device as the agent for the sign-in screen is to be: its id, name and key, the account login, what the
@@ -428,6 +441,16 @@ impl ToService {
                 out.extend_from_slice(installer);
                 out
             }
+            ToService::CheckPassword(password) => {
+                let mut out = vec![6];
+                text(&mut out, password);
+                out
+            }
+            ToService::Notice(notice) => {
+                let mut out = vec![7];
+                text(&mut out, notice);
+                out
+            }
         }
     }
 
@@ -455,6 +478,8 @@ impl ToService {
                     installer: fields.0.to_vec(),
                 })
             }
+            [6, rest @ ..] => read_text(rest).map(ToService::CheckPassword),
+            [7, rest @ ..] => read_text(rest).map(ToService::Notice),
             _ => None,
         }
     }
@@ -473,6 +498,12 @@ impl FromService {
                 identity.encode_into(&mut out);
                 out
             }
+            FromService::Password(right) => vec![3, u8::from(*right)],
+            FromService::Notice(notice) => {
+                let mut out = vec![4];
+                text(&mut out, notice);
+                out
+            }
         }
     }
 
@@ -481,6 +512,12 @@ impl FromService {
         match kind {
             1 => read_text(rest).map(FromService::Reply),
             2 => LogonIdentity::decode_from(rest).map(FromService::Identity),
+            3 => match rest {
+                [0] => Some(FromService::Password(false)),
+                [1] => Some(FromService::Password(true)),
+                _ => None,
+            },
+            4 => read_text(rest).map(FromService::Notice),
             _ => None,
         }
     }
@@ -636,11 +673,21 @@ mod tests {
             ToService::SendSas,
             ToService::Restart,
             ToService::ForgetLogon,
+            ToService::CheckPassword("pässword".into()),
+            ToService::Notice("the sign-in screen was used".into()),
         ] {
             assert_eq!(ToService::decode(&message.encode()), Some(message));
         }
-        let reply = FromService::Reply("Ctrl+Alt+Del sent".into());
-        assert_eq!(FromService::decode(&reply.encode()), Some(reply));
+        for reply in [
+            FromService::Reply("Ctrl+Alt+Del sent".into()),
+            FromService::Password(true),
+            FromService::Password(false),
+            FromService::Notice("used at 09:20".into()),
+        ] {
+            assert_eq!(FromService::decode(&reply.encode()), Some(reply));
+        }
+        assert_eq!(FromService::decode(&[3, 2]), None);
+        assert_eq!(FromService::decode(&[3, 1, 0]), None);
     }
 
     #[test]

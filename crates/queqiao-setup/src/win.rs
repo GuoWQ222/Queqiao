@@ -19,6 +19,8 @@
 //!   public half (for queqiao_update::RELEASE_KEY).
 //! - `release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]`: the update feed
 //!   for that installer: the installer as queqiao-setup-<x.y.z>.exe, queqiao-update.json and its signature.
+//! - `release-package --key <file> --package <name> --size <bytes> --sha256 <hex> --version <x.y.z> --output <folder>`:
+//!   the manifest and signature for a Linux package (queqiao-update-deb.json or -rpm.json); the package goes beside.
 
 use crate::{install, payload, service_update};
 
@@ -50,6 +52,7 @@ pub(crate) fn main() {
         Some("pack") => Some(pack as fn(&[String]) -> Result<String, String>),
         Some("release-key") => Some(release_key as fn(&[String]) -> Result<String, String>),
         Some("release") => Some(release as fn(&[String]) -> Result<String, String>),
+        Some("release-package") => Some(release_package as fn(&[String]) -> Result<String, String>),
         _ => None,
     };
     if let Some(tool) = tool {
@@ -335,6 +338,64 @@ fn release(args: &[String]) -> Result<String, String> {
     };
     Ok(format!(
         "feed for {version} in {output} (signed by {public}: {matches})"
+    ))
+}
+
+/// `release-package --key <file> --package <name> --size <bytes> --sha256 <hex> --version <x.y.z> --output <folder>
+/// [--notes <text>]`: the manifest and signature for a Linux package built elsewhere (only its name, size and SHA-256
+/// come here); the package goes into the feed beside them.
+fn release_package(args: &[String]) -> Result<String, String> {
+    let usage = "usage: queqiao-setup release-package --key <file> --package <name> --size <bytes> --sha256 <hex> --version <x.y.z> --output <folder> [--notes <text>]";
+    let values = named(
+        args,
+        &[
+            "--key",
+            "--package",
+            "--size",
+            "--sha256",
+            "--version",
+            "--output",
+            "--notes",
+        ],
+    )?;
+    let [
+        Some(key),
+        Some(package),
+        Some(size),
+        Some(sha256),
+        Some(version),
+        Some(output),
+        notes,
+    ] = &values[..]
+    else {
+        return Err(usage.into());
+    };
+    let size: u64 = size
+        .parse()
+        .map_err(|_| format!("{size}: not a size in bytes"))?;
+    let sealed = std::fs::read(key).map_err(|e| format!("{key}: {e}"))?;
+    let key = queqiao_update::release::unprotect(&sealed)?;
+    let public = queqiao_update::release::public_key(&key)?;
+    let (name, manifest, signature) = queqiao_update::release::sign_package(
+        &key,
+        version,
+        package,
+        size,
+        sha256,
+        notes.as_deref().unwrap_or(""),
+    )?;
+    let folder = PathBuf::from(output);
+    std::fs::create_dir_all(&folder).map_err(|e| format!("{output}: {e}"))?;
+    std::fs::write(folder.join(name), &manifest).map_err(|e| format!("{name}: {e}"))?;
+    std::fs::write(folder.join(format!("{name}.sig")), signature.as_bytes())
+        .map_err(|e| format!("{name}.sig: {e}"))?;
+    let matches = if public == queqiao_update::RELEASE_KEY {
+        "this build's release key"
+    } else {
+        "NOT this build's release key"
+    };
+    Ok(format!(
+        "{name} for {package} {version} in {output} (signed by {public}: {matches})"
     ))
 }
 

@@ -39,7 +39,63 @@ pub fn sign(
         notes: notes.to_string(),
         published: crate::unix_now(),
     };
-    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
+    sign_manifest(pkcs8, &manifest)
+}
+
+/// The manifest for a Linux package built elsewhere (a .deb or an .rpm: its file name in the feed, its size and
+/// SHA-256), so that only those reach the machine with the release key; its file name in the feed
+/// ([`crate::MANIFEST_DEB`] or [`crate::MANIFEST_RPM`]), the manifest and its signature.
+pub fn sign_package(
+    pkcs8: &[u8],
+    version: &str,
+    package: &str,
+    size: u64,
+    sha256: &str,
+    notes: &str,
+) -> Result<(&'static str, Vec<u8>, String), String> {
+    if parse_version(version).is_none() {
+        return Err(format!("not major.minor.patch: {version}"));
+    }
+    let name = if package.ends_with(".deb") {
+        crate::MANIFEST_DEB
+    } else if package.ends_with(".rpm") {
+        crate::MANIFEST_RPM
+    } else {
+        return Err(format!("{package}: not a .deb or an .rpm"));
+    };
+    if !crate::installer_names(version)[1..]
+        .iter()
+        .any(|name| name == package)
+    {
+        return Err(format!(
+            "{package}: not a name a Linux package of {version} has ({})",
+            crate::installer_names(version)[1..].join(", ")
+        ));
+    }
+    if sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(format!("{sha256}: not a SHA-256 in lower-case hex"));
+    }
+    if size == 0 || size > crate::MAX_INSTALLER {
+        return Err(format!("{size} bytes: not a package's size"));
+    }
+    let manifest = Manifest {
+        version: version.to_string(),
+        installer: package.to_string(),
+        size,
+        sha256: sha256.to_string(),
+        notes: notes.to_string(),
+        published: crate::unix_now(),
+    };
+    let (bytes, signature) = sign_manifest(pkcs8, &manifest)?;
+    Ok((name, bytes, signature))
+}
+
+fn sign_manifest(pkcs8: &[u8], manifest: &Manifest) -> Result<(Vec<u8>, String), String> {
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?;
     let pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|e| format!("release key: {e}"))?;
     let signature = hex(pair.sign(&bytes).as_ref());
     Ok((bytes, signature))
@@ -120,6 +176,27 @@ mod tests {
         let (_, other) = generate_key().unwrap();
         assert!(crate::verify_manifest_with(&other, &manifest, &signature).is_err());
         assert!(sign(&key, "0.2", &installer, "").is_err());
+        // A Linux package: signed from its name, size and SHA-256; checked against the package's bytes.
+        let package = b"!<arch>\ndebian-binary the package".to_vec();
+        let sha = hex(&Sha256::digest(&package));
+        let (name, manifest, signature) = sign_package(
+            &key,
+            "0.2.0",
+            "queqiao_0.2.0_amd64.deb",
+            package.len() as u64,
+            &sha,
+            "",
+        )
+        .unwrap();
+        assert!(sign_package(&key, "0.2.0", "queqiao_0.3.0_amd64.deb", 10, &sha, "").is_err());
+        assert_eq!(name, crate::MANIFEST_DEB);
+        let verified =
+            crate::verify_manifest_with(&public_key(&key).unwrap(), &manifest, &signature).unwrap();
+        assert_eq!(verified.installer, "queqiao_0.2.0_amd64.deb");
+        assert!(crate::check_installer(&verified, &package).is_ok());
+        assert!(sign_package(&key, "0.2.0", "../x.deb", 10, &sha, "").is_err());
+        assert!(sign_package(&key, "0.2.0", "x.exe", 10, &sha, "").is_err());
+        assert!(sign_package(&key, "0.2.0", "x.rpm", 10, "ABC", "").is_err());
     }
 
     #[cfg(windows)]

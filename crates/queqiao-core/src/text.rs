@@ -565,12 +565,12 @@ const CHINESE: &[(&str, &str)] = &[
     ),
     ("New help ID", "换一个帮助 ID"),
     (
-        "That PC is locked. Type its Windows password to show that it is you (this does not unlock it: unlock it on its own screen then).",
-        "那台电脑已锁定。请输入它的 Windows 密码来验证身份（这不会解锁它：之后请在它的锁屏上解锁）。",
+        "That PC is locked. Type the password of its account to show that it is you (this does not unlock it: unlock it on its own screen then).",
+        "那台电脑已锁定。请输入它的账户密码来验证身份（这不会解锁它：之后请在它的锁屏上解锁）。",
     ),
     (
-        "Nobody is signed in on that PC. Type the password of its Windows account to show that it is you.",
-        "那台电脑上没有人登录。请输入它的 Windows 账户密码来验证身份。",
+        "Nobody is signed in on that PC. Type the password of the account that set up Queqiao there to show that it is you.",
+        "那台电脑上没有人登录。请输入在那里设置 Queqiao 的账户的密码来验证身份。",
     ),
     (
         "That PC is locked: only the person there can unlock it.",
