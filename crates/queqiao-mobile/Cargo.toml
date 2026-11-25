@@ -1,0 +1,19 @@
+[package]
+name = "queqiao-mobile"
+description = "The core of Queqiao's phone and tablet apps (Android, iOS): the account, sessions as a viewer, input; a C interface (JNI on Android)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+# rlib for the tests and probes; staticlib for iOS (an XCFramework); cdylib for Android (libqueqiao_mobile.so).
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+queqiao-core.workspace = true
+queqiao-account.workspace = true
+queqiao-transport.workspace = true
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }
