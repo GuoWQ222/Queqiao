@@ -3,8 +3,8 @@
 //! sway, Hyprland, Wayfire and other wlroots desktops offer. Positions map onto the whole output layout, whose size
 //! XWayland's screen has (positions are desktop pixels, as under X11). The keyboard takes this desktop's keymap: the
 //! seat's own (what its keyboard uses), or where the seat has no keyboard yet, the system's default from
-//! libxkbcommon (loaded at run time), so keys mean what they mean here. GNOME and KDE offer the RemoteDesktop portal
-//! instead (not here yet).
+//! libxkbcommon (loaded at run time), so keys mean what they mean here. GNOME and KDE have neither protocol: there
+//! input goes through the RemoteDesktop portal session the capture shares (queqiao-portal), positions on its stream.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::io::Write;
@@ -223,6 +223,106 @@ fn now_ms() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| (since.as_millis() & 0xFFFF_FFFF) as u32)
+}
+
+/// Input on Wayland: the compositor's virtual devices, or the RemoteDesktop portal.
+pub(crate) enum WaylandInjector {
+    Virtual(Box<WaylandInput>),
+    Portal {
+        session: std::sync::Arc<queqiao_portal::PortalSession>,
+        wheel: (i32, i32),
+    },
+}
+
+impl WaylandInjector {
+    /// The virtual devices where the compositor has them, else the portal session's RemoteDesktop.
+    pub(crate) fn new(screen: ScreenRect) -> Result<WaylandInjector, String> {
+        match WaylandInput::new(screen) {
+            Ok(input) => Ok(WaylandInjector::Virtual(Box::new(input))),
+            Err(virtual_error) => {
+                let session = queqiao_portal::session()
+                    .map_err(|portal_error| format!("{virtual_error}; {portal_error}"))?;
+                if !session.has_input() {
+                    return Err(virtual_error);
+                }
+                session.bring_in_devices();
+                Ok(WaylandInjector::Portal {
+                    session,
+                    wheel: (0, 0),
+                })
+            }
+        }
+    }
+
+    /// How input goes, for the reports.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            WaylandInjector::Virtual(_) => "the compositor's virtual pointer and keyboard".into(),
+            WaylandInjector::Portal { session, .. } => format!("the {}", session.describe()),
+        }
+    }
+
+    pub(crate) fn inject(&mut self, screen: ScreenRect, event: &InputEvent) -> Result<(), String> {
+        let (session, wheel) = match self {
+            WaylandInjector::Virtual(input) => return input.inject(screen, event),
+            WaylandInjector::Portal { session, wheel } => (session, wheel),
+        };
+        match *event {
+            InputEvent::MouseMove { x, y } => {
+                // On the stream: its logical pixels.
+                let (width, height) = session.size;
+                let place = |size: u32, value: u16| {
+                    f64::from(size.saturating_sub(1)) * f64::from(value) / 65535.0
+                };
+                session.pointer_to(place(width, x), place(height, y))
+            }
+            InputEvent::MouseDelta { dx, dy } => session.pointer_by(f64::from(dx), f64::from(dy)),
+            InputEvent::MouseButton { button, down } => {
+                let code = match button {
+                    MouseButton::Left => BTN_LEFT,
+                    MouseButton::Right => BTN_RIGHT,
+                    MouseButton::Middle => BTN_MIDDLE,
+                    MouseButton::X1 => BTN_SIDE,
+                    MouseButton::X2 => BTN_EXTRA,
+                };
+                session.button(code as i32, down)
+            }
+            InputEvent::Wheel { delta, horizontal } => {
+                let pending = if horizontal {
+                    &mut wheel.1
+                } else {
+                    &mut wheel.0
+                };
+                *pending += i32::from(delta);
+                let notches = *pending / NOTCH;
+                *pending -= notches * NOTCH;
+                if notches == 0 {
+                    return Ok(());
+                }
+                // Windows' positive is up or right; the portal's vertical positive is down.
+                if horizontal {
+                    session.scroll(false, notches)
+                } else {
+                    session.scroll(true, -notches)
+                }
+            }
+            InputEvent::Key {
+                scancode,
+                extended,
+                down,
+            } => {
+                let Some(code) =
+                    x11_keycode(scancode, extended).and_then(|code| code.checked_sub(8))
+                else {
+                    return Err(format!(
+                        "no key for scancode {scancode:#x}{} here",
+                        if extended { " (E0)" } else { "" }
+                    ));
+                };
+                session.key(i32::from(code), down)
+            }
+        }
+    }
 }
 
 pub(crate) struct WaylandInput {

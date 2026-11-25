@@ -35,10 +35,14 @@ pub(crate) struct Options {
     pub(crate) width: Option<i32>,
     pub(crate) report: Option<PathBuf>,
     pub(crate) input_test: bool,
+    /// Tests: a left click at the last test point before the test key (a desktop that focuses on click: Wayland).
+    pub(crate) input_test_click: bool,
     /// Tests: the card of figures on and the bar kept out from the start.
     pub(crate) figures: bool,
     /// Tests: the session picture (--ui-pictures) this many seconds after the first picture (default 3).
     pub(crate) picture_at: Option<u64>,
+    /// Tests: the input test this many seconds after the first picture (default 1).
+    pub(crate) input_test_at: Option<u64>,
     /// Tests: a picture of the session window with its bar and card (viewer_session.bmp) into this folder.
     pub(crate) ui_pictures: Option<PathBuf>,
     /// For tests: send a clipboard text once the data channel is open.
@@ -184,8 +188,10 @@ pub(crate) fn test_switch(
         "--width" => options.width = args.next().and_then(|v| v.parse().ok()),
         "--report" => options.report = args.next().map(PathBuf::from),
         "--input-test" => options.input_test = true,
+        "--input-test-click" => options.input_test_click = true,
         "--figures" => options.figures = true,
         "--picture-at" => options.picture_at = Some(args.next()?.parse().ok()?),
+        "--input-test-at" => options.input_test_at = Some(args.next()?.parse().ok()?),
         "--ui-pictures" => options.ui_pictures = Some(PathBuf::from(args.next()?)),
         "--clipboard-test" => options.clipboard_test = true,
         "--send-file" => options.send_files.push(PathBuf::from(args.next()?)),

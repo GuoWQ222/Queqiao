@@ -222,6 +222,11 @@ impl Window {
         unsafe { IsWindowVisible(self.hwnd) }.as_bool()
     }
 
+    /// Never on Windows: the desktop keeps the window's picture (Linux: uncovered parts are lost).
+    pub fn needs_repaint(&self) -> bool {
+        false
+    }
+
     /// Puts a check mark on a menu item added with [`Window::add_menu_items`], or takes it off.
     pub fn check_menu_item(&self, id: u16, checked: bool) {
         let menu = unsafe { GetSystemMenu(self.hwnd, false) };

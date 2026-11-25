@@ -652,6 +652,10 @@ pub(crate) fn session(
         "screen {}x{} at {:.0} Hz on {}",
         info.width, info.height, info.refresh_hz, info.adapter
     ));
+    // Wayland: which portal session (and whether the person's earlier answer was kept).
+    if info.adapter == "Wayland" {
+        lines.push(format!("captured through the {}", info.output));
+    }
     // Discrete before integrated: the screen's GPU captures, and encodes too (moving each picture to another GPU is
     // not built), so a screen on the integrated GPU is said.
     if let Some(first) = queqiao_capture::preferred_gpu_besides(&info.adapter) {
@@ -680,6 +684,8 @@ pub(crate) fn session(
         width: info.width,
         height: info.height,
     });
+    #[cfg(target_os = "linux")]
+    lines.push(format!("input through {}", injector.describe()));
     // The screen shown (counted as queqiao_capture::screens does) and the picture size the viewer chose.
     let mut screen_index = queqiao_capture::screens()
         .ok()

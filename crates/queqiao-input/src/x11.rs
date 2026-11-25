@@ -40,7 +40,7 @@ pub struct Injector {
     screen: ScreenRect,
     state: Mutex<Option<State>>,
     /// The Wayland injector, or why there is none, in a Wayland session.
-    wayland: Option<Mutex<Result<crate::wayland::WaylandInput, String>>>,
+    wayland: Option<Mutex<Result<crate::wayland::WaylandInjector, String>>>,
 }
 
 impl Injector {
@@ -49,7 +49,7 @@ impl Injector {
             return Injector {
                 screen,
                 state: Mutex::new(None),
-                wayland: Some(Mutex::new(crate::wayland::WaylandInput::new(screen))),
+                wayland: Some(Mutex::new(crate::wayland::WaylandInjector::new(screen))),
             };
         }
         let state = x11rb::connect(None).ok().and_then(|(connection, number)| {
@@ -65,6 +65,21 @@ impl Injector {
             screen,
             state: Mutex::new(state),
             wayland: None,
+        }
+    }
+
+    /// How input goes (XTEST, or on Wayland the virtual devices or the portal), or why it cannot.
+    pub fn describe(&self) -> String {
+        if let Some(wayland) = &self.wayland {
+            return match wayland.lock().as_deref() {
+                Ok(Ok(injector)) => injector.describe(),
+                Ok(Err(error)) => format!("none ({error})"),
+                Err(_) => "none (the injector broke)".into(),
+            };
+        }
+        match self.state.lock().as_deref() {
+            Ok(Some(_)) => "XTEST".into(),
+            _ => "none (no X display with XTEST)".into(),
         }
     }
 

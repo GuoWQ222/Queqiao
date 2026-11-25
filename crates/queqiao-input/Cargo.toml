@@ -31,3 +31,5 @@ png = "0.17"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
+# GNOME, KDE: input through the RemoteDesktop portal session shared with the capture.
+queqiao-portal.workspace = true

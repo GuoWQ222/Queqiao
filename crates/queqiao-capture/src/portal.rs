@@ -4,11 +4,10 @@
 //! pointer is drawn into the pictures. Frames come when the screen changed, as X11's DAMAGE gives them, and are handed
 //! out in B, G, R, X order as the X11 capture's are.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use ashpd::desktop::PersistMode;
-use ashpd::desktop::Session;
-use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
+use queqiao_portal::PortalSession;
 
 use crate::pipewire::{self, Stream};
 use crate::{BgraImage, Error, Frame, OutputInfo, Result, qpc_now};
@@ -22,9 +21,8 @@ pub(crate) fn wayland_session() -> bool {
 }
 
 pub(crate) struct PortalDuplicator {
-    // Kept for the stream's life: the portal ends the cast when its session closes.
-    _proxy: Screencast,
-    _session: Session<Screencast>,
+    // Kept for the stream's life: the portal ends the cast when its session closes (shared with the input).
+    portal: Arc<PortalSession>,
     stream: Stream,
     info: OutputInfo,
     /// The frame handed out last (B, G, R, X rows of `stride` bytes) and its number.
@@ -37,62 +35,25 @@ pub(crate) struct PortalDuplicator {
 unsafe impl Send for PortalDuplicator {}
 
 impl PortalDuplicator {
-    /// A ScreenCast session of one monitor (the one the person, or the portal's settings, choose).
+    /// The portal session's monitor (the one the person, or the portal's settings, choose).
     pub(crate) fn new() -> Result<Self> {
-        let portal_error =
-            |error: ashpd::Error| Error::new(format!("the ScreenCast portal: {error}"));
-        let (proxy, session, fd, node, size, position) = async_io::block_on(async {
-            let proxy = Screencast::new().await?;
-            let session = proxy.create_session(Default::default()).await?;
-            proxy
-                .select_sources(
-                    &session,
-                    SelectSourcesOptions::default()
-                        .set_cursor_mode(CursorMode::Embedded)
-                        .set_sources(enumflags2::BitFlags::from(SourceType::Monitor))
-                        .set_multiple(false)
-                        .set_persist_mode(PersistMode::DoNot),
-                )
-                .await?;
-            let response = proxy
-                .start(&session, None, Default::default())
-                .await?
-                .response()?;
-            let stream = response
-                .streams()
-                .first()
-                .cloned()
-                .ok_or(ashpd::Error::NoResponse)?;
-            let fd = proxy
-                .open_pipe_wire_remote(&session, Default::default())
-                .await?;
-            Ok((
-                proxy,
-                session,
-                fd,
-                stream.pipe_wire_node_id(),
-                stream.size(),
-                stream.position(),
-            ))
-        })
-        .map_err(portal_error)?;
-        let size = size.map_or((1920, 1080), |(w, h)| (w.max(1) as u32, h.max(1) as u32));
-        let stream = Stream::open(fd, node, size).map_err(Error::new)?;
+        let portal = queqiao_portal::session().map_err(Error::new)?;
+        let fd = portal.pipewire().map_err(Error::new)?;
+        let stream = Stream::open(fd, portal.node, portal.size).map_err(Error::new)?;
         let mut duplicator = PortalDuplicator {
-            _proxy: proxy,
-            _session: session,
-            stream,
             info: OutputInfo {
                 adapter: "Wayland".into(),
-                output: format!("portal stream {node}"),
-                width: size.0,
-                height: size.1,
+                output: portal.describe(),
+                width: portal.size.0,
+                height: portal.size.1,
                 refresh_hz: 60.0,
                 rotation: 0,
                 method: "ScreenCast portal + PipeWire",
-                left: position.map_or(0, |(x, _)| x),
-                top: position.map_or(0, |(_, y)| y),
+                left: portal.position.0,
+                top: portal.position.1,
             },
+            portal,
+            stream,
             pixels: Vec::new(),
             stride: 0,
             seen: 0,
@@ -107,6 +68,7 @@ impl PortalDuplicator {
             .ok_or_else(|| Error::new("the ScreenCast portal sent no picture within 5 s".into()))?;
         duplicator.info.width = first.0;
         duplicator.info.height = first.1;
+        let _ = &duplicator.portal;
         Ok(duplicator)
     }
 

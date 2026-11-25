@@ -174,6 +174,41 @@ pub(crate) const TEST_POINTS: [(f64, f64); 5] = [
 
 pub(crate) const TEST_SCANCODE: u16 = 0x76;
 
+/// The input test's events in order: the pointer to each test point, a left click there with --input-test-click
+/// (where the desktop gives the keyboard to the window clicked), the test key down and up, the game mouse's moves.
+pub(crate) fn input_test_steps(options: &Options) -> Vec<InputEvent> {
+    let mut steps: Vec<InputEvent> = TEST_POINTS
+        .iter()
+        .map(|(x, y)| InputEvent::MouseMove {
+            x: (x * 65535.0) as u16,
+            y: (y * 65535.0) as u16,
+        })
+        .collect();
+    if options.input_test_click {
+        for down in [true, false] {
+            steps.push(InputEvent::MouseButton {
+                button: MouseButton::Left,
+                down,
+            });
+        }
+    }
+    for down in [true, false] {
+        steps.push(InputEvent::Key {
+            scancode: TEST_SCANCODE,
+            extended: false,
+            down,
+        });
+    }
+    if options.game_mouse_test {
+        steps.extend(
+            TEST_DELTAS
+                .iter()
+                .map(|(dx, dy)| InputEvent::MouseDelta { dx: *dx, dy: *dy }),
+        );
+    }
+    steps
+}
+
 /// A session that is not connected after this long is given up.
 pub(crate) const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
@@ -315,6 +350,9 @@ pub(crate) fn run_session(
         .map_err(|e| format!("window: {}", describe(e)))?;
     let mut presenter = Presenter::new(device, context, &window)
         .map_err(|e| format!("presenter: {}", describe(e)))?;
+    // Linux: the picture last shown, kept (moved, not copied) to show again where the window lost it.
+    #[cfg(target_os = "linux")]
+    let mut last_shown: Option<DecodedFrame> = None;
     let mut decoder = H264Decoder::new(device, context, DecoderChoice::from_env())
         .map_err(|e| format!("decoder: {}", describe(e)))?;
     lines.push(format!("decoder: {}", decoder.name()));
@@ -767,6 +805,13 @@ pub(crate) fn run_session(
         let pump_start = Instant::now();
         let open = window.pump();
         stats.pump_ms.push(pump_start.elapsed().as_secs_f64() * 1e3);
+        // Linux: the last picture again where the window lost it (the remote screen may send no new one).
+        #[cfg(target_os = "linux")]
+        if window.needs_repaint()
+            && let Some(picture) = &last_shown
+        {
+            let _ = presenter.show(&picture.texture, (picture.width, picture.height), &window);
+        }
         for slow in window.take_slow_messages() {
             lines.push(format!(
                 "slow at {} ms: {slow}",
@@ -1158,34 +1203,14 @@ pub(crate) fn run_session(
         if options.input_test
             && channel_open
             && first_picture_after.is_some()
-            && let Some(due) =
-                next_test_step.or_else(|| Some(Instant::now() + Duration::from_secs(1)))
+            && let Some(due) = next_test_step.or_else(|| {
+                Some(Instant::now() + Duration::from_secs(options.input_test_at.unwrap_or(1)))
+            })
         {
             next_test_step = Some(due);
-            let deltas = if options.game_mouse_test {
-                TEST_DELTAS.len()
-            } else {
-                0
-            };
-            if Instant::now() >= due && test_step < TEST_POINTS.len() + 2 + deltas {
-                let event = match test_step {
-                    i if i < TEST_POINTS.len() => {
-                        let (x, y) = TEST_POINTS[i];
-                        InputEvent::MouseMove {
-                            x: (x * 65535.0) as u16,
-                            y: (y * 65535.0) as u16,
-                        }
-                    }
-                    i if i >= TEST_POINTS.len() + 2 => {
-                        let (dx, dy) = TEST_DELTAS[i - TEST_POINTS.len() - 2];
-                        InputEvent::MouseDelta { dx, dy }
-                    }
-                    i => InputEvent::Key {
-                        scancode: TEST_SCANCODE,
-                        extended: false,
-                        down: i == TEST_POINTS.len(),
-                    },
-                };
+            let steps = input_test_steps(options);
+            if Instant::now() >= due && test_step < steps.len() {
+                let event = steps[test_step];
                 peer.send_data(Message::Input(event).encode());
                 stats.inputs_sent += 1;
                 test_step += 1;
@@ -1581,6 +1606,10 @@ pub(crate) fn run_session(
                             if stats.viewer_ms.len() < MAX_SAMPLES {
                                 stats.viewer_ms.insert(picture.time as u64, viewer_ms);
                             }
+                            #[cfg(target_os = "linux")]
+                            {
+                                last_shown = Some(picture);
+                            }
                         }
                     }
                 }
@@ -1902,13 +1931,7 @@ pub(crate) fn run_session(
         "ended: {}",
         closed.unwrap_or_else(|| "time is up".into())
     ));
-    let test_steps = TEST_POINTS.len()
-        + 2
-        + if options.game_mouse_test {
-            TEST_DELTAS.len()
-        } else {
-            0
-        };
+    let test_steps = input_test_steps(options).len();
     let test_done = !options.input_test || test_step == test_steps;
     Ok(connected_after.is_some()
         && first_picture_after.is_some()

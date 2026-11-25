@@ -43,7 +43,7 @@ flow; the interface list and one timer call are Windows), `queqiao-local`, `queq
 | Windows, forms, main window | Win32 and GDI | The session window: X11 through x11rb, a connection and window per session thread as on Windows (winit allows one event loop per process, which would not let sessions run on threads of their own); on Wayland through XWayland. Forms, the main window, prompts, the banner and the session bar: egui (eframe, OpenGL) on one GUI thread, as the agent's UI thread on Windows (same pages and texts as on Windows) |
 | Tray | Shell notify icon | StatusNotifierItem (KDE, Ubuntu's GNOME with its AppIndicator extension); without one, the main window stays open instead |
 | Notices | Toasts | org.freedesktop.Notifications |
-| Input injection | SendInput | X11: XTest. Wayland: the RemoteDesktop portal (libei, GNOME 45+, KDE 6). The service and the sign-in screen: uinput (root) |
+| Input injection | SendInput | X11: XTest. Wayland: the compositor's virtual pointer and keyboard (wlroots), else the RemoteDesktop portal (GNOME, KDE: its notify calls, in the session that also gives the picture). The service and the sign-in screen: uinput (root) |
 | Keys | Windows scancodes | The protocol keeps Windows scancodes; Linux maps them to and from evdev key codes (one table, tested both ways) |
 | Ctrl+Alt+Del | The service's SAS | Has no meaning on Linux: the menu item is left out when that PC is Linux; lock and switch user are offered instead |
 | Shortcuts to the remote (Super, Alt+Tab) | Low-level keyboard hook | X11: grab the keyboard while the window has focus. Wayland: the keyboard-shortcuts-inhibit protocol (GNOME, KDE, wlroots) |
@@ -82,11 +82,11 @@ flow; the interface list and one timer call are Windows), `queqiao-local`, `queq
 
 cc4-1 is a container: Ubuntu 22.04, root, 4 x RTX 4090 with NVIDIA's encode/decode/CUDA libraries, no systemd, no
 `/dev/uinput`, no sound card, no monitor. There: the build, the unit tests, X11 sessions on Xvfb (capture, XTest,
-the X11 clipboard), Wayland on a headless compositor (sway + xdg-desktop-portal-wlr: the ScreenCast portal and
-PipeWire), PulseAudio with null sinks, NVENC/NVDEC on the 4090s, Linux agent and viewer against each other, and the
-.deb built and installed in a clean container. Not there (a real Linux PC is needed): GNOME's and KDE's own portals
-and permission prompts, VA-API on Intel/AMD, uinput, the systemd service on a real greeter and lock screen, KMS
-capture, real sound devices. Windows <-> Linux sessions need both on one network (or a reachable test server).
+the X11 clipboard), Wayland on headless compositors (sway + xdg-desktop-portal-wlr: the ScreenCast portal and
+PipeWire; GNOME's mutter + xdg-desktop-portal-gnome: the RemoteDesktop portal and its dialog), PulseAudio with null
+sinks, NVENC/NVDEC on the 4090s, Linux agent and viewer against each other, and the .deb built and installed in a clean
+container. Not there (a real Linux PC is needed): KDE's portal, GNOME Shell itself (it needs systemd-logind),
+VA-API on Intel/AMD, uinput, the systemd service on a real greeter and lock screen, KMS capture, real sound devices. Windows <-> Linux sessions need both on one network (or a reachable test server).
 
 ## Where it stands (2026-11-24)
 
@@ -122,15 +122,26 @@ Wayland (2026-11-25): the agent captures through the ScreenCast portal (xdg-desk
 wlroots desktops answer) and its PipeWire stream (libpipewire loaded at run time, as CUDA and PulseAudio are; only its
 stable C API, the format pods written by hand: it builds without PipeWire's headers and runs with any PipeWire 0.3 or
 later), and injects input through the wlroots compositors' virtual pointer and virtual keyboard (the keymap the seat
-uses, else libxkbcommon's default). The GUI runs natively on Wayland (its hidden root window is a floating
-transparent pixel there: Wayland hides no window); the session window runs through XWayland. Tested on cc4-1 on a
-virtual Wayland display (the user, 2026-11-25: passing on cc4-1's virtual screens is enough): scripts/
-wayland_display_linux.sh starts headless sway with XWayland, PipeWire, WirePlumber and the portals as the user
-qqtest (sway refuses root); scripts/run_wayland_linux.sh runs a session against it: the viewer's picture against the
-Wayland screen (grim), and the input test as wev (a native Wayland program) sees it. Not yet on Wayland: GNOME's and
-KDE's input (the RemoteDesktop portal), the portal's restore token (GNOME and KDE ask the person each session until
-then), the pointer's shape apart from the picture, the banner at the top (Wayland programs cannot place themselves:
-it floats where the compositor puts it).
+uses, else libxkbcommon's default). Where the compositor has no virtual devices (GNOME, KDE), the agent opens one
+RemoteDesktop portal session for both, the screen and the keyboard and pointer (crate queqiao-portal; the person
+answers one dialog, which must allow remote interaction), and injects through its notify calls. GNOME adds that
+session's pointer and keyboard to the seat only with their first event, and on a PC without a keyboard or mouse of its
+own (a server, a virtual machine) programs learn of them after it: the first key would reach none. So the agent brings
+them in when the session opens: a move by nothing, and KEY_UNKNOWN pressed (no symbol in the keymaps: nothing acts on
+it). The GUI runs natively on Wayland (its hidden root window is a 4 x 4 transparent window there: Wayland hides no
+window; mutter refuses smaller); the session window runs through XWayland and shows its last picture again where it
+was uncovered or resized (the X server keeps none, and a still remote screen sends no new one: the session bar left a
+black strip after tucking away). Tested on cc4-1 on virtual Wayland displays (the user, 2026-11-25: passing on cc4-1's
+virtual screens is enough): scripts/wayland_display_linux.sh starts, as the user qqtest, headless sway (DESKTOP=sway,
+the default) or GNOME's mutter (DESKTOP=gnome, with a system bus) with XWayland, PipeWire, WirePlumber and the portals;
+scripts/run_wayland_linux.sh runs a session against it: the viewer's picture against the Wayland screen (grim on
+sway; on GNOME the test window's white), and the input test (five pointer places, a click, F24) as a native Wayland
+window sees it: wev on sway, scripts/wayland_test_window.py (GTK 4, its Wayland protocol log for keys GTK drops) on
+GNOME, where scripts/portal_approve.py answers GNOME's dialog through AT-SPI as the person would (only the tests do;
+Queqiao never goes round it). Not yet on Wayland: KDE (its portal is the same, untested), the portal's restore token
+(asked for and kept where the portal offers it: RemoteDesktop 2, xdg-desktop-portal 1.17 or later; Ubuntu 22.04 has
+1.14, so GNOME asks each session there), the pointer's shape apart from the picture, the banner at the top (Wayland
+programs cannot place themselves: it floats where the compositor puts it).
 
 Not yet on Linux: AV1 and 10-bit encoding, VA-API, the privacy screen and input block, the service and packages.
 

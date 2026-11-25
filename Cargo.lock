@@ -2750,10 +2750,10 @@ dependencies = [
 name = "queqiao-capture"
 version = "0.1.0"
 dependencies = [
- "ashpd",
- "async-io",
- "enumflags2",
  "libc",
+ "queqiao-core",
+ "queqiao-input",
+ "queqiao-portal",
  "windows",
  "x11rb",
 ]
@@ -2822,6 +2822,7 @@ dependencies = [
  "libc",
  "png 0.17.16",
  "queqiao-core",
+ "queqiao-portal",
  "wayland-client",
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
@@ -2836,6 +2837,16 @@ dependencies = [
  "libc",
  "queqiao-core",
  "windows",
+]
+
+[[package]]
+name = "queqiao-portal"
+version = "0.1.0"
+dependencies = [
+ "ashpd",
+ "async-io",
+ "enumflags2",
+ "libc",
 ]
 
 [[package]]

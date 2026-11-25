@@ -50,6 +50,22 @@ fn gui() -> Result<&'static Gui, String> {
     GUI.get_or_init(start).as_ref().map_err(Clone::clone)
 }
 
+/// The root viewport, which nothing is drawn in. Wayland has no hidden windows (winit maps it anyway): there it is a
+/// few transparent pixels without a frame, of fixed size, which tiling compositors (sway and the other wlroots desktops)
+/// float instead of giving it a tile. Four pixels: winit asks for at least two across, and a fixed size smaller than
+/// that is a protocol error to mutter (GNOME).
+fn root_viewport() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title("Queqiao")
+        .with_visible(false)
+        .with_inner_size([4.0, 4.0])
+        .with_min_inner_size([4.0, 4.0])
+        .with_max_inner_size([4.0, 4.0])
+        .with_resizable(false)
+        .with_decorations(false)
+        .with_transparent(true)
+}
+
 fn start() -> Result<Gui, String> {
     let (requests, incoming) = mpsc::channel();
     let (ready, started) = mpsc::channel::<Result<egui::Context, String>>();
@@ -58,18 +74,8 @@ fn start() -> Result<Gui, String> {
         .name("queqiao-gui".into())
         .spawn(move || {
             let options = eframe::NativeOptions {
-                // The root window is not shown: every window is a viewport of its own. Wayland has no hidden windows
-                // (winit maps it anyway): there it is one transparent pixel of fixed size, which tiling compositors
-                // float instead of giving it a tile.
-                viewport: egui::ViewportBuilder::default()
-                    .with_title("Queqiao")
-                    .with_visible(false)
-                    .with_inner_size([1.0, 1.0])
-                    .with_min_inner_size([1.0, 1.0])
-                    .with_max_inner_size([1.0, 1.0])
-                    .with_resizable(false)
-                    .with_decorations(false)
-                    .with_transparent(true),
+                // The root window is not shown: every window is a viewport of its own.
+                viewport: root_viewport(),
                 event_loop_builder: Some(Box::new(|builder| {
                     builder.with_any_thread(true);
                 })),

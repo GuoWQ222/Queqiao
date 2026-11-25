@@ -62,6 +62,8 @@ pub struct Window {
     atoms: Atoms,
     size: (u32, u32),
     visible: Cell<bool>,
+    /// Part of the picture lost since the viewer last asked (uncovered, or the window resized).
+    repaint: Cell<bool>,
     closed: bool,
     full_screen: bool,
     on_top: Cell<bool>,
@@ -138,6 +140,7 @@ impl Window {
             atoms,
             size: (u32::from(width), u32::from(height)),
             visible: Cell::new(true),
+            repaint: Cell::new(false),
             closed: false,
             full_screen: false,
             on_top: Cell::new(false),
@@ -326,6 +329,12 @@ impl Window {
 
     pub fn is_visible(&self) -> bool {
         self.visible.get()
+    }
+
+    /// Whether the window lost part of its picture since the last call (uncovered, resized): the viewer shows its
+    /// last picture again, as a still remote screen sends no new one.
+    pub fn needs_repaint(&self) -> bool {
+        self.repaint.replace(false)
     }
 
     /// Game mouse: the pointer is held in the window (hidden, put back in the middle after each move) and moves go
@@ -613,7 +622,15 @@ impl Window {
                 }
             }
             Event::ConfigureNotify(configure) if configure.window == self.window => {
-                self.size = (u32::from(configure.width), u32::from(configure.height));
+                let size = (u32::from(configure.width), u32::from(configure.height));
+                if size != self.size {
+                    self.repaint.set(true);
+                }
+                self.size = size;
+            }
+            // A part uncovered (the session bar tucked away, a window moved off): the X server keeps no picture of it.
+            Event::Expose(expose) if expose.window == self.window && expose.count == 0 => {
+                self.repaint.set(true);
             }
             Event::MapNotify(_) => self.visible.set(true),
             Event::UnmapNotify(_) => self.visible.set(false),
