@@ -1,0 +1,56 @@
+# The iOS app's Xcode project, made by XcodeGen (`xcodegen generate` here; .github/workflows/ios.yml does it). The core
+# comes as build/QueqiaoCore.xcframework (scripts/build_ios_core.sh).
+name: Queqiao
+options:
+  bundleIdPrefix: com.queqiao
+  deploymentTarget:
+    iOS: "15.0"
+  developmentLanguage: en
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Queqiao:
+    type: application
+    platform: iOS
+    sources:
+      - path: Queqiao
+    dependencies:
+      - framework: build/QueqiaoCore.xcframework
+        embed: false
+    info:
+      path: Queqiao/Info.plist
+      properties:
+        CFBundleDisplayName: Queqiao
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleLocalizations: [en, zh-Hans]
+        UILaunchScreen:
+          UIColorName: ""
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: Queqiao connects straight to your own PCs on this network when it can.
+        ITSAppUsesNonExemptEncryption: false
+        # The server built in (QUEQIAO_DEFAULT_SERVER / _PIN when the app is built), typed in the login form otherwise.
+        QueqiaoServer: $(QUEQIAO_DEFAULT_SERVER)
+        QueqiaoPin: $(QUEQIAO_DEFAULT_PIN)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.queqiao.app
+        SWIFT_OBJC_BRIDGING_HEADER: Queqiao/Queqiao-Bridging-Header.h
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        OTHER_LDFLAGS: ["-lc++", "-lresolv"]
+        QUEQIAO_DEFAULT_SERVER: ""
+        QUEQIAO_DEFAULT_PIN: ""
+    scheme: {}

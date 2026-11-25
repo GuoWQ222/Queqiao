@@ -1,0 +1,81 @@
+# The iOS app: the Rust core for iPhones and the Simulator (scripts/build_ios_core.sh), the Xcode project from
+# mobile/ios/project.yml (XcodeGen), the app built for the Simulator and, unsigned, for iPhones: Queqiao.ipa, which the
+# user signs and installs with Sideloadly and a free Apple ID. The .ipa and the logs are pushed to the branch
+# ci-results-ios (replaced each run).
+name: ios
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/ios/**'
+      - 'crates/**'
+      - 'Cargo.lock'
+      - 'scripts/build_ios_core.sh'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios
+  cancel-in-progress: true
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 75
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the core
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/ios_results
+          bash scripts/build_ios_core.sh 2>&1 | tee /tmp/ios_results/core.txt
+
+      - name: Make the Xcode project
+        run: |
+          brew install xcodegen > /dev/null
+          cd mobile/ios && xcodegen generate
+
+      - name: Build for the Simulator
+        run: |
+          set -o pipefail
+          xcodebuild -project mobile/ios/Queqiao.xcodeproj -scheme Queqiao -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/sim CODE_SIGNING_ALLOWED=NO build \
+            > /tmp/ios_results/simulator.txt 2>&1 || { grep -E "error:|warning: .*swift" /tmp/ios_results/simulator.txt | head -60; exit 1; }
+          grep -c "warning:" /tmp/ios_results/simulator.txt || true
+
+      - name: Build the .ipa (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project mobile/ios/Queqiao.xcodeproj -scheme Queqiao -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' -derivedDataPath build/device \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build \
+            > /tmp/ios_results/device.txt 2>&1 || { grep -E "error:" /tmp/ios_results/device.txt | head -60; exit 1; }
+          mkdir -p Payload
+          cp -R build/device/Build/Products/Release-iphoneos/Queqiao.app Payload/
+          zip -qry /tmp/ios_results/Queqiao.ipa Payload
+          ls -la /tmp/ios_results
+
+      - name: Results to ci-results-ios
+        if: always()
+        run: |
+          mkdir -p /tmp/ios_results
+          cp target/ios-*.log /tmp/ios_results/ 2> /dev/null || true
+          echo "run ${{ github.run_number }} of ${{ github.sha }}" > /tmp/ios_results/RUN.txt
+          cd /tmp/ios_results
+          git init -q
+          git checkout -q -b results
+          git add -A
+          git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q -m "ios run ${{ github.run_number }}"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" results:ci-results-ios

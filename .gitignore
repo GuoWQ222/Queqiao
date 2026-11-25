@@ -14,3 +14,7 @@
 /mobile/android/app/build/
 /mobile/android/app/src/main/jniLibs/
 /mobile/android/local.properties
+# The iOS app's generated project, the core's xcframework and Info.plist (XcodeGen makes it from project.yml).
+/mobile/ios/build/
+/mobile/ios/Queqiao.xcodeproj/
+/mobile/ios/Queqiao/Info.plist

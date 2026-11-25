@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 #[cfg(target_os = "android")]
 mod android;
 pub mod ffi;
+#[cfg(not(target_os = "android"))]
+pub mod pcm;
 
 /// Why a session ended when the PC left it.
 const PC_LEFT: &str = "the PC ended the session";
@@ -112,6 +114,8 @@ pub struct Core {
     frames: Arc<Queue<Frame>>,
     audio: Arc<Queue<AudioPacket>>,
     stopped: Arc<AtomicBool>,
+    #[cfg(not(target_os = "android"))]
+    opus: Mutex<Option<pcm::Decoder>>,
 }
 
 impl Core {
@@ -151,6 +155,8 @@ impl Core {
             frames,
             audio,
             stopped,
+            #[cfg(not(target_os = "android"))]
+            opus: Mutex::new(None),
         }
     }
 
@@ -177,6 +183,22 @@ impl Core {
 
     pub fn next_audio(&self, timeout: Duration) -> Option<AudioPacket> {
         self.audio.pop(timeout)
+    }
+
+    /// The next sound packet decoded into `pcm` (48 kHz stereo float, interleaved): the samples per channel (0 for a
+    /// packet that would not decode) and its time in 48 kHz units; None when nothing came.
+    #[cfg(not(target_os = "android"))]
+    pub fn next_audio_pcm(&self, timeout: Duration, pcm: &mut [f32]) -> Option<(usize, u64)> {
+        let packet = self.audio.pop(timeout)?;
+        let mut decoder = self.opus.lock().ok()?;
+        if decoder.is_none() {
+            *decoder = pcm::Decoder::new().ok();
+        }
+        let samples = decoder
+            .as_mut()
+            .and_then(|d| d.decode(&packet.data, pcm).ok())
+            .unwrap_or(0);
+        Some((samples, packet.time_48khz))
     }
 
     /// Whether the engine has ended (after `stop`).

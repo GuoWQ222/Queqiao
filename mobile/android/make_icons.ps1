@@ -1,6 +1,8 @@
-# Makes the Android app's pictures from assets\queqiao.ico (the magpie, as the desktop program has it):
+# Makes the phone apps' pictures from assets\queqiao.ico (the magpie, as the desktop program has it). Android:
 #   app\src\main\res\mipmap-<density>\ic_launcher.png  the launcher icon: the magpie on a night-blue rounded square
 #   app\src\main\res\drawable-nodpi\magpie.png          the magpie alone (the screens' headers, the session's ball)
+# iOS (mobile\ios\Queqiao\Assets.xcassets): AppIcon.appiconset\icon.png (1024 px, opaque: iOS rounds the corners) and
+# Magpie.imageset\magpie.png.
 # Run it after changing the icon:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File mobile\android\make_icons.ps1
 # Prints ICONS_DONE, or ICONS_FAIL <reason>. ASCII only.
@@ -25,15 +27,22 @@ if (-not $best) { 'ICONS_FAIL no image in queqiao.ico'; return }
 $stream = New-Object IO.MemoryStream(, $bytes[$best.Offset..($best.Offset + $best.Size - 1)])
 $magpie = [Drawing.Image]::FromStream($stream)
 
-function Save-Picture([int]$size, [string]$path, [bool]$square) {
-    $bitmap = New-Object Drawing.Bitmap($size, $size, [Drawing.Imaging.PixelFormat]::Format32bppArgb)
+function Save-Picture([int]$size, [string]$path, [bool]$square, [bool]$full = $false) {
+    $format = if ($full) { [Drawing.Imaging.PixelFormat]::Format24bppRgb } else { [Drawing.Imaging.PixelFormat]::Format32bppArgb }
+    $bitmap = New-Object Drawing.Bitmap($size, $size, $format)
     $g = [Drawing.Graphics]::FromImage($bitmap)
     $g.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
     $g.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
     $g.Clear([Drawing.Color]::Transparent)
     $inset = 0
-    if ($square) {
+    if ($full) {
+        # Full bleed, no transparency (an iOS app icon).
+        $brush = New-Object Drawing.Drawing2D.LinearGradientBrush((New-Object Drawing.Point(0, 0)), (New-Object Drawing.Point(0, $size)),
+            [Drawing.Color]::FromArgb(255, 0x25, 0x30, 0x70), [Drawing.Color]::FromArgb(255, 0x14, 0x1A, 0x3B))
+        $g.FillRectangle($brush, 0, 0, $size, $size)
+        $inset = [int]($size * 0.16)
+    } elseif ($square) {
         # The rounded square of a launcher icon (Android's legacy icons: about 92% of the size, corners 18%).
         $edge = [int]($size * 0.04)
         $side = $size - 2 * $edge
@@ -60,5 +69,8 @@ foreach ($density in @(@('mdpi', 48), @('hdpi', 72), @('xhdpi', 96), @('xxhdpi',
     Save-Picture $density[1] (Join-Path $res "mipmap-$($density[0])\ic_launcher.png") $true
 }
 Save-Picture 192 (Join-Path $res 'drawable-nodpi\magpie.png') $false
+$assets = Join-Path (Split-Path -Parent $PSScriptRoot) 'ios\Queqiao\Assets.xcassets'
+Save-Picture 1024 (Join-Path $assets 'AppIcon.appiconset\icon.png') $false $true
+Save-Picture 192 (Join-Path $assets 'Magpie.imageset\magpie.png') $false
 $magpie.Dispose()
 'ICONS_DONE'

@@ -153,3 +153,36 @@ pub unsafe extern "C" fn qq_next_audio(
     }
     packet.data.len() as isize
 }
+
+/// The next sound packet decoded (iOS): 48 kHz stereo float samples, interleaved, into `out` (room for `capacity`
+/// floats: 5760 * 2 holds the longest packet). Returns the samples per channel written, 0 when nothing came within
+/// `timeout_ms` (or the packet would not decode); `time_48khz` gets the packet's time.
+///
+/// # Safety
+/// `core` from `qq_start`; `out` holds `capacity` floats; `time_48khz` is writable or null.
+#[cfg(not(target_os = "android"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qq_next_audio_pcm(
+    core: *mut Core,
+    timeout_ms: u32,
+    out: *mut f32,
+    capacity: usize,
+    time_48khz: *mut u64,
+) -> isize {
+    let Some(core) = (unsafe { core.as_ref() }) else {
+        return 0;
+    };
+    if out.is_null() {
+        return 0;
+    }
+    let pcm = unsafe { std::slice::from_raw_parts_mut(out, capacity) };
+    let Some((samples, time)) =
+        core.next_audio_pcm(Duration::from_millis(u64::from(timeout_ms)), pcm)
+    else {
+        return 0;
+    };
+    if let Some(slot) = unsafe { time_48khz.as_mut() } {
+        *slot = time;
+    }
+    samples as isize
+}
