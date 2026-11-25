@@ -35,6 +35,9 @@ x11rb::atom_manager! {
         _NET_WM_STATE,
         _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_ABOVE,
+        _NET_WM_STATE_MAXIMIZED_VERT,
+        _NET_WM_STATE_MAXIMIZED_HORZ,
+        WM_CHANGE_STATE,
         _NET_WM_WINDOW_OPACITY,
         _QUEQIAO_BAR,
     }
@@ -394,6 +397,43 @@ impl Window {
 
     pub fn is_visible(&self) -> bool {
         self.visible.get()
+    }
+
+    /// Maximises the window, or restores it (EWMH: both maximised states at once); tests.
+    pub fn set_maximized(&self, on: bool) {
+        let message = ClientMessageEvent::new(
+            32,
+            self.window,
+            self.atoms._NET_WM_STATE,
+            [
+                u32::from(on),
+                self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
+                self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+                1,
+                0,
+            ],
+        );
+        let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+        let _ = self.connection.send_event(false, self.root, mask, message);
+        let _ = self.connection.flush();
+    }
+
+    /// Minimises the window (ICCCM: WM_CHANGE_STATE to IconicState), or restores it (mapped again); tests.
+    pub fn set_minimized(&self, on: bool) {
+        let _ = if on {
+            const ICONIC_STATE: u32 = 3;
+            let message = ClientMessageEvent::new(
+                32,
+                self.window,
+                self.atoms.WM_CHANGE_STATE,
+                [ICONIC_STATE, 0, 0, 0, 0],
+            );
+            let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+            self.connection.send_event(false, self.root, mask, message)
+        } else {
+            self.connection.map_window(self.window)
+        };
+        let _ = self.connection.flush();
     }
 
     /// Whether the window lost part of its picture since the last call (uncovered, resized): the viewer shows its

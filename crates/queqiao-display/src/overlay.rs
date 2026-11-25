@@ -1,6 +1,7 @@
 //! The session window's overlays, in Queqiao's night-blue and gold: a slim bar at the top centre with the session's
-//! commands, which tucks away into a small tab when the pointer leaves it, and a card at the bottom right with the
-//! session's figures (direct or relayed, the delay, frames, data, codec, picture, time, the delay's recent course).
+//! commands, which tucks away into a small tab when the pointer leaves it, and a card with the session's figures (direct
+//! or relayed, the delay, frames, data, codec, picture, time, the delay's recent course), shown from the start at the
+//! bottom right, dragged anywhere inside the window (never out of it) and closed with its button.
 //! Each is a layered popup owned by the session window, so it moves, hides and minimises with it and never covers
 //! other programs; they are drawn with GDI into a 32-bit bitmap given per-pixel alpha (rounded, translucent). The bar
 //! sends its commands to the session window as its menu items do (WM_SYSCOMMAND), "More" opens that same menu.
@@ -19,11 +20,13 @@ use windows::Win32::Graphics::Gdi::{
     CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS,
     DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC,
     DeleteObject, DrawTextW, FF_DONTCARE, FillRect, GetDC, HDC, HFONT, OUT_DEFAULT_PRECIS,
-    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    ReleaseDC, ScreenToClient, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
@@ -39,6 +42,8 @@ const END_RED: u32 = 0x00C8_4A3C;
 const GOOD: u32 = 0x006F_D3A0;
 const FAIR: u32 = 0x00E8_B04A;
 const POOR: u32 = 0x00E8_6A5A;
+/// A button under the pointer.
+const HOVER: u32 = 0x0026_3169;
 /// How opaque the bar and the card are (of 255).
 const OPACITY: u32 = 232;
 /// WM_MOUSELEAVE (winuser.h): the pointer left the bar (asked for with TrackMouseEvent).
@@ -57,8 +62,43 @@ struct BarState {
     hover: Option<usize>,
 }
 
+/// What the card's window procedure needs: the card can be dragged about the session window's drawing area (never out
+/// of it) and closed with its button (2026-11-26: the person wanted it so, shown from the start).
+struct CardState {
+    card: HWND,
+    /// Its top left as the person put it, from the drawing area's top left (None: the bottom right corner).
+    offset: Option<(i32, i32)>,
+    /// While it is dragged: where the pointer and the card were when the drag began (screen).
+    drag: Option<(POINT, POINT)>,
+    /// The close button's place in the card; the pointer over it; pressed on it.
+    close: RECT,
+    close_hover: bool,
+    close_pressed: bool,
+    /// Closed with its button (taken by `tick`); to be drawn again (the close button's highlight changed).
+    closed: bool,
+    dirty: bool,
+    /// The drawing area on the screen and the card's size, where a drag may put it.
+    area: RECT,
+    size: (i32, i32),
+}
+
+impl CardState {
+    /// The card's top left on the screen in `area`: as the person put it or at the bottom right, always inside.
+    fn place(&self, area: RECT, size: (i32, i32), margin: i32) -> (i32, i32) {
+        let (x, y) = match self.offset {
+            Some((dx, dy)) => (area.left + dx, area.top + dy),
+            None => (area.right - size.0 - margin, area.bottom - size.1 - margin),
+        };
+        (
+            x.min(area.right - size.0).max(area.left),
+            y.min(area.bottom - size.1).max(area.top),
+        )
+    }
+}
+
 thread_local! {
     static BAR: RefCell<Option<BarState>> = const { RefCell::new(None) };
+    static CARD: RefCell<Option<CardState>> = const { RefCell::new(None) };
 }
 
 pub struct SessionOverlay {
@@ -74,11 +114,13 @@ pub struct SessionOverlay {
     bar_out: bool,
     last_near: Instant,
     card_on: bool,
+    /// The person closed the card with its button (see `take_card_closed`).
+    card_closed: bool,
     figures: Figures,
     /// Where the bar and card were put last (screen), to move them only when the window moved.
     placed: (RECT, bool, bool),
     hover_drawn: Option<usize>,
-    fonts: (HFONT, HFONT, HFONT, HFONT),
+    fonts: (HFONT, HFONT, HFONT, HFONT, HFONT),
     /// Tests: the bar stays out (for a picture of it).
     keep_out: bool,
     /// The name's width, and each button's with its label and without (pixels).
@@ -120,8 +162,8 @@ impl SessionOverlay {
             )
         };
         let bar = make(WINDOW_EX_STYLE(0))?;
-        // The card lets the mouse through to the picture.
-        let card = make(WS_EX_TRANSPARENT)?;
+        // The card takes the mouse: it is dragged about and has a close button.
+        let card = make(WINDOW_EX_STYLE(0))?;
         let tip = make(WS_EX_TRANSPARENT)?;
         let dpi = unsafe { GetDpiForWindow(owner) }.max(96);
         let scale = f64::from(dpi) / 96.0;
@@ -148,6 +190,7 @@ impl SessionOverlay {
             font(13, 600, w!("Segoe UI")),
             font(15, 400, w!("Segoe MDL2 Assets")),
             font(12, 400, w!("Segoe UI")),
+            font(10, 400, w!("Segoe MDL2 Assets")),
         );
         BAR.with_borrow_mut(|state| {
             *state = Some(BarState {
@@ -155,6 +198,20 @@ impl SessionOverlay {
                 scale,
                 places: Vec::new(),
                 hover: None,
+            })
+        });
+        CARD.with_borrow_mut(|state| {
+            *state = Some(CardState {
+                card,
+                offset: None,
+                drag: None,
+                close: RECT::default(),
+                close_hover: false,
+                close_pressed: false,
+                closed: false,
+                dirty: false,
+                area: RECT::default(),
+                size: (0, 0),
             })
         });
         let mut overlay = SessionOverlay {
@@ -168,6 +225,7 @@ impl SessionOverlay {
             bar_out: true,
             last_near: Instant::now(),
             card_on: false,
+            card_closed: false,
             figures: Figures::default(),
             placed: (RECT::default(), false, false),
             hover_drawn: None,
@@ -190,6 +248,142 @@ impl SessionOverlay {
 
     pub fn card_shown(&self) -> bool {
         self.card_on
+    }
+
+    /// Whether the person closed the card with its button since the last call (the session unticks its menu item).
+    pub fn take_card_closed(&mut self) -> bool {
+        std::mem::take(&mut self.card_closed)
+    }
+
+    /// Tests: the card dragged by (dx, dy) pixels as the mouse drags it (then whether it is still inside the session
+    /// window's drawing area).
+    pub fn drag_card_for_test(&mut self, dx: i32, dy: i32) -> bool {
+        let mut place = RECT::default();
+        let _ = unsafe { GetWindowRect(self.card, &mut place) };
+        let start = POINT {
+            x: place.left,
+            y: place.top,
+        };
+        card_drag(start, POINT { x: dx, y: dy });
+        self.card_inside()
+    }
+
+    /// Whether the card lies inside the session window's drawing area.
+    fn card_inside(&self) -> bool {
+        let mut place = RECT::default();
+        let mut client = RECT::default();
+        let mut corner = POINT::default();
+        unsafe {
+            let _ = GetWindowRect(self.card, &mut place);
+            let _ = GetClientRect(self.owner, &mut client);
+            let _ = ClientToScreen(self.owner, &mut corner);
+        }
+        place.left >= corner.x
+            && place.top >= corner.y
+            && place.right <= corner.x + client.right
+            && place.bottom <= corner.y + client.bottom
+    }
+
+    /// Tests: a click on the card's close button, as the mouse gives it to the card's window.
+    pub fn close_card_for_test(&mut self) {
+        let close = CARD.with_borrow(|state| state.as_ref().map(|state| state.close));
+        let Some(close) = close else {
+            return;
+        };
+        let point = (((close.top + close.bottom) / 2) as u32 & 0xFFFF) << 16
+            | (((close.left + close.right) / 2) as u32 & 0xFFFF);
+        unsafe {
+            SendMessageW(
+                self.card,
+                WM_LBUTTONDOWN,
+                Some(WPARAM(1)),
+                Some(LPARAM(point as isize)),
+            );
+            SendMessageW(
+                self.card,
+                WM_LBUTTONUP,
+                Some(WPARAM(0)),
+                Some(LPARAM(point as isize)),
+            );
+        }
+        self.tick();
+    }
+
+    /// Tests: for the bar and the card, whether each shows, and whether it is in front of the session window (owned
+    /// windows belong just above their owner: one behind it cannot be seen).
+    pub fn shown_for_test(&self) -> ((bool, bool), (bool, bool)) {
+        let state = |hwnd: HWND| unsafe {
+            let shown = IsWindowVisible(hwnd).as_bool();
+            let mut above = GetWindow(self.owner, GW_HWNDPREV);
+            let mut in_front = false;
+            while let Ok(window) = above {
+                if window.0.is_null() {
+                    break;
+                }
+                if window == hwnd {
+                    in_front = true;
+                    break;
+                }
+                above = GetWindow(window, GW_HWNDPREV);
+            }
+            (shown, in_front)
+        };
+        (state(self.bar), state(self.card))
+    }
+
+    /// Tests: puts the pointer near the top of the session window, as the person does to bring the bar out.
+    pub fn point_at_top_for_test(&mut self) {
+        let mut client = RECT::default();
+        let mut corner = POINT::default();
+        unsafe {
+            let _ = GetClientRect(self.owner, &mut client);
+            let _ = ClientToScreen(self.owner, &mut corner);
+            let _ = SetCursorPos(
+                corner.x + client.right / 2 + px(200, self.scale),
+                corner.y + px(20, self.scale),
+            );
+        }
+    }
+
+    /// Tests: whether the bar is seen on the screen: the window Windows finds on top at a point of it near its left end
+    /// (beside the name) is the bar itself (a copy of the screen cannot tell: it leaves the layered bar out over the
+    /// picture), with where it is.
+    pub fn bar_seen_for_test(&self) -> (bool, String) {
+        let mut place = RECT::default();
+        let _ = unsafe { GetWindowRect(self.bar, &mut place) };
+        let point = POINT {
+            x: place.left + px(7, self.scale),
+            y: (place.top + place.bottom) / 2,
+        };
+        let on_top = unsafe { WindowFromPoint(point) };
+        let what = if on_top == self.bar {
+            "the bar".to_string()
+        } else if on_top == self.owner {
+            "the session window".to_string()
+        } else {
+            let mut class = [0u16; 64];
+            let length = unsafe { GetClassNameW(on_top, &mut class) }.max(0) as usize;
+            let root = unsafe { GetAncestor(on_top, GA_ROOT) };
+            format!(
+                "another window ({}{})",
+                String::from_utf16_lossy(&class[..length]),
+                if root == self.owner {
+                    ", in the session window"
+                } else {
+                    ""
+                }
+            )
+        };
+        (
+            on_top == self.bar,
+            format!(
+                "bar at {},{} {}x{}, on top there: {what}",
+                place.left,
+                place.top,
+                place.right - place.left,
+                place.bottom - place.top
+            ),
+        )
     }
 
     /// Tests: keeps the bar out whatever the pointer does (for a picture of it).
@@ -273,6 +467,15 @@ impl SessionOverlay {
         let mut corner = POINT::default();
         unsafe {
             if IsIconic(self.owner).as_bool() || !IsWindowVisible(self.owner).as_bool() {
+                // Hidden with it (Windows left the card on the desktop: hidden here, not left to it); all drawn and
+                // shown again once it is back.
+                for window in [self.bar, self.card, self.tip] {
+                    if IsWindowVisible(window).as_bool() {
+                        let _ = ShowWindow(window, SW_HIDE);
+                    }
+                }
+                self.placed.1 = false;
+                self.placed.2 = false;
                 return;
             }
             let _ = GetClientRect(self.owner, &mut client);
@@ -312,7 +515,19 @@ impl SessionOverlay {
             self.draw_bar(area);
             self.placed.1 = true;
         }
-        if self.card_on && (moved || !self.placed.2) {
+        // The card: closed with its button, or its close button's highlight changed.
+        let (closed, dirty) = CARD.with_borrow_mut(|state| match state {
+            Some(state) => (
+                std::mem::take(&mut state.closed),
+                std::mem::take(&mut state.dirty),
+            ),
+            None => (false, false),
+        });
+        if closed && self.card_on {
+            self.card_on = false;
+            self.card_closed = true;
+        }
+        if self.card_on && (moved || !self.placed.2 || dirty) {
             self.draw_card_at(area);
             self.placed.2 = true;
         } else if !self.card_on && self.placed.2 {
@@ -531,8 +746,27 @@ impl SessionOverlay {
     fn draw_card_at(&mut self, area: RECT) {
         let s = self.scale;
         let (width, height) = (px(214, s), px(176, s));
-        let left = area.right - width - px(12, s);
-        let top = area.bottom - height - px(12, s);
+        // Where the person put it (or the bottom right), inside the drawing area; the close button at the top right.
+        let close = RECT {
+            left: width - px(30, s),
+            top: px(4, s),
+            right: width - px(6, s),
+            bottom: px(28, s),
+        };
+        let (left, top, close_hover) = CARD.with_borrow_mut(|state| match state {
+            Some(state) => {
+                let (left, top) = state.place(area, (width, height), px(12, s));
+                state.area = area;
+                state.size = (width, height);
+                state.close = close;
+                (left, top, state.close_hover)
+            }
+            None => (
+                area.right - width - px(12, s),
+                area.bottom - height - px(12, s),
+                false,
+            ),
+        });
         let fonts = self.fonts;
         let figures = self.figures.clone();
         paint_layered(
@@ -541,10 +775,22 @@ impl SessionOverlay {
             top,
             width,
             height,
-            px(12, s),
+            px(8, s),
             |dc, w, _h| {
                 fill(dc, 0, 0, w, height, INK);
                 let pad = px(12, s);
+                // The close button (Segoe MDL2's "ChromeClose").
+                if close_hover {
+                    fill_round(dc, &close, px(6, s), HOVER);
+                }
+                text(
+                    dc,
+                    "\u{E8BB}",
+                    close,
+                    fonts.4,
+                    if close_hover { TEXT } else { MUTED },
+                    DT_CENTER.0,
+                );
                 // The path and the delay, coloured by how good it is.
                 let (dot, delay) = match figures.delay_ms {
                     Some(ms) if ms < 30.0 => (GOOD, format!("{ms:.0} ms")),
@@ -579,7 +825,7 @@ impl SessionOverlay {
                 text(
                     dc,
                     &delay,
-                    rect(pad, px(8, s), w - 2 * pad, px(20, s)),
+                    rect(pad, px(8, s), w - 2 * pad - px(24, s), px(20, s)),
                     fonts.1,
                     dot,
                     DT_RIGHT.0,
@@ -664,7 +910,6 @@ impl SessionOverlay {
                 fill(dc, px(14, s), 0, w - px(28, s), 1, GOLD);
             },
         );
-        let _ = unsafe { ShowWindow(self.card, SW_SHOWNOACTIVATE) };
     }
 }
 
@@ -674,11 +919,18 @@ impl Drop for SessionOverlay {
             let _ = DestroyWindow(self.bar);
             let _ = DestroyWindow(self.card);
             let _ = DestroyWindow(self.tip);
-            for font in [self.fonts.0, self.fonts.1, self.fonts.2, self.fonts.3] {
+            for font in [
+                self.fonts.0,
+                self.fonts.1,
+                self.fonts.2,
+                self.fonts.3,
+                self.fonts.4,
+            ] {
                 let _ = DeleteObject(font.into());
             }
         }
         BAR.with_borrow_mut(|state| *state = None);
+        CARD.with_borrow_mut(|state| *state = None);
     }
 }
 
@@ -925,7 +1177,17 @@ pub(crate) fn paint_layered_at(
             Some(&raw const blend),
             ULW_ALPHA,
         );
-        if !IsWindowVisible(hwnd).as_bool() {
+        // Never on the desktop while the window it belongs to is minimised or hidden: Windows hides owned windows
+        // then, and showing one again here (the card of figures, drawn each second) left it on the desktop
+        // (2026-11-26). The owner's `tick` draws it again once that window is back.
+        let owner_away = GetWindow(hwnd, GW_OWNER).is_ok_and(|owner| {
+            !owner.0.is_null() && (IsIconic(owner).as_bool() || !IsWindowVisible(owner).as_bool())
+        });
+        if owner_away {
+            if IsWindowVisible(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        } else if !IsWindowVisible(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
         SelectObject(memory, old);
@@ -941,6 +1203,9 @@ extern "system" fn overlay_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if CARD.with_borrow(|state| state.as_ref().is_some_and(|state| state.card == hwnd)) {
+        return card_proc(hwnd, message, wparam, lparam);
+    }
     match message {
         WM_MOUSEMOVE => {
             let (x, y) = (
@@ -1022,5 +1287,165 @@ extern "system" fn overlay_proc(
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
+/// The card's window: dragged anywhere inside the session window's drawing area (never out of it), closed with its
+/// button at the top right.
+fn card_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let at = || POINT {
+        x: (lparam.0 & 0xFFFF) as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+    };
+    let on_close = |point: POINT| {
+        CARD.with_borrow(|state| {
+            state.as_ref().is_some_and(|state| {
+                (state.close.left..state.close.right).contains(&point.x)
+                    && (state.close.top..state.close.bottom).contains(&point.y)
+            })
+        })
+    };
+    match message {
+        WM_LBUTTONDOWN => {
+            let point = at();
+            let mut cursor = POINT::default();
+            let mut place = RECT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut cursor);
+                let _ = GetWindowRect(hwnd, &mut place);
+                SetCapture(hwnd);
+            }
+            let close = on_close(point);
+            CARD.with_borrow_mut(|state| {
+                if let Some(state) = state {
+                    state.close_pressed = close;
+                    state.drag = (!close).then_some((
+                        cursor,
+                        POINT {
+                            x: place.left,
+                            y: place.top,
+                        },
+                    ));
+                }
+            });
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let drag = CARD.with_borrow(|state| state.as_ref().and_then(|state| state.drag));
+            if let Some((start, card)) = drag {
+                let mut cursor = POINT::default();
+                let _ = unsafe { GetCursorPos(&mut cursor) };
+                card_drag(
+                    card,
+                    POINT {
+                        x: cursor.x - start.x,
+                        y: cursor.y - start.y,
+                    },
+                );
+            } else {
+                let hover = on_close(at());
+                CARD.with_borrow_mut(|state| {
+                    if let Some(state) = state
+                        && state.close_hover != hover
+                    {
+                        state.close_hover = hover;
+                        state.dirty = true;
+                    }
+                });
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = unsafe { TrackMouseEvent(&mut track) };
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let point = at();
+            let close = on_close(point);
+            let closed = CARD.with_borrow_mut(|state| {
+                let state = state.as_mut()?;
+                state.drag = None;
+                let closed = std::mem::take(&mut state.close_pressed) && close;
+                if closed {
+                    state.closed = true;
+                    state.close_hover = false;
+                }
+                Some(closed)
+            });
+            unsafe {
+                let _ = ReleaseCapture();
+                if closed == Some(true) {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            CARD.with_borrow_mut(|state| {
+                if let Some(state) = state {
+                    state.drag = None;
+                }
+            });
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            CARD.with_borrow_mut(|state| {
+                if let Some(state) = state
+                    && state.close_hover
+                {
+                    state.close_hover = false;
+                    state.dirty = true;
+                }
+            });
+            LRESULT(0)
+        }
+        // A hand over the close button, the four arrows of moving elsewhere.
+        WM_SETCURSOR => {
+            let mut cursor = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut cursor);
+                let _ = ScreenToClient(hwnd, &mut cursor);
+                let shape = if on_close(cursor) {
+                    IDC_HAND
+                } else {
+                    IDC_SIZEALL
+                };
+                if let Ok(shape) = LoadCursorW(None, shape) {
+                    SetCursor(Some(shape));
+                }
+            }
+            LRESULT(1)
+        }
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
+/// Moves the card to `card` + `moved` (screen), kept inside the drawing area, and keeps that place for the rest of the
+/// session (as an offset from the drawing area's top left, so it follows the window).
+fn card_drag(card: POINT, moved: POINT) {
+    let placed = CARD.with_borrow_mut(|state| {
+        let state = state.as_mut()?;
+        let (area, size) = (state.area, state.size);
+        let x = (card.x + moved.x).min(area.right - size.0).max(area.left);
+        let y = (card.y + moved.y).min(area.bottom - size.1).max(area.top);
+        state.offset = Some((x - area.left, y - area.top));
+        Some((state.card, x, y))
+    });
+    if let Some((window, x, y)) = placed {
+        let _ = unsafe {
+            SetWindowPos(
+                window,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        };
     }
 }

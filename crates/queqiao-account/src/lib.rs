@@ -193,6 +193,7 @@ impl Account {
                 device_name: device.name.clone(),
                 role,
                 public_key: key.public_hex().to_string(),
+                machine: device.machine(),
             },
             Credentials::NewAccount(user, password) => ClientMessage::Register {
                 user: user.to_string(),
@@ -201,6 +202,7 @@ impl Account {
                 device_name: device.name.clone(),
                 role,
                 public_key: key.public_hex().to_string(),
+                machine: device.machine(),
             },
             Credentials::Saved => ClientMessage::Resume {
                 refresh_token: login.refresh_token.clone().ok_or_else(|| {

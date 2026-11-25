@@ -46,6 +46,11 @@ pub enum ClientMessage {
         /// The device's Ed25519 public key, hex. A password login may register a new key (a reinstalled
         /// device); a resume may not change it.
         public_key: String,
+        /// A tag of the PC this program runs on (a salted hash of its machine id, not the id itself): a password
+        /// login from a PC reinstalled under a new device id replaces the account's earlier device of the same PC
+        /// and name (it stayed in the list, offline, 2026-11-26). Empty from programs before it.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        machine: String,
     },
     Resume {
         refresh_token: String,
@@ -62,6 +67,8 @@ pub enum ClientMessage {
         device_name: String,
         role: Role,
         public_key: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        machine: String,
     },
     /// Forward to the program `to_role` on device `to` (same account only).
     Signal {

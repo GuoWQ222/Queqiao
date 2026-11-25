@@ -73,6 +73,11 @@ impl Store {
                 "last_address",
                 "ALTER TABLE devices ADD COLUMN last_address TEXT NOT NULL DEFAULT ''",
             ),
+            // The PC a device runs on (a salted hash of its machine id): a reinstalled PC replaces its earlier device.
+            (
+                "machine",
+                "ALTER TABLE devices ADD COLUMN machine TEXT NOT NULL DEFAULT ''",
+            ),
         ] {
             let present: bool = db
                 .prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = ?1")
@@ -159,10 +164,23 @@ impl Store {
 
     /// Whether `device_id` may log in to the account `user_id`, asked before the password is checked: not a device of
     /// another account, and not a new one past MAX_DEVICES.
-    pub fn device_admissible(&self, user_id: i64, device_id: &str) -> Result<(), String> {
+    pub fn device_admissible(
+        &self,
+        user_id: i64,
+        device_id: &str,
+        name: &str,
+        machine: &str,
+    ) -> Result<(), String> {
         match self.device_owner(device_id)? {
             Some(owner) if owner != user_id => Err("this device belongs to another account".into()),
             Some(_) => Ok(()),
+            // A reinstalled PC takes its earlier device's place, even in a full account.
+            None if !self
+                .same_machine(user_id, device_id, name, machine)?
+                .is_empty() =>
+            {
+                Ok(())
+            }
             None => {
                 let devices: i64 = self
                     .db
@@ -338,6 +356,47 @@ impl Store {
                 },
             )
             .optional()
+            .map_err(|e| e.to_string())
+    }
+
+    /// The user's other devices on the same PC under the same name: what a password login of `device_id` replaces
+    /// (the PC was reinstalled and made a new device id; its earlier device stayed in the list, offline, 2026-11-26).
+    /// Nothing for an empty tag (programs from before it). The name too, so two PCs cloned from one image (one
+    /// machine id) and named apart never replace each other.
+    pub fn same_machine(
+        &self,
+        user_id: i64,
+        device_id: &str,
+        name: &str,
+        machine: &str,
+    ) -> Result<Vec<String>, String> {
+        if machine.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut query = self
+            .db
+            .prepare(
+                "SELECT id FROM devices WHERE user_id = ?1 AND id != ?2 AND name = ?3 AND machine = ?4 ORDER BY id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map(
+                params![user_id, device_id, name, machine.to_ascii_lowercase()],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<String>, _>>()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Records the PC a device runs on (see [`Store::same_machine`]).
+    pub fn set_machine(&self, device_id: &str, machine: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "UPDATE devices SET machine = ?2 WHERE id = ?1",
+                params![device_id, machine.to_ascii_lowercase()],
+            )
+            .map(|_| ())
             .map_err(|e| e.to_string())
     }
 
@@ -906,15 +965,61 @@ mod tests {
             store.register_device(user.id, "one-more", "PC", &format!("{:064x}", 999), true);
         assert!(refused.is_err_and(|e| e.contains("most it may have")));
         // Asked before the password: a new device past the most, another account's device.
-        assert!(store.device_admissible(user.id, "one-more").is_err());
-        assert!(store.device_admissible(user.id, "d0").is_ok());
-        assert!(store.device_admissible(user.id + 1, "d0").is_err());
-        assert!(store.device_admissible(-1, "brand-new").is_ok());
+        assert!(
+            store
+                .device_admissible(user.id, "one-more", "PC", "")
+                .is_err()
+        );
+        assert!(store.device_admissible(user.id, "d0", "PC", "").is_ok());
+        assert!(
+            store
+                .device_admissible(user.id + 1, "d0", "PC", "")
+                .is_err()
+        );
+        assert!(store.device_admissible(-1, "brand-new", "PC", "").is_ok());
         // A known device still logs in.
         assert!(
             !store
                 .register_device(user.id, "d0", "PC", &format!("{:064x}", 0), true)
                 .unwrap()
+        );
+        // A reinstalled PC (a new device id, the same PC and name) takes its earlier device's place, even in a full
+        // account; a PC of the same image under another name, or a program without the tag, does not.
+        let machine = "ab".repeat(32);
+        store.set_machine("d3", &machine).unwrap();
+        assert!(
+            store
+                .device_admissible(user.id, "d3-again", "PC", &machine)
+                .is_ok()
+        );
+        assert_eq!(
+            store
+                .same_machine(user.id, "d3-again", "PC", &machine.to_ascii_uppercase())
+                .unwrap(),
+            vec!["d3".to_string()]
+        );
+        assert!(
+            store
+                .same_machine(user.id, "d3-again", "Other PC", &machine)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .same_machine(user.id, "d3-again", "PC", "")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .same_machine(user.id + 1, "d3-again", "PC", &machine)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .device_admissible(user.id, "d3-again", "Other PC", &machine)
+                .is_err()
         );
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);

@@ -66,6 +66,17 @@ impl DeviceIdentity {
         })
     }
 
+    /// The tag sent with a password login (see `ClientMessage::Login`'s `machine`): this device's place, unless it is
+    /// kept in memory (a test's or a probe's, or handed over by the service, whose own folder is not the person's),
+    /// which replaces nothing.
+    pub fn machine(&self) -> String {
+        if self.in_memory {
+            String::new()
+        } else {
+            machine_tag()
+        }
+    }
+
     /// This PC's identity: made once (random id, the computer's name), then reused; with its key.
     pub fn load_or_create() -> Result<DeviceIdentity, Error> {
         let mut identity = DeviceIdentity::load_or_create_file()?;
@@ -373,6 +384,62 @@ pub(crate) fn random_hex(count: usize) -> String {
     hex(&bytes)
 }
 
+/// Where this device's identity is kept, as a tag: this PC's machine id and the folder of `device.json` (one for each
+/// person on the PC, so two people's devices on one PC never replace each other), hashed with a fixed salt so the
+/// server never learns the machine id. A reinstall makes a new device id at the same place: the server lets it
+/// replace the earlier device of that place (2026-11-26: both stayed in the list, one offline). Empty when the
+/// machine id cannot be read.
+pub fn machine_tag() -> String {
+    use sha2::{Digest, Sha256};
+    let Some(id) = machine_id().filter(|id| !id.trim().is_empty()) else {
+        return String::new();
+    };
+    let place = folder()
+        .map(|folder| folder.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut hash = Sha256::new();
+    hash.update(b"queqiao device place v1\0");
+    hash.update(id.trim().as_bytes());
+    hash.update(b"\0");
+    hash.update(place.as_bytes());
+    hex(&hash.finalize())
+}
+
+/// Windows' id of this installation (`MachineGuid`, made when Windows is set up).
+#[cfg(windows)]
+fn machine_id() -> Option<String> {
+    use windows::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+    };
+    use windows::core::w;
+    let mut buffer = [0u16; 128];
+    let mut size = std::mem::size_of_val(&buffer) as u32;
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!("SOFTWARE\\Microsoft\\Cryptography"),
+            w!("MachineGuid"),
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if read.is_err() {
+        return None;
+    }
+    let length = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..length]))
+}
+
+/// systemd's (or D-Bus's) id of this installation.
+#[cfg(not(windows))]
+fn machine_id() -> Option<String> {
+    std::fs::read_to_string("/etc/machine-id")
+        .or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id"))
+        .ok()
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -403,5 +470,21 @@ mod tests {
         assert!(unprotect(&sealed[..sealed.len() / 2]).is_err());
         assert_eq!(unhex(&hex(&[0, 255, 16])), Some(vec![0, 255, 16]));
         assert_eq!(random_hex(16).len(), 32);
+    }
+
+    #[test]
+    fn the_machine_tag_is_steady_and_hides_the_id() {
+        let id = machine_id().expect("this PC's machine id");
+        let tag = machine_tag();
+        assert_eq!(tag.len(), 64, "{tag}");
+        assert_eq!(tag, machine_tag());
+        assert!(!tag.contains(&id.trim().to_ascii_lowercase().replace('-', "")));
+        // Tests' devices in memory send none.
+        assert!(
+            DeviceIdentity::in_memory("probe")
+                .unwrap()
+                .machine()
+                .is_empty()
+        );
     }
 }

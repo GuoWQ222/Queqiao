@@ -84,7 +84,7 @@ $failed = @()
 # A comma list comes as one string when the script is started with -File (tools\sunshine_run.ps1): split it. Unknown
 # names fail the run: "direct,h265" taken as one name ran no session and still passed (2026-11-23).
 $Sessions = @($Sessions | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-$knownSessions = @("all", "direct", "relay", "allowed", "declined", "ended-here", "av1", "h265", "drag", "help", "help-link", "help-fixed", "help-noask", "removed", "locked", "two-at-once")
+$knownSessions = @("all", "direct", "relay", "allowed", "declined", "ended-here", "av1", "h265", "drag", "window", "help", "help-link", "help-fixed", "help-noask", "removed", "locked", "two-at-once")
 $unknownSessions = @($Sessions | Where-Object { $knownSessions -notcontains $_ })
 if ($unknownSessions.Count) { $failed += "unknown sessions: $($unknownSessions -join ", ")" }
 try {
@@ -211,6 +211,9 @@ try {
         # A File Explorer window dragged round the screen for 12 s mid-session (scripts\drag_window.ps1), with the
         # bitrate course on both sides and a picture in the middle of it. The viewer asks for 4 Mbit/s at most: the
         # agent's encoder must follow while it encodes (Intel's Quick Sync kept 12-17 Mbit/s before, 2026-11-23).
+        # The session window in full screen and back, minimised and restored: the bar and the card of figures stay in
+        # front of it (full screen once put them behind it, 2026-11-26) and hide with it (the card stayed on the desktop).
+        @('window', '', '', 'path after ', 'window test: done', $true),
         @('drag', $DragForce, '', 'bitrate course, every second', 'arrival course, every second', $true)
     )
     foreach ($run in $runs) {
@@ -228,6 +231,7 @@ try {
         if ($label -eq 'relay') { $viewerArgs += ' --terminal-test --game-mouse-test --screen 0 --opacity 60 --boss-key-test' }
         if ($label -eq 'av1') { $viewerArgs += ' --codec av1 --mic-test' }
         if ($label -eq 'h265') { $viewerArgs += ' --codec h265 --chroma444 --ten-bit' }
+        if ($label -eq 'window') { $viewerArgs += ' --codec h264 --window-test --seconds 24' }
         # H.264 asked for (Automatic picks AV1 where both PCs have it on their GPUs): the H.264 path stays tested.
         # The bar and the card of figures on, and a picture of the window with them (viewer_session.bmp).
         # The file transfer window too: that PC's test folder listed, down.txt fetched from it, up.txt sent into it.
@@ -412,6 +416,22 @@ try {
                 }
                 if ((Get-Content -LiteralPath (Join-Path $browseRemote 'up.txt') -Raw -ErrorAction SilentlyContinue) -ne 'queqiao browse test: up') {
                     $failed += "$label viewer (up.txt did not arrive in that PC's folder)"
+                }
+            }
+            # The window test: the bar and the card in front of the window (above it in the order of windows) in full
+            # screen and after it, from a normal and a maximised window, and restored; both hidden while it is
+            # minimised. "seen" (the window on top of the screen there) only for the report: on the PC the user's
+            # Remote Desktop window covers the screen.
+            if ($label -eq 'window' -and $program -eq 'viewer') {
+                foreach ($state in 'in full screen', 'after full screen', 'maximized, in full screen', 'maximized, after full screen', 'restored') {
+                    $wanted = "^window test: ${state}: bar shown true, in front true, seen \w+; card shown true, in front true "
+                    if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label viewer (expected '$wanted')" }
+                }
+                $wanted = '^window test: minimized: bar shown false, in front \w+, seen \w+; card shown false, '
+                if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label viewer (expected '$wanted')" }
+                # The card dragged far out of the window stays inside it; its close button closes it.
+                foreach ($wanted in '^window test: card inside the window after dragging it out: true$', '^window test: card closed by its button: true$', '^card of figures: closed with its button$') {
+                    if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label viewer (expected '$wanted')" }
                 }
             }
             if ($extra -like '*--clipboard-test*' -and -not ($text | Where-Object { $_ -match 'test image from the other side received: yes' })) {

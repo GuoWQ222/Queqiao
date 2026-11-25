@@ -1,10 +1,11 @@
 //! The session window's overlays on Linux (Windows: overlay.rs), in Queqiao's night-blue and gold: the bar at the top
 //! centre with the session's commands, which tucks away into a small tab when the pointer leaves it; the tip under a
-//! button when the bar has no room for labels; the card of figures at the bottom right.
+//! button when the bar has no room for labels; the card of figures, at the bottom right until the person drags it elsewhere
+//! in the window, with a close button.
 //!
 //! Each is a child window of the session window, so it moves, hides and goes with it and never covers other programs.
 //! They have an X connection of their own: their pointer events never reach the session's input, so a click on the
-//! bar never goes to the other PC; the card and the tip let the pointer through (an empty SHAPE input region), and the
+//! bar or the card never goes to the other PC; the tip lets the pointer through (an empty SHAPE input region), and the
 //! bar's and the tab's corners are cut round (the SHAPE bounding region). They are drawn on the CPU (text by ab_glyph
 //! with egui's font and the system's for Chinese and Japanese; the buttons' icons drawn as shapes, Segoe MDL2's
 //! glyphs being Windows' own) and put with PutImage. A click on the bar reaches the session window as a client
@@ -337,6 +338,13 @@ pub struct SessionOverlay {
     bar_out: bool,
     last_near: Instant,
     card_on: bool,
+    /// The card's top left as the person dragged it (None: the bottom right); while dragged, where the pointer (on the
+    /// screen) and the card were when it began; the pointer over its close button, pressed on it; closed with it.
+    card_offset: Option<(i32, i32)>,
+    card_drag: Option<((i32, i32), (i32, i32))>,
+    close_hover: bool,
+    close_pressed: bool,
+    card_closed: bool,
     figures: Figures,
     /// The button under the pointer, and the one pressed.
     hover: Option<usize>,
@@ -353,6 +361,14 @@ pub struct SessionOverlay {
     drawn: Option<Drawn>,
 }
 
+/// The card's size, and its close button (x, y, width, height) in it.
+const CARD_SIZE: (i32, i32) = (214, 176);
+const CLOSE: (i32, i32, i32, i32) = (CARD_SIZE.0 - 30, 4, 24, 24);
+
+/// Whether (x, y) in the card is on its close button.
+fn on_close(x: i32, y: i32) -> bool {
+    (CLOSE.0..CLOSE.0 + CLOSE.2).contains(&x) && (CLOSE.1..CLOSE.1 + CLOSE.3).contains(&y)
+}
 const NAME_SIZE: f32 = 14.0;
 /// The delay's dot and the time after the name ("● 00:12:34").
 const CLOCK_WIDTH: i32 = 70;
@@ -441,23 +457,29 @@ impl SessionOverlay {
                 | EventMask::BUTTON_RELEASE,
             hand,
         )?;
-        let card = make(EventMask::EXPOSURE, x11rb::NONE)?;
+        // The card takes the pointer: it is dragged about and has a close button.
+        let card = make(
+            EventMask::EXPOSURE
+                | EventMask::POINTER_MOTION
+                | EventMask::LEAVE_WINDOW
+                | EventMask::BUTTON_PRESS
+                | EventMask::BUTTON_RELEASE,
+            x11rb::NONE,
+        )?;
         let tip = make(EventMask::EXPOSURE, x11rb::NONE)?;
         connection.free_cursor(hand).map_err(x11_error)?;
-        // The card and the tip let the pointer through to the picture.
-        for window in [card, tip] {
-            connection
-                .shape_rectangles(
-                    shape::SO::SET,
-                    shape::SK::INPUT,
-                    ClipOrdering::UNSORTED,
-                    window,
-                    0,
-                    0,
-                    &[],
-                )
-                .map_err(x11_error)?;
-        }
+        // The tip lets the pointer through to the picture.
+        connection
+            .shape_rectangles(
+                shape::SO::SET,
+                shape::SK::INPUT,
+                ClipOrdering::UNSORTED,
+                tip,
+                0,
+                0,
+                &[],
+            )
+            .map_err(x11_error)?;
         let gc = connection.generate_id().map_err(x11_error)?;
         connection
             .create_gc(gc, bar, &CreateGCAux::new())
@@ -498,6 +520,11 @@ impl SessionOverlay {
             bar_out: true,
             last_near: Instant::now(),
             card_on: false,
+            card_offset: None,
+            card_drag: None,
+            close_hover: false,
+            close_pressed: false,
+            card_closed: false,
             figures: Figures::default(),
             hover: None,
             pressed: None,
@@ -525,6 +552,62 @@ impl SessionOverlay {
 
     pub fn card_shown(&self) -> bool {
         self.card_on
+    }
+
+    /// Whether the person closed the card with its button since the last call (the session unticks its menu item).
+    pub fn take_card_closed(&mut self) -> bool {
+        std::mem::take(&mut self.card_closed)
+    }
+
+    /// Tests: the card dragged by (dx, dy) pixels as the pointer drags it (then whether it is still inside the session
+    /// window).
+    pub fn drag_card_for_test(&mut self, dx: i32, dy: i32) -> bool {
+        self.card_press(CARD_SIZE.0 / 2, CARD_SIZE.1 / 2, (0, 0));
+        self.card_motion(CARD_SIZE.0 / 2, CARD_SIZE.1 / 2, (dx, dy));
+        self.card_release(CARD_SIZE.0 / 2, CARD_SIZE.1 / 2);
+        let _ = self.connection.flush();
+        let (x, y, width, height) = self.card.place;
+        x >= 0 && y >= 0 && x + width <= self.area.0 && y + height <= self.area.1
+    }
+
+    /// Tests: a click on the card's close button.
+    pub fn close_card_for_test(&mut self) {
+        let (x, y) = (CLOSE.0 + CLOSE.2 / 2, CLOSE.1 + CLOSE.3 / 2);
+        self.card_press(x, y, (0, 0));
+        self.card_release(x, y);
+        let _ = self.connection.flush();
+    }
+
+    /// Tests: for the bar and the card, whether each shows (viewable: mapped, in a mapped window), and whether it is in
+    /// front of the session window (a child always is, over its parent, while it shows).
+    pub fn shown_for_test(&self) -> ((bool, bool), (bool, bool)) {
+        let state = |window: u32| {
+            let viewable = self
+                .connection
+                .get_window_attributes(window)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .is_some_and(|reply| {
+                    reply.map_state == x11rb::protocol::xproto::MapState::VIEWABLE
+                });
+            (viewable, viewable)
+        };
+        (state(self.bar.window), state(self.card.window))
+    }
+
+    /// Tests: the pointer near the top of the session window, as the person puts it to bring the bar out.
+    pub fn point_at_top_for_test(&mut self) {
+        self.pointer = Some((self.area.0 / 2 + 200, 20));
+    }
+
+    /// Tests: whether the bar is out and shows, with where it is.
+    pub fn bar_seen_for_test(&self) -> (bool, String) {
+        let ((shown, _), _) = self.shown_for_test();
+        let (x, y, width, height) = self.bar.place;
+        (
+            shown && self.bar_out,
+            format!("bar at {x},{y} {width}x{height}"),
+        )
     }
 
     /// Tests: keeps the bar out whatever the pointer does (for a picture of it).
@@ -635,6 +718,32 @@ impl SessionOverlay {
                     && leave.detail != x11rb::protocol::xproto::NotifyDetail::INFERIOR =>
             {
                 self.pointer = None;
+            }
+            // The card: dragged (the press grabs the pointer until it is let go), closed with its button.
+            Event::ButtonPress(press) if press.event == self.card.window && press.detail == 1 => {
+                self.card_press(
+                    i32::from(press.event_x),
+                    i32::from(press.event_y),
+                    (i32::from(press.root_x), i32::from(press.root_y)),
+                );
+            }
+            Event::MotionNotify(motion) if motion.event == self.card.window => {
+                self.card_motion(
+                    i32::from(motion.event_x),
+                    i32::from(motion.event_y),
+                    (i32::from(motion.root_x), i32::from(motion.root_y)),
+                );
+            }
+            Event::ButtonRelease(release)
+                if release.event == self.card.window && release.detail == 1 =>
+            {
+                self.card_release(i32::from(release.event_x), i32::from(release.event_y));
+            }
+            Event::LeaveNotify(leave)
+                if leave.event == self.card.window && self.close_hover && self.card_on =>
+            {
+                self.close_hover = false;
+                self.draw_card();
             }
             Event::ButtonPress(press) if press.event == self.bar.window && press.detail == 1 => {
                 self.pressed = self.place_at(i32::from(press.event_x), i32::from(press.event_y));
@@ -887,8 +996,56 @@ impl SessionOverlay {
         }
     }
 
+    /// The card's top left in the session window: where the person dragged it (or the bottom right), always inside.
+    fn card_place(&self, size: (i32, i32)) -> (i32, i32) {
+        let (x, y) = self
+            .card_offset
+            .unwrap_or((self.area.0 - size.0 - 12, self.area.1 - size.1 - 12));
+        (
+            x.min(self.area.0 - size.0).max(0),
+            y.min(self.area.1 - size.1).max(0),
+        )
+    }
+
+    /// The pointer pressed on the card at (x, y) in it, at `root` on the screen: on its close button, or a drag begins.
+    fn card_press(&mut self, x: i32, y: i32, root: (i32, i32)) {
+        if on_close(x, y) {
+            self.close_pressed = true;
+        } else {
+            self.card_drag = Some((root, (self.card.place.0, self.card.place.1)));
+        }
+    }
+
+    /// The pointer moved over the card (at (x, y) in it) or dragging it (at `root` on the screen).
+    fn card_motion(&mut self, x: i32, y: i32, root: (i32, i32)) {
+        if let Some((start, card)) = self.card_drag {
+            self.card_offset = Some((card.0 + root.0 - start.0, card.1 + root.1 - start.1));
+            let (left, top) = self.card_place(CARD_SIZE);
+            let _ = self
+                .connection
+                .configure_window(self.card.window, &ConfigureWindowAux::new().x(left).y(top));
+            self.card.place.0 = left;
+            self.card.place.1 = top;
+            self.card_offset = Some((left, top));
+        } else if on_close(x, y) != self.close_hover {
+            self.close_hover = !self.close_hover;
+            self.draw_card();
+        }
+    }
+
+    /// The pointer let go over the card at (x, y) in it: a click on its close button closes it.
+    fn card_release(&mut self, x: i32, y: i32) {
+        self.card_drag = None;
+        if std::mem::take(&mut self.close_pressed) && on_close(x, y) {
+            self.close_hover = false;
+            self.card_on = false;
+            self.card_closed = true;
+            self.hide(Which::Card);
+        }
+    }
+
     fn draw_card(&mut self) {
-        let (width, height) = (214, 176);
+        let (width, height) = CARD_SIZE;
         let mut card = Canvas::new(width, height, INK);
         let pad = 12;
         let figures = &self.figures;
@@ -906,7 +1063,7 @@ impl SessionOverlay {
             tr("Direct")
         };
         card.text(path, pad + 14, 18, NAME_SIZE, TEXT);
-        card.text_right(&delay, width - pad, 18, NAME_SIZE, dot);
+        card.text_right(&delay, width - pad - 24, 18, NAME_SIZE, dot);
         let elapsed = figures.elapsed.as_secs();
         let dash = |value: &str| {
             if value.is_empty() {
@@ -974,8 +1131,19 @@ impl SessionOverlay {
             }
         }
         card.fill(14, 0, width - 28, 1, GOLD);
-        let (left, top) = (self.area.0 - width - 12, self.area.1 - height - 12);
-        self.show(Which::Card, left, top, card, 12);
+        // The close button: a cross at the top right.
+        let (cx, cy) = (
+            (CLOSE.0 + CLOSE.2 / 2) as f32,
+            (CLOSE.1 + CLOSE.3 / 2) as f32,
+        );
+        if self.close_hover {
+            card.fill_round(CLOSE.0, CLOSE.1, CLOSE.2, CLOSE.3, 6, HOVER);
+        }
+        let colour = if self.close_hover { TEXT } else { MUTED };
+        card.line((cx - 4.5, cy - 4.5), (cx + 4.5, cy + 4.5), 1.4, colour);
+        card.line((cx + 4.5, cy - 4.5), (cx - 4.5, cy + 4.5), 1.4, colour);
+        let (left, top) = self.card_place((width, height));
+        self.show(Which::Card, left, top, card, 8);
     }
 }
 

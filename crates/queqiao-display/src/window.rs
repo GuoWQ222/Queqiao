@@ -330,6 +330,16 @@ impl Window {
         };
     }
 
+    /// Maximises the window, or restores it (tests; the person uses the title bar).
+    pub fn set_maximized(&self, on: bool) {
+        let _ = unsafe { ShowWindow(self.hwnd, if on { SW_MAXIMIZE } else { SW_RESTORE }) };
+    }
+
+    /// Minimises the window, or restores it (tests; the person uses the title bar).
+    pub fn set_minimized(&self, on: bool) {
+        let _ = unsafe { ShowWindow(self.hwnd, if on { SW_MINIMIZE } else { SW_RESTORE }) };
+    }
+
     pub fn is_full_screen(&self) -> bool {
         self.restore.is_some()
     }
@@ -424,7 +434,9 @@ impl Window {
         }
     }
 
-    /// Full screen on the window's monitor (no frame), or back to the window it was.
+    /// Full screen on the window's monitor (no frame), or back to the window it was. Without SWP_NOOWNERZORDER: the
+    /// windows it owns (the bar, the card of figures) must move up with it; with it, a maximised window put them
+    /// behind itself, where they stayed until it was minimised and restored (2026-11-26).
     pub fn set_full_screen(&mut self, on: bool) {
         if on == self.restore.is_some() {
             return;
@@ -457,7 +469,7 @@ impl Window {
                     area.top,
                     area.right - area.left,
                     area.bottom - area.top,
-                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                    SWP_FRAMECHANGED,
                 )
             };
             self.restore = Some((style, placement));
@@ -472,7 +484,7 @@ impl Window {
                     0,
                     0,
                     0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
                 )
             };
         }

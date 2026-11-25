@@ -1225,6 +1225,7 @@ impl Hub {
             device_name,
             role,
             public_key,
+            machine,
         } = first
         {
             if !self.signup {
@@ -1276,6 +1277,7 @@ impl Hub {
                 device_name,
                 role,
                 public_key,
+                machine,
             });
         }
         match first {
@@ -1286,6 +1288,7 @@ impl Hub {
                 device_name,
                 role,
                 public_key,
+                machine,
             } => {
                 // The device's fields, and whether it may log in to this account, before the password: once that is
                 // right nothing refuses the login any more, and a new device is announced (the security review of
@@ -1293,12 +1296,16 @@ impl Hub {
                 // so a stolen password could be tried unseen).
                 check_device_fields(&device_id, &device_name)?;
                 check_device_key(&public_key)?;
+                // A tag is 64 hex digits (SHA-256) or nothing.
+                if !(machine.is_empty() || check_device_key(&machine).is_ok()) {
+                    return Err("bad machine tag".to_string().into());
+                }
                 // Argon2 without the store's lock: the hash read, checked, then the store locked again.
                 let record = {
                     let store = self.store.lock().map_err(|e| e.to_string())?;
                     let record = store.password_record(&user)?;
                     store
-                        .device_admissible(record.id, &device_id)
+                        .device_admissible(record.id, &device_id, &device_name, &machine)
                         .map_err(|message| guess(&message))?;
                     record
                 };
@@ -1306,20 +1313,42 @@ impl Hub {
                     .check(&password)
                     .ok_or_else(|| guess("wrong user name or password"))?;
                 let store = self.store.lock().map_err(|e| e.to_string())?;
+                // The same PC reinstalled under a new device id: its earlier device goes (with its saved logins), so
+                // the list holds each PC once.
+                let replaced = store.same_machine(row.id, &device_id, &device_name, &machine)?;
+                for old in &replaced {
+                    store.remove_device(row.id, old)?;
+                }
                 // A password login may give a known device a new key: its other devices are told (the security review
                 // of 2026-11-22: it happened silently).
                 let earlier_key = store.public_key(&device_id).unwrap_or_default();
                 let new_device =
                     store.register_device(row.id, &device_id, &device_name, &public_key, true)?;
-                let news = if new_device {
+                if !machine.is_empty() {
+                    store.set_machine(&device_id, &machine)?;
+                }
+                // A reinstalled PC is told to the other devices as a new key of the same PC.
+                let news = if new_device && replaced.is_empty() {
                     DeviceNews::New
-                } else if !earlier_key.is_empty() && !earlier_key.eq_ignore_ascii_case(&public_key)
+                } else if new_device
+                    || (!earlier_key.is_empty() && !earlier_key.eq_ignore_ascii_case(&public_key))
                 {
                     DeviceNews::KeyChanged
                 } else {
                     DeviceNews::Known
                 };
                 let token = store.issue_refresh_token(row.id, &device_id, role_name(role))?;
+                drop(store);
+                for old in &replaced {
+                    for role in [Role::Agent, Role::Viewer] {
+                        self.revoke_relay(old, role);
+                    }
+                    let user_id = row.id;
+                    self.disconnect(
+                        |(device, _), connection| connection.user_id == user_id && device == old,
+                        "this PC was installed again: its new device takes this one's place",
+                    );
+                }
                 let identity = Identity {
                     user_id: row.id,
                     user: row.name,

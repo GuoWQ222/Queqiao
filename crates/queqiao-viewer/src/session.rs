@@ -220,6 +220,9 @@ pub(crate) fn input_test_steps(options: &Options) -> Vec<InputEvent> {
 /// Tests: the control center opened by the bar's button: when, the step, the button's corner on the screen.
 type PanelTest = (Instant, u8, Option<(i32, i32)>);
 
+/// Tests: how many steps the window test (--window-test) takes.
+const WINDOW_TEST_STEPS: u8 = 14;
+
 /// A session that is not connected after this long is given up.
 pub(crate) const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
@@ -699,10 +702,14 @@ pub(crate) fn run_session(
     )
     .map_err(|e| lines.push(format!("overlay: {}", describe(e))))
     .ok();
+    // The card of figures (the network's state) shows from the start; the person drags it about or closes it.
+    if let Some(overlay) = overlay.as_mut() {
+        overlay.set_card(true);
+        window.check_menu_item(MENU_FIGURES, true);
+    }
     if options.figures
         && let Some(overlay) = overlay.as_mut()
     {
-        overlay.set_card(true);
         overlay.keep_bar_out(true);
         // "Full screen" as under the pointer: its highlight (and its tip on a bar without labels) in the picture.
         overlay.hover_for_test(Some(2));
@@ -721,6 +728,8 @@ pub(crate) fn run_session(
     let mut tucked_picture: Option<(PathBuf, Instant)> = None;
     // Tests: the control center opened by the bar's button (when, the step, the button's corner on the screen).
     let mut panel_test: Option<PanelTest> = None;
+    // Tests: the window test's next step.
+    let mut window_test_step: u8 = 0;
     window.check_menu_item(MENU_PRIVACY, privacy_on);
     window.set_full_screen(options.full_screen);
     window.check_menu_item(MENU_SOUND, sound_on);
@@ -729,6 +738,10 @@ pub(crate) fn run_session(
     'session: loop {
         if let Some(overlay) = overlay.as_mut() {
             overlay.tick();
+            if overlay.take_card_closed() {
+                window.check_menu_item(MENU_FIGURES, false);
+                lines.push("card of figures: closed with its button".to_string());
+            }
         }
         if let Some(shown) = first_picture_after
             && started.elapsed() > shown + Duration::from_secs(options.picture_at.unwrap_or(3))
@@ -784,6 +797,73 @@ pub(crate) fn run_session(
                 lines.push(format!("control center closed: {}", !window.panel_open()));
                 panel_test = None;
             }
+        }
+        // Window test (--window-test): from 2 s after the first picture, a step every 1.2 s. As the person does it:
+        // the pointer at the top brings the bar out (it is not kept out), full screen on and off, maximised, minimised.
+        if options.window_test
+            && window_test_step < WINDOW_TEST_STEPS
+            && let Some(shown) = first_picture_after
+            && let Some(overlay) = overlay.as_mut()
+            && started.elapsed()
+                > shown + Duration::from_millis(2000 + 1200 * u64::from(window_test_step))
+        {
+            let ((bar_shown, bar_front), (card_shown, card_front)) = overlay.shown_for_test();
+            let (bar_seen, bar_place) = overlay.bar_seen_for_test();
+            let state = format!(
+                "bar shown {bar_shown}, in front {bar_front}, seen {bar_seen}; card shown {card_shown}, in front {card_front} ({bar_place})"
+            );
+            match window_test_step {
+                0 => {
+                    overlay.set_card(true);
+                    window.set_full_screen(true);
+                }
+                1 | 3 | 6 | 8 | 11 => overlay.point_at_top_for_test(),
+                2 => {
+                    lines.push(format!("window test: in full screen: {state}"));
+                    window.set_full_screen(false);
+                }
+                4 => {
+                    lines.push(format!("window test: after full screen: {state}"));
+                    window.set_maximized(true);
+                }
+                5 => window.set_full_screen(true),
+                7 => {
+                    lines.push(format!("window test: maximized, in full screen: {state}"));
+                    window.set_full_screen(false);
+                }
+                9 => {
+                    lines.push(format!(
+                        "window test: maximized, after full screen: {state}"
+                    ));
+                    window.set_maximized(false);
+                    window.set_minimized(true);
+                }
+                // Figures came (once a second) while minimised.
+                10 => {
+                    lines.push(format!("window test: minimized: {state}"));
+                    window.set_minimized(false);
+                }
+                12 => {
+                    lines.push(format!("window test: restored: {state}"));
+                    // Dragged far out to the top left, then to the bottom right: it stays inside the window.
+                    let first = overlay.drag_card_for_test(-5000, -5000);
+                    let second = overlay.drag_card_for_test(10000, 10000);
+                    lines.push(format!(
+                        "window test: card inside the window after dragging it out: {}",
+                        first && second
+                    ));
+                }
+                _ => {
+                    overlay.close_card_for_test();
+                    let ((_, _), (card_shown, _)) = overlay.shown_for_test();
+                    lines.push(format!(
+                        "window test: card closed by its button: {}",
+                        !overlay.card_shown() && !card_shown
+                    ));
+                    lines.push("window test: done".to_string());
+                }
+            }
+            window_test_step += 1;
         }
         if let Some(folder) = &options.ui_pictures {
             let now = Instant::now();

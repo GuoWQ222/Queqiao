@@ -36,6 +36,7 @@ fn main() {
         Some("serve") => serve(&args[1..]),
         Some("add-user") => add_user(&args[1..]),
         Some("remove-user") => remove_user(&args[1..]),
+        Some("remove-device") => remove_device(&args[1..]),
         Some("init") => init(&args[1..]),
         _ => {
             println!("{banner}");
@@ -50,6 +51,7 @@ fn main() {
                 "       queqiao-server add-user <name> [--data <folder>]   (the password on standard input)"
             );
             println!("       queqiao-server remove-user <name> [--data <folder>]");
+            println!("       queqiao-server remove-device <user> <device id> [--data <folder>]");
             return;
         }
     };
@@ -119,6 +121,27 @@ fn remove_user(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("no user {name}"))
+    }
+}
+
+/// Removes one device of a user (with its saved logins), as its owner's "Remove" in the device list does. A running
+/// server shows the shorter list from the account's next change.
+fn remove_device(args: &[String]) -> Result<(), String> {
+    let usage = "usage: queqiao-server remove-device <user> <device id> [--data <folder>]";
+    let mut plain = args.iter().take_while(|arg| !arg.starts_with("--"));
+    let (Some(user), Some(device)) = (plain.next(), plain.next()) else {
+        return Err(usage.into());
+    };
+    let store = Store::open(&data_folder(args)?.join("queqiao.db"))?;
+    let record = store.password_record(user)?;
+    if record.id < 0 {
+        return Err(format!("no user {user}"));
+    }
+    if store.remove_device(record.id, device)? {
+        println!("device {device} of {user} removed");
+        Ok(())
+    } else {
+        Err(format!("{user} has no device {device}"))
     }
 }
 
