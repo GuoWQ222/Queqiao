@@ -31,9 +31,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: never
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -49,15 +49,18 @@ jobs:
 
       - name: Build the app
         run: |
+          set -o pipefail
+          mkdir -p /tmp/android_e2e
           export NDK_HOME=$ANDROID_NDK_LATEST_HOME
-          scripts/build_android.sh debug
-          (cd mobile/android && gradle -q assembleDebugAndroidTest)
+          bash scripts/build_android.sh debug 2>&1 | tee /tmp/android_e2e/build.txt
+          (cd mobile/android && gradle -q assembleDebugAndroidTest) 2>&1 | tee -a /tmp/android_e2e/build.txt
 
       - name: Build the server and the Linux agent
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb x11-apps
-          cargo build -q --release -p queqiao-server -p queqiao-agent
+          set -o pipefail
+          cargo build -q --release -p queqiao-server -p queqiao-agent 2>&1 | tee /tmp/android_e2e/build_agent.txt
 
       - name: KVM for the emulator
         run: |
@@ -73,7 +76,7 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          script: scripts/run_android_e2e.sh | tee /tmp/e2e_summary.txt
+          script: OUT=/tmp/android_e2e/e2e bash scripts/run_android_e2e.sh | tee /tmp/e2e_summary.txt
 
       - name: Pass or fail
         run: tail -1 /tmp/e2e_summary.txt | grep -q ANDROID_E2E_PASS
@@ -82,11 +85,12 @@ jobs:
         if: always()
         run: |
           mkdir -p /tmp/android_e2e
+          cp target/android-gradle.log target/mobile-*.log /tmp/android_e2e/ 2> /dev/null || true
           cp /tmp/e2e_summary.txt /tmp/android_e2e/ 2> /dev/null || true
           cp mobile/android/app/build/outputs/apk/debug/app-debug.apk /tmp/android_e2e/queqiao.apk 2> /dev/null || true
           echo "run ${{ github.run_number }} of ${{ github.sha }}" > /tmp/android_e2e/RUN.txt
           cd /tmp/android_e2e
-          rm -rf config state run server
+          rm -rf e2e/config e2e/state e2e/run e2e/server
           git init -q
           git checkout -q -b results
           git add -A

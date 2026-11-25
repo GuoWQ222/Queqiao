@@ -7,7 +7,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 kind=${1:-debug}
 libs=mobile/android/app/src/main/jniLibs
-core=$(scripts/build_mobile_core.sh "$libs")
+core=$(bash scripts/build_mobile_core.sh "$libs")
 if ! echo "$core" | tail -1 | grep -q CORE_BUILT; then
     echo "$core" | tail -30
     echo "APK_FAIL core"
