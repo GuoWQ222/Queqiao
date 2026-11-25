@@ -178,6 +178,8 @@ if [ "$desktop" = kde ]; then
     grep -q "^PROBE_DONE" "$out/probe.out" 2> /dev/null || why="$why probe"
     grep -q "^capture: RemoteDesktop portal" "$out/probe.out" 2> /dev/null || why="$why not-remote-desktop"
     grep -q "^input through the RemoteDesktop portal" "$out/probe.out" 2> /dev/null || why="$why input-not-portal"
+    # The pointer apart from the pictures (the portal's metadata mode; KWin sends no frames here, so no shapes either).
+    grep -q "^capture: .*the pointer apart" "$out/probe.out" 2> /dev/null || why="$why pointer-not-apart"
     # A dialog that came must have been answered; none is Plasma 5.27's way for programs not sandboxed.
     grep -qE "APPROVED|no portal dialog" "$out/approve.txt" 2> /dev/null || why="$why dialog-unanswered"
     echo "picture: not checked (KWin's virtual backend records no frames for screen casts)"
@@ -187,6 +189,9 @@ grep -q "RESULT PASS" "$out/viewer.txt" 2> /dev/null || why="$why viewer"
 grep -q "on Wayland" "$out/agent.txt" 2> /dev/null || why="$why not-the-portal"
 if [ "$desktop" != sway ]; then
     grep -q "captured through the RemoteDesktop portal" "$out/agent.txt" 2> /dev/null || why="$why not-remote-desktop"
+    # GNOME gives the pointer apart from the pictures: its shape goes to the viewer (as on Windows and X11).
+    grep -q "captured through .*the pointer apart" "$out/agent.txt" 2> /dev/null || why="$why pointer-not-apart"
+    grep -qE "^pointer: [1-9][0-9]* shapes sent" "$out/agent.txt" 2> /dev/null || why="$why no-pointer-shape"
     if [ -n "$kept" ]; then
         grep -q APPROVED "$out/approve.txt" 2> /dev/null && why="$why asked-again"
         grep -q "earlier answer offered" "$out/agent.txt" 2> /dev/null || why="$why no-kept-answer"

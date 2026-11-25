@@ -12,7 +12,7 @@ use queqiao_portal::PortalSession;
 
 use crate::pipewire::{self, Stream};
 use crate::wayland_nudge::Nudge;
-use crate::{BgraImage, Error, Frame, OutputInfo, Result, qpc_now};
+use crate::{BgraImage, Error, Frame, OutputInfo, PointerShapeRaw, Result, qpc_now};
 
 /// Whether this is a Wayland session (its programs talk to the compositor, and X11 reaches only XWayland's windows).
 pub(crate) fn wayland_session() -> bool {
@@ -54,7 +54,8 @@ impl PortalDuplicator {
     pub(crate) fn new() -> Result<Self> {
         let portal = queqiao_portal::session().map_err(Error::new)?;
         let fd = portal.pipewire().map_err(Error::new)?;
-        let stream = Stream::open(fd, portal.node, portal.size).map_err(Error::new)?;
+        let stream =
+            Stream::open(fd, portal.node, portal.size, portal.pointer_apart).map_err(Error::new)?;
         let mut duplicator = PortalDuplicator {
             info: OutputInfo {
                 adapter: "Wayland".into(),
@@ -124,6 +125,26 @@ impl PortalDuplicator {
             state.done = true;
             state.nudge = None;
         }
+    }
+
+    /// A new pointer shape (the portal's metadata mode) since it was last taken: alpha blended, B, G, R, A rows
+    /// (the "colour" kind, as the X11 capture gives it). None where the portal draws the pointer into the pictures.
+    pub(crate) fn take_pointer_shape(&mut self) -> Option<PointerShapeRaw> {
+        let image = self.stream.take_pointer_shape()?;
+        Some(PointerShapeRaw {
+            kind: 2,
+            width: image.width,
+            height: image.height,
+            pitch: image.width * 4,
+            hot_x: image.hot_x,
+            hot_y: image.hot_y,
+            data: image.bgra,
+        })
+    }
+
+    /// The pointer's visibility (metadata mode), when it changed since it was last taken.
+    pub(crate) fn take_pointer_visible(&mut self) -> Option<bool> {
+        self.stream.take_pointer_visible()
     }
 
     /// The next frame: the newest since the last one, at once if one came, else after waiting up to `timeout_ms`.

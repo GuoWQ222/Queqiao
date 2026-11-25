@@ -51,6 +51,9 @@ pub struct PortalSession {
     /// answer was offered; the desktop asks again only where it no longer applies, and the portal does not say which
     /// (each start answers with a new token, as tokens are good once).
     pub asked: bool,
+    /// The pointer apart from the pictures, as metadata of the stream (where the portal offers that mode), as on
+    /// Windows and X11: the viewer draws it. Else the portal draws it into the pictures.
+    pub pointer_apart: bool,
 }
 
 static SHARED: Mutex<Weak<PortalSession>> = Mutex::new(Weak::new());
@@ -121,9 +124,19 @@ impl PortalSession {
     fn open() -> Result<PortalSession, String> {
         async_io::block_on(async {
             let screencast = Screencast::new().await.map_err(portal_error)?;
+            // The pointer apart where the portal offers it (GNOME, KDE); drawn into the pictures elsewhere.
+            let pointer_apart = screencast
+                .available_cursor_modes()
+                .await
+                .is_ok_and(|modes| modes.contains(CursorMode::Metadata));
+            let cursor_mode = if pointer_apart {
+                CursorMode::Metadata
+            } else {
+                CursorMode::Embedded
+            };
             let sources = || {
                 SelectSourcesOptions::default()
-                    .set_cursor_mode(CursorMode::Embedded)
+                    .set_cursor_mode(cursor_mode)
                     .set_sources(BitFlags::from(SourceType::Monitor))
                     .set_multiple(false)
             };
@@ -248,6 +261,7 @@ impl PortalSession {
                 position: stream.position().unwrap_or((0, 0)),
                 pipewire: Mutex::new(Some(pipewire)),
                 asked,
+                pointer_apart,
             })
         })
     }
@@ -282,7 +296,7 @@ impl PortalSession {
     /// What the session is, for the reports.
     pub fn describe(&self) -> String {
         format!(
-            "{} portal, {}x{} stream (node {}){}",
+            "{} portal, {}x{} stream (node {}){}{}",
             if self.has_input() {
                 "RemoteDesktop"
             } else {
@@ -291,6 +305,11 @@ impl PortalSession {
             self.size.0,
             self.size.1,
             self.node,
+            if self.pointer_apart {
+                ", the pointer apart"
+            } else {
+                ", the pointer in the pictures"
+            },
             if self.asked {
                 ""
             } else {

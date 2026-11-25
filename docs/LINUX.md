@@ -34,7 +34,7 @@ flow; the interface list and one timer call are Windows), `queqiao-local`, `queq
 
 | Area | Windows | Linux |
 |---|---|---|
-| Screen capture | DXGI Desktop Duplication | X11: MIT-SHM (`xcb-shm`), damage from XDamage, pointer from XFixes. Wayland: the ScreenCast portal + PipeWire (DMA-BUF when offered, else memory; pointer as metadata). Without a session (sign-in screen, the service): KMS/DRM framebuffer capture (root) |
+| Screen capture | DXGI Desktop Duplication | X11: MIT-SHM (`xcb-shm`), damage from XDamage, pointer from XFixes. Wayland: the ScreenCast portal + PipeWire (memory; the pointer as metadata where the portal offers it, else in the pictures). Without a session (sign-in screen, the service): KMS/DRM framebuffer capture (root) |
 | Screens | DXGI outputs | XRandR monitors; Wayland: one portal stream per chosen monitor |
 | Colour conversion | D3D11 video processor | NVENC takes RGB itself; VA-API's video processor (VPP); a Vulkan compute shader; CPU fallback |
 | Encode | Media Foundation, NVENC, oneVPL, AMF, OpenH264 | NVENC on CUDA (same API as on Windows, CUDA device instead of D3D11), VA-API (Intel and AMD: H.264, H.265, AV1 where the GPU has them), OpenH264 |
@@ -165,8 +165,18 @@ not sandboxed and keeps no answer (KDE bug 479013; Plasma 6 asks, and 6.3 can pr
 backend records no frames for screen casts (its buffers are made, the stream runs, nothing comes whatever changes on
 screen), so KDE's pictures are untested here; the session's own check (the probe) stands in for the agent there.
 The KEY_UNKNOWN press that brings in the keyboard reaches the focused program on KDE (it has a keyboard already):
-nothing acts on it. Not yet on Wayland: KDE's pictures (a real KDE desktop), the pointer's shape apart from the
-picture, the banner at the top (Wayland programs cannot place themselves: it floats where the compositor puts it).
+nothing acts on it.
+
+The pointer on Wayland, as on Windows and X11 where the portal allows it: the agent asks for the pointer as metadata
+(GNOME, KDE; xdg-desktop-portal-wlr 0.5 offers only the pointer in the pictures, where it stays). The pictures then
+have no pointer; the stream's buffers carry its bitmap and hot spot (spa_meta_cursor), sent to the viewer as the
+pointer's shape, which draws it at its own mouse, and a bitmap of no size hides it. The screen's side offers room for
+its bitmap at one size (mutter: 384 x 384) that must fall in the range asked for (up to 1024 x 1024), or no pointer meta
+comes at all; shapes over 256 x 256 are passed over. A buffer that carries only the pointer is no frame. Tested: GNOME
+42 and 46 send the shapes (the test checks at least one), GNOME 42 with a cursor theme sends the arrow (cc4-1 had none:
+mutter then sends a grey square), KDE gives the pointer apart (no frames there, so no shapes). Not yet on Wayland:
+KDE's pictures (a real KDE desktop), the banner at the top (Wayland programs cannot place themselves: it floats where
+the compositor puts it).
 
 Not yet on Linux: AV1 and 10-bit encoding, VA-API, the privacy screen and input block, the service and packages.
 

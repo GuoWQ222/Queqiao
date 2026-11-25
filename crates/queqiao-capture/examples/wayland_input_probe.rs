@@ -35,6 +35,28 @@ fn main() {
                 if let Ok(Some(_)) = duplicator.acquire(100) {
                     frames.fetch_add(1, Ordering::Relaxed);
                 }
+                // The pointer's shape where it comes apart from the pictures: its alpha as text, to see it is one.
+                if let Some(shape) = duplicator.take_pointer_shape() {
+                    println!(
+                        "pointer shape {}x{}, hot spot ({}, {})",
+                        shape.width, shape.height, shape.hot_x, shape.hot_y
+                    );
+                    for row in shape.data.chunks(shape.pitch.max(1) as usize).take(24) {
+                        let line: String = row
+                            .chunks(4)
+                            .take(24)
+                            .map(|pixel| match pixel.get(3) {
+                                Some(&alpha) if alpha > 192 => '#',
+                                Some(&alpha) if alpha > 32 => '+',
+                                _ => '.',
+                            })
+                            .collect();
+                        println!("  {line}");
+                    }
+                }
+                if let Some(visible) = duplicator.take_pointer_visible() {
+                    println!("pointer visible: {visible}");
+                }
             }
         })
     };

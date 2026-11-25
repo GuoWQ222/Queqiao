@@ -229,11 +229,12 @@ impl Duplicator {
         }
     }
 
-    /// A new pointer shape since it was last taken (on Wayland the pointer is in the pictures).
+    /// A new pointer shape since it was last taken (on Wayland where the portal gives the pointer apart; else it is
+    /// in the pictures).
     pub fn take_pointer_shape(&mut self) -> Option<PointerShapeRaw> {
         match &mut self.0 {
             Capture::X11(capture) => capture.pointer_shape.take(),
-            Capture::Portal(_) => None,
+            Capture::Portal(capture) => capture.take_pointer_shape(),
         }
     }
 
@@ -241,7 +242,7 @@ impl Duplicator {
     pub fn take_pointer_visible(&mut self) -> Option<bool> {
         match &mut self.0 {
             Capture::X11(capture) => capture.take_pointer_visible(),
-            Capture::Portal(_) => None,
+            Capture::Portal(capture) => capture.take_pointer_visible(),
         }
     }
 }

@@ -3,7 +3,9 @@
 //! C API is used: a thread loop, a context on the portal's connection (its file descriptor), one input stream on the
 //! portal's node. The formats it may send (EnumFormat) and the one it chose (Format) are SPA pods, written and read
 //! here by hand. Each frame is copied out in the stream's `process` callback (on PipeWire's thread) and handed over
-//! under a lock; the buffer goes back to PipeWire at once.
+//! under a lock; the buffer goes back to PipeWire at once. Where the portal gives the pointer apart (its metadata
+//! mode), each buffer may carry its shape (spa_meta_cursor with a bitmap): taken here as well, and a buffer that
+//! carries only the pointer (no picture data) is no frame.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -12,13 +14,24 @@ use std::time::{Duration, Instant};
 
 // SPA's types (spa/utils/type.h), parameters, format keys and values (spa/param/*.h).
 const TYPE_ID: u32 = 3;
+const TYPE_INT: u32 = 4;
 const TYPE_RECTANGLE: u32 = 10;
 const TYPE_FRACTION: u32 = 11;
 const TYPE_OBJECT: u32 = 15;
 const TYPE_CHOICE: u32 = 19;
 const TYPE_OBJECT_FORMAT: u32 = 0x40003;
+const TYPE_OBJECT_PARAM_META: u32 = 0x40005;
 const PARAM_ENUM_FORMAT: u32 = 3;
 const PARAM_FORMAT: u32 = 4;
+const PARAM_META: u32 = 6;
+const PARAM_META_TYPE: u32 = 1;
+const PARAM_META_SIZE: u32 = 2;
+const META_CURSOR: u32 = 5;
+/// spa_chunk flags: the data is not to be used.
+const CHUNK_FLAG_CORRUPTED: i32 = 1;
+/// spa_meta_cursor (id, flags, position, hotspot, bitmap offset) and spa_meta_bitmap (format, size, stride, offset).
+const CURSOR_META: usize = 28;
+const BITMAP_META: usize = 20;
 const FORMAT_MEDIA_TYPE: u32 = 1;
 const FORMAT_MEDIA_SUBTYPE: u32 = 2;
 const FORMAT_VIDEO_FORMAT: u32 = 0x20001;
@@ -33,6 +46,10 @@ pub const VIDEO_FORMAT_RGBX: u32 = 7;
 pub const VIDEO_FORMAT_BGRX: u32 = 8;
 pub const VIDEO_FORMAT_RGBA: u32 = 11;
 pub const VIDEO_FORMAT_BGRA: u32 = 12;
+const VIDEO_FORMAT_ARGB: u32 = 13;
+const VIDEO_FORMAT_ABGR: u32 = 14;
+/// The largest pointer shape taken (as the protocol's MAX_POINTER).
+const POINTER_MAX: u32 = 256;
 const STREAM_FLAG_AUTOCONNECT: u32 = 1 << 0;
 const STREAM_FLAG_MAP_BUFFERS: u32 = 1 << 2;
 const DIRECTION_INPUT: u32 = 0;
@@ -63,6 +80,13 @@ struct SpaBuffer {
     n_datas: u32,
     metas: *mut c_void,
     datas: *mut SpaData,
+}
+
+#[repr(C)]
+struct SpaMeta {
+    type_: u32,
+    size: u32,
+    data: *mut c_void,
 }
 
 #[repr(C)]
@@ -120,6 +144,7 @@ struct Api {
     stream_destroy: unsafe extern "C" fn(Opaque),
     stream_dequeue_buffer: unsafe extern "C" fn(Opaque) -> *mut PwBuffer,
     stream_queue_buffer: unsafe extern "C" fn(Opaque, *mut PwBuffer) -> c_int,
+    stream_update_params: unsafe extern "C" fn(Opaque, *mut *const SpaPod, u32) -> c_int,
 }
 
 /// A function's address from dlsym as the function pointer type `T` (pointer-sized).
@@ -174,6 +199,7 @@ impl Api {
             stream_destroy: function!(c"pw_stream_destroy"),
             stream_dequeue_buffer: function!(c"pw_stream_dequeue_buffer"),
             stream_queue_buffer: function!(c"pw_stream_queue_buffer"),
+            stream_update_params: function!(c"pw_stream_update_params"),
         })
     }
 }
@@ -259,6 +285,23 @@ fn enum_format(width: u32, height: u32) -> Vec<u8> {
     pod(TYPE_OBJECT, &body)
 }
 
+/// The Meta pod asking for the pointer's metadata: room for a bitmap of 64 x 64 by default, up to 1024 x 1024. The
+/// screen's side offers one size (mutter: room for 384 x 384), which must fall in this range or no pointer meta comes;
+/// shapes larger than POINTER_MAX are passed over when read.
+fn cursor_meta_param() -> Vec<u8> {
+    let size = |side: u32| (CURSOR_META + BITMAP_META) as u32 + side * side * 4;
+    let mut body = words(&[TYPE_OBJECT_PARAM_META, PARAM_META]);
+    body.extend(property(
+        PARAM_META_TYPE,
+        pod(TYPE_ID, &words(&[META_CURSOR])),
+    ));
+    body.extend(property(
+        PARAM_META_SIZE,
+        choice(CHOICE_RANGE, TYPE_INT, 1, &[size(64), size(1), size(1024)]),
+    ));
+    pod(TYPE_OBJECT, &body)
+}
+
 fn word(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
@@ -316,10 +359,32 @@ pub struct Frame {
     pub arrived_qpc: i64,
 }
 
+/// The pointer's shape from the metadata: B, G, R, A rows (premultiplied, as the compositors give it).
+#[derive(Clone, PartialEq, Eq)]
+pub struct PointerImage {
+    pub width: u32,
+    pub height: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
+    pub bgra: Vec<u8>,
+}
+
+/// What the metadata told of the pointer since it was last taken.
+#[derive(Default)]
+struct Pointer {
+    shape: Option<PointerImage>,
+    shape_new: bool,
+    visible: Option<bool>,
+    visible_new: bool,
+}
+
 /// What the stream's callbacks (on PipeWire's thread) share with the capture's thread.
 struct Shared {
     api: *const Api,
     stream: Opaque,
+    /// The pointer apart from the picture (the portal's metadata mode): its meta asked for and read.
+    pointer_apart: bool,
+    pointer: Mutex<Pointer>,
     /// The format PipeWire chose: (spa_video_format, width, height).
     format: Mutex<Option<(u32, u32, u32)>>,
     state: AtomicI32,
@@ -358,6 +423,13 @@ unsafe extern "C" fn on_param(data: *mut c_void, id: u32, param: *const SpaPod) 
     if let Ok(mut format) = shared.format.lock() {
         *format = parse_format(bytes);
     }
+    // With the format agreed, the pointer's metadata is asked for (as PipeWire's own examples do it).
+    if shared.pointer_apart {
+        let api = unsafe { &*shared.api };
+        let meta = cursor_meta_param();
+        let mut params = [meta.as_ptr().cast::<SpaPod>()];
+        unsafe { (api.stream_update_params)(shared.stream, params.as_mut_ptr(), 1) };
+    }
     // Under the frame's lock, so a waiter for the size cannot miss it.
     let _frame = shared.frame.lock();
     shared.arrived.notify_all();
@@ -371,14 +443,18 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
         return;
     }
     let spa = unsafe { &*(*buffer).buffer };
+    if shared.pointer_apart {
+        read_pointer(shared, spa);
+    }
     let format = shared.format.lock().ok().and_then(|format| *format);
     if spa.n_datas > 0
         && let Some((format, width, height)) = format
     {
         let data = unsafe { &*spa.datas };
         let chunk = unsafe { &*data.chunk };
-        // A buffer without memory here (DMA-BUF, not asked for) or an empty one (nothing changed) is passed over.
-        if !data.data.is_null() && chunk.size > 0 {
+        // A buffer without memory here (DMA-BUF, not asked for), an empty one (nothing changed, or only the pointer
+        // moved) or one marked not to be used is passed over.
+        if !data.data.is_null() && chunk.size > 0 && chunk.flags & CHUNK_FLAG_CORRUPTED == 0 {
             let stride = if chunk.stride > 0 {
                 chunk.stride as usize
             } else {
@@ -402,6 +478,91 @@ unsafe extern "C" fn on_process(data: *mut c_void) {
         }
     }
     unsafe { (api.stream_queue_buffer)(shared.stream, buffer) };
+}
+
+/// The pointer's metadata in a buffer: a new shape (its bitmap), or hidden (a bitmap of no size). A cursor id of 0, or
+/// no bitmap, tells nothing new of the shape.
+fn read_pointer(shared: &Shared, spa: &SpaBuffer) {
+    if spa.metas.is_null() {
+        return;
+    }
+    let metas =
+        unsafe { std::slice::from_raw_parts(spa.metas.cast::<SpaMeta>(), spa.n_metas as usize) };
+    for meta in metas {
+        if meta.type_ != META_CURSOR || meta.data.is_null() || (meta.size as usize) < CURSOR_META {
+            continue;
+        }
+        let bytes =
+            unsafe { std::slice::from_raw_parts(meta.data.cast::<u8>(), meta.size as usize) };
+        let int = |at: usize| word(bytes, at).map(|value| value as i32);
+        let (Some(id), Some(hot_x), Some(hot_y), Some(bitmap)) =
+            (word(bytes, 0), int(16), int(20), word(bytes, 24))
+        else {
+            continue;
+        };
+        let bitmap = bitmap as usize;
+        if id == 0 || bitmap < CURSOR_META || bitmap + BITMAP_META > bytes.len() {
+            continue;
+        }
+        let (Some(format), Some(width), Some(height), Some(stride), Some(offset)) = (
+            word(bytes, bitmap),
+            word(bytes, bitmap + 4),
+            word(bytes, bitmap + 8),
+            int(bitmap + 12),
+            word(bytes, bitmap + 16),
+        ) else {
+            continue;
+        };
+        let Ok(mut pointer) = shared.pointer.lock() else {
+            return;
+        };
+        if width == 0 || height == 0 {
+            if pointer.visible != Some(false) {
+                pointer.visible = Some(false);
+                pointer.visible_new = true;
+            }
+            continue;
+        }
+        let stride = if stride > 0 {
+            stride as usize
+        } else {
+            width as usize * 4
+        };
+        let start = bitmap + offset as usize;
+        let end = start + stride * (height as usize - 1) + width as usize * 4;
+        let order = match format {
+            VIDEO_FORMAT_RGBA => [2, 1, 0, 3],
+            VIDEO_FORMAT_BGRA => [0, 1, 2, 3],
+            VIDEO_FORMAT_ARGB => [3, 2, 1, 0],
+            VIDEO_FORMAT_ABGR => [1, 2, 3, 0],
+            _ => continue,
+        };
+        if width > POINTER_MAX || height > POINTER_MAX || end > bytes.len() {
+            continue;
+        }
+        let mut bgra = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in 0..height as usize {
+            let line = &bytes[start + row * stride..start + row * stride + width as usize * 4];
+            for pixel in line.as_chunks::<4>().0 {
+                bgra.extend(order.map(|index| pixel[index]));
+            }
+        }
+        let image = PointerImage {
+            width,
+            height,
+            hot_x,
+            hot_y,
+            bgra,
+        };
+        if pointer.shape.as_ref() != Some(&image) {
+            pointer.shape = Some(image);
+            pointer.shape_new = true;
+        }
+        if pointer.visible != Some(true) {
+            pointer.visible = Some(true);
+            pointer.visible_new = true;
+        }
+    }
 }
 
 static EVENTS: StreamEvents = StreamEvents {
@@ -432,7 +593,13 @@ unsafe impl Send for Stream {}
 
 impl Stream {
     /// Connects to the portal's PipeWire (`fd`, from OpenPipeWireRemote) and streams `node`, `size` the screen's.
-    pub fn open(fd: std::os::fd::OwnedFd, node: u32, size: (u32, u32)) -> Result<Stream, String> {
+    /// `pointer_apart`: the portal gives the pointer as metadata (its shape is read; the pictures have none).
+    pub fn open(
+        fd: std::os::fd::OwnedFd,
+        node: u32,
+        size: (u32, u32),
+        pointer_apart: bool,
+    ) -> Result<Stream, String> {
         use std::os::fd::IntoRawFd;
         let api = Box::new(Api::open()?);
         unsafe { (api.init)(std::ptr::null_mut(), std::ptr::null_mut()) };
@@ -455,6 +622,8 @@ impl Stream {
         let mut shared = Box::new(Shared {
             api: &*api,
             stream: std::ptr::null_mut(),
+            pointer_apart,
+            pointer: Mutex::new(Pointer::default()),
             format: Mutex::new(None),
             state: AtomicI32::new(0),
             error: Mutex::new(None),
@@ -574,6 +743,26 @@ impl Stream {
                 .map_err(|_| "PipeWire: poisoned".to_string())?
                 .0;
         }
+    }
+
+    /// A new pointer shape from the metadata since it was last taken.
+    pub fn take_pointer_shape(&self) -> Option<PointerImage> {
+        let mut pointer = self.shared.pointer.lock().ok()?;
+        if !pointer.shape_new {
+            return None;
+        }
+        pointer.shape_new = false;
+        pointer.shape.clone()
+    }
+
+    /// The pointer's visibility from the metadata, when it changed since it was last taken.
+    pub fn take_pointer_visible(&self) -> Option<bool> {
+        let mut pointer = self.shared.pointer.lock().ok()?;
+        if !pointer.visible_new {
+            return None;
+        }
+        pointer.visible_new = false;
+        pointer.visible
     }
 
     /// Waits up to `wait` for a frame newer than `after` (a sequence number) and hands it to `take`.
