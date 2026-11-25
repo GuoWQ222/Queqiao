@@ -2,7 +2,8 @@
 //! capture (on GNOME and KDE the RemoteDesktop portal session: the desktop asks, scripts/portal_approve.py answers in
 //! tests), keeps taking frames on a thread, and moves the pointer to the input test's five places through
 //! queqiao-input's injector, each `pause` ms apart, clicks there, then presses F24 (or PROBE_SCANCODE, hex).
-//! Usage: wayland_input_probe [settle seconds] [pause ms]
+//! With `still`, no input: only the pictures of the screen while it stays as it is.
+//! Usage: wayland_input_probe [settle seconds] [pause ms] [still]
 
 #[cfg(target_os = "linux")]
 fn main() {
@@ -15,6 +16,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let settle: u64 = args.next().and_then(|v| v.parse().ok()).unwrap_or(3);
     let pause: u64 = args.next().and_then(|v| v.parse().ok()).unwrap_or(400);
+    let still = args.next().is_some_and(|v| v == "still");
     let mut duplicator = match queqiao_capture::Duplicator::primary() {
         Ok(duplicator) => duplicator,
         Err(error) => {
@@ -24,13 +26,6 @@ fn main() {
     };
     let info = duplicator.info().clone();
     println!("capture: {} ({}x{})", info.output, info.width, info.height);
-    let injector = queqiao_input::Injector::new(queqiao_input::ScreenRect {
-        left: info.left,
-        top: info.top,
-        width: info.width,
-        height: info.height,
-    });
-    println!("input through {}", injector.describe());
     let stop = Arc::new(AtomicBool::new(false));
     let frames = Arc::new(AtomicU32::new(0));
     let capture = {
@@ -44,6 +39,22 @@ fn main() {
         })
     };
     std::thread::sleep(Duration::from_secs(settle));
+    // Pictures of the screen as it was (the input below changes it): a still screen must send one too.
+    println!("frames before input: {}", frames.load(Ordering::Relaxed));
+    if still {
+        stop.store(true, Ordering::Relaxed);
+        let _ = capture.join();
+        println!("PROBE_DONE");
+        return;
+    }
+    // Only now: new input devices make some compositors draw (a change on the screen).
+    let injector = queqiao_input::Injector::new(queqiao_input::ScreenRect {
+        left: info.left,
+        top: info.top,
+        width: info.width,
+        height: info.height,
+    });
+    println!("input through {}", injector.describe());
     for (fx, fy) in [
         (0.25, 0.25),
         (0.75, 0.25),

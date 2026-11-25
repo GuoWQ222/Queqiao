@@ -358,6 +358,9 @@ unsafe extern "C" fn on_param(data: *mut c_void, id: u32, param: *const SpaPod) 
     if let Ok(mut format) = shared.format.lock() {
         *format = parse_format(bytes);
     }
+    // Under the frame's lock, so a waiter for the size cannot miss it.
+    let _frame = shared.frame.lock();
+    shared.arrived.notify_all();
 }
 
 unsafe extern "C" fn on_process(data: *mut c_void) {
@@ -533,6 +536,43 @@ impl Stream {
                 }
                 Err(error)
             }
+        }
+    }
+
+    /// Waits up to `wait` for the format PipeWire and the screen's side agree on: the size of the pictures to come
+    /// (none may come for a while: a still screen sends none on some desktops).
+    pub fn size(&self, wait: Duration) -> Result<Option<(u32, u32)>, String> {
+        let until = Instant::now() + wait;
+        let mut frame = self
+            .shared
+            .frame
+            .lock()
+            .map_err(|_| "PipeWire: poisoned".to_string())?;
+        loop {
+            if let Some(error) = self
+                .shared
+                .error
+                .lock()
+                .ok()
+                .and_then(|error| error.clone())
+            {
+                return Err(format!("PipeWire: {error}"));
+            }
+            if let Some((_, width, height)) =
+                self.shared.format.lock().ok().and_then(|format| *format)
+            {
+                return Ok(Some((width, height)));
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            frame = self
+                .shared
+                .arrived
+                .wait_timeout(frame, left)
+                .map_err(|_| "PipeWire: poisoned".to_string())?
+                .0;
         }
     }
 

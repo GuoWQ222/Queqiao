@@ -36,3 +36,6 @@ x11rb = { version = "0.13", features = ["shm", "xfixes", "randr", "damage"] }
 libc = "0.2"
 # Wayland: the portal session shared with the input (queqiao-portal).
 queqiao-portal.workspace = true
+# A still screen's first picture on wlroots (wayland_nudge.rs): a transparent overlay surface (the layer shell).
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

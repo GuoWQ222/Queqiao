@@ -21,7 +21,8 @@ out=/tmp/queqiao_wayland_test
 rm -rf "$out"; mkdir -p "$out"; chmod 777 "$out"
 started=$(date +%s)
 nice -n 10 cargo build -q --release --features queqiao-agent/test-switches,queqiao-viewer/test-switches \
-    -p queqiao-agent -p queqiao-viewer > "$out/build.log" 2>&1
+    -p queqiao-agent -p queqiao-viewer > "$out/build.log" 2>&1 \
+    && nice -n 10 cargo build -q --release -p queqiao-capture --example wayland_input_probe >> "$out/build.log" 2>&1
 code=$?
 echo "build exit $code in $(( $(date +%s) - started )) s"
 if [ "$code" -ne 0 ]; then grep -E "^error" -A6 "$out/build.log" | head -30; echo WAYLAND_LINUX_FAIL build; exit 0; fi
@@ -34,7 +35,17 @@ bash scripts/wayland_display_linux.sh status | grep -q "WAYLAND_RUNNING .* $desk
 as_user() { runuser -u qqtest -- bash -c ". /tmp/queqiao_wayland/env; export HOME=/home/qqtest; $1"; }
 as_user "pkill -u qqtest -x wev; pkill -u qqtest -x xev; pkill -u qqtest -f 'xclock|xterm|wayland_test_window'; true"
 sleep 0.5
+still=''
 if [ "$desktop" = sway ]; then
+    # A still screen with no window: a session's first picture must come all the same. wlroots' portal (0.5) asks
+    # for each frame "with damage" since its last copy, the first too: a second capture of a screen unchanged since
+    # the first got none, until the capture damaged the screen without a visible change (wayland_nudge.rs). Two
+    # captures without input; the second must have pictures (before that: "no picture within 5 s").
+    sleep 1
+    as_user "$bin/examples/wayland_input_probe 1 50 still" > "$out/still_first.txt" 2>&1
+    as_user "$bin/examples/wayland_input_probe 1 50 still" > "$out/still.txt" 2>&1
+    grep -qE "^frames before input: [1-9]" "$out/still.txt" || still=bad
+    echo "still screen: $(grep -E "^frames before input|PROBE_FAIL" "$out/still.txt" | head -1)"
     as_user "swaymsg exec 'stdbuf -oL wev > $out/events.log 2>&1' > /dev/null"
     sleep 1.5
     as_user "swaymsg '[app_id=wev] fullscreen enable' > /dev/null"
@@ -80,6 +91,7 @@ echo "=== viewer (exit $viewer_code)"; grep -vE "^[0-9]+ ms: (path|video in)" "$
 [ -f "$out/approve.txt" ] && echo "dialog: $(cat "$out/approve.txt")"
 
 why=''
+[ -n "$still" ] && why="$why still-screen"
 grep -q "RESULT PASS" "$out/agent.txt" 2> /dev/null || why="$why agent"
 grep -q "RESULT PASS" "$out/viewer.txt" 2> /dev/null || why="$why viewer"
 grep -q "on Wayland" "$out/agent.txt" 2> /dev/null || why="$why not-the-portal"

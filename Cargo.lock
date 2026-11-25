@@ -2754,6 +2754,8 @@ dependencies = [
  "queqiao-core",
  "queqiao-input",
  "queqiao-portal",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "windows",
  "x11rb",
 ]

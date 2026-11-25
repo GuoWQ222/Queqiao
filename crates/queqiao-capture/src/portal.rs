@@ -2,14 +2,16 @@
 //! wlroots desktops each answer) opens a PipeWire stream of the monitor, read by pipewire.rs. The desktop asks the
 //! person which screen to share (the wlroots portal can be set to share one without asking, as the tests do); the
 //! pointer is drawn into the pictures. Frames come when the screen changed, as X11's DAMAGE gives them, and are handed
-//! out in B, G, R, X order as the X11 capture's are.
+//! out in B, G, R, X order as the X11 capture's are. Where a still screen sends no first frame (wlroots), the screen is
+//! damaged without a visible change until one comes (wayland_nudge.rs).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use queqiao_portal::PortalSession;
 
 use crate::pipewire::{self, Stream};
+use crate::wayland_nudge::Nudge;
 use crate::{BgraImage, Error, Frame, OutputInfo, Result, qpc_now};
 
 /// Whether this is a Wayland session (its programs talk to the compositor, and X11 reaches only XWayland's windows).
@@ -29,6 +31,11 @@ pub(crate) struct PortalDuplicator {
     pixels: Vec<u8>,
     stride: usize,
     seen: u64,
+    /// Until the first picture: when the stream opened, the transparent surface that damages the screen (None
+    /// before the first poke; an error where the compositor has none) and the last poke.
+    opened: Instant,
+    nudge: Option<std::result::Result<Nudge, String>>,
+    poked: Option<Instant>,
 }
 
 // The stream's raw parts are PipeWire's, used under its lock.
@@ -57,17 +64,20 @@ impl PortalDuplicator {
             pixels: Vec::new(),
             stride: 0,
             seen: 0,
+            opened: Instant::now(),
+            nudge: None,
+            poked: None,
         };
-        // The first picture says the size PipeWire really sends.
-        let first = duplicator
+        // The format agreed says the size PipeWire really sends (pictures may not come yet: a still screen).
+        let size = duplicator
             .stream
-            .next(0, Duration::from_secs(5), |frame| {
-                (frame.width, frame.height)
-            })
+            .size(Duration::from_secs(5))
             .map_err(Error::new)?
-            .ok_or_else(|| Error::new("the ScreenCast portal sent no picture within 5 s".into()))?;
-        duplicator.info.width = first.0;
-        duplicator.info.height = first.1;
+            .ok_or_else(|| {
+                Error::new("the ScreenCast portal agreed on no picture format within 5 s".into())
+            })?;
+        duplicator.info.width = size.0;
+        duplicator.info.height = size.1;
         let _ = &duplicator.portal;
         Ok(duplicator)
     }
@@ -76,8 +86,29 @@ impl PortalDuplicator {
         &self.info
     }
 
+    /// Before the first picture: damages the screen (after 100 ms without one, then every 250 ms) where the
+    /// compositor lets this (the layer shell), so a still screen sends one. More than once: xdg-desktop-portal-wlr may
+    /// give the first change to a capture of an earlier session still waiting for one.
+    fn nudge_until_first(&mut self) {
+        if self.seen > 0
+            || self.opened.elapsed() < Duration::from_millis(100)
+            || self
+                .poked
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
+        {
+            return;
+        }
+        self.poked = Some(Instant::now());
+        if let Ok(nudge) = self.nudge.get_or_insert_with(Nudge::new)
+            && nudge.poke().is_err()
+        {
+            self.nudge = Some(Err("the poke failed".into()));
+        }
+    }
+
     /// The next frame: the newest since the last one, at once if one came, else after waiting up to `timeout_ms`.
     pub(crate) fn acquire(&mut self, timeout_ms: u32) -> Result<Option<Frame>> {
+        self.nudge_until_first();
         let (width, height) = (self.info.width, self.info.height);
         let (pixels, stride) = (&mut self.pixels, &mut self.stride);
         let taken = self
@@ -120,6 +151,8 @@ impl PortalDuplicator {
         }
         let accumulated = (sequence - self.seen).min(u64::from(u32::MAX)) as u32;
         self.seen = sequence;
+        // The first picture came: the surface goes.
+        self.nudge = None;
         Ok(Some(Frame {
             present_qpc: arrived.max(1),
             acquired_qpc: qpc_now(),

@@ -128,7 +128,12 @@ answers one dialog, which must allow remote interaction), and injects through it
 session's pointer and keyboard to the seat only with their first event, and on a PC without a keyboard or mouse of its
 own (a server, a virtual machine) programs learn of them after it: the first key would reach none. So the agent brings
 them in when the session opens: a move by nothing, and KEY_UNKNOWN pressed (no symbol in the keymaps: nothing acts on
-it). The GUI runs natively on Wayland (its hidden root window is a 4 x 4 transparent window there: Wayland hides no
+it). On wlroots, xdg-desktop-portal-wlr (0.5, Ubuntu 22.04) asks for every frame "with damage", the first too, and
+may give the first change to a capture of an earlier session: on a still screen a session got no picture and ended
+after 5 s. The capture now waits only for the format PipeWire agrees on, and until its first picture commits a 1 x 1
+fully transparent overlay surface (the layer shell; no input) every 250 ms: the screen counts as changed, nothing
+shows (wayland_nudge.rs; the sway test checks it with two captures of a still screen in a row). The GUI runs natively
+on Wayland (its hidden root window is a 4 x 4 transparent window there: Wayland hides no
 window; mutter refuses smaller); the session window runs through XWayland and shows its last picture again where it
 was uncovered or resized (the X server keeps none, and a still remote screen sends no new one: the session bar left a
 black strip after tucking away). Tested on cc4-1 on virtual Wayland displays (the user, 2026-11-25: passing on cc4-1's

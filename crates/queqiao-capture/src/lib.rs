@@ -10,6 +10,8 @@
 mod pipewire;
 #[cfg(target_os = "linux")]
 mod portal;
+#[cfg(target_os = "linux")]
+mod wayland_nudge;
 #[cfg(windows)]
 mod win;
 #[cfg(target_os = "linux")]
