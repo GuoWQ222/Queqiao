@@ -2,20 +2,30 @@
 //! separate from input and control so a large file never delays them. Both directions use the same
 //! [`Outbox`] (sending) and [`Inbox`] (receiving):
 //!
-//! 1. the sender offers a file (name, size); the receiver accepts or rejects it;
+//! 1. the sender offers a file (name, size), a few at a time (a folder of many files waits its turn); the receiver
+//!    accepts or rejects it;
 //! 2. the sender sends 16 kB chunks while the channel's buffer has room (the caller passes the room);
 //! 3. the sender ends with the file's SHA-256; the receiver checks size and hash, then renames the file from
 //!    its `.queqiao-part` name and confirms (or deletes it and cancels).
 //!
-//! The receiver keeps only the file name (no folders), replaces characters Windows does not allow, avoids
-//! reserved device names, and never overwrites a file (`name (1).ext`, ...).
+//! The file transfer window (UU Remote's two panes, browse.rs) adds browsing: the controlling side lists the other
+//! side's folders (`List`, answered by `Listing`), fetches files from there into a folder of its own (`Fetch`: the
+//! files then come, each after a `From` naming the request) and sends files into a folder there (`Into` before the
+//! offer). Only the controlled side answers these, and only while it allows files ([`Transfers::serve_browsing`]);
+//! the controlling side never lets the other side choose a folder on it. [`Transfers`] keeps what the person sent or
+//! fetched as jobs, for the window's transfer list.
+//!
+//! The receiver makes each name safe (no folders above, characters Windows does not allow replaced, no reserved
+//! device names) and never overwrites a file (`name (1).ext`, ...).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
+pub mod browse;
 mod clip;
 pub mod history;
 
+pub use browse::{Entry, EntryKind, Found, Lister, Listing};
 pub use clip::{
     ClipMessage, ImageReceiver, ImageSender, MAX_IMAGE, image_fingerprint, test_picture,
 };
@@ -72,6 +82,52 @@ pub enum FileMessage {
         id: u32,
         batch: u32,
     },
+    /// The controlling side asks what folder `path` holds ("" : the places); `id` numbers the request.
+    List {
+        id: u32,
+        path: String,
+    },
+    /// A part of the answer to List `id`; `more`: another part follows.
+    Listing {
+        id: u32,
+        listing: Listing,
+        more: bool,
+    },
+    /// The controlling side asks for the file or folder `path`: its files come as sent ones do, each after a `From`.
+    Fetch {
+        id: u32,
+        path: String,
+    },
+    /// File `id` (offered next) answers Fetch `request`.
+    From {
+        id: u32,
+        request: u32,
+    },
+    /// File `id` (offered next) goes into `folder` on the receiving (controlled) side, not its downloads folder.
+    Into {
+        id: u32,
+        folder: String,
+    },
+    /// What Fetch `id` sends: this many files and bytes.
+    Plan {
+        id: u32,
+        files: u32,
+        bytes: u64,
+    },
+    /// List or Fetch `id` refused or failed.
+    Refused {
+        id: u32,
+        reason: String,
+    },
+    /// The files that answer Fetch `id` wait (true) or go on.
+    Pause {
+        id: u32,
+        paused: bool,
+    },
+    /// The files that answer Fetch `id` are not wanted any more.
+    Drop {
+        id: u32,
+    },
 }
 
 const OFFER: u8 = 1;
@@ -83,21 +139,70 @@ const RECEIVED: u8 = 6;
 const CANCEL: u8 = 7;
 const ABORT: u8 = 8;
 const BATCH: u8 = 9;
+const LIST: u8 = 10;
+const LISTING: u8 = 11;
+const FETCH: u8 = 12;
+const FROM: u8 = 13;
+const INTO: u8 = 14;
+const PLAN: u8 = 15;
+const REFUSED: u8 = 16;
+const PAUSE: u8 = 17;
+const DROP: u8 = 18;
+
+/// Entries in one Listing message at most, and their names' bytes (a listing comes in parts below the channel's
+/// message size).
+const LISTING_PART_ENTRIES: usize = 500;
+const LISTING_PART_BYTES: usize = 48 * 1024;
+
+fn put_text(out: &mut Vec<u8>, text: &str) {
+    // At most 65535 bytes, cut at a character's start.
+    let mut end = text.len().min(u16::MAX as usize);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.extend_from_slice(&(end as u16).to_le_bytes());
+    out.extend_from_slice(&text.as_bytes()[..end]);
+}
+
+/// Reads a message's fields in order; None when it is too short.
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        let (head, rest) = (self.0.get(..count)?, self.0.get(count..)?);
+        self.0 = rest;
+        Some(head)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    fn i64(&mut self) -> Option<i64> {
+        Some(i64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    fn text(&mut self) -> Option<String> {
+        let length = usize::from(u16::from_le_bytes(self.take(2)?.try_into().ok()?));
+        String::from_utf8(self.take(length)?.to_vec()).ok()
+    }
+    fn rest(self) -> &'a [u8] {
+        self.0
+    }
+}
 
 impl FileMessage {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        let text = |out: &mut Vec<u8>, text: &str| {
-            let bytes = &text.as_bytes()[..text.len().min(u16::MAX as usize)];
-            out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-            out.extend_from_slice(bytes);
-        };
         match self {
             FileMessage::Offer { id, name, size } => {
                 out.push(OFFER);
                 out.extend_from_slice(&id.to_le_bytes());
                 out.extend_from_slice(&size.to_le_bytes());
-                text(&mut out, name);
+                put_text(&mut out, name);
             }
             FileMessage::Batch { id, batch } => {
                 out.push(BATCH);
@@ -110,14 +215,16 @@ impl FileMessage {
             }
             FileMessage::Reject { id, reason }
             | FileMessage::Cancel { id, reason }
-            | FileMessage::Abort { id, reason } => {
+            | FileMessage::Abort { id, reason }
+            | FileMessage::Refused { id, reason } => {
                 out.push(match self {
                     FileMessage::Reject { .. } => REJECT,
                     FileMessage::Cancel { .. } => CANCEL,
+                    FileMessage::Refused { .. } => REFUSED,
                     _ => ABORT,
                 });
                 out.extend_from_slice(&id.to_le_bytes());
-                text(&mut out, reason);
+                put_text(&mut out, reason);
             }
             FileMessage::Chunk { id, offset, data } => {
                 out.push(CHUNK_TAG);
@@ -134,57 +241,161 @@ impl FileMessage {
                 out.push(RECEIVED);
                 out.extend_from_slice(&id.to_le_bytes());
             }
+            FileMessage::List { id, path }
+            | FileMessage::Fetch { id, path }
+            | FileMessage::Into { id, folder: path } => {
+                out.push(match self {
+                    FileMessage::List { .. } => LIST,
+                    FileMessage::Fetch { .. } => FETCH,
+                    _ => INTO,
+                });
+                out.extend_from_slice(&id.to_le_bytes());
+                put_text(&mut out, path);
+            }
+            FileMessage::Listing { id, listing, more } => {
+                out.push(LISTING);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.push(u8::from(*more));
+                put_text(&mut out, &listing.path);
+                put_text(&mut out, &listing.parent);
+                put_text(&mut out, &listing.error);
+                out.extend_from_slice(&(listing.entries.len() as u32).to_le_bytes());
+                for entry in &listing.entries {
+                    out.push(entry.kind.code());
+                    out.extend_from_slice(&entry.size.to_le_bytes());
+                    out.extend_from_slice(&entry.modified.to_le_bytes());
+                    put_text(&mut out, &entry.name);
+                }
+            }
+            FileMessage::From { id, request } => {
+                out.push(FROM);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&request.to_le_bytes());
+            }
+            FileMessage::Plan { id, files, bytes } => {
+                out.push(PLAN);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&files.to_le_bytes());
+                out.extend_from_slice(&bytes.to_le_bytes());
+            }
+            FileMessage::Pause { id, paused } => {
+                out.push(PAUSE);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.push(u8::from(*paused));
+            }
+            FileMessage::Drop { id } => {
+                out.push(DROP);
+                out.extend_from_slice(&id.to_le_bytes());
+            }
         }
         out
     }
 
     pub fn decode(bytes: &[u8]) -> Option<FileMessage> {
-        let (&tag, rest) = bytes.split_first()?;
-        let id = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?);
-        let after_id = &rest[4..];
-        let text = |at: &[u8]| -> Option<String> {
-            let length = usize::from(u16::from_le_bytes(at.get(..2)?.try_into().ok()?));
-            String::from_utf8(at.get(2..2 + length)?.to_vec()).ok()
-        };
+        let mut reader = Reader(bytes);
+        let tag = reader.u8()?;
+        let id = reader.u32()?;
         Some(match tag {
             OFFER => FileMessage::Offer {
                 id,
-                size: u64::from_le_bytes(after_id.get(..8)?.try_into().ok()?),
-                name: text(after_id.get(8..)?)?,
+                size: reader.u64()?,
+                name: reader.text()?,
             },
             ACCEPT => FileMessage::Accept { id },
-            BATCH if after_id.len() == 4 => FileMessage::Batch {
+            BATCH if reader.0.len() == 4 => FileMessage::Batch {
                 id,
-                batch: u32::from_le_bytes(after_id.try_into().ok()?),
+                batch: reader.u32()?,
             },
             REJECT => FileMessage::Reject {
                 id,
-                reason: text(after_id)?,
+                reason: reader.text()?,
             },
             CANCEL => FileMessage::Cancel {
                 id,
-                reason: text(after_id)?,
+                reason: reader.text()?,
             },
             ABORT => FileMessage::Abort {
                 id,
-                reason: text(after_id)?,
+                reason: reader.text()?,
+            },
+            REFUSED => FileMessage::Refused {
+                id,
+                reason: reader.text()?,
             },
             CHUNK_TAG => FileMessage::Chunk {
                 id,
-                offset: u64::from_le_bytes(after_id.get(..8)?.try_into().ok()?),
-                data: after_id.get(8..)?.to_vec(),
+                offset: reader.u64()?,
+                data: reader.rest().to_vec(),
             },
             DONE => FileMessage::Done {
                 id,
-                sha256: after_id.get(..32)?.try_into().ok()?,
+                sha256: reader.take(32)?.try_into().ok()?,
             },
             RECEIVED => FileMessage::Received { id },
+            LIST => FileMessage::List {
+                id,
+                path: reader.text()?,
+            },
+            FETCH => FileMessage::Fetch {
+                id,
+                path: reader.text()?,
+            },
+            INTO => FileMessage::Into {
+                id,
+                folder: reader.text()?,
+            },
+            LISTING => {
+                let more = reader.u8()? != 0;
+                let path = reader.text()?;
+                let parent = reader.text()?;
+                let error = reader.text()?;
+                let count = reader.u32()? as usize;
+                // The other side's count is not trusted: entries are read as long as they are there.
+                let mut entries = Vec::with_capacity(count.min(LISTING_PART_ENTRIES));
+                for _ in 0..count {
+                    let kind = EntryKind::from_code(reader.u8()?)?;
+                    let size = reader.u64()?;
+                    let modified = reader.i64()?;
+                    let name = reader.text()?;
+                    entries.push(Entry {
+                        name,
+                        kind,
+                        size,
+                        modified,
+                    });
+                }
+                FileMessage::Listing {
+                    id,
+                    listing: Listing {
+                        path,
+                        parent,
+                        entries,
+                        error,
+                    },
+                    more,
+                }
+            }
+            FROM => FileMessage::From {
+                id,
+                request: reader.u32()?,
+            },
+            PLAN => FileMessage::Plan {
+                id,
+                files: reader.u32()?,
+                bytes: reader.u64()?,
+            },
+            PAUSE => FileMessage::Pause {
+                id,
+                paused: reader.u8()? != 0,
+            },
+            DROP => FileMessage::Drop { id },
             _ => return None,
         })
     }
 }
 
 /// Which side handles `message`: true for the receiving side (`Inbox`), false for the sending side (`Outbox`).
+/// (Browsing's requests and answers are the `Transfers`' own.)
 pub fn for_receiver(message: &FileMessage) -> bool {
     matches!(
         message,
@@ -193,32 +404,42 @@ pub fn for_receiver(message: &FileMessage) -> bool {
             | FileMessage::Done { .. }
             | FileMessage::Cancel { .. }
             | FileMessage::Batch { .. }
+            | FileMessage::From { .. }
+            | FileMessage::Into { .. }
     )
 }
 
-/// What happened to a file, for the program's report and display.
+/// What happened to a file, for the program's report and display. `id` is the file's number on the side that sends
+/// it (0: it never got one, a file that could not be read).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Sent {
+        id: u32,
         name: String,
         size: u64,
     },
     /// `batch` > 0: part of a clipboard copy; `top` is what goes on the clipboard (the file, or the folder it
     /// came in).
     Received {
+        id: u32,
         path: PathBuf,
         size: u64,
         batch: u32,
         top: PathBuf,
     },
     Failed {
+        id: u32,
+        /// This side sent it (false: received it).
+        sending: bool,
         name: String,
         reason: String,
     },
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
+    /// Not offered yet: waits for its turn.
+    Queued,
     Offered,
     Sending,
     /// All chunks and the hash are sent; waiting for the receiver's confirmation.
@@ -229,12 +450,18 @@ struct Outgoing {
     id: u32,
     name: String,
     size: u64,
-    file: File,
+    path: PathBuf,
+    /// Opened when offered.
+    file: Option<File>,
     sent: u64,
     hasher: Sha256,
     stage: Stage,
     /// Paused by the person: no chunks until resumed.
     paused: bool,
+    /// Messages that go just before the offer (Batch, From, Into).
+    before: Vec<FileMessage>,
+    /// The Fetch this file answers (0: none).
+    request: u32,
 }
 
 /// One transfer, for a list of them.
@@ -249,6 +476,10 @@ pub struct TransferRow {
     pub paused: bool,
 }
 
+/// Files offered and not yet confirmed, at most: the rest wait their turn (a folder of many files met the receiver's
+/// limit on files coming at once, MAX_INCOMING).
+const OFFER_AHEAD: usize = 8;
+
 /// Files this side sends.
 #[derive(Default)]
 pub struct Outbox {
@@ -256,91 +487,56 @@ pub struct Outbox {
     files: VecDeque<Outgoing>,
     messages: Vec<FileMessage>,
     outcomes: Vec<Outcome>,
-    /// The clipboard copy the files being added belong to (0: none).
-    batch: u32,
 }
 
 impl Outbox {
-    /// Queues `path` (a file) and offers it.
+    /// Queues `path` (a file, or a folder with what is in it) to offer.
     pub fn add(&mut self, path: &Path) -> Result<(), String> {
         self.add_in(path, 0)
     }
 
     /// As `add`, the file (or every file of the folder) marked as part of clipboard copy `batch` (0: none).
     pub fn add_in(&mut self, path: &Path, batch: u32) -> Result<(), String> {
-        let name = path
-            .file_name()
-            .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
-        self.batch = batch;
-        let result = if path.is_dir() {
-            self.add_folder(path, &name)
-        } else {
-            self.add_named(path, name)
-        };
-        self.batch = 0;
-        result
-    }
-
-    /// Every file in `folder` (and below), offered as "<folder name>/<path inside>"; links are not followed.
-    fn add_folder(&mut self, folder: &Path, name: &str) -> Result<(), String> {
-        let mut pending = vec![(folder.to_path_buf(), name.to_string())];
-        let mut count = 0usize;
-        while let Some((dir, prefix)) = pending.pop() {
-            let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            for entry in entries.flatten() {
-                let Ok(kind) = entry.file_type() else {
-                    continue;
-                };
-                let inside = format!("{prefix}/{}", entry.file_name().to_string_lossy());
-                if kind.is_symlink() {
-                    continue;
-                } else if kind.is_dir() {
-                    pending.push((entry.path(), inside));
-                } else if kind.is_file() {
-                    count += 1;
-                    if count > MAX_FOLDER_FILES {
-                        return Err(format!(
-                            "{}: more than {MAX_FOLDER_FILES} files",
-                            folder.display()
-                        ));
-                    }
-                    self.add_named(&entry.path(), inside)?;
-                }
+        let files = browse::files_of(path)?;
+        self.add_files(files, 0, |id| {
+            if batch > 0 {
+                vec![FileMessage::Batch { id, batch }]
+            } else {
+                Vec::new()
             }
-        }
+        });
         Ok(())
     }
 
-    fn add_named(&mut self, path: &Path, name: String) -> Result<(), String> {
-        let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let meta = file.metadata().map_err(|e| e.to_string())?;
-        if !meta.is_file() {
-            return Err(format!("{}: not a file", path.display()));
-        }
-        self.next_id += 1;
-        let id = self.next_id;
-        if self.batch > 0 {
-            self.messages.push(FileMessage::Batch {
-                id,
-                batch: self.batch,
-            });
-        }
-        self.messages.push(FileMessage::Offer {
-            id,
-            name: name.clone(),
-            size: meta.len(),
-        });
-        self.files.push_back(Outgoing {
-            id,
-            name,
-            size: meta.len(),
-            file,
-            sent: 0,
-            hasher: Sha256::new(),
-            stage: Stage::Offered,
-            paused: false,
-        });
-        Ok(())
+    /// Queues `files` (path, name to send, size) to offer in turn, answering Fetch `request` (0: none); `before`
+    /// gives a file's messages to go just before its offer, by its id. Returns their ids.
+    pub fn add_files(
+        &mut self,
+        files: Vec<(PathBuf, String, u64)>,
+        request: u32,
+        before: impl Fn(u32) -> Vec<FileMessage>,
+    ) -> Vec<u32> {
+        files
+            .into_iter()
+            .map(|(path, name, size)| {
+                self.next_id += 1;
+                let id = self.next_id;
+                self.files.push_back(Outgoing {
+                    id,
+                    name,
+                    size,
+                    path,
+                    file: None,
+                    sent: 0,
+                    hasher: Sha256::new(),
+                    stage: Stage::Queued,
+                    paused: false,
+                    before: before(id),
+                    request,
+                });
+                id
+            })
+            .collect()
     }
 
     /// A message from the receiver.
@@ -348,7 +544,9 @@ impl Outbox {
         let find = |files: &mut VecDeque<Outgoing>, id: u32| files.iter().position(|f| f.id == id);
         match message {
             FileMessage::Accept { id } => {
-                if let Some(index) = find(&mut self.files, *id) {
+                if let Some(index) = find(&mut self.files, *id)
+                    && self.files[index].stage == Stage::Offered
+                {
                     self.files[index].stage = Stage::Sending;
                 }
             }
@@ -357,6 +555,8 @@ impl Outbox {
                     && let Some(file) = self.files.remove(index)
                 {
                     self.outcomes.push(Outcome::Failed {
+                        id: file.id,
+                        sending: true,
                         name: file.name,
                         reason: reason.clone(),
                     });
@@ -364,21 +564,84 @@ impl Outbox {
             }
             FileMessage::Received { id } => {
                 if let Some(index) = find(&mut self.files, *id)
+                    && self.files[index].stage == Stage::Finished
                     && let Some(file) = self.files.remove(index)
                 {
                     self.outcomes.push(Outcome::Sent {
+                        id: file.id,
                         name: file.name,
                         size: file.size,
                     });
+                }
+            }
+            FileMessage::Pause { id, paused } if *id > 0 => {
+                for file in self.files.iter_mut().filter(|f| f.request == *id) {
+                    file.paused = *paused;
+                }
+            }
+            FileMessage::Drop { id } if *id > 0 => {
+                let ids: Vec<u32> = self
+                    .files
+                    .iter()
+                    .filter(|f| f.request == *id)
+                    .map(|f| f.id)
+                    .collect();
+                for file in ids {
+                    self.cancel(file);
                 }
             }
             _ => {}
         }
     }
 
-    /// Messages to send now: offers, and chunks (one file at a time) up to about `room` bytes.
+    /// Messages to send now: offers (a few files ahead), and chunks (one file at a time) up to about `room` bytes.
     pub fn take(&mut self, room: usize) -> Vec<FileMessage> {
         let mut out = std::mem::take(&mut self.messages);
+        let mut active = self
+            .files
+            .iter()
+            .filter(|f| f.stage != Stage::Queued)
+            .count();
+        let mut unreadable = Vec::new();
+        for file in self.files.iter_mut() {
+            if active >= OFFER_AHEAD {
+                break;
+            }
+            if file.stage != Stage::Queued || file.paused {
+                continue;
+            }
+            // Opened now (at most OFFER_AHEAD at once): its size as it is now.
+            let opened = File::open(&file.path)
+                .and_then(|opened| Ok((opened.metadata()?.len(), opened)))
+                .map_err(|e| format!("{}: {e}", file.path.display()));
+            match opened {
+                Ok((size, opened)) => {
+                    file.file = Some(opened);
+                    file.size = size;
+                    out.append(&mut file.before);
+                    out.push(FileMessage::Offer {
+                        id: file.id,
+                        name: file.name.clone(),
+                        size,
+                    });
+                    file.stage = Stage::Offered;
+                    active += 1;
+                }
+                Err(reason) => unreadable.push((file.id, reason)),
+            }
+        }
+        for (id, reason) in unreadable {
+            if let Some(index) = self.files.iter().position(|f| f.id == id)
+                && let Some(file) = self.files.remove(index)
+            {
+                self.outcomes.push(Outcome::Failed {
+                    id,
+                    sending: true,
+                    name: file.name,
+                    reason,
+                });
+            }
+        }
         let mut budget = room;
         if let Some(file) = self
             .files
@@ -388,7 +651,11 @@ impl Outbox {
             let mut buffer = vec![0u8; CHUNK];
             while budget >= CHUNK && file.sent < file.size {
                 let want = CHUNK.min((file.size - file.sent) as usize);
-                if let Err(error) = file.file.read_exact(&mut buffer[..want]) {
+                let read = match file.file.as_mut() {
+                    Some(opened) => opened.read_exact(&mut buffer[..want]),
+                    None => Err(std::io::Error::other("not open")),
+                };
+                if let Err(error) = read {
                     out.push(FileMessage::Cancel {
                         id: file.id,
                         reason: format!("reading failed: {error}"),
@@ -411,6 +678,8 @@ impl Outbox {
                     sha256: file.hasher.clone().finalize().into(),
                 });
                 file.stage = Stage::Finished;
+                // Nothing more to read: the handle goes (a folder's files are not all held open).
+                file.file = None;
             }
         }
         out
@@ -433,11 +702,15 @@ impl Outbox {
             return false;
         };
         if let Some(file) = self.files.remove(index) {
-            self.messages.push(FileMessage::Cancel {
-                id,
-                reason: "cancelled by the sender".into(),
-            });
+            if file.stage != Stage::Queued {
+                self.messages.push(FileMessage::Cancel {
+                    id,
+                    reason: "cancelled by the sender".into(),
+                });
+            }
             self.outcomes.push(Outcome::Failed {
+                id,
+                sending: true,
                 name: file.name,
                 reason: "cancelled".into(),
             });
@@ -459,7 +732,7 @@ impl Outbox {
             .collect()
     }
 
-    /// (name, bytes sent, size) of each file not yet confirmed.
+    /// (name, bytes sent, size) of each file not yet confirmed (also those waiting their turn).
     pub fn progress(&self) -> Vec<(String, u64, u64)> {
         self.files
             .iter()
@@ -476,6 +749,8 @@ impl Outbox {
 const MAX_INCOMING: usize = 16;
 /// Disk space a received file must leave free.
 const DISK_RESERVE: u64 = 1 << 30;
+/// Notes kept about files announced by the other side (Batch, From, Into) at most.
+const MAX_NOTES: usize = 10_000;
 
 /// The mark Windows puts on downloaded files (the Internet zone): SmartScreen and Office's Protected View then treat
 /// a received file as one from elsewhere (the security review of 2026-11-22). Left out on drives without alternate
@@ -540,6 +815,8 @@ fn free_space(folder: &Path) -> Option<u64> {
 struct Incoming {
     part: PathBuf,
     target: PathBuf,
+    /// The folder it goes into (the downloads folder, a fetch's folder, or the folder the other side named).
+    base: PathBuf,
     name: String,
     size: u64,
     file: File,
@@ -547,14 +824,21 @@ struct Incoming {
     hasher: Sha256,
 }
 
-/// Files this side receives, into `folder`.
+/// Files this side receives, into `folder` (or a fetch's folder, or one the other side names where that is allowed).
 pub struct Inbox {
     folder: PathBuf,
     allow: bool,
+    /// The other side may name a folder of this PC (`Into`): only on the controlled side, while it allows files.
+    allow_into: bool,
     files: HashMap<u32, Incoming>,
     outcomes: Vec<Outcome>,
     /// Clipboard copy of each announced file id (Batch messages).
     batches: HashMap<u32, u32>,
+    /// The folder each announced file id is to go into there (Into), checked when it is offered.
+    into: HashMap<u32, String>,
+    /// The Fetch each announced file id answers (From), and each Fetch's folder here.
+    from: HashMap<u32, u32>,
+    fetch_folders: HashMap<u32, PathBuf>,
 }
 
 impl Inbox {
@@ -563,10 +847,24 @@ impl Inbox {
         Inbox {
             folder,
             allow,
+            allow_into: false,
             files: HashMap::new(),
             outcomes: Vec::new(),
             batches: HashMap::new(),
+            into: HashMap::new(),
+            from: HashMap::new(),
+            fetch_folders: HashMap::new(),
         }
+    }
+
+    /// Lets the other side name the folder a file goes into (the controlled side, while it allows files).
+    pub fn allow_into(&mut self, on: bool) {
+        self.allow_into = on;
+    }
+
+    /// The files that answer this side's Fetch `request` go into `folder`.
+    pub fn fetch_into(&mut self, request: u32, folder: PathBuf) {
+        self.fetch_folders.insert(request, folder);
     }
 
     /// A message from the sender; returns the replies to send back.
@@ -576,6 +874,8 @@ impl Inbox {
                 Ok(()) => vec![FileMessage::Accept { id }],
                 Err(reason) => {
                     self.outcomes.push(Outcome::Failed {
+                        id,
+                        sending: false,
                         name,
                         reason: reason.clone(),
                     });
@@ -619,11 +919,12 @@ impl Inbox {
                         let relative = safe_relative_path(&incoming.name);
                         let top = match relative.components().next() {
                             Some(first) if relative.components().count() > 1 => {
-                                self.folder.join(first)
+                                incoming.base.join(first)
                             }
                             _ => target.clone(),
                         };
                         self.outcomes.push(Outcome::Received {
+                            id,
                             path: target,
                             size: incoming.size,
                             batch: self.batches.remove(&id).unwrap_or(0),
@@ -634,6 +935,8 @@ impl Inbox {
                     Err(error) => {
                         let _ = std::fs::remove_file(&incoming.part);
                         self.outcomes.push(Outcome::Failed {
+                            id,
+                            sending: false,
                             name: incoming.name,
                             reason: error.to_string(),
                         });
@@ -644,10 +947,22 @@ impl Inbox {
                     }
                 }
             }
+            // Kept for a bounded number of files (the other side's word).
             FileMessage::Batch { id, batch } => {
-                // Kept for a bounded number of files (the other side's word).
-                if self.batches.len() < 10_000 {
+                if self.batches.len() < MAX_NOTES {
                     self.batches.insert(id, batch);
+                }
+                Vec::new()
+            }
+            FileMessage::Into { id, folder } => {
+                if self.into.len() < MAX_NOTES {
+                    self.into.insert(id, folder);
+                }
+                Vec::new()
+            }
+            FileMessage::From { id, request } => {
+                if self.from.len() < MAX_NOTES {
+                    self.from.insert(id, request);
                 }
                 Vec::new()
             }
@@ -656,6 +971,8 @@ impl Inbox {
                     drop(incoming.file);
                     let _ = std::fs::remove_file(&incoming.part);
                     self.outcomes.push(Outcome::Failed {
+                        id,
+                        sending: false,
                         name: incoming.name,
                         reason,
                     });
@@ -666,7 +983,32 @@ impl Inbox {
         }
     }
 
+    /// The folder file `id` goes into: its fetch's, the one the other side named (where allowed), else the downloads
+    /// folder.
+    fn base_for(&mut self, id: u32) -> Result<PathBuf, String> {
+        let named = self.into.remove(&id);
+        if let Some(request) = self.from.remove(&id) {
+            return Ok(self
+                .fetch_folders
+                .get(&request)
+                .cloned()
+                .unwrap_or_else(|| self.folder.clone()));
+        }
+        let Some(folder) = named else {
+            return Ok(self.folder.clone());
+        };
+        if !self.allow_into {
+            return Err("this PC does not let the other side choose where files go".into());
+        }
+        let path = PathBuf::from(&folder);
+        if !path.is_absolute() || !path.is_dir() {
+            return Err(format!("{folder}: no such folder on that PC"));
+        }
+        Ok(path)
+    }
+
     fn accept(&mut self, id: u32, name: &str, size: u64) -> Result<(), String> {
+        let base = self.base_for(id);
         if !self.allow {
             return Err("receiving files is turned off on that PC".into());
         }
@@ -677,7 +1019,12 @@ impl Inbox {
         if self.files.len() >= MAX_INCOMING {
             return Err(format!("at most {MAX_INCOMING} files can come at once"));
         }
-        std::fs::create_dir_all(&self.folder).map_err(|e| e.to_string())?;
+        let base = base?;
+        if base == self.folder {
+            std::fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+        } else if !base.is_dir() {
+            return Err(format!("{}: the folder is not there", base.display()));
+        }
         // The files still arriving count too: many at once could otherwise fill the disk (the security review of
         // 2026-11-22: the check was per file).
         let arriving: u64 = self
@@ -685,14 +1032,14 @@ impl Inbox {
             .values()
             .map(|file| file.size.saturating_sub(file.received))
             .sum();
-        if let Some(free) = free_space(&self.folder)
+        if let Some(free) = free_space(&base)
             && size.saturating_add(arriving).saturating_add(DISK_RESERVE) > free
         {
             return Err("there is not enough free disk space on that PC".into());
         }
         // A name may be a path inside a sent folder: each part made safe, never leaving the folder.
-        let target = self.folder.join(safe_relative_path(name));
-        if !target.starts_with(&self.folder) {
+        let target = base.join(safe_relative_path(name));
+        if !target.starts_with(&base) {
             return Err("a name that leaves the folder".into());
         }
         if let Some(parent) = target.parent() {
@@ -708,6 +1055,7 @@ impl Inbox {
             Incoming {
                 part,
                 target,
+                base,
                 name: name.to_string(),
                 size,
                 file,
@@ -723,6 +1071,8 @@ impl Inbox {
             drop(incoming.file);
             let _ = std::fs::remove_file(&incoming.part);
             self.outcomes.push(Outcome::Failed {
+                id,
+                sending: false,
                 name: incoming.name,
                 reason: reason.to_string(),
             });
@@ -782,7 +1132,6 @@ impl Drop for Inbox {
     }
 }
 
-/// Both directions of one session: what the program needs from the "files" channel.
 /// File data over time, from its first byte (for the test reports: where the time of a transfer goes, steady or
 /// in bursts with pauses).
 #[derive(Default)]
@@ -846,15 +1195,105 @@ impl Course {
     }
 }
 
+/// Where a job stands, for the transfer list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobState {
+    /// Nothing moved yet (its files are being found, or wait their turn).
+    Waiting,
+    Going,
+    Paused,
+    Done,
+    Failed(String),
+    Cancelled,
+}
+
+/// One thing the person sent or fetched (a file, or a folder with what is in it), or files the other side sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Job {
+    pub id: u32,
+    /// The file's or folder's name.
+    pub name: String,
+    /// This side sends it (false: receives it).
+    pub sending: bool,
+    /// Where it comes from and goes to, as each side writes paths; "" : that side's Queqiao downloads folder (or, for
+    /// what the other side sent by itself, its own unknown place).
+    pub from: String,
+    pub to: String,
+    pub files: u32,
+    pub files_done: u32,
+    pub bytes: u64,
+    pub bytes_done: u64,
+    pub state: JobState,
+    /// Received here: what arrived (the file, or the folder it came in), to show in its folder.
+    pub arrived: Option<PathBuf>,
+    /// The person can pause it (this side sends it, or it answers this side's fetch).
+    pub can_pause: bool,
+}
+
+impl Job {
+    pub fn finished(&self) -> bool {
+        matches!(
+            self.state,
+            JobState::Done | JobState::Failed(_) | JobState::Cancelled
+        )
+    }
+}
+
+struct JobEntry {
+    job: Job,
+    /// Its files (this side's numbers when sending, the other side's when receiving).
+    ids: HashSet<u32>,
+    failed: u32,
+    reason: String,
+    /// Bytes of its files that finished (done or failed).
+    finished_bytes: u64,
+    /// Its files are all known (found here, or the other side's Plan came).
+    known: bool,
+    paused: bool,
+    cancelled: bool,
+}
+
+/// What the worker thread was asked for.
+enum Purpose {
+    /// Files to send: job, the folder there ("" : the downloads folder), the clipboard copy (0: none).
+    Send(u32, String, u32),
+    /// The other side's List and Fetch, answered here (the controlled side).
+    ServeList(u32),
+    ServeFetch(u32),
+}
+
+/// Requests of the other side waiting for the worker at most (more are refused as busy).
+const MAX_SERVING: usize = 64;
+
+/// Both directions of one session: what the program needs from the "files" channel.
 pub struct Transfers {
     outbox: Outbox,
     inbox: Inbox,
     sent_course: Course,
     arrival_course: Course,
     open: bool,
-    /// Files to send once the channel is open, with their clipboard copy (0: none).
-    queued: Vec<(PathBuf, u32)>,
     last_batch: u32,
+    /// Reads folders and finds files on a thread of its own (made when first needed).
+    lister: Option<Lister>,
+    work: HashMap<u32, Purpose>,
+    next_work: u32,
+    /// Requests and answers to send with the next `take`.
+    pending: Vec<FileMessage>,
+    /// This side answers the other's List and Fetch (the controlled side, while it allows files).
+    serving: bool,
+    jobs: Vec<JobEntry>,
+    next_job: u32,
+    /// Jobs of files the other side sent by itself, by the first part of their names, while they come.
+    loose: HashMap<String, u32>,
+    /// Listings this side asked for: the parts so far; and those complete.
+    listing_parts: HashMap<u32, Listing>,
+    listings: Vec<(u32, Listing)>,
+    /// List requests of this side not yet answered (numbered with the jobs: a number is a job's or a list's).
+    lists: HashSet<u32>,
+    /// Fetch requests of this side: the job of each.
+    fetches: HashMap<u32, u32>,
+    /// Outcomes not yet taken by the program.
+    outcomes: Vec<Outcome>,
 }
 
 impl Transfers {
@@ -866,29 +1305,89 @@ impl Transfers {
             sent_course: Course::default(),
             arrival_course: Course::default(),
             open: false,
-            queued: Vec::new(),
             last_batch: 0,
+            lister: None,
+            work: HashMap::new(),
+            next_work: 0,
+            pending: Vec::new(),
+            serving: false,
+            jobs: Vec::new(),
+            next_job: 0,
+            loose: HashMap::new(),
+            listing_parts: HashMap::new(),
+            listings: Vec::new(),
+            lists: HashSet::new(),
+            fetches: HashMap::new(),
+            outcomes: Vec::new(),
         }
     }
 
-    /// The channel is open: files queued before are offered now.
+    /// The controlled side, while it allows files: the other side may list its folders, fetch from them and send
+    /// into them.
+    pub fn serve_browsing(&mut self, on: bool) {
+        self.serving = on;
+        self.inbox.allow_into(on);
+    }
+
+    fn lister(&mut self) -> &Lister {
+        self.lister.get_or_insert_with(Lister::new)
+    }
+
+    fn ask_files(&mut self, path: &Path, purpose: Purpose) {
+        self.next_work += 1;
+        let id = self.next_work;
+        self.work.insert(id, purpose);
+        self.lister().files(id, path);
+    }
+
+    /// The channel is open: what was queued goes now. (Kept for the programs' reports: nothing fails here now.)
     pub fn opened(&mut self) -> Vec<Outcome> {
         self.open = true;
-        let mut failed = Vec::new();
-        for (path, batch) in std::mem::take(&mut self.queued) {
-            if let Err(reason) = self.outbox.add_in(&path, batch) {
-                failed.push(Outcome::Failed {
-                    name: path.display().to_string(),
-                    reason,
-                });
-            }
-        }
-        failed
+        Vec::new()
     }
 
-    /// Sends `path` (now, or once the channel is open).
+    fn new_job(&mut self, name: String, sending: bool, from: String, to: String) -> u32 {
+        self.next_job += 1;
+        let id = self.next_job;
+        self.jobs.push(JobEntry {
+            job: Job {
+                id,
+                name,
+                sending,
+                from,
+                to,
+                files: 0,
+                files_done: 0,
+                bytes: 0,
+                bytes_done: 0,
+                state: JobState::Waiting,
+                arrived: None,
+                can_pause: true,
+            },
+            ids: HashSet::new(),
+            failed: 0,
+            reason: String::new(),
+            finished_bytes: 0,
+            known: false,
+            paused: false,
+            cancelled: false,
+        });
+        id
+    }
+
+    fn job_mut(&mut self, id: u32) -> Option<&mut JobEntry> {
+        self.jobs.iter_mut().find(|entry| entry.job.id == id)
+    }
+
+    /// Sends `path` (a file or a folder) into the other side's downloads folder.
     pub fn send(&mut self, path: &Path) -> Result<(), String> {
-        self.send_in(path, 0)
+        self.send_job(path, "", 0);
+        Ok(())
+    }
+
+    /// Sends `path` into the folder `folder` of the other side (as it writes paths); returns the job.
+    pub fn send_into(&mut self, path: &Path, folder: &str) -> u32 {
+        self.send_job(path, folder, 0)
     }
 
     /// Sends `paths` as one clipboard copy: once they arrived, the other side's clipboard holds them.
@@ -896,18 +1395,53 @@ impl Transfers {
         self.last_batch = self.last_batch.wrapping_add(1).max(1);
         let batch = self.last_batch;
         for path in paths {
-            self.send_in(path, batch)?;
+            self.send_job(path, "", batch);
         }
         Ok(())
     }
 
-    fn send_in(&mut self, path: &Path, batch: u32) -> Result<(), String> {
-        if self.open {
-            self.outbox.add_in(path, batch)
-        } else {
-            self.queued.push((path.to_path_buf(), batch));
-            Ok(())
-        }
+    fn send_job(&mut self, path: &Path, folder: &str, batch: u32) -> u32 {
+        let name = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let job = self.new_job(name, true, path.display().to_string(), folder.to_string());
+        self.ask_files(path, Purpose::Send(job, folder.to_string(), batch));
+        job
+    }
+
+    /// Fetches the other side's file or folder `path` into `folder` here; returns the job.
+    pub fn fetch(&mut self, path: &str, folder: &Path) -> u32 {
+        let job = self.new_job(
+            browse::last_part(path).to_string(),
+            false,
+            path.to_string(),
+            folder.display().to_string(),
+        );
+        self.fetches.insert(job, job);
+        self.inbox.fetch_into(job, folder.to_path_buf());
+        self.pending.push(FileMessage::Fetch {
+            id: job,
+            path: path.to_string(),
+        });
+        job
+    }
+
+    /// Asks the other side what its folder `path` holds ("" : its places); the answer comes from `listings`.
+    pub fn list_remote(&mut self, path: &str) -> u32 {
+        self.next_job += 1;
+        let id = self.next_job;
+        self.lists.insert(id);
+        self.pending.push(FileMessage::List {
+            id,
+            path: path.to_string(),
+        });
+        id
+    }
+
+    /// The other side's folders that arrived since the last call (with the request's number).
+    pub fn listings(&mut self) -> Vec<(u32, Listing)> {
+        std::mem::take(&mut self.listings)
     }
 
     /// A message from the other side; returns the replies to send (encoded).
@@ -915,27 +1449,292 @@ impl Transfers {
         let Some(message) = FileMessage::decode(bytes) else {
             return Vec::new();
         };
-        if let FileMessage::Chunk { data, .. } = &message {
-            self.arrival_course.add(data.len());
+        match message {
+            FileMessage::List { id, path } => self.serve_list(id, path),
+            FileMessage::Fetch { id, path } => self.serve_fetch(id, path),
+            FileMessage::Listing { id, listing, more } => {
+                self.add_listing(id, listing, more);
+                Vec::new()
+            }
+            FileMessage::Plan { id, files, bytes } => {
+                if let Some(&job) = self.fetches.get(&id)
+                    && let Some(entry) = self.job_mut(job)
+                {
+                    entry.job.files = entry.job.files.max(files);
+                    entry.job.bytes = entry.job.bytes.max(bytes);
+                    entry.known = true;
+                }
+                Vec::new()
+            }
+            FileMessage::Refused { id, reason } => {
+                if let Some(&job) = self.fetches.get(&id)
+                    && let Some(entry) = self.job_mut(job)
+                {
+                    entry.reason = reason;
+                    entry.failed = entry.failed.max(1);
+                    entry.known = true;
+                } else if self.lists.contains(&id) {
+                    self.add_listing(
+                        id,
+                        Listing {
+                            error: reason,
+                            ..Listing::default()
+                        },
+                        false,
+                    );
+                }
+                Vec::new()
+            }
+            message => {
+                if let FileMessage::Chunk { data, .. } = &message {
+                    self.arrival_course.add(data.len());
+                }
+                if for_receiver(&message) {
+                    self.note_incoming(&message);
+                    self.inbox
+                        .handle(message)
+                        .iter()
+                        .map(FileMessage::encode)
+                        .collect()
+                } else {
+                    self.outbox.handle(&message);
+                    Vec::new()
+                }
+            }
         }
-        if for_receiver(&message) {
-            self.inbox
-                .handle(message)
-                .iter()
-                .map(FileMessage::encode)
-                .collect()
-        } else {
-            self.outbox.handle(&message);
-            Vec::new()
+    }
+
+    /// An announcement or offer of the other side: the job its file belongs to.
+    fn note_incoming(&mut self, message: &FileMessage) {
+        match message {
+            FileMessage::From { id, request } => {
+                if let Some(&job) = self.fetches.get(request)
+                    && let Some(entry) = self.job_mut(job)
+                    && entry.ids.len() < MAX_NOTES
+                {
+                    entry.ids.insert(*id);
+                }
+            }
+            FileMessage::Offer { id, name, size } => {
+                let known = self
+                    .jobs
+                    .iter()
+                    .position(|entry| !entry.job.sending && entry.ids.contains(id));
+                let index = match known {
+                    Some(index) => index,
+                    None => {
+                        // Sent by the other side by itself: one job per file or folder while its files come.
+                        let first = name
+                            .split(['/', '\\'])
+                            .find(|part| !part.is_empty())
+                            .unwrap_or(name)
+                            .to_string();
+                        let open_job = self.loose.get(&first).copied().filter(|job| {
+                            self.jobs
+                                .iter()
+                                .any(|e| e.job.id == *job && !e.job.finished())
+                        });
+                        let job = match open_job {
+                            Some(job) => job,
+                            None => {
+                                let job = self.new_job(
+                                    first.clone(),
+                                    false,
+                                    String::new(),
+                                    String::new(),
+                                );
+                                if let Some(entry) = self.job_mut(job) {
+                                    entry.known = true;
+                                    entry.job.can_pause = false;
+                                }
+                                self.loose.insert(first, job);
+                                job
+                            }
+                        };
+                        let Some(index) = self.jobs.iter().position(|e| e.job.id == job) else {
+                            return;
+                        };
+                        if self.jobs[index].ids.len() < MAX_NOTES {
+                            self.jobs[index].ids.insert(*id);
+                        }
+                        index
+                    }
+                };
+                let entry = &mut self.jobs[index];
+                if entry.ids.contains(id) {
+                    // Counted once per file (a Plan may have counted them already).
+                    let offered = entry.ids.len() as u32;
+                    entry.job.files = entry.job.files.max(offered);
+                    if self.fetches.contains_key(&entry.job.id)
+                        && entry.job.bytes > 0
+                        && entry.known
+                    {
+                        // The Plan's total stands.
+                    } else {
+                        entry.job.bytes += size;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn add_listing(&mut self, id: u32, part: Listing, more: bool) {
+        // Only answers to this side's own requests.
+        if !self.lists.contains(&id) {
+            return;
+        }
+        let whole = self.listing_parts.entry(id).or_default();
+        if whole.entries.is_empty() {
+            whole.path = part.path;
+            whole.parent = part.parent;
+        }
+        if !part.error.is_empty() {
+            whole.error = part.error;
+        }
+        if whole.entries.len() < browse::MAX_ENTRIES {
+            whole.entries.extend(part.entries);
+        }
+        if !more && let Some(done) = self.listing_parts.remove(&id) {
+            self.lists.remove(&id);
+            self.listings.push((id, done));
+        }
+    }
+
+    /// The other side's List: answered by the worker (or refused here).
+    fn serve_list(&mut self, id: u32, path: String) -> Vec<Vec<u8>> {
+        if let Some(reason) = self.refusal(&path) {
+            return vec![FileMessage::Refused { id, reason }.encode()];
+        }
+        self.next_work += 1;
+        let work = self.next_work;
+        self.work.insert(work, Purpose::ServeList(id));
+        self.lister().list(work, &path);
+        Vec::new()
+    }
+
+    /// The other side's Fetch: its files found by the worker, then sent (or refused here).
+    fn serve_fetch(&mut self, id: u32, path: String) -> Vec<Vec<u8>> {
+        let refusal = self.refusal(&path).or_else(|| {
+            path.is_empty()
+                .then(|| "choose files or folders to fetch".to_string())
+        });
+        if let Some(reason) = refusal {
+            return vec![FileMessage::Refused { id, reason }.encode()];
+        }
+        self.ask_files(Path::new(&path), Purpose::ServeFetch(id));
+        Vec::new()
+    }
+
+    /// Why a List or Fetch of the other side is not answered, if it is not.
+    fn refusal(&self, path: &str) -> Option<String> {
+        if !self.serving {
+            return Some("that PC does not share its files in this session".into());
+        }
+        if self.work.len() >= MAX_SERVING {
+            return Some("that PC is busy: try again in a moment".into());
+        }
+        if !path.is_empty() && !Path::new(path).is_absolute() {
+            return Some(format!("{path}: not a full path"));
+        }
+        None
+    }
+
+    /// What the worker found: listings to send, files to send.
+    fn poll(&mut self) {
+        let found = match &self.lister {
+            Some(lister) => lister.found(),
+            None => return,
+        };
+        for found in found {
+            match found {
+                Found::Listing(work, listing) => {
+                    if let Some(Purpose::ServeList(request)) = self.work.remove(&work) {
+                        self.pending.extend(listing_parts(request, listing));
+                    }
+                }
+                Found::Files(work, files) => match (self.work.remove(&work), files) {
+                    (Some(Purpose::Send(job, folder, batch)), Ok(files)) => {
+                        let count = files.len() as u32;
+                        let bytes = files.iter().map(|f| f.2).sum();
+                        let into = folder.clone();
+                        let ids = self.outbox.add_files(files, 0, |id| {
+                            let mut before = Vec::new();
+                            if batch > 0 {
+                                before.push(FileMessage::Batch { id, batch });
+                            }
+                            if !into.is_empty() {
+                                before.push(FileMessage::Into {
+                                    id,
+                                    folder: into.clone(),
+                                });
+                            }
+                            before
+                        });
+                        if let Some(entry) = self.job_mut(job) {
+                            entry.ids.extend(ids);
+                            entry.job.files = count;
+                            entry.job.bytes = bytes;
+                            entry.known = true;
+                            let paused = entry.paused;
+                            if paused {
+                                let ids: Vec<u32> = entry.ids.iter().copied().collect();
+                                for id in ids {
+                                    self.outbox.pause(id, true);
+                                }
+                            }
+                        }
+                    }
+                    (Some(Purpose::Send(job, _, _)), Err(reason)) => {
+                        let name = self
+                            .job_mut(job)
+                            .map(|entry| {
+                                entry.reason = reason.clone();
+                                entry.failed = 1;
+                                entry.known = true;
+                                entry.job.files = 1;
+                                entry.job.from.clone()
+                            })
+                            .unwrap_or_default();
+                        self.outcomes.push(Outcome::Failed {
+                            id: 0,
+                            sending: true,
+                            name,
+                            reason,
+                        });
+                    }
+                    (Some(Purpose::ServeFetch(request)), Ok(files)) => {
+                        let count = files.len() as u32;
+                        let bytes = files.iter().map(|f| f.2).sum();
+                        self.pending.push(FileMessage::Plan {
+                            id: request,
+                            files: count,
+                            bytes,
+                        });
+                        self.outbox.add_files(files, request, |id| {
+                            vec![FileMessage::From { id, request }]
+                        });
+                    }
+                    (Some(Purpose::ServeFetch(request)), Err(reason)) => {
+                        self.pending.push(FileMessage::Refused {
+                            id: request,
+                            reason,
+                        });
+                    }
+                    _ => {}
+                },
+            }
         }
     }
 
     /// Messages to send now (encoded), at most about `room` bytes of file data.
     pub fn take(&mut self, room: usize) -> Vec<Vec<u8>> {
+        self.poll();
         if !self.open {
             return Vec::new();
         }
-        let messages = self.outbox.take(room);
+        let mut messages = std::mem::take(&mut self.pending);
+        messages.extend(self.outbox.take(room));
         let data: usize = messages
             .iter()
             .map(|message| match message {
@@ -960,11 +1759,167 @@ impl Transfers {
         lines
     }
 
-    /// What finished or failed since the last call, both directions.
+    /// What finished or failed since the last call, both directions (the jobs follow).
     pub fn outcomes(&mut self) -> Vec<Outcome> {
-        let mut all = self.outbox.take_outcomes();
+        let mut all = std::mem::take(&mut self.outcomes);
+        all.extend(self.outbox.take_outcomes());
         all.extend(self.inbox.take_outcomes());
+        for outcome in &all {
+            let (sending, id, size, failed, arrived) = match outcome {
+                Outcome::Sent { id, size, .. } => (true, *id, *size, None, None),
+                Outcome::Received { id, size, top, .. } => {
+                    (false, *id, *size, None, Some(top.clone()))
+                }
+                Outcome::Failed {
+                    id,
+                    sending,
+                    reason,
+                    ..
+                } => (*sending, *id, 0, Some(reason.clone()), None),
+            };
+            if id == 0 {
+                continue;
+            }
+            if let Some(entry) = self
+                .jobs
+                .iter_mut()
+                .find(|entry| entry.job.sending == sending && entry.ids.contains(&id))
+            {
+                entry.ids.remove(&id);
+                match failed {
+                    Some(reason) => {
+                        entry.failed += 1;
+                        if entry.reason.is_empty() {
+                            entry.reason = reason;
+                        }
+                    }
+                    None => {
+                        entry.job.files_done += 1;
+                        entry.finished_bytes += size;
+                    }
+                }
+                if arrived.is_some() && entry.job.arrived.is_none() {
+                    entry.job.arrived = arrived;
+                }
+            }
+        }
         all
+    }
+
+    /// The jobs, oldest first, with where each stands now.
+    pub fn jobs(&self) -> Vec<Job> {
+        let mut going: HashMap<(bool, u32), (u64, bool)> = HashMap::new();
+        for row in self.outbox.rows().into_iter().chain(self.inbox.rows()) {
+            going.insert((row.sending, row.id), (row.done, row.paused));
+        }
+        self.jobs
+            .iter()
+            .map(|entry| {
+                let mut job = entry.job.clone();
+                let moving: u64 = entry
+                    .ids
+                    .iter()
+                    .filter_map(|id| going.get(&(job.sending, *id)).map(|(done, _)| *done))
+                    .sum();
+                job.bytes_done = (entry.finished_bytes + moving)
+                    .min(job.bytes.max(entry.finished_bytes + moving));
+                let settled = job.files_done + entry.failed;
+                job.state = if entry.cancelled {
+                    JobState::Cancelled
+                } else if entry.known && settled >= job.files && entry.ids.is_empty() {
+                    if entry.failed > 0 {
+                        JobState::Failed(entry.reason.clone())
+                    } else {
+                        JobState::Done
+                    }
+                } else if entry.paused {
+                    JobState::Paused
+                } else if job.bytes_done > 0 {
+                    JobState::Going
+                } else {
+                    JobState::Waiting
+                };
+                job
+            })
+            .collect()
+    }
+
+    /// Pauses or resumes job `id` (its files this side sends, or asks the other side to hold those it sends).
+    pub fn pause_job(&mut self, id: u32, paused: bool) {
+        let Some(entry) = self.jobs.iter_mut().find(|entry| entry.job.id == id) else {
+            return;
+        };
+        if !entry.job.can_pause || entry.job.finished() || entry.cancelled {
+            return;
+        }
+        entry.paused = paused;
+        if entry.job.sending {
+            let ids: Vec<u32> = entry.ids.iter().copied().collect();
+            for file in ids {
+                self.outbox.pause(file, paused);
+            }
+        } else if self.fetches.contains_key(&id) {
+            self.pending.push(FileMessage::Pause { id, paused });
+        }
+    }
+
+    /// Stops job `id`: what arrived of its files is removed on the receiving side.
+    pub fn cancel_job(&mut self, id: u32) {
+        let Some(index) = self.jobs.iter().position(|entry| entry.job.id == id) else {
+            return;
+        };
+        if self.jobs[index].cancelled {
+            return;
+        }
+        self.jobs[index].cancelled = true;
+        let ids: Vec<u32> = self.jobs[index].ids.iter().copied().collect();
+        if self.jobs[index].job.sending {
+            for file in ids {
+                self.outbox.cancel(file);
+            }
+            // Files still being found are dropped when found.
+            self.work
+                .retain(|_, purpose| !matches!(purpose, Purpose::Send(job, _, _) if *job == id));
+        } else {
+            if self.fetches.contains_key(&id) {
+                self.pending.push(FileMessage::Drop { id });
+            }
+            for file in ids {
+                let replies = self.inbox.cancel(file);
+                self.pending.extend(replies);
+            }
+        }
+    }
+
+    pub fn pause_all(&mut self, paused: bool) {
+        let ids: Vec<u32> = self.jobs.iter().map(|entry| entry.job.id).collect();
+        for id in ids {
+            self.pause_job(id, paused);
+        }
+    }
+
+    pub fn cancel_all(&mut self) {
+        let unfinished: Vec<u32> = self
+            .jobs()
+            .into_iter()
+            .filter(|job| !job.finished())
+            .map(|job| job.id)
+            .collect();
+        for id in unfinished {
+            self.cancel_job(id);
+        }
+    }
+
+    /// Takes the finished jobs off the list (job `only`, or all).
+    pub fn clear_finished(&mut self, only: Option<u32>) {
+        let finished: HashSet<u32> = self
+            .jobs()
+            .into_iter()
+            .filter(|job| job.finished() && only.is_none_or(|id| id == job.id))
+            .map(|job| job.id)
+            .collect();
+        self.jobs.retain(|entry| !finished.contains(&entry.job.id));
+        self.loose.retain(|_, job| !finished.contains(job));
     }
 
     /// Every transfer on its way: sent ones first.
@@ -994,19 +1949,70 @@ impl Transfers {
         }
     }
 
-    /// Files still on their way (either direction).
+    /// Files still on their way (either direction), or being found.
     pub fn busy(&self) -> bool {
         !self.outbox.progress().is_empty()
             || !self.inbox.progress().is_empty()
-            || !self.queued.is_empty()
+            || self
+                .work
+                .values()
+                .any(|purpose| matches!(purpose, Purpose::Send(..) | Purpose::ServeFetch(_)))
     }
 }
 
-/// A file name that is safe on Windows: the last component only, no forbidden or control characters, no
-/// trailing dots or spaces, not a reserved device name, at most 200 characters.
-/// Files sent from one folder, at most.
-const MAX_FOLDER_FILES: usize = 10_000;
+/// A listing as messages small enough for the channel (the last one with `more` false).
+fn listing_parts(id: u32, listing: Listing) -> Vec<FileMessage> {
+    let mut parts = Vec::new();
+    let mut current = Vec::new();
+    let mut bytes = 0usize;
+    let Listing {
+        path,
+        parent,
+        entries,
+        error,
+    } = listing;
+    let make = |entries: Vec<Entry>, more: bool| FileMessage::Listing {
+        id,
+        listing: Listing {
+            path: path.clone(),
+            parent: parent.clone(),
+            entries,
+            error: if more { String::new() } else { error.clone() },
+        },
+        more,
+    };
+    for entry in entries {
+        bytes += entry.name.len() + 20;
+        current.push(entry);
+        if current.len() >= LISTING_PART_ENTRIES || bytes >= LISTING_PART_BYTES {
+            parts.push(make(std::mem::take(&mut current), true));
+            bytes = 0;
+        }
+    }
+    parts.push(make(current, false));
+    parts
+}
 
+/// The person's folder `key` from the text of `user-dirs.dirs` (`XDG_DOWNLOAD_DIR` and the like): a quoted path,
+/// absolute or starting with `$HOME/`; None for none of its own ("$HOME").
+#[cfg(unix)]
+pub(crate) fn xdg_dir(text: &str, key: &str, home: &Path) -> Option<PathBuf> {
+    let prefix = format!("{key}=");
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&prefix))?;
+    let value = line[prefix.len()..].trim().trim_matches('"');
+    let path = if let Some(rest) = value.strip_prefix("$HOME/") {
+        home.join(rest)
+    } else if value == "$HOME" {
+        // The desktop's way of saying it has no such folder of its own.
+        return None;
+    } else {
+        PathBuf::from(value)
+    };
+    path.is_absolute().then_some(path)
+}
 /// A path inside a sent folder ("folder/sub/file.txt", either slash), made safe part by part: no empty, "." or
 /// ".." parts, no drive letters, each part a safe file name, at most 16 parts deep. Never leaves the folder it
 /// is joined to.
@@ -1026,6 +2032,8 @@ pub fn safe_relative_path(name: &str) -> PathBuf {
     }
 }
 
+/// A file name that is safe on Windows: the last component only, no forbidden or control characters, no
+/// trailing dots or spaces, not a reserved device name, at most 200 characters.
 pub fn safe_name(name: &str) -> String {
     let last = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let mut clean: String = last
@@ -1118,20 +2126,7 @@ pub fn downloads_folder() -> PathBuf {
 /// `XDG_DOWNLOAD_DIR` from the text of `user-dirs.dirs`: a quoted path, absolute or starting with `$HOME/`.
 #[cfg(unix)]
 fn xdg_download_dir(text: &str, home: &Path) -> Option<PathBuf> {
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("XDG_DOWNLOAD_DIR="))?;
-    let value = line["XDG_DOWNLOAD_DIR=".len()..].trim().trim_matches('"');
-    let path = if let Some(rest) = value.strip_prefix("$HOME/") {
-        home.join(rest)
-    } else if value == "$HOME" {
-        // The desktop's way of saying it has no download folder of its own.
-        return None;
-    } else {
-        PathBuf::from(value)
-    };
-    path.is_absolute().then_some(path)
+    xdg_dir(text, "XDG_DOWNLOAD_DIR", home)
 }
 
 #[cfg(test)]
@@ -1630,5 +2625,241 @@ mod robustness {
             }
         }
         let _ = std::fs::remove_dir_all(&parent);
+    }
+}
+
+/// Browsing and jobs (the file transfer window): two sides' `Transfers` talking as over the files channel.
+#[cfg(test)]
+mod browsing {
+    use super::*;
+
+    /// Messages both ways until nothing moves for a while (the worker threads answer on their own time).
+    fn pump(viewer: &mut Transfers, agent: &mut Transfers) {
+        let (mut to_agent, mut to_viewer): (VecDeque<Vec<u8>>, VecDeque<Vec<u8>>) =
+            (VecDeque::new(), VecDeque::new());
+        let mut quiet = 0;
+        for _ in 0..50_000 {
+            to_agent.extend(viewer.take(256 * 1024));
+            to_viewer.extend(agent.take(256 * 1024));
+            let moved = !to_agent.is_empty() || !to_viewer.is_empty();
+            while let Some(message) = to_agent.pop_front() {
+                to_viewer.extend(agent.on_message(&message));
+            }
+            while let Some(message) = to_viewer.pop_front() {
+                to_agent.extend(viewer.on_message(&message));
+            }
+            let _ = (viewer.outcomes(), agent.outcomes());
+            if moved || viewer.busy() || agent.busy() {
+                quiet = 0;
+            } else {
+                quiet += 1;
+                if quiet > 40 {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("the sides did not settle");
+    }
+
+    fn sides(root: &Path, serving: bool) -> (Transfers, Transfers) {
+        let mut viewer = Transfers::new(root.join("viewer_downloads"), true);
+        let mut agent = Transfers::new(root.join("agent_downloads"), true);
+        agent.serve_browsing(serving);
+        viewer.opened();
+        agent.opened();
+        (viewer, agent)
+    }
+
+    #[test]
+    fn the_controller_lists_fetches_and_sends_into_a_folder_there() {
+        let root = std::env::temp_dir().join(format!("queqiao-browsing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let share = root.join("there").join("share");
+        std::fs::create_dir_all(share.join("sub")).unwrap();
+        std::fs::write(share.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(share.join("sub").join("b.bin"), vec![9u8; 70_000]).unwrap();
+        let target = root.join("there").join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let local = root.join("here").join("in");
+        std::fs::create_dir_all(&local).unwrap();
+        let upload = root.join("here").join("up.txt");
+        std::fs::write(&upload, b"upload").unwrap();
+        let (mut viewer, mut agent) = sides(&root, true);
+
+        let asked = viewer.list_remote(&share.to_string_lossy());
+        pump(&mut viewer, &mut agent);
+        let listings = viewer.listings();
+        let (id, listing) = listings.first().expect("a listing");
+        assert_eq!(*id, asked);
+        assert!(listing.error.is_empty(), "{}", listing.error);
+        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["sub", "a.txt"]);
+        assert_eq!(Path::new(&listing.parent), share.parent().unwrap());
+
+        let fetched = viewer.fetch(&share.to_string_lossy(), &local);
+        pump(&mut viewer, &mut agent);
+        assert_eq!(
+            std::fs::read(local.join("share").join("a.txt")).unwrap(),
+            b"alpha"
+        );
+        assert_eq!(
+            std::fs::read(local.join("share").join("sub").join("b.bin"))
+                .unwrap()
+                .len(),
+            70_000
+        );
+        let job = viewer
+            .jobs()
+            .into_iter()
+            .find(|job| job.id == fetched)
+            .unwrap();
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+        assert_eq!((job.files, job.files_done, job.bytes), (2, 2, 70_005));
+        assert_eq!(job.bytes_done, 70_005);
+        assert_eq!(job.arrived.as_deref(), Some(local.join("share").as_path()));
+
+        let sent = viewer.send_into(&upload, &target.to_string_lossy());
+        pump(&mut viewer, &mut agent);
+        assert_eq!(std::fs::read(target.join("up.txt")).unwrap(), b"upload");
+        let job = viewer
+            .jobs()
+            .into_iter()
+            .find(|job| job.id == sent)
+            .unwrap();
+        assert_eq!(job.state, JobState::Done, "{job:?}");
+        // Nothing went into the downloads folders.
+        assert!(!root.join("viewer_downloads").exists());
+        assert!(!root.join("agent_downloads").exists());
+        // Finished jobs leave the list when cleared.
+        viewer.clear_finished(None);
+        assert!(viewer.jobs().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nothing_is_browsed_without_leave_and_the_controller_is_never_browsed() {
+        let root = std::env::temp_dir().join(format!("queqiao-browsing-no-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("folder")).unwrap();
+        let file = root.join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let (mut viewer, mut agent) = sides(&root, false);
+        viewer.list_remote(&root.to_string_lossy());
+        let fetched = viewer.fetch(&file.to_string_lossy(), &root.join("folder"));
+        let sent = viewer.send_into(&file, &root.join("folder").to_string_lossy());
+        pump(&mut viewer, &mut agent);
+        let listings = viewer.listings();
+        assert!(
+            listings[0].1.error.contains("does not share"),
+            "{listings:?}"
+        );
+        assert!(listings[0].1.entries.is_empty());
+        let jobs = viewer.jobs();
+        for id in [fetched, sent] {
+            let job = jobs.iter().find(|job| job.id == id).unwrap();
+            assert!(matches!(job.state, JobState::Failed(_)), "{job:?}");
+        }
+        assert!(!root.join("folder").join("f.txt").exists());
+        // The controlled side asking the controller: refused, and its Into is refused too.
+        agent.list_remote(&root.to_string_lossy());
+        let into = agent.send_into(&file, &root.join("folder").to_string_lossy());
+        pump(&mut viewer, &mut agent);
+        assert!(!agent.listings()[0].1.error.is_empty());
+        let job = agent.jobs().into_iter().find(|job| job.id == into).unwrap();
+        assert!(matches!(job.state, JobState::Failed(_)), "{job:?}");
+        assert!(!root.join("folder").join("f.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_of_many_files_arrives_whole_and_a_job_can_be_cancelled() {
+        let root =
+            std::env::temp_dir().join(format!("queqiao-browsing-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("many");
+        std::fs::create_dir_all(&folder).unwrap();
+        for index in 0..40 {
+            std::fs::write(folder.join(format!("{index}.txt")), format!("file {index}")).unwrap();
+        }
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let (mut viewer, mut agent) = sides(&root, true);
+        let job = viewer.send_into(&folder, &target.to_string_lossy());
+        pump(&mut viewer, &mut agent);
+        let state = viewer.jobs().into_iter().find(|j| j.id == job).unwrap();
+        assert_eq!(state.state, JobState::Done, "{state:?}");
+        assert_eq!(state.files_done, 40);
+        assert_eq!(std::fs::read_dir(target.join("many")).unwrap().count(), 40);
+        // A cancelled fetch leaves nothing behind.
+        let big = root.join("big.bin");
+        std::fs::write(&big, vec![1u8; 4 * 1024 * 1024]).unwrap();
+        let local = root.join("local");
+        std::fs::create_dir_all(&local).unwrap();
+        let fetch = viewer.fetch(&big.to_string_lossy(), &local);
+        for _ in 0..20 {
+            for message in viewer.take(64 * 1024) {
+                for reply in agent.on_message(&message) {
+                    viewer.on_message(&reply);
+                }
+            }
+            for message in agent.take(64 * 1024) {
+                for reply in viewer.on_message(&message) {
+                    agent.on_message(&reply);
+                }
+            }
+            if viewer.rows().iter().any(|row| row.done > 0) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            viewer.rows().iter().any(|row| row.done > 0),
+            "the fetch began"
+        );
+        viewer.cancel_job(fetch);
+        pump(&mut viewer, &mut agent);
+        let state = viewer.jobs().into_iter().find(|j| j.id == fetch).unwrap();
+        assert_eq!(state.state, JobState::Cancelled);
+        let left: Vec<_> = std::fs::read_dir(&local)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        assert!(!agent.busy(), "the sending side dropped it too");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_listing_survives_the_wire_in_parts() {
+        let listing = Listing {
+            path: "C:\\Users\\me".into(),
+            parent: "C:\\Users".into(),
+            entries: (0..1234u64)
+                .map(|index| Entry {
+                    name: format!("名字 {index}.txt"),
+                    kind: if index % 3 == 0 {
+                        EntryKind::Folder
+                    } else {
+                        EntryKind::File
+                    },
+                    size: index * 1000,
+                    modified: 1_764_000_000 + index as i64,
+                })
+                .collect(),
+            error: String::new(),
+        };
+        let mut viewer = Transfers::new(std::env::temp_dir(), true);
+        let id = viewer.list_remote("C:\\Users\\me");
+        // An answer to a request this side never made is dropped.
+        viewer.on_message(&listing_parts(id + 1, listing.clone())[0].encode());
+        let parts = listing_parts(id, listing.clone());
+        assert_eq!(parts.len(), 3);
+        for part in &parts {
+            assert!(part.encode().len() < 64 * 1024);
+            viewer.on_message(&part.encode());
+        }
+        assert_eq!(viewer.listings(), vec![(id, listing)]);
     }
 }

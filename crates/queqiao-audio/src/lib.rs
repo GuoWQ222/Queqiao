@@ -24,7 +24,7 @@ use pulse as device;
 use wasapi as device;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -346,11 +346,17 @@ fn sleep_unless(stop: &AtomicBool, duration: Duration) {
     }
 }
 
+/// What the person set for the sound played here: muted, and the volume in percent.
+struct Level {
+    muted: AtomicBool,
+    volume: AtomicU8,
+}
+
 /// Plays the other PC's sound.
 pub struct Player {
     packets: Sender<(Arc<[u8]>, u64)>,
     stop: Arc<AtomicBool>,
-    muted: Arc<AtomicBool>,
+    level: Arc<Level>,
     thread: Option<JoinHandle<()>>,
     stats: Arc<Mutex<PlayerStats>>,
     notes: Receiver<String>,
@@ -387,11 +393,14 @@ impl Player {
     pub fn start(device: Option<String>, check_tone: bool) -> Player {
         let (packets, incoming) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let muted = Arc::new(AtomicBool::new(false));
+        let level = Arc::new(Level {
+            muted: AtomicBool::new(false),
+            volume: AtomicU8::new(100),
+        });
         let stats = Arc::new(Mutex::new(PlayerStats::default()));
         let (note_sender, notes) = mpsc::channel();
         let thread = {
-            let (stop, muted, stats) = (stop.clone(), muted.clone(), stats.clone());
+            let (stop, level, stats) = (stop.clone(), level.clone(), stats.clone());
             std::thread::Builder::new()
                 .name("queqiao-sound-play".into())
                 .spawn(move || {
@@ -400,7 +409,7 @@ impl Player {
                         check_tone,
                         &incoming,
                         &stop,
-                        &muted,
+                        &level,
                         &stats,
                         &note_sender,
                     )
@@ -410,7 +419,7 @@ impl Player {
         Player {
             packets,
             stop,
-            muted,
+            level,
             thread,
             stats,
             notes,
@@ -422,7 +431,12 @@ impl Player {
     }
 
     pub fn set_muted(&self, muted: bool) {
-        self.muted.store(muted, Ordering::Relaxed);
+        self.level.muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// The volume of the other PC's sound here, 0 to 100 percent (the control center's slider).
+    pub fn set_volume(&self, percent: u8) {
+        self.level.volume.store(percent.min(100), Ordering::Relaxed);
     }
 
     pub fn stats(&self) -> PlayerStats {
@@ -451,7 +465,7 @@ fn play_thread(
     check_tone: bool,
     incoming: &Receiver<(Arc<[u8]>, u64)>,
     stop: &AtomicBool,
-    muted: &AtomicBool,
+    level: &Level,
     stats: &Mutex<PlayerStats>,
     notes: &Sender<String>,
 ) {
@@ -549,8 +563,13 @@ fn play_thread(
                         stats.tone_frames += u64::from(tone);
                     }
                 }
-                if muted.load(Ordering::Relaxed) {
+                let volume = level.volume.load(Ordering::Relaxed);
+                if level.muted.load(Ordering::Relaxed) || volume == 0 {
                     pcm.fill(0.0);
+                } else if volume < 100 {
+                    // The slider follows hearing, not amplitude: its square.
+                    let gain = (f32::from(volume) / 100.0).powi(2);
+                    pcm.iter_mut().for_each(|sample| *sample *= gain);
                 }
                 if stream.write(&pcm).is_err() {
                     break 'device;

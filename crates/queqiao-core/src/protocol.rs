@@ -258,6 +258,8 @@ pub enum Command {
     RestartQueqiao,
     /// The viewer's microphone comes (true) or stops: the controlled PC plays it into a virtual microphone.
     Microphone(bool),
+    /// Lock that PC when this session ends (true), as its own setting may also say.
+    LockAfter(bool),
     /// The picture's codec as the viewer wants it, and whether it can decode AV1 (H.264 it always can), what H.265 it
     /// decodes (`hevc` bits; 0 from viewers before H.265), and whether it wants 4:4:4 colour and 10 bits (H.265).
     VideoCodec {
@@ -370,6 +372,7 @@ impl Message {
                     Command::Lock => out.push(2),
                     Command::RestartQueqiao => out.push(13),
                     Command::Microphone(on) => out.extend([15, u8::from(on)]),
+                    Command::LockAfter(on) => out.extend([16, u8::from(on)]),
                     Command::VideoCodec {
                         prefer,
                         can_decode_av1,
@@ -525,6 +528,11 @@ impl Message {
                 2 => Command::Lock,
                 13 => Command::RestartQueqiao,
                 15 => Command::Microphone(match rest.get(1)? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                }),
+                16 => Command::LockAfter(match rest.get(1)? {
                     0 => false,
                     1 => true,
                     _ => return None,
@@ -769,6 +777,8 @@ mod tests {
             Message::Command(Command::RestartQueqiao),
             Message::Command(Command::Microphone(true)),
             Message::Command(Command::Microphone(false)),
+            Message::Command(Command::LockAfter(true)),
+            Message::Command(Command::LockAfter(false)),
             Message::Command(Command::VideoCodec {
                 prefer: CodecPreference::Av1,
                 can_decode_av1: true,

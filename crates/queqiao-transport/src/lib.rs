@@ -12,7 +12,7 @@ mod shape;
 mod signal;
 mod turn;
 
-pub use interfaces::{connect_direct, public_address};
+pub use interfaces::{connect_direct, connect_direct_noted, public_address};
 pub use peer::{
     Addresses, AudioSender, Peer, PeerEvent, Role, START_BITRATE, STREAM_IN_FLIGHT, Stream, tune,
 };

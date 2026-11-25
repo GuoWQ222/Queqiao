@@ -248,6 +248,44 @@ impl Canvas {
                     self.line(p(column, 15.0), p(column, 15.0 - height), 2.4, colour);
                 }
             }
+            // File transfer: a folder.
+            "\u{E8B7}" => {
+                for (from, to) in [
+                    (p(1.0, 4.0), p(6.0, 4.0)),
+                    (p(6.0, 4.0), p(7.5, 6.0)),
+                    (p(7.5, 6.0), p(15.0, 6.0)),
+                    (p(15.0, 6.0), p(15.0, 14.0)),
+                    (p(15.0, 14.0), p(1.0, 14.0)),
+                    (p(1.0, 14.0), p(1.0, 4.0)),
+                ] {
+                    self.line(from, to, 1.4, colour);
+                }
+            }
+            // Control center: a gear (a ring with teeth).
+            "\u{E713}" => {
+                for step in 0..8 {
+                    let angle = step as f32 * std::f32::consts::PI / 4.0;
+                    let (sin, cos) = angle.sin_cos();
+                    self.line(
+                        p(8.0 + cos * 5.0, 8.0 + sin * 5.0),
+                        p(8.0 + cos * 7.0, 8.0 + sin * 7.0),
+                        2.0,
+                        colour,
+                    );
+                }
+                for step in 0..16 {
+                    let (a, b) = (
+                        step as f32 * std::f32::consts::PI / 8.0,
+                        (step + 1) as f32 * std::f32::consts::PI / 8.0,
+                    );
+                    self.line(
+                        p(8.0 + a.cos() * 4.5, 8.0 + a.sin() * 4.5),
+                        p(8.0 + b.cos() * 4.5, 8.0 + b.sin() * 4.5),
+                        1.4,
+                        colour,
+                    );
+                }
+            }
             // More: three dots.
             "\u{E712}" => {
                 for column in [3.0, 8.0, 13.0] {
@@ -316,6 +354,8 @@ pub struct SessionOverlay {
 }
 
 const NAME_SIZE: f32 = 14.0;
+/// The delay's dot and the time after the name ("● 00:12:34").
+const CLOCK_WIDTH: i32 = 70;
 const LABEL_SIZE: f32 = 13.5;
 const SMALL_SIZE: f32 = 12.5;
 
@@ -511,8 +551,22 @@ impl SessionOverlay {
         self.figures = figures;
         if self.card_on {
             self.draw_card();
-            let _ = self.connection.flush();
         }
+        // The bar's clock and delay dot.
+        if self.bar_out && self.level < 2 {
+            self.draw_bar();
+        }
+        let _ = self.connection.flush();
+    }
+
+    /// Where the bar's button `id` ends (its bottom right, in the session window), while it shows.
+    pub fn anchor_of(&self, id: u16) -> Option<(i32, i32)> {
+        let ((left, top, width, height), _) =
+            self.places.iter().find(|(_, place_id)| *place_id == id)?;
+        Some((
+            self.bar.place.0 + left + width,
+            self.bar.place.1 + top + height,
+        ))
     }
 
     /// Follows the pointer and the session window's size, brings the bar out or tucks it away. Called often (the
@@ -625,7 +679,7 @@ impl SessionOverlay {
     /// The bar's width at `level`: 0 all of it, 1 without the buttons' labels, 2 without the name either.
     fn width_at(&self, level: usize) -> i32 {
         let name = if level < 2 {
-            14 + self.name_width + 14
+            14 + self.name_width + 10 + CLOCK_WIDTH + 4
         } else {
             4
         };
@@ -756,6 +810,23 @@ impl SessionOverlay {
             x = 14;
             bar.text(&self.name, x, height / 2, NAME_SIZE, TEXT);
             x += self.name_width + 10;
+            // The delay's dot and the session's time, as UU Remote shows its signal and time.
+            let dot = match self.figures.delay_ms {
+                Some(ms) if ms < 30.0 => GOOD,
+                Some(ms) if ms < 80.0 => FAIR,
+                Some(_) => POOR,
+                None => MUTED,
+            };
+            bar.fill_round(x, height / 2 - 3, 7, 7, 3, dot);
+            let elapsed = self.figures.elapsed.as_secs();
+            let clock = format!(
+                "{:02}:{:02}:{:02}",
+                elapsed / 3600,
+                elapsed / 60 % 60,
+                elapsed % 60
+            );
+            bar.text(&clock, x + 12, height / 2, SMALL_SIZE, MUTED);
+            x += CLOCK_WIDTH;
             bar.fill(x, height / 2 - 8, 1, 16, DIVIDER);
             x += 4;
         }

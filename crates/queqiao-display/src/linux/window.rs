@@ -6,6 +6,7 @@
 //! window of its own while the session goes on.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use queqiao_input::scancode::scancode_from_evdev;
@@ -23,6 +24,7 @@ use x11rb::wrapper::ConnectionExt as _;
 use super::cursor::{RemoteCursor, XCursor};
 use super::{Result, x11_error};
 use crate::model::WindowEvent;
+use crate::panel::PanelItem;
 
 x11rb::atom_manager! {
     pub(super) Atoms: AtomsCookie {
@@ -80,6 +82,10 @@ pub struct Window {
     hotkeys: RefCell<Vec<(i32, u16, u8)>>,
     /// The session menu's items (id, text, checked): kept for the session bar to come.
     menu: RefCell<Vec<(u16, String, bool)>>,
+    /// The control center: its items, the menu's check marks, the window while open.
+    panel: RefCell<Vec<PanelItem>>,
+    checks: RefCell<HashMap<u16, bool>>,
+    center: RefCell<Option<super::control_center::ControlCenter>>,
     events: RefCell<Vec<WindowEvent>>,
     slow: Vec<String>,
 }
@@ -154,6 +160,9 @@ impl Window {
             hidden_cursor: RefCell::new(None),
             hotkeys: RefCell::new(Vec::new()),
             menu: RefCell::new(Vec::new()),
+            panel: RefCell::new(Vec::new()),
+            checks: RefCell::new(HashMap::new()),
+            center: RefCell::new(None),
             events: RefCell::new(Vec::new()),
             slow: Vec::new(),
         };
@@ -175,29 +184,83 @@ impl Window {
         );
     }
 
-    /// The session menu, in a window of its own (the session goes on meanwhile); the choice comes back as the bar's
-    /// buttons do, a _QUEQIAO_BAR message to this window.
-    fn open_menu(&self) {
-        let items = self.menu.borrow().clone();
-        let (window, atom) = (self.window, self.atoms._QUEQIAO_BAR);
-        let _ = std::thread::Builder::new()
-            .name("queqiao-menu".into())
-            .spawn(move || {
-                let items: Vec<(u16, &str, bool)> = items
-                    .iter()
-                    .map(|(id, text, checked)| (*id, text.as_str(), *checked))
-                    .collect();
-                let Some(id) = super::dialogs::menu(queqiao_core::text::tr("Queqiao"), &items)
-                else {
-                    return;
-                };
-                if let Ok((connection, _)) = x11rb::connect(None) {
-                    let message =
-                        ClientMessageEvent::new(32, window, atom, [u32::from(id), 0, 0, 0, 0]);
-                    let _ = connection.send_event(false, window, EventMask::NO_EVENT, message);
-                    let _ = connection.flush();
+    /// The control center's items (the bar's "Control center" opens it); its check marks follow `check_menu_item`.
+    pub fn set_panel(&self, items: Vec<PanelItem>) {
+        *self.panel.borrow_mut() = items;
+    }
+
+    /// Changes the control center's items.
+    pub fn update_panel(&self, change: impl FnOnce(&mut Vec<PanelItem>)) {
+        change(&mut self.panel.borrow_mut());
+    }
+
+    /// Opens the control center (tests: with group `group` open), or closes it when it is open. `_anchor`: where
+    /// Windows puts it; here it opens at the window's top right, under the bar.
+    pub fn open_panel(&self, _anchor: (i32, i32), group: Option<usize>) {
+        if self.panel_open() {
+            *self.center.borrow_mut() = None;
+            return;
+        }
+        let position = self.screen_origin().map(|(x, y)| {
+            let right = x + self.size.0 as i32;
+            [(right - 610).max(x) as f32, (y + 52) as f32]
+        });
+        let center = super::control_center::ControlCenter::open(
+            self.panel.borrow().clone(),
+            self.checks.borrow().clone(),
+            position,
+            group,
+        );
+        *self.center.borrow_mut() = center.ok();
+    }
+
+    /// The control center is open.
+    pub fn panel_open(&self) -> bool {
+        self.center
+            .borrow()
+            .as_ref()
+            .is_some_and(super::control_center::ControlCenter::is_open)
+    }
+
+    /// Tests: a picture of the open control center (a window of its own here).
+    pub fn save_panel_picture(&self, path: &std::path::Path) -> std::io::Result<()> {
+        match self.center.borrow().as_ref() {
+            Some(center) => super::forms::save_screen_picture(center.hwnd(), path),
+            None => Err(std::io::Error::other("the control center is not open")),
+        }
+    }
+
+    /// The window's top left on the screen.
+    fn screen_origin(&self) -> Option<(i32, i32)> {
+        let root = self.connection.setup().roots.first()?.root;
+        let reply = self
+            .connection
+            .translate_coordinates(self.window, root, 0, 0)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some((i32::from(reply.dst_x), i32::from(reply.dst_y)))
+    }
+
+    /// The control center's choices as menu commands and values.
+    fn take_choices(&self) {
+        let choices = match self.center.borrow().as_ref() {
+            Some(center) => center.take(),
+            None => return,
+        };
+        for choice in choices {
+            let event = match choice {
+                super::control_center::Choice::Menu(id) => WindowEvent::Menu(id),
+                super::control_center::Choice::Value(id, value) => {
+                    crate::panel::set_value(&mut self.panel.borrow_mut(), id, value);
+                    WindowEvent::Value { id, value }
                 }
-            });
+            };
+            self.events.borrow_mut().push(event);
+        }
+        if !self.panel_open() && self.center.borrow().is_some() {
+            *self.center.borrow_mut() = None;
+        }
     }
 
     pub fn add_submenu(&self, _title: &str, items: &[(u16, &str)]) {
@@ -208,12 +271,14 @@ impl Window {
         if let Some(item) = self.menu.borrow_mut().iter_mut().find(|item| item.0 == id) {
             item.1 = text.to_string();
         }
+        crate::panel::rename(&mut self.panel.borrow_mut(), id, text);
     }
 
     pub fn check_menu_item(&self, id: u16, checked: bool) {
         if let Some(item) = self.menu.borrow_mut().iter_mut().find(|item| item.0 == id) {
             item.2 = checked;
         }
+        self.checks.borrow_mut().insert(id, checked);
     }
 
     /// That PC's pointer shape as this window's cursor (None: the usual arrow).
@@ -644,7 +709,7 @@ impl Window {
             Event::ClientMessage(message) if message.type_ == self.atoms._QUEQIAO_BAR => {
                 match message.data.as_data32()[0] as u16 {
                     crate::model::BAR_END => self.closed = true,
-                    crate::model::BAR_MORE => self.open_menu(),
+                    crate::model::BAR_MORE => self.open_panel((0, 0), None),
                     id => self.events.borrow_mut().push(WindowEvent::Menu(id)),
                 }
             }
@@ -702,6 +767,7 @@ impl Window {
     }
 
     pub fn take_events(&mut self) -> Vec<WindowEvent> {
+        self.take_choices();
         std::mem::take(self.events.get_mut())
     }
 

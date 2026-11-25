@@ -7,8 +7,10 @@
 //! - what is not on Linux yet (the session bar, lists, the password form, the privacy screen) is refused with a message.
 
 mod banner;
+mod control_center;
 mod cursor;
 mod dialogs;
+mod file_window;
 mod forms;
 mod gui;
 mod icon;
@@ -22,6 +24,7 @@ mod window;
 pub use banner::{ConsentPrompt, SessionBanner};
 pub use cursor::RemoteCursor;
 pub use dialogs::{ask_secret, ask_text, show_error, show_info};
+pub use file_window::{FileWindow, show_in_folder};
 pub use forms::{owner_from_raw, pick_files, popup_menu, save_screen_picture, save_window_picture};
 pub use lists::{DeviceList, HelpForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList};
 pub use login::LoginForm;

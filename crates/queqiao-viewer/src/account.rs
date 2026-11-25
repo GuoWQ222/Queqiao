@@ -57,8 +57,12 @@ pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<
         lines.push(format!("the key of device {device} will be pinned anew"));
     }
     lines.push(format!(
-        "logged in as {} at {}; this device: {} ({})",
-        account.user, login.server, identity.name, identity.id
+        "logged in as {} at {} (route: {}); this device: {} ({})",
+        account.user,
+        login.server,
+        account.route(),
+        identity.name,
+        identity.id
     ));
     if options.logout {
         account.send(ClientMessage::Logout);

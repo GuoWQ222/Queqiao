@@ -180,6 +180,11 @@ try {
     # A file copied to the clipboard on the viewer's side (allowed session).
     $clipFile = Join-Path $Out 'queqiao-clipboard-file.txt'
     [IO.File]::WriteAllText($clipFile, 'queqiao clipboard file test')
+    # "That PC's" folder for the file transfer window's test (direct session): down.txt to fetch, up.txt arrives.
+    $browseRemote = Join-Path $Out 'browse_remote'
+    Remove-Item -LiteralPath $browseRemote -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $browseRemote | Out-Null
+    [IO.File]::WriteAllText((Join-Path $browseRemote 'down.txt'), 'queqiao browse test: down')
     # label, QUEQIAO_FORCE, extra agent options, what the agent's report must say, what the viewer's must say,
     # whether both runs must pass (a declined session passes neither). Later options win, so an extra --seconds shortens the agent's run.
     # A virtual microphone on this PC (the names the agent pairs: VB-CABLE, VoiceMeeter, Virtual Audio Cable): with one
@@ -225,7 +230,8 @@ try {
         if ($label -eq 'h265') { $viewerArgs += ' --codec h265 --chroma444 --ten-bit' }
         # H.264 asked for (Automatic picks AV1 where both PCs have it on their GPUs): the H.264 path stays tested.
         # The bar and the card of figures on, and a picture of the window with them (viewer_session.bmp).
-        if ($label -eq 'direct') { $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out`"" }
+        # The file transfer window too: that PC's test folder listed, down.txt fetched from it, up.txt sent into it.
+        if ($label -eq 'direct') { $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out`" --browse-test `"$browseRemote`"" }
         if ($label -eq 'drag') {
             New-Item -ItemType Directory -Force (Join-Path $Out 'drag') | Out-Null
             $viewerArgs += " --codec h264 --figures --ui-pictures `"$Out\drag`" --picture-at 9 --seconds 22 --max-bitrate $DragMaxBitrate"
@@ -396,11 +402,16 @@ try {
                     $failed += "drag agent (expected 'bitrate course')"
                 }
             }
-            # The session window's bar and card (the direct session has them on): pictures taken, "Figures" on the bar
-            # clicked twice (the card off, then on).
+            # The session window's bar and card (the direct session has them on): pictures taken; the bar's "Control
+            # center" clicked (it opened), a picture with its Picture group open, closed again. The file transfer
+            # window: its test passed (that PC's folder listed, down.txt fetched, up.txt sent and checked there), with
+            # a picture of it; up.txt is in that folder now.
             if ($label -eq 'direct' -and $program -eq 'viewer') {
-                foreach ($wanted in '^session picture: .+viewer_session\.bmp$', '^session picture: .+viewer_session_tucked\.bmp$', '^card of figures: off$', '^card of figures: on$') {
+                foreach ($wanted in '^session picture: .+viewer_session\.bmp$', '^session picture: .+viewer_session_tucked\.bmp$', '^control center open after the click: true$', '^control center picture: .+viewer_panel\.bmp$', '^control center closed: true$', '^browse test: PASS', '^file transfer picture: .+viewer_files\.bmp$') {
                     if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label viewer (expected '$wanted')" }
+                }
+                if ((Get-Content -LiteralPath (Join-Path $browseRemote 'up.txt') -Raw -ErrorAction SilentlyContinue) -ne 'queqiao browse test: up') {
+                    $failed += "$label viewer (up.txt did not arrive in that PC's folder)"
                 }
             }
             if ($extra -like '*--clipboard-test*' -and -not ($text | Where-Object { $_ -match 'test image from the other side received: yes' })) {

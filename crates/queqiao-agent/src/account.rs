@@ -721,12 +721,12 @@ pub(crate) fn run_account(
                     Ok(outcome) => {
                         passed &= outcome.passed;
                         ui::record_session(&from_name, &from, started_at, &outcome.ended);
-                        lock_after(options, &settings, lines);
+                        lock_after(options, &settings, outcome.lock_after, lines);
                         ui.lock_settings(false);
                     }
                     Err(error) => {
                         ui.lock_settings(false);
-                        lock_after(options, &settings, lines);
+                        lock_after(options, &settings, false, lines);
                         lines.push(format!("session {sessions} failed: {error}"));
                         ui::record_session(
                             &from_name,
@@ -910,9 +910,10 @@ fn went_online(
     ui.set_user(&account.user);
     ui.set_devices(main_devices(&account.devices, &account.device_id));
     lines.push(format!(
-        "logged in as {} at {}; this device: {} ({}); {} devices on the account",
+        "logged in as {} at {} (route: {}); this device: {} ({}); {} devices on the account",
         account.user,
         login.server,
+        account.route(),
         identity.name,
         identity.id,
         account.devices.len()
@@ -1086,9 +1087,9 @@ fn ask_consent(ui: &ui::Ui, question: &str, answer: Option<bool>) -> Result<bool
     }
 }
 
-/// Locks the PC after a session when the person chose so (or a test asked).
-fn lock_after(options: &Options, settings: &ui::Settings, lines: &mut Vec<String>) {
-    if !(settings.lock_after_session || options.lock_after_session) {
+/// Locks the PC after a session when the person chose so, the viewer asked for it (`asked`), or a test did.
+fn lock_after(options: &Options, settings: &ui::Settings, asked: bool, lines: &mut Vec<String>) {
+    if !(settings.lock_after_session || options.lock_after_session || asked) {
         return;
     }
     if options.dry_run_commands {

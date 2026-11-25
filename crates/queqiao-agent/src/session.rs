@@ -398,6 +398,7 @@ pub(crate) fn run_command(command: Command, dry_run: bool) -> String {
         | Command::MaxBitrate(_)
         | Command::RestartQueqiao
         | Command::Microphone(_)
+        | Command::LockAfter(_)
         | Command::VideoCodec { .. }
         | Command::Picture { .. } => "changed".into(),
     }
@@ -499,7 +500,7 @@ pub(crate) fn report_files(
     for outcome in outcomes {
         queqiao_files::history::record(&outcome, peer);
         lines.push(match outcome {
-            Outcome::Sent { name, size } => {
+            Outcome::Sent { name, size, .. } => {
                 format!("file sent: {name} ({size} bytes, checked by the viewer) after {at:.1} s")
             }
             Outcome::Received { path, size, .. } => {
@@ -508,7 +509,7 @@ pub(crate) fn report_files(
                     path.display()
                 )
             }
-            Outcome::Failed { name, reason } => format!("file failed: {name}: {reason}"),
+            Outcome::Failed { name, reason, .. } => format!("file failed: {name}: {reason}"),
         });
     }
 }
@@ -549,6 +550,9 @@ pub(crate) struct SessionOutcome {
     /// How it ended, for the session history (Windows' account mode keeps one).
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) ended: String,
+    /// The viewer asked for this PC to be locked when the session ends (its control center's Security).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) lock_after: bool,
 }
 
 /// Takes the banner down however the session ends.
@@ -752,6 +756,8 @@ pub(crate) fn session(
     let mut local_block: Option<queqiao_input::LocalInputBlock> = None;
     // Muted speakers: whether they were muted before, to put back when the session ends.
     let mut speakers_before: Option<bool> = None;
+    // The viewer's "lock that PC when the session ends".
+    let mut lock_requested = false;
     // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
     // never above the size-based bitrate the encoder was opened with.
     // The viewer's picture settings change the highest bitrate (quality) and the frame interval (frame rate).
@@ -804,8 +810,11 @@ pub(crate) fn session(
     };
     let mut clipboard_stats = ClipboardStats::default();
     let mut channel_open_at: Option<Instant> = None;
-    // Files both ways: from the viewer into Downloads\Queqiao (while the person at this PC allows it).
+    // Files both ways while the person at this PC allows them; then also the viewer's file transfer window: it may
+    // list this PC's folders, fetch from them and send into them (never at the sign-in screen, nor for someone of
+    // another account unless files are allowed for helpers too).
     let mut transfers = Transfers::new(downloads_folder(), receive_files);
+    transfers.serve_browsing(receive_files);
     // Clipboard images both ways, on their own stream.
     let (mut images, mut image_in) = (ImageSender::default(), ImageReceiver::default());
     let (mut images_received, mut images_sent, mut image_test_received) = (0u32, 0u32, false);
@@ -1506,6 +1515,18 @@ pub(crate) fn session(
                             }
                         }
                     }
+                    Some(Message::Command(Command::LockAfter(on))) => {
+                        lock_requested = on;
+                        lines.push(format!(
+                            "command from the viewer: lock this PC after the session: {on}"
+                        ));
+                        let notice = if on {
+                            "that PC will be locked when this session ends"
+                        } else {
+                            "that PC will not be locked when this session ends (unless its own setting says so)"
+                        };
+                        peer.send_data(Message::Notice(notice.to_string()).encode());
+                    }
                     Some(Message::Command(command)) => {
                         let notice = run_command(command, options.dry_run_commands);
                         lines.push(format!("command from the viewer: {command:?}: {notice}"));
@@ -2095,7 +2116,11 @@ pub(crate) fn session(
             && stats.deltas_ok == stats.deltas_checked);
     let passed =
         connected_after.is_some() && stats.sent > 0 && stats.inject_failures == 0 && input_ok;
-    Ok(SessionOutcome { passed, ended })
+    Ok(SessionOutcome {
+        passed,
+        ended,
+        lock_after: lock_requested,
+    })
 }
 
 /// After an injected event: is the pointer where it should be, is the test key in the right state?

@@ -179,6 +179,131 @@ pub enum WindowEvent {
     },
     /// A hotkey registered with [`Window::register_hotkey`] was pressed (anywhere).
     Hotkey(i32),
+    /// A slider of the control center (the volume) moved to `value` (0 to 100).
+    Value {
+        id: u16,
+        value: u8,
+    },
+}
+
+/// What an entry of the file transfer window is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    File,
+    Folder,
+    /// A drive or the file system's root (in the places).
+    Drive,
+    /// One of the person's own folders (in the places).
+    Place,
+}
+
+/// One entry of a pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileItem {
+    /// As that PC names it (in the places: the full path).
+    pub name: String,
+    /// What the pane shows ("Desktop" for a place's full path).
+    pub label: String,
+    pub kind: FileKind,
+    pub size: u64,
+    /// Seconds since 1970 (UTC); 0 when unknown.
+    pub modified: i64,
+}
+
+/// One side of the file transfer window: this PC (left) or the other (right).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FilePane {
+    /// The folder shown, as that PC writes it ("" : the places).
+    pub folder: String,
+    pub items: Vec<FileItem>,
+    /// "Reading...", or why the folder could not be read; empty when all is well.
+    pub status: String,
+    /// The places for the folder box's list: (label, path).
+    pub places: Vec<(String, String)>,
+    pub can_go_back: bool,
+    pub can_go_up: bool,
+}
+
+/// Where a row of the transfer list stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobRowState {
+    Waiting,
+    Going,
+    Paused,
+    Done,
+    Failed(String),
+    Cancelled,
+}
+
+/// One row of the file transfer window's list: something sent or fetched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobRow {
+    pub id: u32,
+    pub name: String,
+    /// Several files (a folder).
+    pub folder: bool,
+    /// This PC sends it (false: it comes here).
+    pub sending: bool,
+    /// Where it comes from and goes to ("" : that PC's Queqiao downloads folder).
+    pub from: String,
+    pub to: String,
+    pub bytes: u64,
+    pub bytes_done: u64,
+    pub state: JobRowState,
+    pub can_pause: bool,
+    /// What arrived here, to show in its folder.
+    pub local_path: Option<PathBuf>,
+}
+
+/// A row's own commands (its buttons and right-click menu).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobCommand {
+    ShowInFolder,
+    Pause,
+    Resume,
+    Cancel,
+    /// Off the list (a finished one; a running one is cancelled first).
+    Remove,
+}
+
+/// What the person did in the file transfer window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileWindowEvent {
+    /// Show this folder in a pane ("" : the places); `remote`: the other PC's pane.
+    Open {
+        remote: bool,
+        path: String,
+    },
+    /// Show the entry `name` of the pane's folder (a double-click on a folder).
+    OpenItem {
+        remote: bool,
+        name: String,
+    },
+    Up {
+        remote: bool,
+    },
+    Back {
+        remote: bool,
+    },
+    Refresh {
+        remote: bool,
+    },
+    /// Send these entries of a pane (their names in its folder) into the other pane's folder.
+    Send {
+        from_remote: bool,
+        names: Vec<String>,
+    },
+    /// Files dropped on the window from Explorer: into the other PC's folder.
+    Dropped(Vec<PathBuf>),
+    PauseAll,
+    ResumeAll,
+    CancelAll,
+    ClearFinished,
+    Job {
+        id: u32,
+        command: JobCommand,
+    },
+    Closed,
 }
 
 /// A button of the bar: its glyph (Segoe MDL2 Assets), its label, and the menu id it sends to the session window.
@@ -292,4 +417,19 @@ pub struct DeviceRow {
     pub id: String,
     pub name: String,
     pub status: String,
+}
+/// A size as UU Remote shows it ("1.30 KB", "9.32 MB").
+pub fn size_text(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
 }

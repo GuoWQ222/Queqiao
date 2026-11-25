@@ -114,6 +114,9 @@ pub(crate) struct Options {
     pub(crate) opacity: Option<u8>,
     /// Boss key test: Ctrl+Alt+F11 for this run, pressed (as Windows would report it) to hide and show the window.
     pub(crate) boss_key_test: bool,
+    /// Tests: the file transfer window opened, that PC's folder here (holding down.txt) shown, down.txt fetched and
+    /// a test file sent there (see files_ui::BrowseTest).
+    pub(crate) browse_test: Option<String>,
 }
 
 impl Options {
@@ -194,6 +197,7 @@ pub(crate) fn test_switch(
         "--input-test" => options.input_test = true,
         "--input-test-click" => options.input_test_click = true,
         "--figures" => options.figures = true,
+        "--browse-test" => options.browse_test = Some(args.next()?),
         "--picture-at" => options.picture_at = Some(args.next()?.parse().ok()?),
         "--input-test-at" => options.input_test_at = Some(args.next()?.parse().ok()?),
         "--ui-pictures" => options.ui_pictures = Some(PathBuf::from(args.next()?)),

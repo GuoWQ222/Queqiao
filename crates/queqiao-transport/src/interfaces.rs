@@ -86,18 +86,46 @@ pub fn public_address(ip: IpAddr) -> bool {
 /// its address leaves through that card, see the top of this file), `timeout` each; for any other address (a LAN,
 /// Tailscale, this PC), and when no uplink connects, the connection goes as the routing table says.
 pub fn connect_direct(address: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    connect_direct_noted(address, timeout).0
+}
+
+/// As [`connect_direct`], with what was tried, for the programs' reports ("from 183.172.248.204: connected").
+pub fn connect_direct_noted(
+    address: SocketAddr,
+    timeout: Duration,
+) -> (std::io::Result<TcpStream>, Vec<String>) {
+    let mut notes = Vec::new();
     if public_address(address.ip()) {
         let sources: Vec<IpAddr> = match address {
             SocketAddr::V4(_) => uplinks().into_iter().map(IpAddr::V4).collect(),
             SocketAddr::V6(_) => ipv6_uplinks(false).into_iter().map(IpAddr::V6).collect(),
         };
+        if sources.is_empty() {
+            notes.push("no network card with a gateway".to_string());
+        }
         for source in sources {
-            if let Ok(stream) = connect_from(source, address, timeout) {
-                return Ok(stream);
+            match connect_from(source, address, timeout) {
+                Ok(stream) => {
+                    notes.push(format!("from {source}: connected"));
+                    return (Ok(stream), notes);
+                }
+                Err(error) => notes.push(format!("from {source}: {error}")),
             }
         }
+    } else {
+        notes.push("not a public address: as the routes say".to_string());
     }
-    TcpStream::connect_timeout(&address, timeout)
+    let stream = TcpStream::connect_timeout(&address, timeout);
+    match &stream {
+        Ok(stream) => notes.push(format!(
+            "as the routes say: from {}",
+            stream
+                .local_addr()
+                .map_or_else(|_| "?".to_string(), |a| a.ip().to_string())
+        )),
+        Err(error) => notes.push(format!("as the routes say: {error}")),
+    }
+    (stream, notes)
 }
 
 fn connect_from(

@@ -96,6 +96,8 @@ pub struct Account {
     events: Receiver<AccountEvent>,
     pending: VecDeque<AccountEvent>,
     local_ip: IpAddr,
+    /// How the server connection was made (each network card tried), for the reports.
+    route: Vec<String>,
     pub user: String,
     pub device_id: String,
     pub devices: Vec<Device>,
@@ -170,8 +172,15 @@ impl Account {
             .next()
             .ok_or_else(|| Error(format!("no address for {}", login.server)))?;
         // Straight out of this PC's network card, past a proxy's TUN adapter, for a server on the internet.
-        let tcp = queqiao_transport::connect_direct(address, Duration::from_secs(10))
-            .map_err(|e| Error(format!("cannot reach {}: {e}", login.server)))?;
+        let (tcp, route) =
+            queqiao_transport::connect_direct_noted(address, Duration::from_secs(10));
+        let tcp = tcp.map_err(|e| {
+            Error(format!(
+                "cannot reach {}: {e} ({})",
+                login.server,
+                route.join("; ")
+            ))
+        })?;
         tcp.set_nodelay(true)?;
         let local_ip = tcp.local_addr()?.ip();
         let mut socket = tls::open(tcp, &login.server, &login.pin)?;
@@ -246,6 +255,7 @@ impl Account {
             events: event_receiver,
             pending: VecDeque::new(),
             local_ip,
+            route,
             user,
             device_id,
             devices,
@@ -370,6 +380,11 @@ impl Account {
     /// Our address as seen on the connection to the server (the one other devices can reach).
     pub fn local_ip(&self) -> IpAddr {
         self.local_ip
+    }
+
+    /// How the server connection was made: each network card tried and what came of it.
+    pub fn route(&self) -> String {
+        self.route.join("; ")
     }
 
     pub fn send(&self, message: ClientMessage) {

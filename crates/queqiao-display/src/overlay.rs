@@ -17,9 +17,9 @@ use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
     CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS,
-    DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
-    FF_DONTCARE, FillRect, GetDC, HDC, HFONT, OUT_DEFAULT_PRECIS, ReleaseDC, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC,
+    DeleteObject, DrawTextW, FF_DONTCARE, FillRect, GetDC, HDC, HFONT, OUT_DEFAULT_PRECIS,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -227,6 +227,24 @@ impl SessionOverlay {
         true
     }
 
+    /// The bottom right of the bar's button `id` on the screen (where the control center opens), while it shows.
+    pub fn anchor_of(&self, id: u16) -> Option<(i32, i32)> {
+        let place = BAR.with_borrow(|state| {
+            state
+                .as_ref()?
+                .places
+                .iter()
+                .find(|(_, place_id)| *place_id == id)
+                .map(|(place, _)| *place)
+        })?;
+        let mut corner = POINT {
+            x: place.right,
+            y: place.bottom,
+        };
+        let _ = unsafe { ClientToScreen(self.bar, &mut corner) };
+        Some((corner.x, corner.y))
+    }
+
     /// Tests: the button `index` drawn as under the pointer (its highlight, and its tip when the bar has no labels).
     pub fn hover_for_test(&mut self, index: Option<usize>) {
         BAR.with_borrow_mut(|state| {
@@ -241,6 +259,10 @@ impl SessionOverlay {
         self.figures = figures;
         if self.card_on {
             self.draw_card();
+        }
+        // The bar's clock and delay dot.
+        if self.bar_out && self.level < 2 && self.placed.0.right > self.placed.0.left {
+            self.draw_bar(self.placed.0);
         }
     }
 
@@ -316,11 +338,20 @@ impl SessionOverlay {
     /// The bar's width at `level`: 0 all of it, 1 without the buttons' labels, 2 without the name either.
     fn width_at(&self, level: usize) -> i32 {
         let name = if level < 2 {
-            px(14, self.scale) + self.name_width + px(14, self.scale)
+            px(14, self.scale)
+                + self.name_width
+                + px(10, self.scale)
+                + self.clock_width()
+                + px(14, self.scale)
         } else {
             px(4, self.scale)
         };
         name + self.button_widths[level.min(1)].iter().sum::<i32>() + px(8, self.scale)
+    }
+
+    /// The delay dot and the session's time after the name ("● 00:12:34"), as UU Remote shows its signal and time.
+    fn clock_width(&self) -> i32 {
+        px(14, self.scale) + px(54, self.scale)
     }
 
     /// The bar's size when out (pixels).
@@ -368,6 +399,20 @@ impl SessionOverlay {
         let level = self.level;
         let widths = self.button_widths[level.min(1)].clone();
         let name_width = self.name_width;
+        let clock_width = self.clock_width();
+        let elapsed = self.figures.elapsed.as_secs();
+        let clock = format!(
+            "{:02}:{:02}:{:02}",
+            elapsed / 3600,
+            elapsed / 60 % 60,
+            elapsed % 60
+        );
+        let dot = match self.figures.delay_ms {
+            Some(ms) if ms < 30.0 => GOOD,
+            Some(ms) if ms < 80.0 => FAIR,
+            Some(_) => POOR,
+            None => MUTED,
+        };
         paint_layered(self.bar, left, top, width, height, height, |dc, w, h| {
             fill(dc, 0, 0, w, h, INK);
             let mut x = px(4, s);
@@ -382,6 +427,18 @@ impl SessionOverlay {
                     DT_LEFT.0,
                 );
                 x += name_width + px(10, s);
+                // The delay's dot and the session's time.
+                let size = px(7, s);
+                fill_round(dc, &rect(x, (h - size) / 2, size, size), size, dot);
+                text(
+                    dc,
+                    &clock,
+                    rect(x + px(12, s), 0, clock_width - px(12, s), h),
+                    fonts.3,
+                    MUTED,
+                    DT_LEFT.0,
+                );
+                x += clock_width + px(4, s);
                 fill(dc, x, h / 2 - px(8, s), 1, px(16, s), 0x003A_4370);
                 x += px(4, s);
             }
@@ -634,11 +691,11 @@ fn or_dash(value: &str) -> String {
     }
 }
 
-fn px(value: i32, scale: f64) -> i32 {
+pub(crate) fn px(value: i32, scale: f64) -> i32 {
     (f64::from(value) * scale).round() as i32
 }
 
-fn rect(x: i32, y: i32, width: i32, height: i32) -> RECT {
+pub(crate) fn rect(x: i32, y: i32, width: i32, height: i32) -> RECT {
     RECT {
         left: x,
         top: y,
@@ -648,11 +705,11 @@ fn rect(x: i32, y: i32, width: i32, height: i32) -> RECT {
 }
 
 /// COLORREF from 0x00RRGGBB.
-fn colorref(rgb: u32) -> COLORREF {
+pub(crate) fn colorref(rgb: u32) -> COLORREF {
     COLORREF(((rgb & 0xFF) << 16) | (rgb & 0xFF00) | ((rgb >> 16) & 0xFF))
 }
 
-fn fill(dc: HDC, x: i32, y: i32, width: i32, height: i32, rgb: u32) {
+pub(crate) fn fill(dc: HDC, x: i32, y: i32, width: i32, height: i32, rgb: u32) {
     unsafe {
         let brush = CreateSolidBrush(colorref(rgb));
         FillRect(dc, &rect(x, y, width, height), brush);
@@ -660,7 +717,7 @@ fn fill(dc: HDC, x: i32, y: i32, width: i32, height: i32, rgb: u32) {
     }
 }
 
-fn fill_round(dc: HDC, area: &RECT, round: i32, rgb: u32) {
+pub(crate) fn fill_round(dc: HDC, area: &RECT, round: i32, rgb: u32) {
     use windows::Win32::Graphics::Gdi::{GetStockObject, NULL_PEN, RoundRect};
     unsafe {
         let brush = CreateSolidBrush(colorref(rgb));
@@ -681,7 +738,7 @@ fn fill_round(dc: HDC, area: &RECT, round: i32, rgb: u32) {
     }
 }
 
-fn text(dc: HDC, value: &str, area: RECT, font: HFONT, rgb: u32, align: u32) {
+pub(crate) fn text(dc: HDC, value: &str, area: RECT, font: HFONT, rgb: u32, align: u32) {
     // DrawTextW reads the text even when told it is 0 long: an empty Vec's dangling pointer crashes it.
     if value.is_empty() {
         return;
@@ -704,7 +761,7 @@ fn text(dc: HDC, value: &str, area: RECT, font: HFONT, rgb: u32, align: u32) {
     }
 }
 
-fn text_width(dc: HDC, value: &str, font: HFONT) -> i32 {
+pub(crate) fn text_width(dc: HDC, value: &str, font: HFONT) -> i32 {
     // DrawTextW reads the text even when told it is 0 long: an empty Vec's dangling pointer crashes it.
     if value.is_empty() {
         return 0;
@@ -726,6 +783,51 @@ fn text_width(dc: HDC, value: &str, font: HFONT) -> i32 {
     area.right - area.left
 }
 
+/// Text broken into lines within `area`'s width (from its top, left aligned).
+pub(crate) fn text_wrapped(dc: HDC, value: &str, area: RECT, font: HFONT, rgb: u32) {
+    if value.is_empty() {
+        return;
+    }
+    let mut value: Vec<u16> = value.encode_utf16().collect();
+    let mut area = area;
+    unsafe {
+        let old = SelectObject(dc, font.into());
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, colorref(rgb));
+        DrawTextW(
+            dc,
+            &mut value,
+            &mut area,
+            windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(
+                DT_LEFT.0 | DT_WORDBREAK.0 | DT_NOPREFIX.0,
+            ),
+        );
+        SelectObject(dc, old);
+    }
+}
+
+/// The height of `value` broken into lines `width` wide.
+pub(crate) fn wrapped_height(dc: HDC, value: &str, width: i32, font: HFONT) -> i32 {
+    if value.is_empty() {
+        return 0;
+    }
+    let mut value: Vec<u16> = value.encode_utf16().collect();
+    let mut area = rect(0, 0, width, 0);
+    unsafe {
+        let old = SelectObject(dc, font.into());
+        DrawTextW(
+            dc,
+            &mut value,
+            &mut area,
+            windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(
+                0x400 | DT_LEFT.0 | DT_WORDBREAK.0 | DT_NOPREFIX.0,
+            ),
+        );
+        SelectObject(dc, old);
+    }
+    area.bottom - area.top
+}
+
 /// Draws `paint` into a 32-bit bitmap of `width` x `height`, gives it rounded corners (`round` radius) at OPACITY,
 /// and puts it on the layered window `hwnd` at (left, top) on the screen.
 fn paint_layered(
@@ -735,6 +837,21 @@ fn paint_layered(
     width: i32,
     height: i32,
     round: i32,
+    paint: impl FnOnce(HDC, i32, i32),
+) {
+    paint_layered_at(hwnd, left, top, width, height, round, OPACITY, paint);
+}
+
+/// As `paint_layered`, `opacity` of 255.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_layered_at(
+    hwnd: HWND,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    round: i32,
+    opacity: u32,
     paint: impl FnOnce(HDC, i32, i32),
 ) {
     if width <= 0 || height <= 0 {
@@ -778,7 +895,7 @@ fn paint_layered(
                         coverage += 0.25;
                     }
                 }
-                let alpha = (f64::from(OPACITY) * coverage).round() as u32;
+                let alpha = (f64::from(opacity.min(255)) * coverage).round() as u32;
                 let pixel = &mut pixels[(y * width + x) as usize];
                 let scale = |channel: u32| (channel * alpha + 127) / 255;
                 let (b, g, red) = (*pixel & 0xFF, (*pixel >> 8) & 0xFF, (*pixel >> 16) & 0xFF);
@@ -875,32 +992,20 @@ extern "system" fn overlay_proc(
                             let _ = PostMessageW(Some(owner), WM_CLOSE, WPARAM(0), LPARAM(0));
                         }
                         BAR_MORE => {
-                            // The session window's own menu, under the button.
+                            // The control center, under the button: the session window opens it there.
                             let mut corner = POINT {
-                                x: place.left,
+                                x: place.right,
                                 y: place.bottom,
                             };
                             let _ = ClientToScreen(hwnd, &mut corner);
-                            let menu = GetSystemMenu(owner, false);
-                            // The menu closes on a click elsewhere only when its window is in front.
-                            let _ = SetForegroundWindow(owner);
-                            let chosen = TrackPopupMenu(
-                                menu,
-                                TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                                corner.x,
-                                corner.y,
-                                None,
-                                owner,
-                                None,
+                            let packed =
+                                ((corner.y as u32 & 0xFFFF) << 16) | (corner.x as u32 & 0xFFFF);
+                            let _ = PostMessageW(
+                                Some(owner),
+                                WM_SYSCOMMAND,
+                                WPARAM(usize::from(BAR_MORE)),
+                                LPARAM(packed as i32 as isize),
                             );
-                            if chosen.0 != 0 {
-                                let _ = PostMessageW(
-                                    Some(owner),
-                                    WM_SYSCOMMAND,
-                                    WPARAM(chosen.0 as usize),
-                                    LPARAM(0),
-                                );
-                            }
                         }
                         id => {
                             let _ = PostMessageW(

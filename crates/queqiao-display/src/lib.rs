@@ -3,7 +3,11 @@
 //! video processor, or the CPU on devices without one).
 
 #[cfg(windows)]
+mod control_center;
+#[cfg(windows)]
 mod cursor;
+#[cfg(windows)]
+mod file_window;
 #[cfg(windows)]
 mod forms;
 #[cfg(windows)]
@@ -15,6 +19,7 @@ mod main_window;
 mod model;
 #[cfg(windows)]
 mod overlay;
+mod panel;
 #[cfg(windows)]
 mod presence;
 #[cfg(windows)]
@@ -31,6 +36,8 @@ mod yuv;
 #[cfg(windows)]
 pub use cursor::RemoteCursor;
 #[cfg(windows)]
+pub use file_window::{FileWindow, show_in_folder};
+#[cfg(windows)]
 pub use forms::{
     DeviceList, HelpForm, LoginForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList,
     SetupAction, SetupForm, ask_secret, ask_text, confirm, copy_text, owner_from_raw, pick_files,
@@ -40,18 +47,21 @@ pub use forms::{
 pub use icon::app_icon;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    ConsentPrompt, DeviceList, Error, HelpForm, Hwnd, LoginForm, PICK_CLOSED, PasswordAction,
-    PasswordForm, PickList, Presence, Presenter, PrivacyScreen, Rect, RemoteCursor, SessionBanner,
-    SessionOverlay, Window, ask_secret, ask_text, confirm, fit, owner_from_raw, pick_files,
-    popup_menu, save_screen_picture, save_window_picture, show_error, show_info, show_running_main,
+    ConsentPrompt, DeviceList, Error, FileWindow, HelpForm, Hwnd, LoginForm, PICK_CLOSED,
+    PasswordAction, PasswordForm, PickList, Presence, Presenter, PrivacyScreen, Rect, RemoteCursor,
+    SessionBanner, SessionOverlay, Window, ask_secret, ask_text, confirm, fit, owner_from_raw,
+    pick_files, popup_menu, save_screen_picture, save_window_picture, show_error, show_in_folder,
+    show_info, show_running_main,
 };
 pub use model::{
-    AccountState, BAR_END, BAR_MORE, BarButton, ConnectionRow, DeviceRow, Figures, HelpAction,
-    HelpMode, ListAction, LoginAction, LoginFields, MainDevice, Page, PasswordCheck, PresenceEvent,
-    TransferRow, WindowEvent, normalize_code,
+    AccountState, BAR_END, BAR_MORE, BarButton, ConnectionRow, DeviceRow, Figures, FileItem,
+    FileKind, FilePane, FileWindowEvent, HelpAction, HelpMode, JobCommand, JobRow, JobRowState,
+    ListAction, LoginAction, LoginFields, MainDevice, Page, PasswordCheck, PresenceEvent,
+    TransferRow, WindowEvent, normalize_code, size_text,
 };
 #[cfg(windows)]
 pub use overlay::SessionOverlay;
+pub use panel::{Mark, PanelIcon, PanelItem};
 #[cfg(windows)]
 pub use presence::{Presence, SessionBanner, show_running_main};
 #[cfg(windows)]

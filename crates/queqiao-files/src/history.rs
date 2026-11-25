@@ -37,7 +37,7 @@ fn path() -> Option<PathBuf> {
 /// Notes a finished file (failed ones are not listed).
 pub fn record(outcome: &Outcome, peer: &str) {
     let (received, name, size) = match outcome {
-        Outcome::Sent { name, size } => (false, name.clone(), *size),
+        Outcome::Sent { name, size, .. } => (false, name.clone(), *size),
         Outcome::Received { path, size, .. } => (
             true,
             path.file_name()

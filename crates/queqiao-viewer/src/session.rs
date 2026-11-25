@@ -16,11 +16,9 @@ use queqiao_core::protocol::{
     Command, InputEvent, MAX_CLIPBOARD_TEXT, Message, MouseButton, Quality,
 };
 use queqiao_core::text::{tr, trf};
-use queqiao_display::{
-    PICK_CLOSED, PickList, Presenter, Window, WindowEvent, ask_text, fit, popup_menu, show_error,
-};
+use queqiao_display::{Presenter, Window, WindowEvent, ask_text, fit, popup_menu, show_error};
 use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
-use queqiao_files::{Outcome, TransferRow, Transfers, downloads_folder};
+use queqiao_files::{Outcome, Transfers, downloads_folder};
 use queqiao_input::{ClipContent, Clipboard};
 use queqiao_terminal::{TerminalMessage, TerminalWindow, WindowEvent as TerminalEvent};
 use queqiao_transport::{Addresses, Peer, PeerEvent, Role, Signaling, Stream};
@@ -70,8 +68,23 @@ pub(crate) const MENU_POINTER_SHAPE: u16 = 0x1660;
 
 pub(crate) const MENU_MICROPHONE: u16 = 0x16D0;
 
-/// The card of the session's figures at the bottom right (also on the bar).
+/// The card of the session's figures at the bottom right.
 pub(crate) const MENU_FIGURES: u16 = 0x16E0;
+
+/// The file transfer window (the bar's first button; the control center's Tools).
+pub(crate) const MENU_FILE_TRANSFER: u16 = 0x1720;
+
+/// The control center's volume slider (WindowEvent::Value).
+pub(crate) const MENU_VOLUME: u16 = 0x1730;
+
+/// That PC's next screen (the control center).
+pub(crate) const MENU_NEXT_SCREEN: u16 = 0x1740;
+
+/// End the session (the control center's last item).
+pub(crate) const MENU_END: u16 = 0x1750;
+
+/// Lock that PC when the session ends (the control center's Security).
+pub(crate) const MENU_LOCK_AFTER: u16 = 0x1760;
 
 /// The picture's codec: (menu id, preference, label).
 pub(crate) const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 4] = [
@@ -120,11 +133,6 @@ pub(crate) const MENU_OPACITY: [(u16, u8, &str); 4] = [
 
 /// The boss key's id with Windows.
 pub(crate) const BOSS_HOTKEY: i32 = 1;
-
-/// The transfer list's buttons.
-pub(crate) const TRANSFER_PAUSE: u16 = 301;
-
-pub(crate) const TRANSFER_CANCEL: u16 = 302;
 
 /// The other PC's screens: menu ids from here, 16 apart.
 pub(crate) const MENU_SCREENS: u16 = 0x1400;
@@ -208,6 +216,9 @@ pub(crate) fn input_test_steps(options: &Options) -> Vec<InputEvent> {
     }
     steps
 }
+
+/// Tests: the control center opened by the bar's button: when, the step, the button's corner on the screen.
+type PanelTest = (Instant, u8, Option<(i32, i32)>);
 
 /// A session that is not connected after this long is given up.
 pub(crate) const CONNECT_LIMIT: Duration = Duration::from_secs(30);
@@ -507,8 +518,14 @@ pub(crate) fn run_session(
     let mut boss_test: Option<(Instant, u8, bool)> = options
         .boss_key_test
         .then(|| (Instant::now() + Duration::from_secs(1), 0, false));
-    // The transfer list window, while open.
-    let mut transfer_list: Option<PickList> = None;
+    // The file transfer window (UU Remote's two panes and transfer list), while open.
+    let mut files_ui = crate::files_ui::FilesUi::new(agent);
+    if let Some(folder) = &options.browse_test {
+        files_ui.test = Some(crate::files_ui::BrowseTest::new(folder));
+    }
+    // Tests: the file window's picture is taken once its test is over.
+    let mut files_picture_due = options.browse_test.is_some() && options.ui_pictures.is_some();
+    let mut files_done_at: Option<Instant> = None;
     // That PC's Windows password, while it asks for it (locked); the tests' passwords instead.
     let mut password_form: Option<queqiao_display::PasswordForm> = None;
     let mut test_passwords: std::collections::VecDeque<String> =
@@ -605,6 +622,22 @@ pub(crate) fn run_session(
     show_resolution(&window, resolution);
     // That PC's screens, once it has told them (a submenu then).
     let mut screen_count = 0u8;
+    let mut current_screen = 0u8;
+    // The control center (the bar's "Control center"): UU Remote's groups with Queqiao's choices; built again when
+    // that PC's screens or the keys change. Its check marks follow the menu's.
+    let mut screen_names: Vec<String> = Vec::new();
+    let mut volume = 100u8;
+    let build_panel = |window: &Window, screens: &[String], keys: &hotkeys::Keys, volume: u8| {
+        window.set_panel(crate::control::items(
+            screens,
+            &keys.full_screen().text(),
+            &keys.game_mouse().text(),
+            volume,
+        ));
+    };
+    build_panel(&window, &screen_names, &keys, volume);
+    let mut lock_after = false;
+    window.check_menu_item(MENU_LOCK_AFTER, false);
     let (mut fps_cap, mut quality) = options.picture.unwrap_or((60, Quality::Balanced));
     let show_picture_choice = |window: &Window, fps_cap: u8, quality: Quality| {
         for (id, fps, _) in MENU_FPS {
@@ -629,17 +662,18 @@ pub(crate) fn run_session(
     };
     // What the main window asked for, done once the session is up.
     let mut then = options.then;
-    // Queqiao's bar at the top (the session's commands, tucked away when the pointer leaves it) and the card of
-    // figures at the bottom right; the menu stays as it was.
+    // Queqiao's bar at the top (tucked away when the pointer leaves it): the other PC's name with the delay's dot and
+    // the session's time, file transfer, Ctrl+Alt+Del, full screen, the control center (everything else, grouped as
+    // UU Remote does) and End; the card of figures at the bottom right. The window's menu (Alt+Space) stays.
     use queqiao_display::{BAR_END, BAR_MORE, BarButton, Figures, SessionOverlay};
     let mut overlay = SessionOverlay::new(
         window.hwnd(),
         agent,
         vec![
             BarButton {
-                glyph: "\u{E740}",
-                label: tr("Full screen").to_string(),
-                id: MENU_FULL_SCREEN,
+                glyph: "\u{E8B7}",
+                label: tr("File transfer").to_string(),
+                id: MENU_FILE_TRANSFER,
             },
             BarButton {
                 glyph: "\u{E765}",
@@ -647,23 +681,13 @@ pub(crate) fn run_session(
                 id: MENU_CTRL_ALT_DEL,
             },
             BarButton {
-                glyph: "\u{E898}",
-                label: tr("Send files").to_string(),
-                id: MENU_SEND_FILES,
+                glyph: "\u{E740}",
+                label: tr("Full screen").to_string(),
+                id: MENU_FULL_SCREEN,
             },
             BarButton {
-                glyph: "\u{E756}",
-                label: tr("Command line").to_string(),
-                id: MENU_TERMINAL,
-            },
-            BarButton {
-                glyph: "\u{E9D9}",
-                label: tr("Figures").to_string(),
-                id: MENU_FIGURES,
-            },
-            BarButton {
-                glyph: "\u{E712}",
-                label: String::new(),
+                glyph: "\u{E713}",
+                label: tr("Control center").to_string(),
                 id: BAR_MORE,
             },
             BarButton {
@@ -680,7 +704,7 @@ pub(crate) fn run_session(
     {
         overlay.set_card(true);
         overlay.keep_bar_out(true);
-        // "Send files" as under the pointer: its highlight (and its tip on a bar without labels) in the picture.
+        // "Full screen" as under the pointer: its highlight (and its tip on a bar without labels) in the picture.
         overlay.hover_for_test(Some(2));
         window.check_menu_item(MENU_FIGURES, true);
     }
@@ -695,6 +719,8 @@ pub(crate) fn run_session(
     let mut due_pictures: Vec<(Instant, String)> = Vec::new();
     // Then one with the bar let go, tucked into its tab (unless the pointer is at the top of the window).
     let mut tucked_picture: Option<(PathBuf, Instant)> = None;
+    // Tests: the control center opened by the bar's button (when, the step, the button's corner on the screen).
+    let mut panel_test: Option<PanelTest> = None;
     window.check_menu_item(MENU_PRIVACY, privacy_on);
     window.set_full_screen(options.full_screen);
     window.check_menu_item(MENU_SOUND, sound_on);
@@ -714,15 +740,50 @@ pub(crate) fn run_session(
                 Err(error) => lines.push(format!("session picture: {error}")),
             }
             if let Some(overlay) = overlay.as_mut() {
-                for _ in 0..2 {
-                    if !overlay.click_for_test(MENU_FIGURES) {
-                        lines.push("bar: no Figures button to click".to_string());
-                    }
+                // The bar's "Control center" as a click on it gives it; then (panel_test) whether it opened, the
+                // Picture group open beside it in a picture, closed again.
+                if overlay.click_for_test(BAR_MORE) {
+                    panel_test = Some((Instant::now(), 0, overlay.anchor_of(BAR_MORE)));
+                } else {
+                    lines.push("bar: no Control center button to click".to_string());
                 }
                 overlay.keep_bar_out(false);
                 overlay.hover_for_test(None);
             }
-            tucked_picture = Some((folder, Instant::now()));
+            tucked_picture = Some((folder, Instant::now() + Duration::from_millis(2000)));
+        }
+        if let Some((since, step, anchor)) = panel_test
+            && let Some(folder) = &options.ui_pictures
+        {
+            let at = since.elapsed();
+            if step == 0 && at > Duration::from_millis(400) {
+                lines.push(format!(
+                    "control center open after the click: {}",
+                    window.panel_open()
+                ));
+                // Closed, then opened again with the Picture group beside it.
+                if window.panel_open() {
+                    window.open_panel(anchor.unwrap_or((0, 0)), None);
+                }
+                window.open_panel(
+                    anchor.unwrap_or((0, 0)),
+                    Some(crate::control::GROUP_PICTURE),
+                );
+                panel_test = Some((since, 1, anchor));
+            } else if step == 1 && at > Duration::from_millis(1300) {
+                let path = folder.join("viewer_panel.bmp");
+                match window.save_panel_picture(&path) {
+                    Ok(()) => lines.push(format!("control center picture: {}", path.display())),
+                    Err(error) => lines.push(format!("control center picture: {error}")),
+                }
+                panel_test = Some((since, 2, anchor));
+            } else if step == 2 && at > Duration::from_millis(1700) {
+                if window.panel_open() {
+                    window.open_panel(anchor.unwrap_or((0, 0)), None);
+                }
+                lines.push(format!("control center closed: {}", !window.panel_open()));
+                panel_test = None;
+            }
         }
         if let Some(folder) = &options.ui_pictures {
             let now = Instant::now();
@@ -825,6 +886,14 @@ pub(crate) fn run_session(
             break;
         }
         for event in window.take_events() {
+            // The control center's volume slider.
+            if let WindowEvent::Value { id, value } = event {
+                if id == MENU_VOLUME {
+                    volume = value;
+                    player.set_volume(value);
+                }
+                continue;
+            }
             if let WindowEvent::Menu(id) = event {
                 let command = match id {
                     MENU_CTRL_ALT_DEL => Some(Command::CtrlAltDel),
@@ -848,6 +917,7 @@ pub(crate) fn run_session(
                         for other in 0..screen_count {
                             window.check_menu_item(MENU_SCREENS + 16 * u16::from(other), other == index);
                         }
+                        current_screen = index;
                         Some(Command::Screen(index))
                     }
                     id if MENU_RESOLUTION.iter().any(|(item, _, _)| *item == id) => {
@@ -916,16 +986,25 @@ pub(crate) fn run_session(
                         window.check_menu_item(MENU_PRIVACY, privacy_on);
                         Some(if privacy_on { Command::PrivacyOn } else { Command::PrivacyOff })
                     }
-                    MENU_TRANSFERS => {
-                        if transfer_list.is_none() {
-                            transfer_list = PickList::new(
-                                tr("Queqiao - transfers"),
-                                tr("Files on their way (sent and received):"),
-                                &[(TRANSFER_PAUSE, tr("Pause / resume")), (TRANSFER_CANCEL, tr("Cancel"))],
-                            )
-                            .ok();
-                        }
+                    MENU_TRANSFERS | MENU_FILE_TRANSFER => {
+                        files_ui.open(&mut transfers, lines);
                         None
+                    }
+                    MENU_NEXT_SCREEN if screen_count > 1 => {
+                        current_screen = (current_screen + 1) % screen_count;
+                        for other in 0..screen_count {
+                            window.check_menu_item(MENU_SCREENS + 16 * u16::from(other), other == current_screen);
+                        }
+                        Some(Command::Screen(current_screen))
+                    }
+                    MENU_LOCK_AFTER => {
+                        lock_after = !lock_after;
+                        window.check_menu_item(MENU_LOCK_AFTER, lock_after);
+                        Some(Command::LockAfter(lock_after))
+                    }
+                    MENU_END => {
+                        closed = Some("ended here (control center)".to_string());
+                        break 'session;
                     }
                     id if MENU_OPACITY.iter().any(|(item, _, _)| *item == id) => {
                         let percent = MENU_OPACITY.iter().find(|(item, _, _)| *item == id).map_or(100, |(_, percent, _)| *percent);
@@ -1034,6 +1113,7 @@ pub(crate) fn run_session(
                             window.rename_menu_item(MENU_FULL_SCREEN, &trf("Full screen ({key})", &[("key", &keys.full_screen().text())]));
                             window.rename_menu_item(MENU_GAME_MOUSE, &trf("Game mouse ({key})", &[("key", &keys.game_mouse().text())]));
                             register_boss(&window, &keys, lines);
+                            build_panel(&window, &screen_names, &keys, volume);
                             lines.push("hotkeys changed".into());
                         }
                         None
@@ -1382,47 +1462,35 @@ pub(crate) fn run_session(
                 _ => {}
             }
         }
-        // The transfer list: progress, and what the person pressed.
-        if let Some(list) = &mut transfer_list {
-            let transfer_rows: Vec<TransferRow> = transfers.rows();
-            let items: Vec<String> = transfer_rows
-                .iter()
-                .map(|row| {
-                    let percent = row
-                        .done
-                        .saturating_mul(100)
-                        .checked_div(row.size)
-                        .unwrap_or(100);
-                    let way = if row.sending {
-                        tr("sending")
-                    } else {
-                        tr("receiving")
-                    };
-                    let state = if row.paused {
-                        format!(" ({})", tr("paused"))
-                    } else {
-                        String::new()
-                    };
-                    format!("{way}  {}  {percent}%{state}", row.name)
-                })
-                .collect();
-            list.set_items(items);
-            match list.next(0) {
-                Some((PICK_CLOSED, _)) => transfer_list = None,
-                Some((TRANSFER_PAUSE, Some(index))) => {
-                    if let Some(row) = transfer_rows.get(index) {
-                        transfers.pause(row.id, !row.paused);
-                    }
-                }
-                Some((TRANSFER_CANCEL, Some(index))) => {
-                    if let Some(row) = transfer_rows.get(index).cloned() {
-                        for message in transfers.cancel(row.sending, row.id) {
-                            peer.send_stream(Stream::Files, message);
-                        }
-                    }
-                }
-                _ => {}
+        // The file transfer window: listings that came, what the person did, the transfer list. Tests: its test
+        // (--browse-test) once the session's data channel is open and the session window's own pictures are taken
+        // (the file window would cover it), and its picture when that is over.
+        if options.browse_test.is_some()
+            && channel_open
+            && first_picture_after.is_some()
+            && overlay_picture.is_none()
+            && panel_test.is_none()
+            && tucked_picture.is_none()
+            && !files_ui.is_open()
+            && !files_ui.test_done()
+        {
+            files_ui.open(&mut transfers, lines);
+        }
+        files_ui.poll(&mut transfers, lines);
+        // The picture a second after the test: the transfer list shows the jobs done by then.
+        if files_picture_due && files_ui.test_done() && files_done_at.is_none() {
+            files_done_at = Some(Instant::now());
+        }
+        if files_picture_due
+            && files_done_at.is_some_and(|at| at.elapsed() > Duration::from_millis(1200))
+            && let Some(folder) = &options.ui_pictures
+        {
+            let path = folder.join("viewer_files.bmp");
+            match files_ui.save_picture(&path) {
+                Ok(()) => lines.push(format!("file transfer picture: {}", path.display())),
+                Err(error) => lines.push(format!("file transfer picture: {error}")),
             }
+            files_picture_due = false;
         }
         for message in transfers.take(peer.room(Stream::Files)) {
             peer.send_stream(Stream::Files, message);
@@ -1462,7 +1530,7 @@ pub(crate) fn run_session(
                     channel_open = true;
                     match then.take() {
                         Some(Then::Terminal) => terminals.open(&peer, agent, false, lines),
-                        Some(Then::Files) => start_picker(),
+                        Some(Then::Files) => files_ui.open(&mut transfers, lines),
                         None => {}
                     }
                     if !sound_on {
@@ -1709,6 +1777,9 @@ pub(crate) fn run_session(
                         window.add_submenu(tr("Screens"), &items);
                         screen_count = sizes.len() as u8;
                         window.check_menu_item(MENU_SCREENS + 16 * u16::from(current), true);
+                        current_screen = current;
+                        screen_names = names.clone();
+                        build_panel(&window, &screen_names, &keys, volume);
                         let english: Vec<String> = sizes
                             .iter()
                             .enumerate()
@@ -2049,7 +2120,10 @@ pub(crate) fn translate(
                 down,
             }
         }
-        WindowEvent::FilesDropped(_) | WindowEvent::Menu(_) | WindowEvent::Hotkey(_) => {
+        WindowEvent::FilesDropped(_)
+        | WindowEvent::Menu(_)
+        | WindowEvent::Hotkey(_)
+        | WindowEvent::Value { .. } => {
             return Vec::new();
         }
         WindowEvent::FocusLost => {
@@ -2412,7 +2486,7 @@ pub(crate) fn report_files(
     for outcome in outcomes {
         queqiao_files::history::record(&outcome, peer);
         lines.push(match outcome {
-            Outcome::Sent { name, size } => {
+            Outcome::Sent { name, size, .. } => {
                 format!("file sent: {name} ({size} bytes, checked by the agent) after {at:.1} s")
             }
             Outcome::Received { path, size, .. } => {
@@ -2421,7 +2495,7 @@ pub(crate) fn report_files(
                     path.display()
                 )
             }
-            Outcome::Failed { name, reason } => format!("file failed: {name}: {reason}"),
+            Outcome::Failed { name, reason, .. } => format!("file failed: {name}: {reason}"),
         });
     }
 }
@@ -2487,6 +2561,12 @@ mod tests {
             MENU_HOTKEYS,
             MENU_POINTER_SHAPE,
             MENU_MICROPHONE,
+            MENU_FIGURES,
+            MENU_FILE_TRANSFER,
+            MENU_VOLUME,
+            MENU_NEXT_SCREEN,
+            MENU_END,
+            MENU_LOCK_AFTER,
         ];
         ids.extend(MENU_MOUSE_SPEED.iter().map(|(id, _, _)| *id));
         ids.extend(MENU_CODEC.iter().map(|(id, _, _)| *id));

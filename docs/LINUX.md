@@ -113,8 +113,12 @@ input, clipboard, files, commands, sound with the speakers muted) and passes on 
 Step 5 so far: the GUI (egui on one GUI thread; every window a viewport): the tray icon (StatusNotifierItem, the menu
 shared with Windows in tray.rs; without a tray the main window opens instead), the main window (Devices, Help,
 Transfers, Settings), the session banner and the consent prompt, the help window, the login form, the device list,
-the "help someone" form, the session's transfer list and password form, the small dialogs and menus, the session bar and card of figures on the viewer (child windows
-of the session window, drawn on the CPU), and pictures of these windows for tests. The account mode is
+the "help someone" form, the session's password form, the small dialogs and menus, the session bar and card of figures on the viewer (child windows
+of the session window, drawn on the CPU), and pictures of these windows for tests. The session's control center (the bar's
+"Control center", 2026-11-25) and file transfer window (UU Remote's two panes and transfer list) are windows of the GUI
+thread too, with the Windows windows' contents (panel.rs, model.rs): the control center opens at the session window's
+top right (where the compositor places windows itself, as on Wayland, wherever it puts it) and closes on a choice, Esc
+or a click elsewhere. The account mode is
 shared with Windows (the agent's and the viewer's account.rs): login, online, the device list, help requests,
 Wake-on-LAN (the cards from /sys/class/net; the check from sysfs and ethtool), start at sign-in (an XDG autostart
 entry), one agent per user (a lock in a private runtime folder; opened again, it shows the running one's window).

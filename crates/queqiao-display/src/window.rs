@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::sync::Once;
 use std::time::{Duration, Instant};
 
-use crate::model::WindowEvent;
+use std::collections::HashMap;
+
+use crate::model::{BAR_MORE, WindowEvent};
+use crate::panel::PanelItem;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -34,6 +37,9 @@ thread_local! {
     /// That PC's pointer shape as this window's cursor (0: the arrow), and whether that pointer is hidden.
     static REMOTE_CURSOR: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static POINTER_HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The control center's items, and which menu items are checked (one session window per thread).
+    static PANEL: RefCell<Vec<PanelItem>> = const { RefCell::new(Vec::new()) };
+    static CHECKS: RefCell<HashMap<u16, bool>> = RefCell::new(HashMap::new());
 }
 
 pub struct Window {
@@ -168,8 +174,46 @@ impl Window {
         }
     }
 
-    /// New text for a menu item added with [`Window::add_menu_items`].
+    /// The control center's items (the bar's "Control center" button opens it): groups of choices with the ids of
+    /// this window's menu items. Its check marks follow [`Window::check_menu_item`].
+    pub fn set_panel(&self, items: Vec<PanelItem>) {
+        PANEL.with_borrow_mut(|panel| *panel = items);
+    }
+
+    /// Changes the control center's items (a group filled in later, an item greyed).
+    pub fn update_panel(&self, change: impl FnOnce(&mut Vec<PanelItem>)) {
+        PANEL.with_borrow_mut(change);
+    }
+
+    /// Opens the control center under the bar's button (tests: with group `group` open beside it), or closes it.
+    pub fn open_panel(&self, anchor: (i32, i32), group: Option<usize>) {
+        let items = PANEL.with_borrow(Clone::clone);
+        let checks = CHECKS.with_borrow(Clone::clone);
+        crate::control_center::open(
+            self.hwnd,
+            POINT {
+                x: anchor.0,
+                y: anchor.1,
+            },
+            items,
+            checks,
+            group,
+        );
+    }
+
+    /// The control center is open.
+    pub fn panel_open(&self) -> bool {
+        crate::control_center::is_open()
+    }
+
+    /// Tests: a picture of the session window's place on the screen, the open control center on it.
+    pub fn save_panel_picture(&self, path: &std::path::Path) -> std::io::Result<()> {
+        crate::forms::save_screen_picture(self.hwnd, path)
+    }
+
+    /// New text for a menu item added with [`Window::add_menu_items`] (and the control center's item).
     pub fn rename_menu_item(&self, id: u16, text: &str) {
+        PANEL.with_borrow_mut(|panel| crate::panel::rename(panel, id, text));
         let menu = unsafe { GetSystemMenu(self.hwnd, false) };
         let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let _ = unsafe {
@@ -229,6 +273,7 @@ impl Window {
 
     /// Puts a check mark on a menu item added with [`Window::add_menu_items`], or takes it off.
     pub fn check_menu_item(&self, id: u16, checked: bool) {
+        CHECKS.with_borrow_mut(|checks| checks.insert(id, checked));
         let menu = unsafe { GetSystemMenu(self.hwnd, false) };
         let flags = MF_BYCOMMAND | if checked { MF_CHECKED } else { MF_UNCHECKED };
         let _ = unsafe { CheckMenuItem(menu, u32::from(id), flags.0) };
@@ -535,6 +580,9 @@ impl Drop for Window {
         // Fails harmlessly when the user already closed the window.
         // The keyboard hook goes with the window.
         crate::shortcuts::set(self.hwnd, false);
+        crate::control_center::close(false);
+        PANEL.with_borrow_mut(Vec::clear);
+        CHECKS.with_borrow_mut(HashMap::clear);
         let _ = unsafe { DestroyWindow(self.hwnd) };
         self.pump();
         EVENTS.with_borrow_mut(Vec::clear);
@@ -683,6 +731,20 @@ extern "system" fn window_proc(
         // Our own system-menu items (Windows' own commands are 0xF000 and above).
         WM_SYSCOMMAND if (wparam.0 & 0xFFF0) < 0xF000 => {
             push(WindowEvent::Menu((wparam.0 & 0xFFF0) as u16));
+            LRESULT(0)
+        }
+        // The bar's "Control center": opened under the button (lparam: its bottom right on the screen).
+        WM_SYSCOMMAND if wparam.0 == usize::from(BAR_MORE) => {
+            let items = PANEL.with_borrow(Clone::clone);
+            let checks = CHECKS.with_borrow(Clone::clone);
+            crate::control_center::open(hwnd, POINT { x: low, y: high }, items, checks, None);
+            LRESULT(0)
+        }
+        // A slider of the control center (the volume).
+        crate::control_center::WM_PANEL_VALUE => {
+            let (id, value) = (wparam.0 as u16, lparam.0.clamp(0, 100) as u8);
+            PANEL.with_borrow_mut(|panel| crate::panel::set_value(panel, id, value));
+            push(WindowEvent::Value { id, value });
             LRESULT(0)
         }
         WM_DROPFILES => {

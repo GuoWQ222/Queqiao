@@ -3,7 +3,8 @@
 # own on 127.0.0.1, as scripts\run_m4_local.ps1 does on Windows: the server made (init, a user), the agent logged in and
 # online, the viewer logged in and connected to it by name (--device), with the input test. Sessions (SESSIONS, default
 # "direct allowed declined ui"): direct (the clipboard both ways too; the session bar and card of figures, pictured with
-# the bar out and tucked away, its Figures button clicked twice; a command line on the agent in a terminal window
+# the bar out and tucked away, its Control center button clicked (it opens, then closes); the file transfer window's test
+# (--browse-test: that PC's folder listed, a file fetched, one sent there); a command line on the agent in a terminal window
 # here, detached and shown again: --terminal-test), allowed (the agent asks the person, who allows:
 # the consent prompt answered by the test; pictures of the banner and the prompt), declined (who declines: neither side passes, both must say so), ui (the
 # viewer through its login form and device list as a person would, filled and pressed by the program, with pictures of
@@ -75,10 +76,13 @@ if [ -z "$up" ]; then cat "$out/server.txt"; echo M3_LINUX_FAIL server; kill "$s
 device=$(cat /proc/sys/kernel/hostname)
 account="--server $listen --pin $pin --user alice --password $password"
 why=''
+# "That PC's" folder for the file transfer window's test (direct session): down.txt to fetch, up.txt arrives.
+browse_remote=$out/browse_remote
+rm -rf "$browse_remote" && mkdir -p "$browse_remote" && printf 'queqiao browse test: down' > "$browse_remote/down.txt"
 for label in $sessions; do
     agent_env=''
     case $label in
-        direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out --terminal-test";
+        direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out --terminal-test --browse-test $browse_remote";
                 agent_expects='test text from the other side received: yes'; viewer_expects='test text from the other side received: yes'; both_pass=yes ;;
         # The agent's banner and consent prompt pictured.
         allowed) agent_extra="--ask --answer allow --ui-pictures $out"; viewer_extra='';
@@ -173,8 +177,14 @@ EOF
         for picture in viewer_session viewer_session_tucked; do
             [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp" || why="$why direct-$picture-picture"
         done
-        grep -qE "^bar: no Figures button|^overlay: " "$out/viewer_direct.txt" && why="$why direct-bar"
+        grep -qE "^bar: no Control center button|^overlay: " "$out/viewer_direct.txt" && why="$why direct-bar"
         grep -q "^terminal test: PASS" "$out/viewer_direct.txt" || why="$why direct-terminal"
+        # The bar's Control center opened it and it closed again; the file transfer window's test (that PC's folder
+        # listed, down.txt fetched, up.txt sent), its picture, and up.txt there.
+        for line in "^control center open after the click: true" "^control center closed: true" "^browse test: PASS" "^file transfer picture: "; do
+            grep -q "$line" "$out/viewer_direct.txt" || why="$why direct-[$line]"
+        done
+        [ "$(cat "$browse_remote/up.txt" 2> /dev/null)" = 'queqiao browse test: up' ] || why="$why direct-up.txt"
     fi
     pictures=''
     [ "$label" = allowed ] && pictures='banner prompt'
