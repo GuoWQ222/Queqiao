@@ -22,7 +22,7 @@ mod notes;
 mod tls;
 
 use std::collections::VecDeque;
-use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -169,7 +169,8 @@ impl Account {
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| Error(format!("no address for {}", login.server)))?;
-        let tcp = TcpStream::connect_timeout(&address, Duration::from_secs(10))
+        // Straight out of this PC's network card, past a proxy's TUN adapter, for a server on the internet.
+        let tcp = queqiao_transport::connect_direct(address, Duration::from_secs(10))
             .map_err(|e| Error(format!("cannot reach {}: {e}", login.server)))?;
         tcp.set_nodelay(true)?;
         let local_ip = tcp.local_addr()?.ip();

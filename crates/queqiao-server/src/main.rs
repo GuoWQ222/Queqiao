@@ -14,6 +14,8 @@
 //! queqiao-server add-user <name> [--data <folder>]
 //!     Adds a user; the password is one line on standard input (never the command line, where process lists and
 //!     shell history show it).
+//! queqiao-server remove-user <name> [--data <folder>]
+//!     Takes a user out, with their devices and logins.
 //! Without arguments it prints its version.
 
 mod cert;
@@ -33,6 +35,7 @@ fn main() {
     let result = match args.first().map(String::as_str) {
         Some("serve") => serve(&args[1..]),
         Some("add-user") => add_user(&args[1..]),
+        Some("remove-user") => remove_user(&args[1..]),
         Some("init") => init(&args[1..]),
         _ => {
             println!("{banner}");
@@ -46,6 +49,7 @@ fn main() {
             println!(
                 "       queqiao-server add-user <name> [--data <folder>]   (the password on standard input)"
             );
+            println!("       queqiao-server remove-user <name> [--data <folder>]");
             return;
         }
     };
@@ -102,6 +106,20 @@ fn add_user(args: &[String]) -> Result<(), String> {
     store.add_user(name, password)?;
     println!("user {name} added");
     Ok(())
+}
+
+/// Takes a user out with their devices and logins (a running server forgets them at its next check of a login).
+fn remove_user(args: &[String]) -> Result<(), String> {
+    let Some(name) = args.first().filter(|name| !name.starts_with("--")) else {
+        return Err("usage: queqiao-server remove-user <name> [--data <folder>]".into());
+    };
+    let mut store = Store::open(&data_folder(args)?.join("queqiao.db"))?;
+    if store.remove_user(name)? {
+        println!("user {name} removed");
+        Ok(())
+    } else {
+        Err(format!("no user {name}"))
+    }
 }
 
 fn init(args: &[String]) -> Result<(), String> {

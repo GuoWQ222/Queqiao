@@ -7,7 +7,8 @@
 //! server connection uses is offered anyway (it may be one). The account's own devices also get this PC's public
 //! IPv6 addresses ([`ipv6_uplinks`]): no NAT there, so two PCs with IPv6 connect directly.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -60,6 +61,60 @@ fn private_ipv6(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xfe00) == 0xfc00
 }
 
+/// An address on the internet: not private, loopback, link-local, shared (100.64/10: carrier NAT and Tailscale),
+/// benchmarking (198.18/15: the fake addresses of Clash/Mihomo's DNS) or otherwise reserved.
+pub fn public_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            usable(ip)
+                && !ip.is_private()
+                && !ip.is_broadcast()
+                && !ip.is_documentation()
+                && a != 0
+                && a < 224
+                && !(a == 100 && (64..128).contains(&b))
+                && !(a == 198 && (18..20).contains(&b))
+        }
+        IpAddr::V6(ip) => public_ipv6(ip),
+    }
+}
+
+/// A TCP connection to the account server at `address` that goes straight out of a network card of this PC, past
+/// a VPN or a proxy's TUN adapter holding the default route (the user, 2026-11-25: "each computer connects to the
+/// server directly, not via a proxy"). For a public address each uplink is tried in route order (a socket bound to
+/// its address leaves through that card, see the top of this file), `timeout` each; for any other address (a LAN,
+/// Tailscale, this PC), and when no uplink connects, the connection goes as the routing table says.
+pub fn connect_direct(address: SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    if public_address(address.ip()) {
+        let sources: Vec<IpAddr> = match address {
+            SocketAddr::V4(_) => uplinks().into_iter().map(IpAddr::V4).collect(),
+            SocketAddr::V6(_) => ipv6_uplinks(false).into_iter().map(IpAddr::V6).collect(),
+        };
+        for source in sources {
+            if let Ok(stream) = connect_from(source, address, timeout) {
+                return Ok(stream);
+            }
+        }
+    }
+    TcpStream::connect_timeout(&address, timeout)
+}
+
+fn connect_from(
+    source: IpAddr,
+    address: SocketAddr,
+    timeout: Duration,
+) -> std::io::Result<TcpStream> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(address),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.bind(&SocketAddr::new(source, 0).into())?;
+    socket.connect_timeout(&address.into(), timeout)?;
+    Ok(socket.into())
+}
+
 fn usable(ip: Ipv4Addr) -> bool {
     !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified() && !ip.is_multicast()
 }
@@ -102,6 +157,41 @@ mod tests {
             assert!(super::public_ipv6(*ip), "{ip}");
             assert!(!found[..index].contains(ip), "{ip} twice");
         }
+    }
+
+    #[test]
+    fn the_server_goes_direct_only_at_a_public_address() {
+        let public = |text: &str| super::public_address(text.parse().unwrap());
+        // The Aliyun server, the PC's campus address, a public IPv6 address.
+        assert!(public("101.201.221.56"));
+        assert!(public("59.66.29.128"));
+        assert!(public("2402:f000:4:1008:809:fffc:8a2f:5778"));
+        // A LAN, Tailscale, Mihomo's tunnel and fake DNS addresses, this PC, nothing, multicast, IPv6 ULA.
+        for text in [
+            "192.168.1.10",
+            "10.0.2.2",
+            "172.24.43.86",
+            "100.69.159.77",
+            "198.19.0.1",
+            "198.18.0.5",
+            "127.0.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "fd7a:115c:a1e0::1",
+            "::1",
+        ] {
+            assert!(!public(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_direct_connection_to_this_pc_still_connects() {
+        // Not public: as the routing table says (a listener on the loopback answers).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stream = super::connect_direct(address, std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), address);
     }
 
     #[test]

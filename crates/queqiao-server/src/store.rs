@@ -118,6 +118,33 @@ impl Store {
         Ok(())
     }
 
+    /// Takes a user out with their devices and logins; false when there is no such user.
+    pub fn remove_user(&mut self, name: &str) -> Result<bool, String> {
+        let transaction = self.db.transaction().map_err(|e| e.to_string())?;
+        let id: Option<i64> = transaction
+            .query_row(
+                "SELECT id FROM users WHERE name = ?1 COLLATE NOCASE",
+                params![name],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(id) = id else {
+            return Ok(false);
+        };
+        for statement in [
+            "DELETE FROM refresh_tokens WHERE user_id = ?1",
+            "DELETE FROM devices WHERE user_id = ?1",
+            "DELETE FROM users WHERE id = ?1",
+        ] {
+            transaction
+                .execute(statement, params![id])
+                .map_err(|e| e.to_string())?;
+        }
+        transaction.commit().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
     /// The account a device belongs to, if it is known.
     pub fn device_owner(&self, device_id: &str) -> Result<Option<i64>, String> {
         self.db
