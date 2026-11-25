@@ -323,6 +323,9 @@ impl Peer {
             }
         };
         let peer_quic: Option<String>;
+        // The other side's relayed candidates (its TURN allocations): a path to one of them goes through a relay
+        // although this side sends straight to it.
+        let remote_relays: Vec<SocketAddr>;
         set_sctp_timeouts();
         let mut rtc = tune(
             RtcConfig::new()
@@ -386,12 +389,14 @@ impl Peer {
                 signal.send("offer", &offer)?;
                 let answer = signal.expect("answer")?;
                 peer_quic = quic::from_sdp(&answer);
+                remote_relays = relayed_candidates(&answer);
                 let answer = SdpAnswer::from_sdp_string(&answer).map_err(err)?;
                 rtc.sdp_api().accept_answer(pending, answer).map_err(err)?;
             }
             Role::Agent => {
                 let offer = signal.expect("offer")?;
                 peer_quic = quic::from_sdp(&offer);
+                remote_relays = relayed_candidates(&offer);
                 let offer = SdpOffer::from_sdp_string(&offer).map_err(err)?;
                 let answer = rtc.sdp_api().accept_offer(offer).map_err(err)?;
                 let answer = match (&identity, &peer_quic) {
@@ -456,6 +461,7 @@ impl Peer {
             rtc,
             socket,
             local,
+            remote_relays,
             wake_from,
             mid,
             audio_mid,
@@ -772,6 +778,24 @@ fn receive_extra(
     }
 }
 
+/// The relayed candidates of an SDP (`a=candidate:<foundation> <component> <transport> <priority> <address> <port>
+/// typ relay ...`): the other side's TURN allocations.
+pub(crate) fn relayed_candidates(sdp: &str) -> Vec<SocketAddr> {
+    sdp.lines()
+        .filter_map(|line| line.trim().strip_prefix("a=candidate:"))
+        .filter_map(|candidate| {
+            let parts: Vec<&str> = candidate.split_whitespace().collect();
+            let kind = parts.iter().position(|part| *part == "typ")?;
+            if parts.get(kind + 1) != Some(&"relay") {
+                return None;
+            }
+            let ip: IpAddr = parts.get(4)?.parse().ok()?;
+            let port: u16 = parts.get(5)?.parse().ok()?;
+            Some(SocketAddr::new(ip, port))
+        })
+        .collect()
+}
+
 fn bind_socket(ip: IpAddr) -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
     let socket = Socket::new(
@@ -815,6 +839,8 @@ struct Network {
     /// DTLS packets noted before connecting (out, in): where the handshake goes and how long it takes.
     dtls_notes: (u32, u32),
     path: Option<String>,
+    /// The other side's relayed candidates: a path to one of them is relayed by that side.
+    remote_relays: Vec<SocketAddr>,
     /// The latest time given to str0m: inputs never go back in time (deadlines are served up to 1 ms early).
     clock: Instant,
     /// How much the streams may have in flight, from what the path delivers ([`crate::flow`]); the cap is shared
@@ -1033,6 +1059,12 @@ impl Network {
                             Some(server) => {
                                 format!("relayed through {server} to {}", packet.destination)
                             }
+                            // Straight to the other side's relay: relayed all the same (it was shown as direct,
+                            // 2026-11-25, sunshine behind a phone's hotspot).
+                            None if self.remote_relays.contains(&packet.destination) => format!(
+                                "relayed through that PC's relay {} (from {})",
+                                packet.destination, packet.source
+                            ),
                             None => {
                                 format!("direct to {} (from {})", packet.destination, packet.source)
                             }
@@ -1641,5 +1673,27 @@ impl Network {
             let _ = writer.request_keyframe(None, KeyframeRequestKind::Pli);
             self.last_keyframe_request = Some(now);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_other_sides_relays_are_read_from_its_sdp() {
+        let sdp = "v=0\r\n\
+            a=candidate:1 1 udp 2130706431 172.20.10.2 58077 typ host\r\n\
+            a=candidate:2 1 udp 1694498815 223.104.42.214 12934 typ srflx raddr 172.20.10.2 rport 58077\r\n\
+            a=candidate:3 1 udp 16777215 101.201.221.56 47223 typ relay raddr 223.104.42.214 rport 12934\r\n\
+            a=candidate:4 1 udp 16777214 2001:db8::1 47224 typ relay\r\n\
+            a=candidate:5 1 udp 16777213 not-an-address 1 typ relay\r\n";
+        let relays = super::relayed_candidates(sdp);
+        assert_eq!(
+            relays,
+            vec![
+                "101.201.221.56:47223".parse().unwrap(),
+                "[2001:db8::1]:47224".parse().unwrap()
+            ]
+        );
+        assert!(super::relayed_candidates("v=0\r\n").is_empty());
     }
 }
