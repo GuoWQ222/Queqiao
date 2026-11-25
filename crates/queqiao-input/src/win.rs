@@ -105,6 +105,59 @@ impl Injector {
             ))
         }
     }
+
+    /// Types `text` as characters whatever the PC's keyboard layout (KEYEVENTF_UNICODE: each UTF-16 unit as a
+    /// VK_PACKET key, which the window receives as WM_CHAR), a line break as Enter, a tab as Tab.
+    pub fn type_text(&self, text: &str) -> Result<(), String> {
+        let key = |vk: VIRTUAL_KEY, scan: u16, flags: KEYBD_EVENT_FLAGS| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let mut inputs = Vec::with_capacity(text.len() * 2);
+        for c in text.chars() {
+            let virtual_key = match c {
+                '\n' => Some(VK_RETURN),
+                '\t' => Some(VK_TAB),
+                '\r' => continue,
+                _ => None,
+            };
+            if let Some(vk) = virtual_key {
+                inputs.push(key(vk, 0, KEYBD_EVENT_FLAGS(0)));
+                inputs.push(key(vk, 0, KEYEVENTF_KEYUP));
+                continue;
+            }
+            let mut units = [0u16; 2];
+            for &unit in c.encode_utf16(&mut units).iter() {
+                inputs.push(key(VIRTUAL_KEY(0), unit, KEYEVENTF_UNICODE));
+                inputs.push(key(
+                    VIRTUAL_KEY(0),
+                    unit,
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                ));
+            }
+        }
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+        if sent as usize == inputs.len() {
+            Ok(())
+        } else {
+            Err(format!(
+                "SendInput typed {sent} of {} key events: {}",
+                inputs.len(),
+                windows::core::Error::from_thread().message()
+            ))
+        }
+    }
 }
 
 fn mouse(dx: i32, dy: i32, data: i32, flags: MOUSE_EVENT_FLAGS) -> INPUT {

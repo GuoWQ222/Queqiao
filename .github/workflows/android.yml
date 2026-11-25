@@ -60,7 +60,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb x11-apps
           set -o pipefail
-          cargo build -q --release -p queqiao-server -p queqiao-agent 2>&1 | tee /tmp/android_e2e/build_agent.txt
+          cargo build -q --release --features queqiao-agent/test-switches -p queqiao-server -p queqiao-agent 2>&1 | tee /tmp/android_e2e/build_agent.txt
 
       - name: KVM for the emulator
         run: |

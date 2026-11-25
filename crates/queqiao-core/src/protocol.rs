@@ -77,6 +77,9 @@ pub enum Message {
     Leave,
     /// The sender's clipboard now holds this text (both directions; at most [`MAX_CLIPBOARD_TEXT`] bytes).
     ClipboardText(String),
+    /// Viewer -> agent: text typed on the viewer (a phone's keyboard, in any language), typed on the PC as characters,
+    /// whatever its keyboard layout (at most [`MAX_TYPE_TEXT`] bytes).
+    TypeText(String),
     /// Viewer -> agent: do something on the controlled PC.
     Command(Command),
     /// Agent -> viewer: something to show the person controlling (e.g. why a command cannot run).
@@ -292,6 +295,8 @@ impl Quality {
 
 /// Clipboard text larger than this (UTF-8 bytes) is not sent in one message.
 pub const MAX_CLIPBOARD_TEXT: usize = 256 * 1024;
+/// Typed text longer than this (UTF-8 bytes) is not sent in one message.
+pub const MAX_TYPE_TEXT: usize = 4096;
 
 const INPUT_MOVE: u8 = 1;
 const INPUT_BUTTON: u8 = 2;
@@ -303,6 +308,7 @@ const PONG: u8 = 21;
 const FRAME_INFO: u8 = 30;
 const LEAVE: u8 = 40;
 const CLIPBOARD_TEXT: u8 = 50;
+const TYPE_TEXT: u8 = 51;
 const COMMAND: u8 = 60;
 const NOTICE: u8 = 61;
 const SCREENS: u8 = 62;
@@ -363,6 +369,10 @@ impl Message {
             Message::Leave => out.push(LEAVE),
             Message::ClipboardText(ref text) => {
                 out.push(CLIPBOARD_TEXT);
+                out.extend_from_slice(text.as_bytes());
+            }
+            Message::TypeText(ref text) => {
+                out.push(TYPE_TEXT);
                 out.extend_from_slice(text.as_bytes());
             }
             Message::Command(command) => {
@@ -523,6 +533,9 @@ impl Message {
             }
             LEAVE => Message::Leave,
             CLIPBOARD_TEXT => Message::ClipboardText(String::from_utf8(rest.to_vec()).ok()?),
+            TYPE_TEXT if rest.len() <= MAX_TYPE_TEXT => {
+                Message::TypeText(String::from_utf8(rest.to_vec()).ok()?)
+            }
             COMMAND => Message::Command(match rest.first()? {
                 1 => Command::CtrlAltDel,
                 2 => Command::Lock,
@@ -773,6 +786,7 @@ mod tests {
             },
             Message::Leave,
             Message::ClipboardText("copied text, ä 中文".into()),
+            Message::TypeText("typed 中文, émoji 🙂\n".into()),
             Message::Command(Command::Lock),
             Message::Command(Command::RestartQueqiao),
             Message::Command(Command::Microphone(true)),

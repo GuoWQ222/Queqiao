@@ -179,6 +179,126 @@ impl Injector {
         }
         state.connection.flush().map_err(|e| format!("XTEST: {e}"))
     }
+
+    /// Types `text` as characters whatever the keyboard layout. X11: each character's keysym is put on a key that has
+    /// none (as xdotool does), pressed and let go, and the key is emptied again at the end; Wayland: the portal's
+    /// keysyms. A line break as Return, a tab as Tab.
+    pub fn type_text(&self, text: &str) -> Result<(), String> {
+        if let Some(wayland) = &self.wayland {
+            let mut wayland = wayland
+                .lock()
+                .map_err(|_| "the injector broke".to_string())?;
+            return match wayland.as_mut() {
+                Ok(input) => input.type_text(text),
+                Err(error) => Err(error.clone()),
+            };
+        }
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| "the injector broke".to_string())?;
+        let state = guard
+            .as_mut()
+            .ok_or("no X display with XTEST to inject into")?;
+        let error = |e: &dyn std::fmt::Display| format!("typing text: {e}");
+        let (first, last) = {
+            let setup = state.connection.setup();
+            (setup.min_keycode, setup.max_keycode)
+        };
+        let mapping = state
+            .connection
+            .get_keyboard_mapping(first, last - first + 1)
+            .map_err(|e| error(&e))?
+            .reply()
+            .map_err(|e| error(&e))?;
+        let per = usize::from(mapping.keysyms_per_keycode).max(1);
+        // Keys with no keysym at all (the highest first), up to 16. Programs reread the keyboard lazily (Xlib fetches
+        // the new map when it next looks a key up, after MappingNotify), so a key must keep its character until the
+        // program has looked at the key event: each character goes on the next spare key in turn, a key is used
+        // again only after a pause, and they are all emptied after one at the end (one key for everything lost
+        // characters: found 2026-11-26).
+        let spares: Vec<u8> = (0..=usize::from(last - first))
+            .rev()
+            .filter(|&i| {
+                mapping
+                    .keysyms
+                    .get(i * per..(i + 1) * per)
+                    .is_some_and(|syms| syms.iter().all(|&k| k == 0))
+            })
+            .map(|i| first + i as u8)
+            .take(16)
+            .collect();
+        if spares.is_empty() {
+            return Err("typing text: no free key on this keyboard to type with".into());
+        }
+        let sync = |state: &State| {
+            state
+                .connection
+                .get_input_focus()
+                .map_err(|e| error(&e))?
+                .reply()
+                .map(|_| ())
+                .map_err(|e| error(&e))
+        };
+        // What each spare key holds now (0: nothing yet), and the next one to take.
+        let mut holding = vec![0u32; spares.len()];
+        let mut next = 0;
+        let mut result = Ok(());
+        for c in text.chars() {
+            let Some(symbol) = keysym(c) else { continue };
+            let slot = match holding.iter().position(|&held| held == symbol) {
+                Some(slot) => slot,
+                None => {
+                    let slot = next % spares.len();
+                    if next >= spares.len() {
+                        // This key typed a character a moment ago: let the program read it first.
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    next += 1;
+                    // Both levels (a single alphabetic keysym would type its lower case without Shift).
+                    let changed = state
+                        .connection
+                        .change_keyboard_mapping(1, spares[slot], 2, &[symbol, symbol])
+                        .map_err(|e| error(&e))
+                        .and_then(|_| sync(state));
+                    if let Err(e) = changed {
+                        result = Err(e);
+                        break;
+                    }
+                    holding[slot] = symbol;
+                    slot
+                }
+            };
+            for kind in [xproto::KEY_PRESS_EVENT, xproto::KEY_RELEASE_EVENT] {
+                if let Err(e) = state.connection.xtest_fake_input(
+                    kind,
+                    spares[slot],
+                    x11rb::CURRENT_TIME,
+                    state.root,
+                    0,
+                    0,
+                    0,
+                ) {
+                    result = Err(error(&e));
+                }
+            }
+            if let Err(e) = sync(state) {
+                result = Err(e);
+                break;
+            }
+        }
+        // The keys emptied again, once the programs have read the last characters.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        for (slot, &held) in holding.iter().enumerate() {
+            if held != 0 {
+                let _ = state
+                    .connection
+                    .change_keyboard_mapping(1, spares[slot], 2, &[0, 0]);
+            }
+        }
+        state.connection.flush().map_err(|e| error(&e))?;
+        result
+    }
 }
 
 /// The pointer's position on the X screen.
@@ -242,4 +362,33 @@ pub fn key_is_down(virtual_key: u16) -> bool {
         .ok()
         .and_then(|cookie| cookie.reply().ok())
         .is_some_and(|keymap| keymap.keys[usize::from(code / 8)] & (1 << (code % 8)) != 0)
+}
+
+/// The X keysym that types `c`: Latin-1 as itself, anything else as 0x01000000 + its code point; a line break is
+/// Return, a tab Tab; None for a carriage return (the line break comes as '\n').
+pub(crate) fn keysym(c: char) -> Option<u32> {
+    match c {
+        '\n' => Some(0xff0d),
+        '\t' => Some(0xff09),
+        '\r' => None,
+        c if (c as u32) >= 0x20 && (c as u32) < 0x7f => Some(c as u32),
+        c if (c as u32) >= 0xa0 && (c as u32) <= 0xff => Some(c as u32),
+        c if (c as u32) < 0x20 || (c as u32) == 0x7f => None,
+        c => Some(0x0100_0000 | c as u32),
+    }
+}
+
+#[cfg(test)]
+mod keysym_tests {
+    use super::keysym;
+
+    #[test]
+    fn characters_become_keysyms() {
+        assert_eq!(keysym('a'), Some(0x61));
+        assert_eq!(keysym('é'), Some(0xe9));
+        assert_eq!(keysym('中'), Some(0x0100_4e2d));
+        assert_eq!(keysym('🙂'), Some(0x0101_f642));
+        assert_eq!(keysym('\n'), Some(0xff0d));
+        assert_eq!(keysym('\r'), None);
+    }
 }

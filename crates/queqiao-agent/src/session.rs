@@ -1035,6 +1035,22 @@ pub(crate) fn session(
                             }
                         }
                     }
+                    Some(Message::TypeText(_)) if gate.closed() => {}
+                    // Text typed on a phone, as characters (any language, whatever this PC's layout). Not on another
+                    // desktop (sign-in, lock, UAC): the desktop helper takes keys only there.
+                    Some(Message::TypeText(text)) => {
+                        stats.inputs += 1;
+                        if duplicator.is_none() && links.desktop.is_some() {
+                            stats.inject_failures += 1;
+                            stats.last_inject_error =
+                                "typed text on the sign-in or UAC screen (keys only there)".into();
+                            continue;
+                        }
+                        if let Err(error) = injector.type_text(&text) {
+                            stats.inject_failures += 1;
+                            stats.last_inject_error = error;
+                        }
+                    }
                     Some(Message::Ping { id, sent_us }) => {
                         peer.send_data(Message::Pong { id, sent_us }.encode());
                     }

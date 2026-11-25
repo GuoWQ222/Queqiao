@@ -323,6 +323,27 @@ impl WaylandInjector {
             }
         }
     }
+
+    /// Types `text` as characters: the portal's keysyms; the compositor's virtual keyboard has no way to (it would
+    /// need a keymap of its own for each character).
+    pub(crate) fn type_text(&mut self, text: &str) -> Result<(), String> {
+        let session = match self {
+            WaylandInjector::Portal { session, .. } => session,
+            WaylandInjector::Virtual(_) => {
+                return Err(
+                    "typing text is not available with this compositor's virtual keyboard".into(),
+                );
+            }
+        };
+        for c in text.chars() {
+            let Some(symbol) = crate::x11::keysym(c) else {
+                continue;
+            };
+            session.key_symbol(symbol as i32, true)?;
+            session.key_symbol(symbol as i32, false)?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct WaylandInput {

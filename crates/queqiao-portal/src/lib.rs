@@ -396,6 +396,18 @@ impl PortalSession {
         async_io::block_on(proxy.notify_keyboard_keycode(session, code, state, Default::default()))
             .map_err(portal_error)
     }
+
+    /// A key by its X keysym (Unicode characters as 0x01000000 + code point): typing text whatever the layout.
+    pub fn key_symbol(&self, keysym: i32, down: bool) -> Result<(), String> {
+        let (proxy, session) = self.remote()?;
+        let state = if down {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
+        async_io::block_on(proxy.notify_keyboard_keysym(session, keysym, state, Default::default()))
+            .map_err(portal_error)
+    }
 }
 
 impl Drop for PortalSession {

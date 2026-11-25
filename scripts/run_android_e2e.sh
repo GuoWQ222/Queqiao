@@ -6,7 +6,7 @@
 # session, frames sent, input events received. The pictures the test took and every log go to OUT (default
 # /tmp/android_e2e).
 # Needs: the APKs built (scripts/build_android.sh debug, then gradle assembleDebugAndroidTest), queqiao-server and
-# queqiao-agent built (cargo build --release), Xvfb and xclock, adb.
+# queqiao-agent built (cargo build --release --features queqiao-agent/test-switches: the options), Xvfb, xclock, adb.
 # Prints ANDROID_E2E_PASS or ANDROID_E2E_FAIL <why>.
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -61,7 +61,7 @@ adb shell am instrument -w -e server "10.0.2.2:$port" -e pin "$pin" -e user test
     -e device "$device" com.queqiao.app.test/androidx.test.runner.AndroidJUnitRunner > "$out/instrument.txt" 2>&1
 for name in login devices session toolbar after; do
     adb exec-out run-as com.queqiao.app cat "files/test_pictures/$name.png" > "$out/$name.png" 2> /dev/null
-    [ -s "$out/$name.png" ] || rm -f "$out/$name.png"
+    head -c 4 "$out/$name.png" 2> /dev/null | grep -q PNG || rm -f "$out/$name.png"
 done
 # The agent's session has ended (the app disconnected): wait for its report.
 for _ in $(seq 40); do [ -s "$out/agent_report.txt" ] && break; sleep 0.5; done

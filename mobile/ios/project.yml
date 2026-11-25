@@ -49,6 +49,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.queqiao.app
         SWIFT_OBJC_BRIDGING_HEADER: Queqiao/Queqiao-Bridging-Header.h
         TARGETED_DEVICE_FAMILY: "1,2"
+        # The core is built for Apple silicon Simulators only (scripts/build_ios_core.sh).
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         OTHER_LDFLAGS: ["-lc++", "-lresolv"]
         QUEQIAO_DEFAULT_SERVER: ""

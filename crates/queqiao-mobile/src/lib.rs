@@ -103,6 +103,7 @@ enum Request {
     Remote(RemoteCommand),
     Password(String),
     Clipboard(String),
+    Text(String),
     RemoveDevice(String),
     Stop,
 }
@@ -164,7 +165,7 @@ impl Core {
     /// {"connect": {"device": id}}, {"disconnect": {}}, {"move": {"x", "y"}} (0..1 of the picture),
     /// {"button": {"button": "left"|"right"|"middle", "down": bool}}, {"wheel": {"delta", "horizontal"}},
     /// {"key": {"scancode", "extended", "down"}}, {"command": "ctrl_alt_del"|"lock"|...}, {"password": text},
-    /// {"clipboard": text}, {"remove_device": id}. False for something it does not know.
+    /// {"clipboard": text}, {"text": typed text, as characters on the PC}, {"remove_device": id}. False for something it does not know.
     pub fn command(&self, json: &str) -> bool {
         match parse(json) {
             Some(request) => self.requests.send(request).is_ok(),
@@ -278,6 +279,7 @@ fn parse(json: &str) -> Option<Request> {
         }),
         "password" => Request::Password(body.as_str()?.to_string()),
         "clipboard" => Request::Clipboard(body.as_str()?.to_string()),
+        "text" => Request::Text(body.as_str()?.to_string()),
         "remove_device" => Request::RemoveDevice(body.as_str()?.to_string()),
         _ => return None,
     })
@@ -383,6 +385,19 @@ impl Engine {
             Request::Remote(command) => self.send(Message::Command(command)),
             Request::Password(password) => self.send(Message::Password(password)),
             Request::Clipboard(text) => self.send(Message::ClipboardText(text)),
+            // Long text in pieces of at most MAX_TYPE_TEXT bytes (on character boundaries).
+            Request::Text(text) => {
+                let mut piece = String::new();
+                for c in text.chars() {
+                    if piece.len() + c.len_utf8() > queqiao_core::protocol::MAX_TYPE_TEXT {
+                        self.send(Message::TypeText(std::mem::take(&mut piece)));
+                    }
+                    piece.push(c);
+                }
+                if !piece.is_empty() {
+                    self.send(Message::TypeText(piece));
+                }
+            }
             Request::RemoveDevice(device) => {
                 if let Some(account) = &self.account {
                     account.remove_device(&device);

@@ -83,6 +83,7 @@ fn main() {
                 json!({"wheel": {"delta": -120}}),
                 json!({"key": {"scancode": 0x10, "extended": false, "down": true}}),
                 json!({"key": {"scancode": 0x10, "extended": false, "down": false}}),
+                json!({"text": "typed 中文 é\n"}),
             ] {
                 core.command(&command.to_string());
             }

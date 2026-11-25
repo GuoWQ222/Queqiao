@@ -410,32 +410,12 @@ class SessionView(context: Context, private val engine: Engine) : FrameLayout(co
         return event.action == KeyEvent.ACTION_UP && event.unicodeChar != 0
     }
 
-    /** Types [text] on the PC: keys of the US layout where there are any, the PC's clipboard and Ctrl+V otherwise. */
+    /**
+     * Types [text] on the PC as characters, in any language and whatever the PC's keyboard layout (the agent types them
+     * as such: TypeText).
+     */
     fun type(text: String) {
-        val other = StringBuilder()
-        for (c in text) {
-            val key = Keys.forChar(c)
-            if (key == null) {
-                other.append(c)
-                continue
-            }
-            flush(other)
-            val (code, shift) = key
-            if (shift) engine.key(Keys.SHIFT, false, true)
-            tap(code)
-            if (shift) engine.key(Keys.SHIFT, false, false)
-        }
-        flush(other)
-    }
-
-    private fun flush(other: StringBuilder) {
-        if (other.isEmpty()) return
-        // Chinese and other characters no key types: through the PC's clipboard (as UU Remote's phone keyboard).
-        engine.sendClipboard(other.toString())
-        engine.key(Keys.CTRL, false, true)
-        tap(0x2F)
-        engine.key(Keys.CTRL, false, false)
-        other.clear()
+        if (text.isNotEmpty()) engine.typeText(text)
     }
 
     fun tap(code: Int) {

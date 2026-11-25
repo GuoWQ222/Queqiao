@@ -280,27 +280,10 @@ final class RemoteScreenView: UIView, UIKeyInput {
 
     func deleteBackward() { tap(Keys.backspace) }
 
-    /// Types `text` on the PC: keys of the US layout where there are any, the PC's clipboard and Ctrl+V otherwise.
+    /// Types `text` on the PC as characters, in any language and whatever the PC's keyboard layout (the agent types them
+    /// as such: TypeText).
     func type(_ text: String) {
-        var other = ""
-        func flush() {
-            guard !other.isEmpty else { return }
-            engine.sendClipboard(other)
-            combo([Keys.ctrl, Keys.v])
-            other = ""
-        }
-        for c in text {
-            guard let key = Keys.forCharacter(c) else {
-                other.append(c)
-                continue
-            }
-            let (code, shift) = key
-            flush()
-            if shift { engine.key(Keys.shift, down: true) }
-            tap(code)
-            if shift { engine.key(Keys.shift, down: false) }
-        }
-        flush()
+        if !text.isEmpty { engine.typeText(text) }
     }
 
     func tap(_ code: Int) {

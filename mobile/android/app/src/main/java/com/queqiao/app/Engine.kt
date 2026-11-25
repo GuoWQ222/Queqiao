@@ -118,6 +118,9 @@ class Engine private constructor(context: Context) {
 
     fun sendClipboard(text: String) = command(JSONObject().put("clipboard", text))
 
+    /** Text typed on the PC as characters (any language). */
+    fun typeText(text: String) = command(JSONObject().put("text", text))
+
     private fun onEvent(event: JSONObject) {
         when {
             event.has("logged_in") -> {

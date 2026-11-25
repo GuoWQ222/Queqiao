@@ -10,8 +10,9 @@ out=/tmp/queqiao_core_probe
 rm -rf "$out"; mkdir -p "$out"
 export XDG_CONFIG_HOME=$out/config XDG_STATE_HOME=$out/state XDG_RUNTIME_DIR=$out/run
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"; mkdir -m 700 "$XDG_RUNTIME_DIR"
-nice -n 10 cargo build -q --release -p queqiao-server -p queqiao-agent -p queqiao-mobile --example core_probe \
-    > "$out/build.log" 2>&1 || { grep -E "^error" -A6 "$out/build.log" | head -30; echo MOBILE_CORE_FAIL build; exit 0; }
+# Two builds: with --example cargo builds the example alone, not the programs.
+{ nice -n 10 cargo build -q --release --features queqiao-agent/test-switches -p queqiao-server -p queqiao-agent \
+    && nice -n 10 cargo build -q --release -p queqiao-mobile --example core_probe; } > "$out/build.log" 2>&1 || { grep -E "^error" -A6 "$out/build.log" | head -30; echo MOBILE_CORE_FAIL build; exit 0; }
 bin=$CARGO_TARGET_DIR/release
 pids=()
 finish() { kill "${pids[@]}" 2> /dev/null; echo "$1"; exit 0; }
@@ -36,6 +37,12 @@ DISPLAY=:93 "$bin/queqiao-agent" --server "127.0.0.1:$port" --pin "$pin" --user 
 agent=$!
 pids+=($agent)
 sleep 3
+# A terminal under the pointer, over the agent's main window (the probe clicks the middle of the screen; no window manager:
+# the keys go to the window under the pointer), writing what is typed into typed.txt: the typed text must arrive as
+# characters.
+DISPLAY=:93 LANG=C.UTF-8 LC_ALL=C.UTF-8 xterm -u8 -geometry 80x12+340+260 -e sh -c "stty -echo; cat > $out/typed.txt" > /dev/null 2>&1 &
+pids+=($!)
+sleep 1
 # The probe's own folder: its device key apart from the agent's.
 probe_folder=$out/probe
 mkdir -p "$probe_folder"
@@ -47,5 +54,9 @@ grep '^event: ' "$out/probe.txt" | cut -c1-160 | head -12
 cat "$out/agent_report.txt" 2> /dev/null | head -20
 grep -q CORE_PROBE_PASS "$out/probe.txt" || finish "MOBILE_CORE_FAIL probe"
 inputs=$(grep -o 'input: [0-9]* events' "$out/agent_report.txt" | head -1 | cut -d' ' -f2)
-[ "${inputs:-0}" -ge 6 ] || finish "MOBILE_CORE_FAIL the agent received ${inputs:-no} input events (6 sent)"
+[ "${inputs:-0}" -ge 7 ] || finish "MOBILE_CORE_FAIL the agent received ${inputs:-no} input events (7 sent)"
+grep -q "input: [0-9]* events, 0 refused" "$out/agent_report.txt" || finish "MOBILE_CORE_FAIL the agent refused input: $(grep -o "input: .*" "$out/agent_report.txt")"
+# "typed", then Chinese (zhong wen) and e-acute in UTF-8 (the script stays ASCII).
+expected=$(printf 'typed \344\270\255\346\226\207 \303\251')
+grep -qF "$expected" "$out/typed.txt" 2> /dev/null || finish "MOBILE_CORE_FAIL typed text not received as characters: $(od -c "$out/typed.txt" 2> /dev/null | head -3)"
 finish MOBILE_CORE_PASS

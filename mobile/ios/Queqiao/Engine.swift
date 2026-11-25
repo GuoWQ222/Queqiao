@@ -105,6 +105,9 @@ final class Engine: ObservableObject {
 
     func sendClipboard(_ text: String) { command(["clipboard": text]) }
 
+    /// Text typed on the PC as characters (any language).
+    func typeText(_ text: String) { command(["text": text]) }
+
     private func readEvents() {
         var buffer = [UInt8](repeating: 0, count: 1 << 20)
         while true {
