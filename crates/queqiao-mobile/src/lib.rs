@@ -25,6 +25,9 @@ use serde_json::{Value, json};
 mod android;
 pub mod ffi;
 
+/// Why a session ended when the PC left it.
+const PC_LEFT: &str = "the PC ended the session";
+
 /// One frame of the picture, as it came.
 pub struct Frame {
     pub data: Arc<[u8]>,
@@ -535,6 +538,7 @@ impl Engine {
                     let sizes: Vec<Value> = sizes.iter().map(|(w, h)| json!([w, h])).collect();
                     self.emit(json!({"screens": {"current": current, "sizes": sizes}}));
                 }
+                Some(Message::Leave) => return Some(PC_LEFT.to_string()),
                 _ => {}
             },
             PeerEvent::Closed(reason) => return Some(reason),
@@ -546,6 +550,11 @@ impl Engine {
     fn end_session(&mut self, why: &str) {
         if let Some(session) = self.session.take() {
             let seconds = session.started.elapsed().as_secs();
+            // Tell the PC at once (as the desktop viewer does), unless it ended the session itself.
+            if why != PC_LEFT {
+                session.peer.send_data(Message::Leave.encode());
+                std::thread::sleep(Duration::from_millis(100));
+            }
             drop(session.peer);
             self.frames.clear();
             self.emit(json!({"session": {"state": "ended", "device": session.device, "why": why, "seconds": seconds, "frames": session.frames}}));

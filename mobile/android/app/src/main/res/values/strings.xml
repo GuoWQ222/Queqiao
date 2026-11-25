@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Queqiao</string>
+    <string name="login_subtitle">Remote control of your own devices</string>
+    <string name="login_title">Log in</string>
+    <string name="login_hint">Log in with your Queqiao account to see your devices.</string>
+    <string name="user">Account</string>
+    <string name="password">Password</string>
+    <string name="server">Server</string>
+    <string name="pin">Server key (SHA-256)</string>
+    <string name="other_server">Another server…</string>
+    <string name="log_in">Log in</string>
+    <string name="log_out">Log out</string>
+    <string name="my_devices">My devices</string>
+    <string name="no_devices">No other devices on this account yet. Install Queqiao on a PC and log in there with this account.</string>
+    <string name="online">Online</string>
+    <string name="offline">Offline</string>
+    <string name="connect">Connect</string>
+    <string name="remove_from_account">Remove from this account</string>
+    <string name="remove_title">Remove %1$s?</string>
+    <string name="remove_text">It leaves this account. To add it back, log in on it again.</string>
+    <string name="remove">Remove</string>
+    <string name="cancel">Cancel</string>
+    <string name="back">Back</string>
+    <string name="session_connecting">Connecting to %1$s…</string>
+    <string name="session_waiting">Connected, waiting for the picture…</string>
+    <string name="session_failed">Could not connect: %1$s</string>
+    <string name="path_direct">Direct connection</string>
+    <string name="path_relayed">Through the server (relayed)</string>
+    <string name="mode_touch">Touch</string>
+    <string name="mode_mouse">Mouse</string>
+    <string name="keyboard">Keyboard</string>
+    <string name="keys">Keys</string>
+    <string name="sound_on">Sound on</string>
+    <string name="sound_off">Sound off</string>
+    <string name="lock">Lock</string>
+    <string name="privacy_screen">Privacy screen</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="pc_password_title">The PC is locked</string>
+    <string name="pc_password_text">Type the PC\'s Windows password to unlock it.</string>
+    <string name="unlock">Unlock</string>
+</resources>

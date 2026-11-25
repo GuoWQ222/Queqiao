@@ -1,0 +1,101 @@
+# The Android app: built (the Rust core for arm64-v8a and x86_64 with the NDK, the APK with Gradle) and tested end to
+# end in an Android emulator against a queqiao-server and a Linux agent on the same runner (scripts/run_android_e2e.sh).
+# The APK is kept as the run's artifact; the test's pictures and logs are pushed to the branch ci-results-android
+# (replaced each run).
+name: android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/android/**'
+      - 'crates/**'
+      - 'Cargo.lock'
+      - 'scripts/build_mobile_core.sh'
+      - 'scripts/build_android.sh'
+      - 'scripts/run_android_e2e.sh'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the app
+        run: |
+          export NDK_HOME=$ANDROID_NDK_LATEST_HOME
+          scripts/build_android.sh debug
+          (cd mobile/android && gradle -q assembleDebugAndroidTest)
+
+      - name: Build the server and the Linux agent
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb x11-apps
+          cargo build -q --release -p queqiao-server -p queqiao-agent
+
+      - name: KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: End to end in the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: scripts/run_android_e2e.sh | tee /tmp/e2e_summary.txt
+
+      - name: Pass or fail
+        run: tail -1 /tmp/e2e_summary.txt | grep -q ANDROID_E2E_PASS
+
+      - name: Results to ci-results-android
+        if: always()
+        run: |
+          mkdir -p /tmp/android_e2e
+          cp /tmp/e2e_summary.txt /tmp/android_e2e/ 2> /dev/null || true
+          cp mobile/android/app/build/outputs/apk/debug/app-debug.apk /tmp/android_e2e/queqiao.apk 2> /dev/null || true
+          echo "run ${{ github.run_number }} of ${{ github.sha }}" > /tmp/android_e2e/RUN.txt
+          cd /tmp/android_e2e
+          rm -rf config state run server
+          git init -q
+          git checkout -q -b results
+          git add -A
+          git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q -m "android run ${{ github.run_number }}"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" results:ci-results-android
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: queqiao-android
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: ignore

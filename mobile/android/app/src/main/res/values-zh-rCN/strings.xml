@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">鹊桥</string>
+    <string name="login_subtitle">远程控制你自己的设备</string>
+    <string name="login_title">登录</string>
+    <string name="login_hint">登录鹊桥账号，查看你的设备。</string>
+    <string name="user">账号</string>
+    <string name="password">密码</string>
+    <string name="server">服务器</string>
+    <string name="pin">服务器密钥（SHA-256）</string>
+    <string name="other_server">其他服务器…</string>
+    <string name="log_in">登录</string>
+    <string name="log_out">退出登录</string>
+    <string name="my_devices">我的设备</string>
+    <string name="no_devices">这个账号下还没有其他设备。在电脑上安装鹊桥，并用这个账号登录。</string>
+    <string name="online">在线</string>
+    <string name="offline">离线</string>
+    <string name="connect">连接</string>
+    <string name="remove_from_account">从此账号移除</string>
+    <string name="remove_title">移除 %1$s？</string>
+    <string name="remove_text">它将离开这个账号。要加回来，在它上面重新登录。</string>
+    <string name="remove">移除</string>
+    <string name="cancel">取消</string>
+    <string name="back">返回</string>
+    <string name="session_connecting">正在连接 %1$s…</string>
+    <string name="session_waiting">已连接，正在等待画面…</string>
+    <string name="session_failed">无法连接：%1$s</string>
+    <string name="path_direct">直连</string>
+    <string name="path_relayed">经服务器中转</string>
+    <string name="mode_touch">触控</string>
+    <string name="mode_mouse">鼠标</string>
+    <string name="keyboard">键盘</string>
+    <string name="keys">按键</string>
+    <string name="sound_on">声音开</string>
+    <string name="sound_off">声音关</string>
+    <string name="lock">锁定</string>
+    <string name="privacy_screen">隐私屏</string>
+    <string name="disconnect">断开</string>
+    <string name="pc_password_title">电脑已锁定</string>
+    <string name="pc_password_text">输入电脑的 Windows 密码来解锁。</string>
+    <string name="unlock">解锁</string>
+</resources>

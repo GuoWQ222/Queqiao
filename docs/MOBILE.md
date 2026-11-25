@@ -6,7 +6,7 @@ repository).
 
 ## How they are built
 
-- **One Rust core for both** (`crates/queqiao-mobile`, planned): the account (log in, saved login, the device list, its
+- **One Rust core for both** (`crates/queqiao-mobile`): the account (log in, saved login, the device list, its
   changes), sessions as a viewer through the server (signalling, the WebRTC transport, the data channel and its
   streams), input, the clipboard and files: the crates the desktop viewer already uses (`queqiao-core`,
   `queqiao-account`, `queqiao-transport`, `queqiao-files`), with the platform parts they lack on Android and iOS
@@ -20,16 +20,17 @@ repository).
 
 ## Where they are built and tested
 
-- **Android**: GitHub Actions on Linux runners (KVM): the core with cargo-ndk, the APK with Gradle, then the Android
+- **Android**: GitHub Actions on Linux runners (KVM): the core with the NDK (`scripts/build_mobile_core.sh`), the APK with Gradle (`scripts/build_android.sh`), then the Android
   emulator. A test there starts the account server and a Linux agent on a virtual screen on the same runner, logs the
   app in (the emulator reaches the runner at 10.0.2.2), connects, checks that pictures are decoded and that input
-  arrives (as `scripts/run_m3_linux.sh` does on cc4-1). Nothing is installed on the user's machines. cc4-1 builds the
-  core for Android too (the NDK in /cpfs/user/guowenqi/android) for quicker checks.
+  arrives (`scripts/run_android_e2e.sh`, `.github/workflows/android.yml`). Nothing is installed on the user's machines. cc4-1 builds the
+  core and the APK too (the NDK, SDK and Gradle in /cpfs/user/guowenqi/android) for quicker checks, and
+  `scripts/run_mobile_core_probe.sh` runs the core against a server and an agent there without a phone.
 - **iOS**: GitHub Actions on macOS runners (the repository is public): the core for the device and the simulator, the
   app with Xcode, its tests in the iPhone Simulator against a test agent that streams a test picture. The user installs
   the unsigned `.ipa` with **Sideloadly and a free Apple ID** (Apple's limit: signed again every 7 days).
-- Results (logs, pictures, the `.apk` and `.ipa`) are pushed by the workflow to a branch `ci-results/<run>`, which the
-  relay fetches with git (no GitHub token there).
+- Results (logs, pictures, the `.apk` and `.ipa`) are pushed by the workflows to the branches
+  `ci-results-android` and `ci-results-ios` (replaced each run), which the relay fetches with git (no GitHub token there).
 
 ## What they do (UU Remote's mobile apps, with Queqiao's own)
 
@@ -60,4 +61,9 @@ Being controlled (Android only; iOS lets no app control the phone):
 - [ ] Input from the PC through an AccessibilityService (taps, swipes, text, back/home/recent), only once the person
       has enabled it
 
-Status: planned 2026-11-26; this file records what is done as it lands.
+Status (this file records what is done as it lands):
+- 2026-11-26: the core (log in, the device list, a session, frames, input) passes the probe on cc4-1. The Android
+  app's first version (`mobile/android`): log in, the device list (remove a device), connect, H.264/H.265 decoded
+  by MediaCodec, the PC's sound (Opus by MediaCodec), touch and mouse modes (tap, long press, double tap and drag,
+  two-finger tap, scroll, pinch zoom and pan), the phone's keyboard (US keys; other text through the PC's clipboard
+  and Ctrl+V for now), a key bar, Ctrl+Alt+Del, lock, privacy screen, the PC's password form; English and Chinese.

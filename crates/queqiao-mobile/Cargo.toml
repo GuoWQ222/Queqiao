@@ -17,3 +17,7 @@ serde_json = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", default-features = false }
+
+# str0m's crypto on Android and iOS: OpenSSL built from source for the phone (no system OpenSSL there).
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

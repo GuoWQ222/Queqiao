@@ -10,15 +10,29 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
+// Android's kernel is Linux: the same tables (an app may be refused /proc/net there, and then has no uplinks of its own
+// to offer: the session goes as the routes say).
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux;
 #[cfg(windows)]
 mod win;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub use linux::{ipv6_uplinks, uplinks};
 #[cfg(windows)]
 pub use win::{ipv6_uplinks, uplinks};
+
+/// Elsewhere (iOS, macOS): no uplinks of this program's own; the session goes as the routes say.
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+pub fn uplinks() -> Vec<Ipv4Addr> {
+    Vec::new()
+}
+
+/// As `uplinks`: none of this program's own.
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+pub fn ipv6_uplinks(_any: bool) -> Vec<Ipv6Addr> {
+    Vec::new()
+}
 
 /// Whether `address` (the server connection's) is a tunnel: not one of this PC's `uplinks` (a VPN, Tailscale or a
 /// proxy's TUN adapter such as Clash's Mihomo has no gateway of its own), while there are uplinks (`others` of them
