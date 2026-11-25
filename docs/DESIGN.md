@@ -83,7 +83,9 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
    frame again right after (a larger buffer for every frame let P-frames reach 2.4x their share). Tested: the PC (RTX
    5080) makes AV1 through NVENC for the M4 viewer, explicitly and by default; with `QUEQIAO_NVENC_API=11` NVIDIA's
    AV1 Media Foundation encoder takes over; Linux (RTX 4090) makes AV1 and its viewer decodes it with NVDEC
-   (run_m3_linux.sh av1, av1_api11 falls back to H.264).
+   (run_m3_linux.sh av1, av1_api11 falls back to H.264). Between two machines (the PC and an Intel Iris Xe laptop,
+   direct over the internet, 2026-11-25): the laptop's agent has no AV1 encoder and sends H.264 through Quick Sync;
+   the PC's agent sends AV1 through NVENC, which the laptop's viewer decodes on its GPU (419 of 420 frames AV1).
 10. **Build requirements:** Rust, Visual Studio Build Tools (C++), and NASM on the PATH: without NASM, OpenH264
    builds silently without its assembly and runs about 5x slower (measured 35 ms instead of 6.6 ms per 1080p
    frame); `scripts\check.ps1` warns when NASM is missing.
