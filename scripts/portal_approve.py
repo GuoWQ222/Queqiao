@@ -3,7 +3,8 @@
 remote-desktop dialog (xdg-desktop-portal-gnome), through the accessibility interface (AT-SPI), as a screen reader user
 would. Nothing in Queqiao goes round GNOME's dialog; only the tests answer it this way.
 
-Usage: portal_approve.py [seconds] [--remember]   (waits up to `seconds`, 20 by default, for one dialog)
+Usage: portal_approve.py [seconds] [--remember] [--list]   (waits up to `seconds`, 20 by default, for one dialog;
+--list also prints the dialog's controls)
 A remote-desktop dialog's "Allow remote interaction" switch is turned on, as a person letting Queqiao control the PC
 does (else GNOME shares the screen only). --remember also ticks "Remember this selection" (or the like) where the
 dialog has one, as a person allowing it for good would. Prints APPROVED <dialog> or APPROVE_FAIL <why>.
@@ -16,8 +17,9 @@ import time
 pyatspi = None
 
 BUTTONS = ("Share", "Allow")
-REMEMBER = ("Remember", "remember")
-INTERACTION = ("remote interaction", "Remote interaction", "Allow remote control")
+# Matched in lower case: GNOME 42 says "Allow remote interaction" (a switch), 46 "Allow Remote Interaction" (a check box).
+REMEMBER = ("remember",)
+INTERACTION = ("remote interaction", "allow remote control")
 
 
 def buttons(node, found):
@@ -75,7 +77,7 @@ def main():
     if "--once" in sys.argv:
         return once("--remember" in sys.argv)
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else 20.0
-    extra = ["--remember"] if "--remember" in sys.argv else []
+    extra = [flag for flag in ("--remember", "--list") if flag in sys.argv]
     until = time.time() + seconds
     while time.time() < until:
         result = subprocess.run([sys.executable, __file__, "--once", *extra], capture_output=True, text=True)
@@ -105,8 +107,12 @@ def once(remember):
             # A dialog just shown takes a moment before it answers (as a person takes to read it).
             time.sleep(2)
             found = buttons(window, [])
+            if "--list" in sys.argv:
+                # What the dialog offers (each desktop version words and builds it its own way).
+                for node in found:
+                    print(f"control {node.getRoleName()} {label(node)!r} checked={checked(node)}")
             for node in found:
-                if node.getRoleName() != "push button" and any(word in label(node) for word in INTERACTION):
+                if node.getRoleName() != "push button" and any(word in label(node).lower() for word in INTERACTION):
                     # Clicked while it reads off, the state read afresh each time (AT-SPI caches states).
                     on = False
                     for _ in range(3):
@@ -118,7 +124,7 @@ def once(remember):
                     print(f"switch {label(node)!r}: {'on' if on else 'still off'}")
             if remember:
                 for node in found:
-                    if node.getRoleName() != "push button" and any(word in label(node) for word in REMEMBER):
+                    if node.getRoleName() != "push button" and any(word in label(node).lower() for word in REMEMBER):
                         states = node.getState()
                         if not states.contains(pyatspi.STATE_CHECKED):
                             click(node)

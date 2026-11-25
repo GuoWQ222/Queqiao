@@ -126,11 +126,14 @@ dbus-update-activation-environment WAYLAND_DISPLAY DISPLAY="$x11" XDG_CURRENT_DE
 
 # PipeWire and its session manager; then the portals (started here rather than by D-Bus, so they get this
 # environment and their logs land in the folder).
-for program in pipewire wireplumber; do
-    setsid "$program" > "$folder/log/$program.log" 2>&1 < /dev/null &
-    echo $! >> "$folder/pids"
-    sleep 0.5
-done
+# QUEQIAO_PIPEWIRE_PRELOAD: a library for PipeWire alone (scripts/noble_root_linux.sh: its sandbox check under proot).
+setsid env ${QUEQIAO_PIPEWIRE_PRELOAD:+LD_PRELOAD=$QUEQIAO_PIPEWIRE_PRELOAD} pipewire > "$folder/log/pipewire.log" 2>&1 \
+    < /dev/null &
+echo $! >> "$folder/pids"
+sleep 0.5
+setsid wireplumber > "$folder/log/wireplumber.log" 2>&1 < /dev/null &
+echo $! >> "$folder/pids"
+sleep 0.5
 if [ "$desktop" = sway ]; then
     setsid /usr/libexec/xdg-desktop-portal-wlr -l DEBUG > "$folder/log/portal-backend.log" 2>&1 < /dev/null &
 else

@@ -11,12 +11,21 @@
 # The viewer runs on Xvfb :92 and connects by IP (M2, a test build); its input test (five pointer positions, a left
 # click, F24 down and up) must reach the test window, which logs what it gets.
 # Prints the reports and WAYLAND_LINUX_PASS or WAYLAND_LINUX_FAIL <why>.
-# Usage: [DESKTOP=gnome] scripts/run_wayland_linux.sh (CARGO_TARGET_DIR and SECONDS_RUN from the environment).
+# NOBLE=1 (GNOME): the desktop in the Ubuntu 24.04 root of scripts/noble_root_linux.sh (GNOME 46, whose portal keeps
+# the person's answer); the first session starts without a kept answer and the dialog's "remember" is ticked where
+# it has one. KEPT=1: a later session, which must start without a dialog, the agent offering the kept answer.
+# Usage: [DESKTOP=gnome [NOBLE=1 [KEPT=1]]] scripts/run_wayland_linux.sh (CARGO_TARGET_DIR and SECONDS_RUN from the
+# environment).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 seconds=${SECONDS_RUN:-15}
 desktop=${DESKTOP:-sway}
+noble=${NOBLE:-}
+kept=${KEPT:-}
+py=/usr/bin/python3.10
+[ -n "$noble" ] && py=/usr/bin/python3
+if [ -n "$noble" ] && [ "$desktop" != gnome ]; then echo "WAYLAND_LINUX_FAIL the 24.04 root has GNOME only"; exit 0; fi
 out=/tmp/queqiao_wayland_test
 rm -rf "$out"; mkdir -p "$out"; chmod 777 "$out"
 started=$(date +%s)
@@ -28,11 +37,50 @@ echo "build exit $code in $(( $(date +%s) - started )) s"
 if [ "$code" -ne 0 ]; then grep -E "^error" -A6 "$out/build.log" | head -30; echo WAYLAND_LINUX_FAIL build; exit 0; fi
 bin=$CARGO_TARGET_DIR/release
 chmod 755 "$CARGO_TARGET_DIR" "$bin" 2> /dev/null
-cp scripts/portal_approve.py scripts/wayland_test_window.py "$out/" && chmod 755 "$out/portal_approve.py" "$out/wayland_test_window.py"
+cp scripts/portal_approve.py scripts/wayland_test_window.py scripts/wayland_display_linux.sh "$out/" \
+    && chmod 755 "$out/portal_approve.py" "$out/wayland_test_window.py" "$out/wayland_display_linux.sh"
 
-bash scripts/wayland_display_linux.sh status | grep -q "WAYLAND_RUNNING .* $desktop\$" \
-    || DESKTOP=$desktop bash scripts/wayland_display_linux.sh start | tail -1
-as_user() { runuser -u qqtest -- bash -c ". /tmp/queqiao_wayland/env; export HOME=/home/qqtest; $1"; }
+# The display (in the 24.04 root: its own /tmp, so its own /tmp/queqiao_wayland), and commands on it as the test user.
+display() {
+    if [ -z "$noble" ]; then
+        DESKTOP=$desktop bash scripts/wayland_display_linux.sh "$1"
+        return
+    fi
+    # In the 24.04 root as the test user (the script's part for root would change user inside proot, which fails
+    # there); GNOME's system bus first, as root. proot lasts while what it started runs: those start apart.
+    if [ "$1" != start ]; then
+        bash scripts/noble_root_linux.sh run "DESKTOP=$desktop bash $out/wayland_display_linux.sh $1"
+        return
+    fi
+    if ! [ -S "${NOBLE_ROOT:-/tmp/noble}/run/dbus/system_bus_socket" ]; then
+        (setsid bash scripts/noble_root_linux.sh root "mkdir -p /run/dbus && exec dbus-daemon --config-file=/etc/dbus-1/queqiao-system.conf --nofork" \
+            > "$out/noble_bus.log" 2>&1 < /dev/null &)
+        sleep 2
+    fi
+    (setsid bash scripts/noble_root_linux.sh run "QUEQIAO_PIPEWIRE_PRELOAD=/usr/local/lib/queqiao-proot-shim.so \
+        DESKTOP=$desktop bash $out/wayland_display_linux.sh start" \
+        > "$out/display.log" 2>&1 < /dev/null &)
+    for _ in $(seq 60); do
+        display status | grep -q "WAYLAND_RUNNING" && break
+        sleep 1
+    done
+    display status
+}
+display status | grep -q "WAYLAND_RUNNING .* $desktop\$" || display start | tail -1
+if [ -n "$noble" ]; then
+    as_user() { bash scripts/noble_root_linux.sh run ". /tmp/queqiao_wayland/env; $1"; }
+else
+    as_user() { runuser -u qqtest -- bash -c ". /tmp/queqiao_wayland/env; export HOME=/home/qqtest; $1"; }
+fi
+# A program left running (with its redirections in $1). Started apart here, not inside the command: proot (the 24.04
+# root) lasts while what it runs does, so a program put in the background inside it held the test up until it ended.
+as_user_bg() {
+    if [ -n "$noble" ]; then
+        (setsid bash scripts/noble_root_linux.sh run ". /tmp/queqiao_wayland/env; exec $1" < /dev/null > /dev/null 2>&1 &)
+    else
+        as_user "(setsid $1 < /dev/null &)"
+    fi
+}
 as_user "pkill -u qqtest -x wev; pkill -u qqtest -x xev; pkill -u qqtest -f 'xclock|xterm|wayland_test_window'; true"
 sleep 0.5
 still=''
@@ -51,19 +99,27 @@ if [ "$desktop" = sway ]; then
     as_user "swaymsg '[app_id=wev] fullscreen enable' > /dev/null"
 else
     # GNOME's dialog, answered as the person at the PC would (it must be in sight: a covered window gets no frames, and
-    # its switch never turns). Then the test window, the newest: in front and with the keyboard.
-    as_user "(setsid /usr/bin/python3.10 $out/portal_approve.py 40 > $out/approve.txt 2>&1 < /dev/null &)"
+    # its switch never turns), "remember" ticked where it has one. Then the test window, the newest: in front and with
+    # the keyboard. A first session starts without a kept answer; with KEPT no dialog may come (the helper still
+    # answers one that does, so the rest of the session runs), and the test window starts after the agent's main window
+    # (no tray there) opened, so that it is the newest again.
+    [ -z "$kept" ] && as_user "rm -f \$XDG_CONFIG_HOME/queqiao/portal-*.token"
+    as_user_bg "$py $out/portal_approve.py $([ -n "$kept" ] && echo 15 || echo 40) --remember > $out/approve.txt 2>&1"
     cat > "$out/window.sh" << 'EOF'
-for _ in $(seq 400); do
-    grep -q APPROVED "$1/approve.txt" 2> /dev/null && break
-    sleep 0.1
-done
-sleep 1
+# $1 the output folder, $2 the Python, $3 "wait" for the dialog's answer first, or the seconds to wait.
+if [ "$3" = wait ]; then
+    for _ in $(seq 400); do
+        grep -q APPROVED "$1/approve.txt" 2> /dev/null && break
+        sleep 0.1
+    done
+    sleep 1
+else
+    sleep "$3"
+fi
 # Its Wayland protocol log too: GTK drops keys without a symbol in the keymap (F24, the test key, is one).
-WAYLAND_DEBUG=client GDK_BACKEND=wayland exec /usr/bin/python3.10 "$1/wayland_test_window.py" "$1/events.log" 60 \
-    2> "$1/protocol.log"
+WAYLAND_DEBUG=client GDK_BACKEND=wayland exec "$2" "$1/wayland_test_window.py" "$1/events.log" 60 2> "$1/protocol.log"
 EOF
-    as_user "(setsid bash $out/window.sh $out < /dev/null > $out/window.err 2>&1 &)"
+    as_user_bg "bash $out/window.sh $out $py $([ -n "$kept" ] && echo 5 || echo wait) > $out/window.err 2>&1"
 fi
 sleep 0.5
 
@@ -79,7 +135,8 @@ DISPLAY=:92 "$bin/queqiao-viewer" --listen "127.0.0.1:$port" --seconds "$(( seco
     --input-test --input-test-click --input-test-at $input_at --picture-at ${PICTURE_AT:-5} --width 960 --codec h264 --ui-pictures "$out" > "$out/viewer.out" 2>&1 &
 viewer=$!
 sleep 1
-as_user "$bin/queqiao-agent --connect 127.0.0.1:$port --seconds $(( seconds + 10 )) --report $out/agent.txt > $out/agent.out 2>&1"
+# A stalled agent ends the test, not hangs it.
+as_user "timeout $(( seconds + 40 )) $bin/queqiao-agent --connect 127.0.0.1:$port --seconds $(( seconds + 10 )) --report $out/agent.txt > $out/agent.out 2>&1"
 agent_code=$?
 wait "$viewer"
 viewer_code=$?
@@ -97,6 +154,12 @@ grep -q "RESULT PASS" "$out/viewer.txt" 2> /dev/null || why="$why viewer"
 grep -q "on Wayland" "$out/agent.txt" 2> /dev/null || why="$why not-the-portal"
 if [ "$desktop" = gnome ]; then
     grep -q "captured through the RemoteDesktop portal" "$out/agent.txt" 2> /dev/null || why="$why not-remote-desktop"
+    if [ -n "$kept" ]; then
+        grep -q APPROVED "$out/approve.txt" 2> /dev/null && why="$why asked-again"
+        grep -q "earlier answer offered" "$out/agent.txt" 2> /dev/null || why="$why no-kept-answer"
+    else
+        grep -q APPROVED "$out/approve.txt" 2> /dev/null || why="$why not-approved"
+    fi
 fi
 # The picture: sway's against the screen (grim); GNOME's must be xev's white.
 picture=$(python3 - "$out" "$desktop" << 'EOF'

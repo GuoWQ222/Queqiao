@@ -83,9 +83,10 @@ flow; the interface list and one timer call are Windows), `queqiao-local`, `queq
 cc4-1 is a container: Ubuntu 22.04, root, 4 x RTX 4090 with NVIDIA's encode/decode/CUDA libraries, no systemd, no
 `/dev/uinput`, no sound card, no monitor. There: the build, the unit tests, X11 sessions on Xvfb (capture, XTest,
 the X11 clipboard), Wayland on headless compositors (sway + xdg-desktop-portal-wlr: the ScreenCast portal and
-PipeWire; GNOME's mutter + xdg-desktop-portal-gnome: the RemoteDesktop portal and its dialog), PulseAudio with null
-sinks, NVENC/NVDEC on the 4090s, Linux agent and viewer against each other, and the .deb built and installed in a clean
-container. Not there (a real Linux PC is needed): KDE's portal, GNOME Shell itself (it needs systemd-logind),
+PipeWire; GNOME's mutter + xdg-desktop-portal-gnome: the RemoteDesktop portal and its dialog; the same with GNOME 46
+in an Ubuntu 24.04 root entered with proot, scripts/noble_root_linux.sh), PulseAudio with null sinks, NVENC/NVDEC on
+the 4090s, Linux agent and viewer against each other, and the .deb built and installed in a clean container. Not there
+(a real Linux PC is needed): KDE's portal, GNOME Shell itself (it needs systemd-logind),
 VA-API on Intel/AMD, uinput, the systemd service on a real greeter and lock screen, KMS capture, real sound devices. Windows <-> Linux sessions need both on one network (or a reachable test server).
 
 ## Where it stands (2026-11-24)
@@ -143,10 +144,18 @@ scripts/run_wayland_linux.sh runs a session against it: the viewer's picture aga
 sway; on GNOME the test window's white), and the input test (five pointer places, a click, F24) as a native Wayland
 window sees it: wev on sway, scripts/wayland_test_window.py (GTK 4, its Wayland protocol log for keys GTK drops) on
 GNOME, where scripts/portal_approve.py answers GNOME's dialog through AT-SPI as the person would (only the tests do;
-Queqiao never goes round it). Not yet on Wayland: KDE (its portal is the same, untested), the portal's restore token
-(asked for and kept where the portal offers it: RemoteDesktop 2, xdg-desktop-portal 1.17 or later; Ubuntu 22.04 has
-1.14, so GNOME asks each session there), the pointer's shape apart from the picture, the banner at the top (Wayland
-programs cannot place themselves: it floats where the compositor puts it).
+Queqiao never goes round it). The person's answer is kept where the portal can keep it (RemoteDesktop 2,
+xdg-desktop-portal 1.17 or later, and a desktop backend that keeps it): the agent asks for that ("until revoked"),
+keeps the restore token for the user only (0600) and offers it the next time, and the desktop starts the session
+without asking until the person revokes it in its settings; elsewhere the desktop asks each session (Ubuntu 22.04:
+1.14). Tested with GNOME 46 (Ubuntu 24.04, its dialog's "Remember This Selection" ticked by default): the first session
+asks, the next starts with no dialog, picture and input as in the first (run_wayland_linux.sh NOBLE=1, then KEPT=1).
+That root (Ubuntu 24.04 on cc4-1, a container without mount rights or user namespaces) runs under proot 5.5 (22.04's
+5.1 does not know statx), its programs as the test user from the start (proot cannot follow a change of user), with a
+system bus that keeps its user, and a library in PipeWire alone answering its sandbox check (/proc/<pid>/root, which
+proot cannot open) with "permission denied", which PipeWire takes for "not sandboxed": all for the test bench only.
+Not yet on Wayland: KDE (its portal is the same, untested), the pointer's shape apart from the picture, the banner at
+the top (Wayland programs cannot place themselves: it floats where the compositor puts it).
 
 Not yet on Linux: AV1 and 10-bit encoding, VA-API, the privacy screen and input block, the service and packages.
 

@@ -47,7 +47,9 @@ pub struct PortalSession {
     pub position: (i32, i32),
     /// The connection to PipeWire, taken once by the capture.
     pipewire: Mutex<Option<OwnedFd>>,
-    /// Whether the desktop asked the person (false: an earlier answer was kept).
+    /// Whether the session went to the desktop without an earlier answer (the person is asked). False: the kept
+    /// answer was offered; the desktop asks again only where it no longer applies, and the portal does not say which
+    /// (each start answers with a new token, as tokens are good once).
     pub asked: bool,
 }
 
@@ -183,7 +185,7 @@ impl PortalSession {
                         .first()
                         .cloned()
                         .ok_or("the portal shared no screen")?;
-                    let asked = token.is_none() || started.restore_token() != token.as_deref();
+                    let asked = token.is_none() || proxy.version() < 2;
                     (Kind::RemoteDesktop { proxy, session }, (stream, asked))
                 }
                 None => {
@@ -217,7 +219,7 @@ impl PortalSession {
                         .first()
                         .cloned()
                         .ok_or("the portal shared no screen")?;
-                    let asked = token.is_none() || started.restore_token() != token.as_deref();
+                    let asked = token.is_none() || screencast.version() < 4;
                     (Kind::ScreenCast { session }, (stream, asked))
                 }
             };
@@ -292,7 +294,7 @@ impl PortalSession {
             if self.asked {
                 ""
             } else {
-                ", the person's earlier answer kept"
+                ", the person's earlier answer offered"
             }
         )
     }
