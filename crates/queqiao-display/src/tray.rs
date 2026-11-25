@@ -28,6 +28,108 @@ pub(crate) const MENU_HELP_BOTH: u16 = 224;
 pub(crate) const MENU_HELP_CODE_ONLY: u16 = 225;
 pub(crate) const MENU_HELP_ASK_ONLY: u16 = 226;
 pub(crate) const MENU_HELP_FILES: u16 = 227;
+// Settings kept by this PC's Queqiao for this person alone (no event for the agent): the display language and the
+// session window's keys.
+pub(crate) const MENU_LANGUAGE_SYSTEM: u16 = 230;
+pub(crate) const MENU_LANGUAGE_ZH: u16 = 231;
+pub(crate) const MENU_LANGUAGE_EN: u16 = 232;
+pub(crate) const MENU_KEY_FULL_SCREEN: u16 = 233;
+pub(crate) const MENU_KEY_GAME_MOUSE: u16 = 234;
+pub(crate) const MENU_KEY_BOSS: u16 = 235;
+pub(crate) const MENU_KEYS_DEFAULT: u16 = 236;
+
+/// What a local setting's choice did (see [`choose_local`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Local {
+    /// Not one of them: the tray's model handles it.
+    Other,
+    /// Handled, nothing to draw again.
+    Unchanged,
+    /// The session keys changed (sessions opened from now on use them).
+    Keys,
+    /// The display language changed: the windows are made again in it.
+    Language,
+}
+
+/// The display language and the session keys: chosen in Settings, kept in this person's Queqiao folder.
+pub(crate) fn choose_local(item: u16, dialogs: &dyn Dialogs) -> Local {
+    use queqiao_core::hotkeys::{Hotkey, Keys};
+    use queqiao_core::text::{LanguageChoice, choose_language, saved_choice};
+    let language = match item {
+        MENU_LANGUAGE_SYSTEM => Some(LanguageChoice::System),
+        MENU_LANGUAGE_ZH => Some(LanguageChoice::Chinese),
+        MENU_LANGUAGE_EN => Some(LanguageChoice::English),
+        _ => None,
+    };
+    if let Some(choice) = language {
+        if choice == saved_choice() {
+            return Local::Unchanged;
+        }
+        return match choose_language(choice) {
+            Ok(()) => Local::Language,
+            Err(error) => {
+                dialogs.show_error(tr("Queqiao"), &error.to_string());
+                Local::Unchanged
+            }
+        };
+    }
+    let mut keys = Keys::load();
+    let (value, prompt, may_be_empty) = match item {
+        MENU_KEYS_DEFAULT => {
+            if keys == Keys::default() {
+                return Local::Unchanged;
+            }
+            return match Keys::default().save() {
+                Ok(()) => Local::Keys,
+                Err(error) => {
+                    dialogs.show_error(tr("Queqiao"), &error);
+                    Local::Unchanged
+                }
+            };
+        }
+        MENU_KEY_FULL_SCREEN => (
+            &mut keys.full_screen,
+            tr("Full screen key (for example Ctrl+Alt+Enter):"),
+            false,
+        ),
+        MENU_KEY_GAME_MOUSE => (
+            &mut keys.game_mouse,
+            tr("Game mouse key (for example Ctrl+Alt+M):"),
+            false,
+        ),
+        MENU_KEY_BOSS => (
+            &mut keys.boss_key,
+            tr("Boss key, hides this window at once (for example Ctrl+Alt+H; empty: none):"),
+            true,
+        ),
+        _ => return Local::Other,
+    };
+    let Some(typed) = dialogs.ask_text(tr("Queqiao"), prompt, value) else {
+        return Local::Unchanged;
+    };
+    let typed = typed.trim().to_string();
+    match Hotkey::parse(&typed) {
+        Some(key) => *value = key.text(),
+        None if typed.is_empty() && may_be_empty => value.clear(),
+        None => {
+            dialogs.show_error(
+                tr("Queqiao"),
+                &trf(
+                    "Not a key Queqiao can use: {key}. A key is Ctrl and/or Alt (Shift may be added) with one letter, digit, F1 to F12 or Enter, Space, Home and the like.",
+                    &[("key", &typed)],
+                ),
+            );
+            return Local::Unchanged;
+        }
+    }
+    match keys.save() {
+        Ok(()) => Local::Keys,
+        Err(error) => {
+            dialogs.show_error(tr("Queqiao"), &error);
+            Local::Unchanged
+        }
+    }
+}
 
 /// For tests: menu items to choose as a click would.
 pub const TEST_MENU_TERMINAL: u16 = MENU_TERMINAL;

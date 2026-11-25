@@ -55,6 +55,8 @@ enum Command {
     Connections(Vec<ConnectionRow>),
     /// Tests: pictures of the main window's pages into the folder.
     MainPictures(PathBuf, Sender<Result<(), String>>),
+    /// Tests: the Settings page's clicks and language (Presence::test_settings).
+    TestSettings(Sender<Vec<String>>),
     /// A notification from the tray icon.
     Notify(String),
 }
@@ -251,6 +253,15 @@ impl Ui {
     }
 
     /// Tests: pictures of the main window's pages (main_devices.bmp ...) into `folder`.
+    /// Tests: the Settings page's clicks and language, a line each (see Presence::test_settings).
+    pub fn test_settings(&self) -> Vec<String> {
+        let (reply, answer) = mpsc::channel();
+        self.send(Command::TestSettings(reply));
+        answer
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap_or_else(|_| vec!["settings test: the UI did not answer".to_string()])
+    }
+
     pub fn save_main_pictures(&self, folder: &Path) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
         self.send(Command::MainPictures(folder.to_path_buf(), reply));
@@ -398,6 +409,9 @@ fn run(
                             .save_main_pictures(&folder)
                             .map_err(|e| e.to_string()),
                     );
+                }
+                Ok(Command::TestSettings(reply)) => {
+                    let _ = reply.send(presence.test_settings());
                 }
                 Ok(Command::LockSettings(locked)) => presence.set_settings_locked(locked),
                 Ok(Command::Account(state)) => presence.set_account_state(state),

@@ -19,11 +19,12 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 use crate::forms::{Form, Kind, set_text};
-use crate::main_window::{MainAction, MainWindow, Shown};
+use crate::main_window::{MainAction, MainWindow};
 use crate::model::{
     AccountState, ConnectionRow, HelpMode, MainDevice, Page, PasswordCheck, PresenceEvent,
     TransferRow,
 };
+use crate::settings::Shown;
 use crate::tray::*;
 
 const TRAY_CALLBACK: u32 = WM_APP + 1;
@@ -349,7 +350,7 @@ impl Presence {
     /// Opens the main window (made the first time), on `page` if given.
     pub fn show_main(&mut self, page: Option<Page>) -> Result<()> {
         if self.main.is_none() {
-            let mut main = MainWindow::new(&self.version)?;
+            let mut main = MainWindow::new()?;
             main.set_account(&self.user, self.menu.account);
             main.set_devices(self.devices.clone());
             main.set_transfers(self.transfers.clone());
@@ -365,6 +366,39 @@ impl Presence {
             main.show();
         }
         Ok(())
+    }
+
+    /// Tests: the Settings page answers clicks where it draws its controls; a click on "Ask before each session"'s
+    /// switch (as the mouse gives it) turns it over, through the usual path (the agent reports the change); choosing
+    /// English draws the windows in it at once. Run with a settings folder of the test's own (APPDATA).
+    pub fn test_settings(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Err(error) = self.show_main(Some(Page::Settings)) {
+            return vec![format!("settings test: no main window: {error}")];
+        }
+        if let Some(main) = self.main.as_mut() {
+            lines.push(format!("settings test: {}", main.check_settings_clicks()));
+        }
+        let before = queqiao_core::text::language();
+        let _ = self.choose(crate::tray::MENU_LANGUAGE_EN);
+        let after = queqiao_core::text::language();
+        let title = self
+            .main
+            .as_ref()
+            .map(|main| crate::forms::text_of(main.hwnd))
+            .unwrap_or_default();
+        lines.push(format!(
+            "settings test: display language {before:?} -> {after:?} after choosing English, the main window's title: {title}"
+        ));
+        let _ = self.choose(crate::tray::MENU_LANGUAGE_SYSTEM);
+        // On the window as it is now (made again for each language): the loop takes the click as any other.
+        if let Some(main) = self.main.as_mut() {
+            lines.push(format!(
+                "settings test: clicked the switch of asking before each session: {}",
+                main.click_setting_for_test(crate::tray::MENU_ASK)
+            ));
+        }
+        lines
     }
 
     /// The main window's handle (tests).
@@ -457,6 +491,9 @@ impl Presence {
             auto_update: self.menu.auto_update,
             password: self.menu.password_check.is_some(),
             fixed_code: self.menu.fixed_code,
+            language: queqiao_core::text::saved_choice(),
+            keys: queqiao_core::hotkeys::Keys::load(),
+            version: self.version.clone(),
         }
     }
 
@@ -728,6 +765,24 @@ impl Presence {
     pub fn choose(&mut self, item: u16) -> Option<PresenceEvent> {
         if item == MENU_OPEN {
             return self.show_main(None).ok().map(|()| PresenceEvent::MainShown);
+        }
+        // The display language and the session keys: this PC's own, nothing for the agent.
+        match crate::tray::choose_local(item, &WindowsDialogs) {
+            crate::tray::Local::Other => {}
+            crate::tray::Local::Unchanged => return None,
+            crate::tray::Local::Keys => {
+                self.refresh_main();
+                return None;
+            }
+            // The main window made again in the new language, on Settings as it was.
+            crate::tray::Local::Language => {
+                let open = self.main.as_ref().is_some_and(MainWindow::visible);
+                self.main = None;
+                if open {
+                    let _ = self.show_main(Some(Page::Settings));
+                }
+                return None;
+            }
         }
         self.menu.choose(item, &WindowsDialogs)
     }

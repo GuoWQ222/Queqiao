@@ -1,10 +1,11 @@
-//! The words people see, in their language: English, or Simplified Chinese when Windows' display language is
-//! Chinese. `QUEQIAO_LANG=en` or `zh` decides instead. Reports and logs stay English (tests read them).
+//! The words people see, in their language: the one chosen in Settings (Display language), else the system's:
+//! Simplified Chinese when Windows' display language is Chinese (Linux: LANG), English otherwise.
+//! `QUEQIAO_LANG=en` or `zh` decides above both (tests). Reports and logs stay English (tests read them).
 //!
 //! A text is looked up by its English wording, so code reads as English; one without a translation shows in
 //! English. `{name}` marks a value filled in by [`trf`].
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Language {
@@ -12,13 +13,104 @@ pub enum Language {
     Chinese,
 }
 
+/// What Settings' "Display language" holds: the system's language, or one of Queqiao's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LanguageChoice {
+    #[default]
+    System,
+    Chinese,
+    English,
+}
+
+impl LanguageChoice {
+    pub const ALL: [LanguageChoice; 3] = [
+        LanguageChoice::System,
+        LanguageChoice::Chinese,
+        LanguageChoice::English,
+    ];
+
+    /// As Settings lists it: each language in its own words, so anyone can find theirs.
+    pub fn label(self) -> &'static str {
+        match self {
+            LanguageChoice::System => tr("Same as the system"),
+            LanguageChoice::Chinese => "简体中文",
+            LanguageChoice::English => "English",
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            LanguageChoice::System => "system",
+            LanguageChoice::Chinese => "zh",
+            LanguageChoice::English => "en",
+        }
+    }
+
+    /// As the file keeps it (anything else: the system's).
+    fn from_word(word: &str) -> LanguageChoice {
+        LanguageChoice::ALL
+            .into_iter()
+            .find(|choice| choice.word() == word.trim())
+            .unwrap_or_default()
+    }
+}
+
+/// The language in use (0: not decided yet, then 1 English, 2 Chinese): decided on first use, changed by
+/// [`choose_language`] while the program runs (what is drawn after that is in the new language).
+static CURRENT: AtomicU8 = AtomicU8::new(0);
+
 pub fn language() -> Language {
-    static LANGUAGE: OnceLock<Language> = OnceLock::new();
-    *LANGUAGE.get_or_init(|| match std::env::var("QUEQIAO_LANG").ok().as_deref() {
+    match CURRENT.load(Ordering::Relaxed) {
+        1 => Language::English,
+        2 => Language::Chinese,
+        _ => {
+            let decided = decide();
+            CURRENT.store(code(decided), Ordering::Relaxed);
+            decided
+        }
+    }
+}
+
+fn code(language: Language) -> u8 {
+    match language {
+        Language::English => 1,
+        Language::Chinese => 2,
+    }
+}
+
+fn decide() -> Language {
+    match std::env::var("QUEQIAO_LANG").ok().as_deref() {
         Some("en") => Language::English,
         Some("zh") => Language::Chinese,
-        _ => system_language(),
-    })
+        _ => match saved_choice() {
+            LanguageChoice::English => Language::English,
+            LanguageChoice::Chinese => Language::Chinese,
+            LanguageChoice::System => system_language(),
+        },
+    }
+}
+
+/// The file that keeps the choice: one word (system, zh or en) in this person's Queqiao folder.
+fn choice_file() -> Option<std::path::PathBuf> {
+    crate::config_folder()
+        .ok()
+        .map(|folder| folder.join("language.txt"))
+}
+
+/// The display language chosen in Settings (the system's when none was).
+pub fn saved_choice() -> LanguageChoice {
+    let word = choice_file()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    LanguageChoice::from_word(&word)
+}
+
+/// Keeps `choice` for every Queqiao program of this person, and uses it in this one from now on.
+pub fn choose_language(choice: LanguageChoice) -> std::io::Result<()> {
+    let path = choice_file().ok_or_else(|| std::io::Error::other("no settings folder"))?;
+    std::fs::write(path, choice.word())?;
+    CURRENT.store(code(decide()), Ordering::Relaxed);
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -32,9 +124,18 @@ fn system_language() -> Language {
     }
 }
 
+/// The locale's language, as programs read it: LC_ALL, else LC_MESSAGES, else LANG ("zh_CN.UTF-8" is Chinese).
 #[cfg(not(windows))]
 fn system_language() -> Language {
-    Language::English
+    let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .unwrap_or_default();
+    if locale.starts_with("zh") {
+        Language::Chinese
+    } else {
+        Language::English
+    }
 }
 
 /// `english` in the user's language.
@@ -774,6 +875,95 @@ const CHINESE: &[(&str, &str)] = &[
     ("Pause", "暂停"),
     ("Resume", "继续"),
     ("Remove from the list", "从列表中移除"),
+    // Settings, as tabs of cards (settings.rs), and the display language.
+    ("Same as the system", "跟随系统"),
+    ("General", "常规"),
+    ("When controlled", "被控"),
+    ("Display language", "显示语言"),
+    (
+        "The language of Queqiao's windows on this PC.",
+        "这台电脑上鹊桥各个窗口使用的语言。",
+    ),
+    (
+        "Queqiao starts with this PC, so your devices can reach it.",
+        "开机后自动运行鹊桥，你的设备随时可以连接这台电脑。",
+    ),
+    (
+        "New versions are installed while no session runs.",
+        "有新版本时，在没有远控进行时自动安装。",
+    ),
+    ("Version", "版本"),
+    ("Queqiao {version}", "鹊桥 {version}"),
+    ("Wake-on-LAN", "网络唤醒"),
+    (
+        "Whether your other devices can wake this PC when it sleeps or is off.",
+        "检查你的其他设备能否在这台电脑睡眠或关机时把它唤醒。",
+    ),
+    ("Check...", "检查..."),
+    ("Fixed help code", "固定协助码"),
+    (
+        "A code of your own that stays the same, instead of a new one each time.",
+        "使用固定不变的协助码，而不是每次换一个新的。",
+    ),
+    ("Remove", "移除"),
+    ("Set...", "设置..."),
+    (
+        "Your other devices, logged in to the same account, can connect to it.",
+        "登录同一账号的其他设备可以连接这台电脑。",
+    ),
+    (
+        "Someone at this PC allows or declines each session first.",
+        "每次远控前，先由这台电脑前的人允许或拒绝。",
+    ),
+    (
+        "How someone of another account starts helping",
+        "他人远程协助本机的方式",
+    ),
+    (
+        "With this PC's help ID and the code it shows.",
+        "使用本机的协助 ID 和本机显示的验证码。",
+    ),
+    (
+        "Files can go both ways while someone of another account helps.",
+        "被他人远程协助时，可以双向传输文件。",
+    ),
+    ("Settings password", "设置密码"),
+    (
+        "These settings, logging out and quitting ask for it.",
+        "更改这些设置、退出登录和退出鹊桥时需要输入它。",
+    ),
+    (
+        "Copy on one PC and paste on the other, both ways.",
+        "在一台电脑上复制，在另一台上粘贴，双向可用。",
+    ),
+    (
+        "Files can be sent to this PC, and taken from it, in a session.",
+        "远控中可以向这台电脑发送文件，也可以从它取文件。",
+    ),
+    (
+        "Your devices can open a command line on this PC.",
+        "你的设备可以在这台电脑上打开命令行。",
+    ),
+    (
+        "This PC locks as soon as a session ends.",
+        "远控一结束，这台电脑立即锁定。",
+    ),
+    ("Shortcuts of the session window", "远控窗口的快捷键"),
+    (
+        "Pressed in a session, these work on this PC and never go to the other PC.",
+        "远控中按下时只在本机生效，不会发送到被控端。",
+    ),
+    ("Restore the default keys", "还原默认按键"),
+    ("Full screen or back to a window", "远控窗口全屏/窗口化"),
+    ("Game mouse on or off", "开启/关闭游戏鼠标"),
+    (
+        "Boss key: hide the session window and its sound at once",
+        "老板键：立即隐藏远控窗口和声音",
+    ),
+    ("On", "开"),
+    ("Off", "关"),
+    ("Not set", "未设置"),
+    ("Change", "修改"),
 ];
 
 #[cfg(test)]
@@ -799,6 +989,24 @@ mod tests {
             );
             assert_eq!(placeholders(english), placeholders(chinese), "{english}");
         }
+    }
+
+    #[test]
+    fn the_language_choice_is_kept_as_a_word() {
+        for choice in LanguageChoice::ALL {
+            assert_eq!(LanguageChoice::from_word(choice.word()), choice);
+            assert_eq!(
+                LanguageChoice::from_word(&format!(
+                    "{}
+",
+                    choice.word()
+                )),
+                choice
+            );
+        }
+        assert_eq!(LanguageChoice::from_word("fr"), LanguageChoice::System);
+        assert_eq!(LanguageChoice::English.label(), "English");
+        assert_eq!(LanguageChoice::Chinese.label(), "简体中文");
     }
 
     #[test]

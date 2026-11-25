@@ -22,9 +22,10 @@
 mod account;
 mod control;
 mod files_ui;
-mod hotkeys;
+use queqiao_core::hotkeys;
 mod options;
 mod session;
+mod system_keys;
 
 #[cfg(windows)]
 mod win;

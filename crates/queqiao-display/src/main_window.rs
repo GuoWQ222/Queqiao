@@ -12,7 +12,7 @@ use std::ffi::c_void;
 use std::path::Path;
 use std::sync::Once;
 
-use queqiao_core::text::{tr, trf};
+use queqiao_core::text::tr;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
@@ -20,10 +20,10 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush,
     DEFAULT_CHARSET, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
     DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FF_DONTCARE,
-    FillRect, GRADIENT_FILL_RECT_V, GRADIENT_RECT, GetStockObject, GradientFill, HBRUSH, HDC,
-    HFONT, InvalidateRect, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, Polygon, RoundRect,
-    SRCCOPY, SelectClipRgn, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TRIVERTEX,
-    UpdateWindow,
+    FillRect, GRADIENT_FILL_RECT_V, GRADIENT_RECT, GetDC, GetStockObject, GradientFill, HBRUSH,
+    HDC, HFONT, IntersectClipRect, InvalidateRect, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    PS_SOLID, Polygon, ReleaseDC, RoundRect, SRCCOPY, SelectClipRgn, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, TRIVERTEX, UpdateWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT};
@@ -34,6 +34,7 @@ use windows::core::{PCWSTR, Result, w};
 
 use crate::model::AccountState;
 use crate::model::{ConnectionRow, MainDevice, Page, TransferRow};
+use crate::settings::{Control, Row, Shown, Tab};
 
 const CLASS: PCWSTR = w!("QueqiaoMain");
 static REGISTER: Once = Once::new();
@@ -113,9 +114,6 @@ const LBN_SELCHANGE: u16 = 1;
 const LBN_DBLCLK: u16 = 2;
 const EN_CHANGE: u16 = 0x0300;
 const BN_CLICKED: u16 = 0;
-const BS_CHECKBOX: u32 = 0x2;
-const BS_RADIOBUTTON: u32 = 0x4;
-const BM_SETCHECK: u32 = 0x00F1;
 const SS_NOPREFIX: u32 = 0x80;
 const ODS_SELECTED: u32 = 0x1;
 
@@ -154,23 +152,6 @@ fn glyph(page: Page) -> &'static str {
         Page::Transfers => GLYPH_TRANSFERS,
         Page::Settings => GLYPH_SETTINGS,
     }
-}
-
-/// The settings as the Settings page shows them (the tray menu's own copy is in Presence).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Shown {
-    pub help_mode: crate::model::HelpMode,
-    pub help_files: bool,
-    pub allow: bool,
-    pub ask: bool,
-    pub clipboard: bool,
-    pub files: bool,
-    pub terminal: bool,
-    pub autostart: bool,
-    pub lock_after: bool,
-    pub auto_update: bool,
-    pub password: bool,
-    pub fixed_code: bool,
 }
 
 /// What the person did in the main window.
@@ -214,10 +195,13 @@ struct State {
     connections: Vec<ConnectionRow>,
     help: Option<(String, String)>,
     fonts: Fonts,
-    version: String,
     icon: HICON,
     /// The magpie with its wings spread, for the card's bridge (None in a program without it).
     bird: Option<HICON>,
+    /// The Settings page: what it shows, its tab, how far its cards are scrolled (96-DPI units).
+    settings: Shown,
+    tab: Tab,
+    scroll: i32,
 }
 
 struct Fonts {
@@ -230,6 +214,7 @@ struct Fonts {
     big: HFONT,
     glyph: HFONT,
     glyph_hero: HFONT,
+    small_glyph: HFONT,
 }
 
 thread_local! {
@@ -253,13 +238,11 @@ pub(crate) struct MainWindow {
     help_buttons: Vec<HWND>,
     help_open_button: HWND,
     fixed_button: HWND,
-    password_button: HWND,
-    checks: Vec<(u16, HWND)>,
 }
 
 impl MainWindow {
     /// The window, hidden (`show` brings it up).
-    pub(crate) fn new(version: &str) -> Result<MainWindow> {
+    pub(crate) fn new() -> Result<MainWindow> {
         let instance = unsafe { GetModuleHandleW(None) }?;
         REGISTER.call_once(|| unsafe {
             let class = WNDCLASSEXW {
@@ -345,6 +328,7 @@ impl MainWindow {
             big: font(30, 600, w!("Segoe UI"), scale),
             glyph: font(16, 400, w!("Segoe MDL2 Assets"), scale),
             glyph_hero: font(30, 400, w!("Segoe MDL2 Assets"), scale),
+            small_glyph: font(11, 400, w!("Segoe MDL2 Assets"), scale),
         };
         let body = fonts.body;
         STATE.with_borrow_mut(|state| {
@@ -359,9 +343,11 @@ impl MainWindow {
                 connections: Vec::new(),
                 help: None,
                 fonts,
-                version: version.to_string(),
                 icon: crate::icon::app_icon(px(28, scale)),
                 bird: crate::icon::spread_magpie(px(BIRD, scale)),
+                settings: Shown::default(),
+                tab: Tab::default(),
+                scroll: 0,
             })
         });
         let make = |class: PCWSTR,
@@ -520,110 +506,7 @@ impl MainWindow {
             )?,
         );
 
-        // Settings: the tray menu's items, in two groups.
-        let mut checks = Vec::new();
-        let this_pc = [
-            (
-                crate::tray::MENU_ALLOW,
-                tr("This account's devices may control this PC"),
-            ),
-            (crate::tray::MENU_ASK, tr("Ask before each session")),
-            (crate::tray::MENU_CLIPBOARD, tr("Share the clipboard")),
-            (crate::tray::MENU_FILES, tr("Receive files")),
-            (crate::tray::MENU_TERMINAL, tr("Allow command lines")),
-            (
-                crate::tray::MENU_LOCK_AFTER,
-                tr("Lock this PC after a session"),
-            ),
-        ];
-        for (index, (id, text)) in this_pc.into_iter().enumerate() {
-            let y = 130 + index as i32 * 30;
-            let hwnd = make(
-                w!("BUTTON"),
-                text,
-                tab | BS_CHECKBOX,
-                WINDOW_EX_STYLE(0),
-                id,
-                [LEFT + 4, y, 300, 26],
-            )?;
-            checks.push((id, place(Page::Settings, hwnd)));
-        }
-        // Remote help: how someone of another account may start (UU's three ways), and files while they help.
-        let ways = [
-            (crate::tray::MENU_HELP_BOTH, tr("The code, then I allow it")),
-            (crate::tray::MENU_HELP_CODE_ONLY, tr("The code alone")),
-            (
-                crate::tray::MENU_HELP_ASK_ONLY,
-                tr("No code: I allow each request"),
-            ),
-        ];
-        for (index, (id, text)) in ways.into_iter().enumerate() {
-            let y = 154 + index as i32 * 30;
-            let hwnd = make(
-                w!("BUTTON"),
-                text,
-                tab | BS_RADIOBUTTON,
-                WINDOW_EX_STYLE(0),
-                id,
-                [LEFT + 320, y, CONTENT - 324, 26],
-            )?;
-            checks.push((id, place(Page::Settings, hwnd)));
-        }
-        let files_while_helping = make(
-            w!("BUTTON"),
-            tr("Allow files while someone helps"),
-            tab | BS_CHECKBOX,
-            WINDOW_EX_STYLE(0),
-            crate::tray::MENU_HELP_FILES,
-            [LEFT + 320, 250, CONTENT - 324, 26],
-        )?;
-        checks.push((
-            crate::tray::MENU_HELP_FILES,
-            place(Page::Settings, files_while_helping),
-        ));
-        let program = [
-            (crate::tray::MENU_AUTOSTART, crate::tray::autostart_text()),
-            (
-                crate::tray::MENU_AUTO_UPDATE,
-                tr("Install updates automatically"),
-            ),
-        ];
-        for (index, (id, text)) in program.into_iter().enumerate() {
-            let y = 362 + index as i32 * 30;
-            let hwnd = make(
-                w!("BUTTON"),
-                text,
-                tab | BS_CHECKBOX,
-                WINDOW_EX_STYLE(0),
-                id,
-                [LEFT + 4, y, 300, 26],
-            )?;
-            checks.push((id, place(Page::Settings, hwnd)));
-        }
-        place(
-            Page::Settings,
-            button(
-                tr("Check for updates"),
-                crate::tray::MENU_UPDATE_CHECK,
-                [LEFT + 320, 390, 170, 30],
-            )?,
-        );
-        let password_button = place(
-            Page::Settings,
-            button(
-                tr("Lock settings with a password..."),
-                crate::tray::MENU_PASSWORD,
-                [LEFT, 440, 260, 34],
-            )?,
-        );
-        place(
-            Page::Settings,
-            button(
-                tr("Wake-on-LAN check..."),
-                crate::tray::MENU_WOL_CHECK,
-                [LEFT + 272, 440, 200, 34],
-            )?,
-        );
+        // Settings: painted (tabs and cards, settings.rs), no controls of their own.
 
         let window = MainWindow {
             hwnd,
@@ -636,8 +519,6 @@ impl MainWindow {
             help_buttons,
             help_open_button,
             fixed_button,
-            password_button,
-            checks,
         };
         window.arrange();
         Ok(window)
@@ -740,38 +621,6 @@ impl MainWindow {
     }
 
     pub(crate) fn set_settings(&mut self, shown: Shown) {
-        for (id, hwnd) in &self.checks {
-            let on = match *id {
-                crate::tray::MENU_ALLOW => shown.allow,
-                crate::tray::MENU_ASK => shown.ask,
-                crate::tray::MENU_CLIPBOARD => shown.clipboard,
-                crate::tray::MENU_FILES => shown.files,
-                crate::tray::MENU_TERMINAL => shown.terminal,
-                crate::tray::MENU_LOCK_AFTER => shown.lock_after,
-                crate::tray::MENU_AUTOSTART => shown.autostart,
-                crate::tray::MENU_AUTO_UPDATE => shown.auto_update,
-                crate::tray::MENU_HELP_BOTH => {
-                    shown.help_mode == crate::model::HelpMode::CodeAndAsk
-                }
-                crate::tray::MENU_HELP_CODE_ONLY => {
-                    shown.help_mode == crate::model::HelpMode::CodeOnly
-                }
-                crate::tray::MENU_HELP_ASK_ONLY => {
-                    shown.help_mode == crate::model::HelpMode::AskOnly
-                }
-                crate::tray::MENU_HELP_FILES => shown.help_files,
-                _ => false,
-            };
-            unsafe { SendMessageW(*hwnd, BM_SETCHECK, Some(WPARAM(usize::from(on))), None) };
-        }
-        crate::forms::set_text(
-            self.password_button,
-            if shown.password {
-                tr("Remove the settings password")
-            } else {
-                tr("Lock settings with a password...")
-            },
-        );
         crate::forms::set_text(
             self.fixed_button,
             if shown.fixed_code {
@@ -780,6 +629,80 @@ impl MainWindow {
                 tr("Fixed help code...")
             },
         );
+        STATE.with_borrow_mut(|state| {
+            if let Some(state) = state {
+                state.settings = shown;
+            }
+        });
+        let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
+    }
+
+    /// Tests: on each tab, whether a click at the middle of each control gives that control's command.
+    pub(crate) fn check_settings_clicks(&mut self) -> String {
+        let mut checked = 0;
+        let mut wrong = Vec::new();
+        for tab in Tab::ALL {
+            self.set_tab(tab);
+            STATE.with_borrow(|state| {
+                let Some(state) = state.as_ref() else {
+                    return;
+                };
+                for (place, id) in cards(state).into_iter().flat_map(|card| card.hits) {
+                    let (x, y) = (place[0] + place[2] / 2, place[1] + place[3] / 2);
+                    if (CARDS_TOP..CARDS_BOTTOM).contains(&y) {
+                        checked += 1;
+                        if settings_hit(state, x, y).map(|(hit, _)| hit) != Some(id) {
+                            wrong.push(id);
+                        }
+                    }
+                }
+            });
+        }
+        self.set_tab(Tab::General);
+        let verdict = if wrong.is_empty() {
+            "yes".to_string()
+        } else {
+            format!("no ({wrong:?})")
+        };
+        format!("{checked} controls answer clicks where they are drawn: {verdict}")
+    }
+
+    /// Tests: a click on control `id` (its tab chosen first), as the mouse gives it to the window; false if no tab
+    /// has it.
+    pub(crate) fn click_setting_for_test(&mut self, id: u16) -> bool {
+        self.set_page(Page::Settings);
+        for tab in Tab::ALL {
+            self.set_tab(tab);
+            let point = STATE.with_borrow(|state| {
+                let state = state.as_ref()?;
+                let place = cards(state)
+                    .into_iter()
+                    .flat_map(|card| card.hits)
+                    .find(|(_, hit)| *hit == id)
+                    .map(|(place, _)| place)?;
+                let x = px(place[0] + place[2] / 2, state.scale);
+                let y = px(place[1] + place[3] / 2, state.scale);
+                Some(((y as u32 & 0xFFFF) << 16) | (x as u32 & 0xFFFF))
+            });
+            if let Some(point) = point {
+                unsafe {
+                    SendMessageW(self.hwnd, WM_LBUTTONUP, None, Some(LPARAM(point as isize)));
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The Settings page's tab (tests: a picture of each).
+    pub(crate) fn set_tab(&mut self, tab: Tab) {
+        STATE.with_borrow_mut(|state| {
+            if let Some(state) = state {
+                state.tab = tab;
+                state.scroll = 0;
+            }
+        });
+        let _ = unsafe { InvalidateRect(Some(self.hwnd), None, false) };
     }
 
     /// What the person did, if anything (the thread's messages are pumped by Presence).
@@ -800,6 +723,10 @@ impl MainWindow {
             }
             id if (ID_NAV..ID_NAV + 4).contains(&id) => {
                 self.set_page(Page::ALL[usize::from(id - ID_NAV)]);
+                None
+            }
+            id if (ID_TAB..ID_TAB + Tab::ALL.len() as u16).contains(&id) => {
+                self.set_tab(Tab::ALL[usize::from(id - ID_TAB)]);
                 None
             }
             ID_SELECT => {
@@ -912,6 +839,18 @@ impl MainWindow {
             let name = format!("main_{}.bmp", format!("{page:?}").to_lowercase());
             crate::forms::save_window_picture(self.hwnd, &folder.join(name))?;
         }
+        // Each further tab of Settings: main_settings_security.bmp ... (main_settings.bmp is its first).
+        self.set_page(Page::Settings);
+        for tab in &Tab::ALL[1..] {
+            self.set_tab(*tab);
+            unsafe {
+                let _ = UpdateWindow(self.hwnd);
+            }
+            crate::forms::pump(50);
+            let name = format!("main_settings_{}.bmp", format!("{tab:?}").to_lowercase());
+            crate::forms::save_window_picture(self.hwnd, &folder.join(name))?;
+        }
+        self.set_tab(Tab::General);
         // The Devices page once more as it looks for a device that is online (its card with the magpies), when the
         // chosen one is offline: main_devices_online.bmp.
         let offline = STATE.with_borrow_mut(|state| {
@@ -962,6 +901,7 @@ impl Drop for MainWindow {
                     f.big,
                     f.glyph,
                     f.glyph_hero,
+                    f.small_glyph,
                 ] {
                     let _ = unsafe { DeleteObject(font.into()) };
                 }
@@ -1195,6 +1135,17 @@ fn paint(hwnd: HWND, dc: HDC, state: &State) {
     paint_sidebar(dc, state);
     match state.page {
         Page::Devices => paint_device_page(dc, state),
+        Page::Settings => {
+            text(
+                dc,
+                Page::Settings.title(),
+                rect(LEFT, 20, CONTENT, 40, s),
+                state.fonts.title,
+                TEXT_COLOR,
+                LINE,
+            );
+            paint_settings(dc, state);
+        }
         page => {
             text(
                 dc,
@@ -1942,50 +1893,7 @@ fn paint_page(dc: HDC, state: &State) {
                 DT_LEFT.0 | DT_WORDBREAK.0,
             );
         }
-        Page::Settings => {
-            text(
-                dc,
-                tr("This PC"),
-                rect(LEFT, 98, CONTENT, 24, s),
-                f.section,
-                TEXT_COLOR,
-                LINE,
-            );
-            text(
-                dc,
-                tr("Remote help"),
-                rect(LEFT + 320, 98, CONTENT - 320, 24, s),
-                f.section,
-                TEXT_COLOR,
-                LINE,
-            );
-            text(
-                dc,
-                tr("Someone of another account starts helping with:"),
-                rect(LEFT + 320, 126, CONTENT - 320, 22, s),
-                f.small,
-                SECONDARY,
-                LINE,
-            );
-            text(
-                dc,
-                tr("Queqiao"),
-                rect(LEFT, 330, CONTENT, 24, s),
-                f.section,
-                TEXT_COLOR,
-                LINE,
-            );
-            let version = trf("Version {version}", &[("version", &state.version)]);
-            text(
-                dc,
-                &version,
-                rect(LEFT, 500, CONTENT, 20, s),
-                f.small,
-                SECONDARY,
-                LINE,
-            );
-        }
-        Page::Devices | Page::Transfers => {}
+        Page::Devices | Page::Transfers | Page::Settings => {}
     }
 }
 
@@ -2155,6 +2063,9 @@ fn hit(state: &State, x: i32, y: i32) -> Option<u16> {
         }
         return None;
     }
+    if state.page == Page::Settings {
+        return settings_hit(state, x, y).map(|(id, _)| id);
+    }
     if state.page != Page::Devices {
         return None;
     }
@@ -2227,8 +2138,38 @@ extern "system" fn main_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: L
                 let (x, y) = scaled_point(lparam, state.scale);
                 hit(state, x, y)
             });
-            if let Some(command) = command {
-                push(command);
+            match command {
+                // A card's choice: its menu, then the option chosen.
+                Some(command) if (ID_CHOICE..ID_CHOICE + 32).contains(&command) => {
+                    let chosen = STATE.with_borrow(|state| {
+                        let state = state.as_ref()?;
+                        let (x, y) = scaled_point(lparam, state.scale);
+                        let (_, place) = settings_hit(state, x, y)?;
+                        choose_from(hwnd, state, usize::from(command - ID_CHOICE), place)
+                    });
+                    if let Some(chosen) = chosen {
+                        push(chosen);
+                    }
+                }
+                Some(command) => push(command),
+                None => {}
+            }
+            LRESULT(0)
+        }
+        // The Settings page's cards scroll.
+        WM_MOUSEWHEEL => {
+            let delta = i32::from(((wparam.0 >> 16) & 0xFFFF) as u16 as i16);
+            let scrolled = STATE.with_borrow_mut(|state| {
+                let state = state.as_mut()?;
+                if state.page != Page::Settings {
+                    return None;
+                }
+                let most = max_scroll(state);
+                let scroll = (state.scroll - delta * 56 / 120).clamp(0, most);
+                (scroll != state.scroll).then(|| state.scroll = scroll)
+            });
+            if scrolled.is_some() {
+                let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
             }
             LRESULT(0)
         }
@@ -2339,4 +2280,403 @@ fn brush(color: u32) -> HBRUSH {
         *slot.get_or_init(|| unsafe { CreateSolidBrush(COLORREF(color)) }.0 as usize)
             as *mut c_void,
     )
+}
+
+// The Settings page (96-DPI units): the tabs under the title, then the cards, scrolled between CARDS_TOP and
+// CARDS_BOTTOM.
+const TABS_Y: i32 = 66;
+const TAB_GAP: i32 = 30;
+const CARDS_TOP: i32 = 112;
+const CARDS_BOTTOM: i32 = HEIGHT - 12;
+const CARD_GAP: i32 = 10;
+/// A tab (+ its index).
+const ID_TAB: u16 = 340;
+/// A card's choice (+ the card's index): its menu opens.
+const ID_CHOICE: u16 = 350;
+const SWITCH_ON: u32 = ACCENT;
+const SWITCH_OFF: u32 = 0x00C9_BBB6;
+const BUTTON_BORDER: u32 = 0x00DA_CFCB;
+const KEY_CHIP: (u32, u32) = (0x00FB_EDE8, ACCENT);
+
+/// One card on the page: its row, its place (as scrolled), and what a click on each of its controls sends.
+struct Card {
+    row: Row,
+    top: i32,
+    height: i32,
+    hits: Vec<([i32; 4], u16)>,
+}
+
+/// Each tab's place along the tab line: (tab, x, width).
+fn tab_places(state: &State) -> Vec<(Tab, i32, i32)> {
+    let dc = unsafe { GetDC(None) };
+    let mut x = LEFT;
+    let places = Tab::ALL
+        .iter()
+        .map(|tab| {
+            let width = unscaled(
+                text_width(dc, tab.title(), state.fonts.section),
+                state.scale,
+            );
+            let place = (*tab, x, width);
+            x += width + TAB_GAP;
+            place
+        })
+        .collect();
+    unsafe { ReleaseDC(None, dc) };
+    places
+}
+
+/// A width measured on the screen, in 96-DPI units.
+fn unscaled(width: i32, scale: f64) -> i32 {
+    (f64::from(width) / scale).ceil() as i32
+}
+
+/// The cards of the chosen tab, placed as scrolled.
+fn cards(state: &State) -> Vec<Card> {
+    let rows = crate::settings::rows(state.tab, &state.settings);
+    let dc = unsafe { GetDC(None) };
+    let right = LEFT + CONTENT - 18;
+    let mut y = CARDS_TOP - state.scroll;
+    let mut cards = Vec::new();
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 && !row.sub {
+            y += CARD_GAP;
+        }
+        let height = if row.detail.is_empty() { 52 } else { 68 };
+        let middle = y + height / 2;
+        let mut hits = Vec::new();
+        match &row.control {
+            // The switch and its "On" / "Off".
+            Control::Switch { id, .. } => hits.push(([right - 80, middle - 13, 80, 26], *id)),
+            Control::Choice { .. } => {
+                hits.push((
+                    [right - 200, middle - 16, 200, 32],
+                    ID_CHOICE + index as u16,
+                ));
+            }
+            Control::Buttons(buttons) => {
+                let mut x = right;
+                for (id, label) in buttons.iter().rev() {
+                    let width = unscaled(text_width(dc, label, state.fonts.body), state.scale) + 32;
+                    x -= width;
+                    hits.push(([x, middle - 16, width, 32], *id));
+                    x -= 10;
+                }
+            }
+            Control::Keys { id, .. } => hits.push(([right - 30, middle - 15, 30, 30], *id)),
+        }
+        cards.push(Card {
+            row,
+            top: y,
+            height,
+            hits,
+        });
+        y += height;
+    }
+    unsafe { ReleaseDC(None, dc) };
+    cards
+}
+
+/// How far the cards can be scrolled.
+fn max_scroll(state: &State) -> i32 {
+    let cards = cards(state);
+    let bottom = cards
+        .last()
+        .map_or(0, |card| card.top + card.height + state.scroll);
+    (bottom - CARDS_BOTTOM + 8).max(0)
+}
+
+/// What a click at (x, y) on the Settings page sends, and the place clicked.
+fn settings_hit(state: &State, x: i32, y: i32) -> Option<(u16, [i32; 4])> {
+    if (TABS_Y..TABS_Y + 36).contains(&y) {
+        return tab_places(state)
+            .into_iter()
+            .enumerate()
+            .find(|(_, (_, left, width))| (*left - 8..*left + width + 8).contains(&x))
+            .map(|(index, (_, left, width))| (ID_TAB + index as u16, [left, TABS_Y, width, 36]));
+    }
+    if !(CARDS_TOP..CARDS_BOTTOM).contains(&y) {
+        return None;
+    }
+    cards(state)
+        .into_iter()
+        .flat_map(|card| card.hits)
+        .find(|(place, _)| inside(*place, x, y))
+        .map(|(place, id)| (id, place))
+}
+
+fn paint_settings(dc: HDC, state: &State) {
+    let s = state.scale;
+    let f = &state.fonts;
+    // The tabs, the chosen one dark with a short gold line under it.
+    for (tab, x, width) in tab_places(state) {
+        let chosen = tab == state.tab;
+        text(
+            dc,
+            tab.title(),
+            rect(x, TABS_Y, width + 4, 30, s),
+            f.section,
+            if chosen { TEXT_COLOR } else { SECONDARY },
+            LINE,
+        );
+        if chosen {
+            rounded(
+                dc,
+                &rect(x + width / 2 - 12, TABS_Y + 32, 24, 4, s),
+                px(4, s),
+                GOLD,
+            );
+        }
+    }
+    fill(dc, &rect(LEFT, CARDS_TOP - 6, CONTENT, 1, s), DIVIDER);
+    let cards = cards(state);
+    unsafe {
+        let _ = IntersectClipRect(
+            dc,
+            px(LEFT - 2, s),
+            px(CARDS_TOP - 2, s),
+            px(LEFT + CONTENT + 2, s),
+            px(CARDS_BOTTOM, s),
+        );
+    }
+    // Each card with the ones that belong to it, as one rounded panel; a line between them.
+    let mut index = 0;
+    while index < cards.len() {
+        let mut end = index + 1;
+        while end < cards.len() && cards[end].row.sub {
+            end += 1;
+        }
+        let top = cards[index].top;
+        let bottom = cards[end - 1].top + cards[end - 1].height;
+        outlined(
+            dc,
+            &rect(LEFT, top, CONTENT, bottom - top, s),
+            px(12, s),
+            WHITE,
+            DIVIDER,
+        );
+        for card in &cards[index..end] {
+            if card.row.sub {
+                fill(dc, &rect(LEFT + 56, card.top, CONTENT - 74, 1, s), DIVIDER);
+            }
+            paint_card(dc, state, card);
+        }
+        index = end;
+    }
+    unsafe {
+        let _ = SelectClipRgn(dc, None);
+    }
+    // A thin bar on the right while there is more to scroll to.
+    let most = max_scroll(state);
+    if most > 0 {
+        let track = CARDS_BOTTOM - CARDS_TOP;
+        let thumb = (track * track / (track + most)).max(24);
+        let at = CARDS_TOP + (track - thumb) * state.scroll / most;
+        rounded(
+            dc,
+            &rect(LEFT + CONTENT + 8, at, 4, thumb, s),
+            px(4, s),
+            SWITCH_OFF,
+        );
+    }
+}
+
+fn paint_card(dc: HDC, state: &State, card: &Card) {
+    let s = state.scale;
+    let f = &state.fonts;
+    let (top, height) = (card.top, card.height);
+    let middle = top + height / 2;
+    let right = LEFT + CONTENT - 18;
+    // Where the control begins: the title and its line stop before it.
+    let controls_left = card
+        .hits
+        .iter()
+        .map(|(place, _)| place[0])
+        .min()
+        .unwrap_or(right - 140);
+    if !card.row.glyph.is_empty() {
+        text(
+            dc,
+            card.row.glyph,
+            rect(LEFT + 18, top, 24, height, s),
+            f.glyph,
+            TEXT_COLOR,
+            DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0,
+        );
+    }
+    let title_width = (controls_left - 16 - (LEFT + 56)).max(80);
+    if card.row.detail.is_empty() {
+        text(
+            dc,
+            &card.row.title,
+            rect(LEFT + 56, top, title_width, height, s),
+            f.body,
+            TEXT_COLOR,
+            LINE,
+        );
+    } else {
+        text(
+            dc,
+            &card.row.title,
+            rect(LEFT + 56, top + 13, title_width, 22, s),
+            f.body,
+            TEXT_COLOR,
+            LINE,
+        );
+        text(
+            dc,
+            &card.row.detail,
+            rect(LEFT + 56, top + 36, title_width, 20, s),
+            f.small,
+            SECONDARY,
+            LINE,
+        );
+    }
+    match &card.row.control {
+        Control::Switch { on, .. } => {
+            text(
+                dc,
+                if *on { tr("On") } else { tr("Off") },
+                rect(right - 84, middle - 10, 32, 20, s),
+                f.small,
+                SECONDARY,
+                DT_RIGHT.0 | DT_SINGLELINE.0 | DT_VCENTER.0,
+            );
+            let track = rect(right - 44, middle - 12, 44, 24, s);
+            if *on {
+                rounded(dc, &track, px(24, s), SWITCH_ON);
+            } else {
+                outlined(dc, &track, px(24, s), WHITE, SWITCH_OFF);
+            }
+            let knob_x = if *on { right - 22 } else { right - 40 };
+            rounded(
+                dc,
+                &rect(knob_x, middle - 8, 16, 16, s),
+                px(16, s),
+                if *on { WHITE } else { SWITCH_OFF },
+            );
+        }
+        Control::Choice { value, .. } => {
+            let [x, y, width, box_height] = card.hits[0].0;
+            outlined(
+                dc,
+                &rect(x, y, width, box_height, s),
+                px(8, s),
+                WHITE,
+                BUTTON_BORDER,
+            );
+            text(
+                dc,
+                value,
+                rect(x + 12, y, width - 40, box_height, s),
+                f.body,
+                TEXT_COLOR,
+                LINE,
+            );
+            text(
+                dc,
+                "\u{E70D}",
+                rect(x + width - 30, y, 20, box_height, s),
+                f.small_glyph,
+                SECONDARY,
+                DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0,
+            );
+        }
+        Control::Buttons(buttons) => {
+            for ((place, _), (_, label)) in card.hits.iter().zip(buttons.iter().rev()) {
+                let [x, y, width, button_height] = *place;
+                outlined(
+                    dc,
+                    &rect(x, y, width, button_height, s),
+                    px(8, s),
+                    WHITE,
+                    BUTTON_BORDER,
+                );
+                text(
+                    dc,
+                    label,
+                    rect(x, y, width, button_height, s),
+                    f.body,
+                    TEXT_COLOR,
+                    DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0,
+                );
+            }
+        }
+        Control::Keys { keys, .. } => {
+            text(
+                dc,
+                "\u{E70F}",
+                rect(right - 30, middle - 15, 30, 30, s),
+                f.glyph,
+                SECONDARY,
+                DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0,
+            );
+            if keys.is_empty() {
+                text(
+                    dc,
+                    tr("Not set"),
+                    rect(right - 160, middle - 12, 120, 24, s),
+                    f.small,
+                    SECONDARY,
+                    DT_RIGHT.0 | DT_SINGLELINE.0 | DT_VCENTER.0,
+                );
+            }
+            let mut x = right - 38;
+            for key in keys.iter().rev() {
+                let width = (unscaled(text_width(dc, key, f.small), s) + 18).max(30);
+                x -= width;
+                rounded(
+                    dc,
+                    &rect(x, middle - 12, width, 24, s),
+                    px(6, s),
+                    KEY_CHIP.0,
+                );
+                text(
+                    dc,
+                    key,
+                    rect(x, middle - 12, width, 24, s),
+                    f.small,
+                    KEY_CHIP.1,
+                    DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0,
+                );
+                x -= 6;
+            }
+        }
+    }
+}
+
+/// The menu of a card's choice, under its box: the option chosen (its id), if any.
+fn choose_from(hwnd: HWND, state: &State, index: usize, place: [i32; 4]) -> Option<u16> {
+    let rows = crate::settings::rows(state.tab, &state.settings);
+    let Control::Choice { options, .. } = &rows.get(index)?.control else {
+        return None;
+    };
+    unsafe {
+        let menu = CreatePopupMenu().ok()?;
+        for (id, label, chosen) in options {
+            let label: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+            let flags = if *chosen {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            };
+            let _ = AppendMenuW(menu, flags, usize::from(*id), PCWSTR(label.as_ptr()));
+        }
+        let mut corner = POINT {
+            x: px(place[0], state.scale),
+            y: px(place[1] + place[3] + 2, state.scale),
+        };
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut corner);
+        let chosen = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+            corner.x,
+            corner.y,
+            None,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+        u16::try_from(chosen.0).ok().filter(|id| *id != 0)
+    }
 }

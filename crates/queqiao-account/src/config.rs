@@ -220,33 +220,10 @@ fn this_pc_name() -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Linux PC".into())
 }
-/// `%APPDATA%\Queqiao`, where this device keeps its files.
-#[cfg(windows)]
+/// `%APPDATA%\Queqiao` (Linux: `~/.config/queqiao`, this person's only), where this device keeps its files
+/// ([`queqiao_core::config_folder`]).
 pub fn folder() -> Result<PathBuf, Error> {
-    let base = std::env::var_os("APPDATA").ok_or_else(|| Error("APPDATA is not set".into()))?;
-    let folder = PathBuf::from(base).join("Queqiao");
-    std::fs::create_dir_all(&folder)?;
-    Ok(folder)
-}
-
-/// `$XDG_CONFIG_HOME/queqiao` (`~/.config/queqiao`), where this device keeps its files: made for this person only
-/// (0700), as `%APPDATA%` is.
-#[cfg(unix)]
-pub fn folder() -> Result<PathBuf, Error> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or_else(|| Error("neither XDG_CONFIG_HOME nor HOME is set".into()))?;
-    let folder = base.join("queqiao");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&folder)?;
-    // Made earlier by something else with wider rights: this person's only.
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))?;
-    Ok(folder)
+    Ok(queqiao_core::config_folder()?)
 }
 
 /// Sealed data on Linux: "QQS1", a 12-byte nonce, then ChaCha20-Poly1305 of the data with this person's key.

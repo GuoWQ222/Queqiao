@@ -1,7 +1,8 @@
 //! The session window's own keys, which the person can change ("Hotkeys..." in the session menu): full screen, game
 //! mouse, and the boss key (hides the session window and its sound at once, from anywhere; again to bring it back).
 //! A key is Ctrl and/or Alt (Shift may be added) with one other key, written as "Ctrl+Alt+Enter"; it is never sent to
-//! the other PC. Kept in `%APPDATA%\Queqiao\viewer_settings.json`.
+//! the other PC. Kept in `%APPDATA%\Queqiao\viewer_settings.json` (Linux: `~/.config/queqiao`); the session window reads
+//! them as it opens, the main window's Settings (Keyboard) shows and changes them.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -149,38 +150,6 @@ impl Hotkey {
             && held_code(ALT) == self.alt
             && (held_code(LEFT_SHIFT) || held_code(RIGHT_SHIFT)) == self.shift
     }
-
-    /// The modifiers and virtual key for RegisterHotKey (a boss key works with the window hidden).
-    #[cfg(windows)]
-    pub fn system(&self) -> (u32, u32) {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VSC_TO_VK_EX, MapVirtualKeyW};
-        const MOD_ALT: u32 = 0x1;
-        const MOD_CONTROL: u32 = 0x2;
-        const MOD_SHIFT: u32 = 0x4;
-        const MOD_NOREPEAT: u32 = 0x4000;
-        let modifiers = MOD_NOREPEAT
-            | if self.alt { MOD_ALT } else { 0 }
-            | if self.ctrl { MOD_CONTROL } else { 0 }
-            | if self.shift { MOD_SHIFT } else { 0 };
-        let code = u32::from(self.scancode) | if self.extended { 0xE000 } else { 0 };
-        let vk = unsafe { MapVirtualKeyW(code, MAPVK_VSC_TO_VK_EX) };
-        (modifiers, vk)
-    }
-
-    /// The X modifier bits (Control, Mod1 for Alt, Shift) and X keycode for a key grab on the root window (a boss
-    /// key works with the window hidden); keycode 0 for a key the evdev table does not know.
-    #[cfg(target_os = "linux")]
-    pub fn system(&self) -> (u32, u32) {
-        const SHIFT: u32 = 1;
-        const CONTROL: u32 = 4;
-        const MOD1: u32 = 8;
-        let modifiers = if self.alt { MOD1 } else { 0 }
-            | if self.ctrl { CONTROL } else { 0 }
-            | if self.shift { SHIFT } else { 0 };
-        let keycode =
-            queqiao_input::scancode::x11_keycode(self.scancode, self.extended).unwrap_or(0);
-        (modifiers, u32::from(keycode))
-    }
 }
 
 /// The keys as kept: names, so the file reads as the menu does. An empty boss key: none.
@@ -219,7 +188,7 @@ struct Stored {
 }
 
 fn file() -> Option<PathBuf> {
-    queqiao_account::data_folder()
+    crate::config_folder()
         .ok()
         .map(|folder| folder.join("viewer_settings.json"))
 }

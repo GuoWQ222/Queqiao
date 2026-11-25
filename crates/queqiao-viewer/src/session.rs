@@ -4,6 +4,7 @@
 //! crates; moved from win.rs.
 
 use crate::hotkeys;
+use crate::system_keys::SystemKey;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;

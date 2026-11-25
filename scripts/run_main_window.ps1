@@ -8,7 +8,9 @@
 param(
     [string]$Bin = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\release'),
     [string]$Out = (Join-Path (Split-Path -Parent $PSScriptRoot) 'target\probe\main_window'),
-    [string]$Listen = '127.0.0.1:47100'
+    [string]$Listen = '127.0.0.1:47100',
+    # The windows' language for this run (en or zh: QUEQIAO_LANG for the agent); empty: as the PC has it.
+    [string]$Lang = ''
 )
 $ErrorActionPreference = 'Stop'
 $consoleUser = (Get-CimInstance Win32_ComputerSystem).UserName
@@ -57,10 +59,13 @@ do {
 } while (-not $up -and (Get-Date) -lt $deadline)
 if (-not $up) { 'RUN_FAIL the server did not start'; return }
 
-# The test build's list of transfers, kept aside while a sample stands in.
-$userHome = (Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq (New-Object Security.Principal.NTAccount $consoleUser).Translate([Security.Principal.SecurityIdentifier]).Value }).LocalPath
-# A test build reads transfers.test.log (never the person's own transfers.log).
-$history = Join-Path $userHome 'AppData\Roaming\Queqiao\transfers.test.log'
+# The agent keeps its files in a folder of the test's own (APPDATA): its settings test turns a setting over and
+# changes the display language, which must never reach the person's own Queqiao on this PC (2026-11-26).
+$appData = Join-Path $Out 'appdata'
+if (Test-Path -LiteralPath $appData) { Remove-Item -Recurse -Force -LiteralPath $appData }
+New-Item -ItemType Directory -Force $appData | Out-Null
+# A test build reads transfers.test.log there: a sample.
+$history = Join-Path $appData 'Queqiao\transfers.test.log'
 $kept = if (Test-Path -LiteralPath $history) { [IO.File]::ReadAllBytes($history) } else { $null }
 $sample = @(
     "2026-11-22 09:41`tS`t2483112`tOffice PC`tquarterly-report.xlsx",
@@ -75,16 +80,27 @@ try {
     & $viewer --server $Listen --pin $pin --user alice --password $password --test-device 'Office-PC' --list --report "$Out\viewer_list.txt" | Out-Null
     $pictures = $Out
     $agentArgs = "--server $Listen --pin $pin --user alice --password $password --seconds 25 --help-code K7Q2M9XD --test-main-window --ui-pictures `"$pictures`" --report `"$Out\agent.txt`""
-    Start-SessionTask 'Queqiao-MainWindow' $agent $agentArgs
+    if ($Lang -and $Lang -notmatch '^(en|zh)$') { throw '-Lang: en or zh' }
+    $language = if ($Lang) { "set QUEQIAO_LANG=$Lang&& " } else { '' }
+    Start-SessionTask 'Queqiao-MainWindow' "$env:SystemRoot\System32\cmd.exe" "/c set `"APPDATA=$appData`"&& $language`"$agent`" $agentArgs"
     $result = Wait-SessionTask 'Queqiao-MainWindow' 90
     "agent exit $result"
     $report = Join-Path $Out 'agent.txt'
     if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report -Encoding UTF8 | Where-Object { $_ -match 'main window|logged in|ERROR|RESULT' } } else { 'no agent report' }
-    foreach ($page in 'devices', 'help', 'transfers', 'settings') {
+    foreach ($page in 'devices', 'help', 'transfers', 'settings', 'settings_security', 'settings_sessions', 'settings_keyboard') {
         $picture = Join-Path $Out "main_$page.bmp"
         $ok = (Test-Path -LiteralPath $picture) -and ((Get-Item -LiteralPath $picture).Length -gt 100000)
         '{0,-40} {1}' -f "picture of the $page page", $(if ($ok) { 'ok' } else { 'FAIL' })
         if (-not $ok) { $failed += $page }
+    }
+    # The Settings page's test: its controls answer clicks where they are drawn; a click on a switch reached the
+    # agent; choosing English drew the windows in it (unless QUEQIAO_LANG holds Chinese, which wins).
+    $text = if (Test-Path -LiteralPath $report) { @(Get-Content -LiteralPath $report -Encoding UTF8) } else { @() }
+    $text | Where-Object { $_ -match '^settings test|set: ask before' }
+    $wanted = @('^settings test: \d+ controls answer clicks where they are drawn: yes$', '^settings test: clicked the switch of asking before each session: true$', '^the person at this PC set: ask before each session: ')
+    if ($Lang -ne 'zh') { $wanted += "^settings test: display language \w+ -> English after choosing English, the main window's title: Queqiao$" }
+    foreach ($pattern in $wanted) {
+        if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "settings ($pattern)" }
     }
 } finally {
     if ($null -eq $kept) { Remove-Item -LiteralPath $history -ErrorAction SilentlyContinue } else { [IO.File]::WriteAllBytes($history, $kept) }

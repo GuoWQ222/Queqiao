@@ -168,6 +168,7 @@ pub(crate) fn run_account(
                     Ok(()) => "main window: pictures of its pages saved".into(),
                     Err(error) => format!("main window: pictures: {error}"),
                 });
+                lines.extend(ui.test_settings());
             }
         }
         // What the person did in the tray (also during the last session).

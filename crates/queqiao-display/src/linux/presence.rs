@@ -99,13 +99,10 @@ struct Shown {
     transfers: Vec<TransferRow>,
     connections: Vec<ConnectionRow>,
     help: Option<(String, String)>,
-    settings: [(u16, bool); 7],
-    help_mode: HelpMode,
-    help_files: bool,
-    fixed_code: bool,
-    password: bool,
+    /// The Settings page: what it shows (settings.rs), its tab; locked while someone of another account controls.
+    settings: crate::settings::Shown,
+    tab: crate::settings::Tab,
     locked: bool,
-    version: String,
 }
 
 /// The dialogs the tray model asks through (tray.rs).
@@ -188,13 +185,9 @@ impl Presence {
                 transfers: Vec::new(),
                 connections: Vec::new(),
                 help: None,
-                settings: [(0, false); 7],
-                help_mode: HelpMode::default(),
-                help_files: false,
-                fixed_code: false,
-                password: false,
+                settings: crate::settings::Shown::default(),
+                tab: crate::settings::Tab::default(),
                 locked: false,
-                version: queqiao_core::VERSION.to_string(),
             })),
             invitation: String::new(),
             clipboard: None,
@@ -225,19 +218,23 @@ impl Presence {
         if let Ok(mut shown) = self.shown.lock() {
             let m = &self.menu;
             shown.account = m.account;
-            shown.settings = [
-                (MENU_ALLOW, m.allow),
-                (MENU_ASK, m.ask),
-                (MENU_CLIPBOARD, m.clipboard),
-                (MENU_FILES, m.files),
-                (MENU_TERMINAL, m.terminal),
-                (MENU_LOCK_AFTER, m.lock_after),
-                (MENU_AUTOSTART, m.autostart),
-            ];
-            shown.help_mode = m.help_mode;
-            shown.help_files = m.help_files;
-            shown.fixed_code = m.fixed_code;
-            shown.password = m.password_check.is_some();
+            shown.settings = crate::settings::Shown {
+                help_mode: m.help_mode,
+                help_files: m.help_files,
+                allow: m.allow,
+                ask: m.ask,
+                clipboard: m.clipboard,
+                files: m.files,
+                terminal: m.terminal,
+                autostart: m.autostart,
+                lock_after: m.lock_after,
+                auto_update: m.auto_update,
+                password: m.password_check.is_some(),
+                fixed_code: m.fixed_code,
+                language: queqiao_core::text::saved_choice(),
+                keys: queqiao_core::hotkeys::Keys::load(),
+                version: queqiao_core::VERSION.to_string(),
+            };
             shown.locked = m.settings_locked;
         }
         gui::repaint();
@@ -335,6 +332,7 @@ impl Presence {
             let view = MainView {
                 shown: self.shown.clone(),
                 sender: self.sender.clone(),
+                title: tr("Queqiao"),
                 help_id: String::new(),
                 code: String::new(),
                 selected: None,
@@ -344,6 +342,46 @@ impl Presence {
         }
         gui::repaint();
         Ok(())
+    }
+
+    /// Tests, as on Windows: the Settings page's cards; a click on "Ask before each session"'s switch (as the window
+    /// sends it) turns it over through the usual path (the agent reports the change); choosing English draws the
+    /// windows in it at once. Run with a settings folder of the test's own (XDG_CONFIG_HOME).
+    pub fn test_settings(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Err(error) = self.show_main(Some(Page::Settings)) {
+            return vec![format!(
+                "settings test: no main window: {}",
+                error.message()
+            )];
+        }
+        let shown = self
+            .shown
+            .lock()
+            .map(|shown| shown.settings.clone())
+            .unwrap_or_default();
+        let cards: usize = crate::settings::Tab::ALL
+            .iter()
+            .map(|tab| crate::settings::rows(*tab, &shown).len())
+            .sum();
+        lines.push(format!(
+            "settings test: {cards} cards on {} tabs",
+            crate::settings::Tab::ALL.len()
+        ));
+        lines.push(format!(
+            "settings test: clicked the switch of asking before each session: {}",
+            self.sender.send(Action::Choose(MENU_ASK)).is_ok()
+        ));
+        let before = queqiao_core::text::language();
+        let _ = self.choose(crate::tray::MENU_LANGUAGE_EN);
+        let after = queqiao_core::text::language();
+        gui::repaint();
+        lines.push(format!(
+            "settings test: display language {before:?} -> {after:?} after choosing English, the main window's title: {}",
+            tr("Queqiao")
+        ));
+        let _ = self.choose(crate::tray::MENU_LANGUAGE_SYSTEM);
+        lines
     }
 
     /// Tests: pictures of the main window's pages (main_devices.bmp, main_help.bmp ...) into `folder`, as on Windows.
@@ -364,8 +402,23 @@ impl Presence {
                 .ok_or_else(|| std::io::Error::other("the main window closed"))?
                 .save_picture(&folder.join(name))?;
         }
+        // Each further tab of Settings: main_settings_security.bmp ... (main_settings.bmp is its first).
+        for tab in &crate::settings::Tab::ALL[1..] {
+            if let Ok(mut shown) = self.shown.lock() {
+                shown.page = Page::Settings;
+                shown.tab = *tab;
+            }
+            gui::repaint();
+            std::thread::sleep(Duration::from_millis(300));
+            let name = format!("main_settings_{}.bmp", format!("{tab:?}").to_lowercase());
+            self.main
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("the main window closed"))?
+                .save_picture(&folder.join(name))?;
+        }
         if let Ok(mut shown) = self.shown.lock() {
             shown.page = back;
+            shown.tab = crate::settings::Tab::General;
         }
         gui::repaint();
         Ok(())
@@ -446,6 +499,16 @@ impl Presence {
     pub fn choose(&mut self, item: u16) -> Option<PresenceEvent> {
         if item == MENU_OPEN {
             return self.show_main(None).ok().map(|()| PresenceEvent::MainShown);
+        }
+        // The display language and the session keys: this PC's own, nothing for the agent. The main window draws in
+        // the language in use each time, so a new one shows at once.
+        match crate::tray::choose_local(item, &LinuxDialogs) {
+            crate::tray::Local::Other => {}
+            crate::tray::Local::Unchanged => return None,
+            crate::tray::Local::Keys | crate::tray::Local::Language => {
+                self.refresh();
+                return None;
+            }
         }
         let event = self.menu.choose(item, &LinuxDialogs);
         self.refresh();
@@ -696,6 +759,8 @@ impl View for HelpView {
 struct MainView {
     shown: Arc<Mutex<Shown>>,
     sender: Sender<Action>,
+    /// The title the window has (tr("Queqiao") in the language it was set in).
+    title: &'static str,
     help_id: String,
     code: String,
     selected: Option<String>,
@@ -862,84 +927,142 @@ impl MainView {
         });
     }
 
+    /// Settings: the tabs, then the chosen tab's cards (settings.rs), as on Windows.
     fn settings(&mut self, ui: &mut egui::Ui, shown: &Shown) {
-        let texts = [
-            (MENU_ALLOW, tr("This account's devices may control this PC")),
-            (MENU_ASK, tr("Ask before each session")),
-            (MENU_CLIPBOARD, tr("Share the clipboard")),
-            (MENU_FILES, tr("Receive files")),
-            (MENU_TERMINAL, tr("Allow command lines")),
-            (MENU_LOCK_AFTER, tr("Lock this PC after a session")),
-            (MENU_AUTOSTART, autostart_text()),
-        ];
-        ui.add_enabled_ui(!shown.locked, |ui| {
-            for (id, text) in texts {
-                let mut on = shown.settings.iter().any(|(item, on)| *item == id && *on);
-                if ui.checkbox(&mut on, text).clicked() {
-                    self.send(Action::Choose(id));
-                }
-            }
-            ui.add_space(6.0);
-            ui.label(tr("Someone of another account starts helping with:"));
-            for (id, mode, text) in [
-                (
-                    MENU_HELP_BOTH,
-                    HelpMode::CodeAndAsk,
-                    tr("The code, then I allow it"),
-                ),
-                (
-                    MENU_HELP_CODE_ONLY,
-                    HelpMode::CodeOnly,
-                    tr("The code alone"),
-                ),
-                (
-                    MENU_HELP_ASK_ONLY,
-                    HelpMode::AskOnly,
-                    tr("No code: I allow each request"),
-                ),
-            ] {
-                if ui.radio(shown.help_mode == mode, text).clicked() {
-                    self.send(Action::Choose(id));
-                }
-            }
-            let mut files = shown.help_files;
-            if ui
-                .checkbox(&mut files, tr("Allow files while someone helps"))
-                .clicked()
-            {
-                self.send(Action::Choose(MENU_HELP_FILES));
-            }
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                let code = if shown.fixed_code {
-                    tr("Remove the fixed help code")
-                } else {
-                    tr("Fixed help code...")
-                };
-                if ui.button(code).clicked() {
-                    self.send(Action::Choose(MENU_FIXED_CODE));
-                }
-                let password = if shown.password {
-                    tr("Remove the settings password")
-                } else {
-                    tr("Lock settings with a password...")
-                };
-                if ui.button(password).clicked() {
-                    self.send(Action::Choose(MENU_PASSWORD));
-                }
-            });
-        });
+        use crate::settings::{Control, Tab};
         ui.horizontal(|ui| {
-            if ui.button(tr("Check for updates")).clicked() {
-                self.send(Action::Choose(MENU_UPDATE_CHECK));
-            }
-            if ui.button(tr("Wake-on-LAN check...")).clicked() {
-                self.send(Action::Choose(MENU_WOL_CHECK));
+            for tab in Tab::ALL {
+                let title = egui::RichText::new(tab.title()).size(16.0);
+                if ui.selectable_label(shown.tab == tab, title).clicked()
+                    && let Ok(mut state) = self.shown.lock()
+                {
+                    state.tab = tab;
+                }
+                ui.add_space(12.0);
             }
         });
-        ui.add_space(6.0);
-        ui.label(format!("Queqiao {}", shown.version));
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_enabled_ui(!shown.locked, |ui| {
+                    let rows = crate::settings::rows(shown.tab, &shown.settings);
+                    for (index, row) in rows.iter().enumerate() {
+                        if index > 0 && !row.sub {
+                            ui.add_space(8.0);
+                        }
+                        let frame = egui::Frame::group(ui.style())
+                            .corner_radius(10)
+                            .inner_margin(egui::Margin::symmetric(14, 10));
+                        frame.show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                if row.sub {
+                                    ui.add_space(24.0);
+                                }
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new(&row.title).size(14.5));
+                                    if !row.detail.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&row.detail).weak().size(12.5),
+                                        );
+                                    }
+                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| match &row.control {
+                                        Control::Switch { id, on } => {
+                                            if switch(ui, *on).clicked() {
+                                                self.send(Action::Choose(*id));
+                                            }
+                                            ui.label(
+                                                egui::RichText::new(if *on {
+                                                    tr("On")
+                                                } else {
+                                                    tr("Off")
+                                                })
+                                                .weak(),
+                                            );
+                                        }
+                                        Control::Choice { value, options } => {
+                                            egui::ComboBox::from_id_salt((
+                                                "settings choice",
+                                                index,
+                                            ))
+                                            .selected_text(value)
+                                            .width(190.0)
+                                            .show_ui(
+                                                ui,
+                                                |ui| {
+                                                    for (id, label, chosen) in options {
+                                                        if ui
+                                                            .selectable_label(*chosen, label)
+                                                            .clicked()
+                                                        {
+                                                            self.send(Action::Choose(*id));
+                                                        }
+                                                    }
+                                                },
+                                            );
+                                        }
+                                        Control::Buttons(buttons) => {
+                                            for (id, label) in buttons.iter().rev() {
+                                                if ui.button(label).clicked() {
+                                                    self.send(Action::Choose(*id));
+                                                }
+                                            }
+                                        }
+                                        Control::Keys { id, keys } => {
+                                            if ui.button("✏").on_hover_text(tr("Change")).clicked()
+                                            {
+                                                self.send(Action::Choose(*id));
+                                            }
+                                            if keys.is_empty() {
+                                                ui.label(egui::RichText::new(tr("Not set")).weak());
+                                            }
+                                            for key in keys.iter().rev() {
+                                                ui.label(
+                                                    egui::RichText::new(format!(" {key} "))
+                                                        .color(egui::Color32::from_rgb(
+                                                            0x3D, 0x5F, 0xAE,
+                                                        ))
+                                                        .background_color(egui::Color32::from_rgb(
+                                                            0xE8, 0xED, 0xFB,
+                                                        )),
+                                                );
+                                                ui.add_space(4.0);
+                                            }
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                    }
+                });
+            });
     }
+}
+
+/// A switch as Settings shows it (Windows draws the same): blue and to the right when on.
+fn switch(ui: &mut egui::Ui, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(42.0, 22.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let t = ui.ctx().animate_bool(response.id, on);
+        let radius = rect.height() / 2.0;
+        let fill = if on {
+            egui::Color32::from_rgb(0x3D, 0x5F, 0xAE)
+        } else {
+            egui::Color32::from_rgb(0xB6, 0xBB, 0xC9)
+        };
+        ui.painter().rect_filled(rect, radius, fill);
+        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+        ui.painter().circle_filled(
+            egui::pos2(x, rect.center().y),
+            radius - 4.0,
+            egui::Color32::WHITE,
+        );
+    }
+    response
 }
 
 impl View for MainView {
@@ -965,6 +1088,12 @@ impl View for MainView {
         let Ok(shown) = self.shown.lock().map(|shown| shown.clone()) else {
             return true;
         };
+        // The title in the language in use (it can change in Settings while the window is open).
+        let title = tr("Queqiao");
+        if self.title != title {
+            self.title = title;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.to_string()));
+        }
         egui::SidePanel::left("pages")
             .resizable(false)
             .show(ctx, |ui| {

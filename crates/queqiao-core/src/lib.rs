@@ -4,6 +4,7 @@
 //! start-up, and the test switch that forces fallback paths. Planned (docs/DESIGN.md): identity.
 
 pub mod account;
+pub mod hotkeys;
 pub mod invitation;
 /// A Linux account's password, checked by PAM (the lock screen's gate, the sign-in screen).
 #[cfg(target_os = "linux")]
@@ -28,6 +29,38 @@ pub const VERSION: &str = match option_env!("QUEQIAO_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
+
+/// `%APPDATA%\Queqiao`, where this person's Queqiao keeps its files (made if missing).
+#[cfg(windows)]
+pub fn config_folder() -> std::io::Result<std::path::PathBuf> {
+    let base =
+        std::env::var_os("APPDATA").ok_or_else(|| std::io::Error::other("APPDATA is not set"))?;
+    let folder = std::path::PathBuf::from(base).join("Queqiao");
+    std::fs::create_dir_all(&folder)?;
+    Ok(folder)
+}
+
+/// `$XDG_CONFIG_HOME/queqiao` (`~/.config/queqiao`), where this person's Queqiao keeps its files: made for this person
+/// only (0700), as `%APPDATA%` is.
+#[cfg(unix)]
+pub fn config_folder() -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })
+        .ok_or_else(|| std::io::Error::other("neither XDG_CONFIG_HOME nor HOME is set"))?;
+    let folder = base.join("queqiao");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&folder)?;
+    // Made earlier by something else with wider rights: this person's only.
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))?;
+    Ok(folder)
+}
 
 /// One-line start-up banner: program name, workspace version, protocol version.
 pub fn banner(program: &str) -> String {

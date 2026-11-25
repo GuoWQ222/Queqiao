@@ -26,6 +26,7 @@ mod presence;
 mod present;
 #[cfg(windows)]
 mod privacy;
+mod settings;
 #[cfg(windows)]
 mod shortcuts;
 mod tray;
