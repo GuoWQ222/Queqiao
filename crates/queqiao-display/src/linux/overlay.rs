@@ -60,8 +60,12 @@ fn fonts() -> &'static [FontArc] {
         fonts.extend(
             super::gui::system_font_files()
                 .into_iter()
-                .filter_map(|path| std::fs::read(path).ok())
-                .filter_map(|bytes| FontArc::try_from_vec(bytes).ok()),
+                .filter_map(|(path, index)| Some((std::fs::read(path).ok()?, index)))
+                .filter_map(|(bytes, index)| {
+                    ab_glyph::FontVec::try_from_vec_and_index(bytes, index)
+                        .ok()
+                        .map(FontArc::new)
+                }),
         );
         fonts
     })

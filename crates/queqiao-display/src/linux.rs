@@ -16,9 +16,11 @@ mod gui;
 mod icon;
 mod lists;
 mod login;
+mod main_view;
 mod overlay;
 mod presence;
 mod present;
+mod theme;
 mod window;
 
 pub use banner::{ConsentPrompt, SessionBanner};

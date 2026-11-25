@@ -15,6 +15,7 @@ use queqiao_core::text::{tr, trf};
 
 use super::banner::{ConsentPrompt, SessionBanner};
 use super::gui::{self, Opened, View};
+use super::main_view::MainView;
 use super::window::Hwnd;
 use super::{Error, Result, dialogs};
 use crate::model::{
@@ -71,7 +72,7 @@ pub fn show_running_main() -> bool {
 }
 
 /// What the windows and the tray asked for, handled in `next`.
-enum Action {
+pub(super) enum Action {
     Choose(u16),
     OpenMain,
     Connect(String),
@@ -91,18 +92,18 @@ enum Action {
 
 /// What the main window shows (kept also while it is closed).
 #[derive(Clone)]
-struct Shown {
-    page: Page,
-    user: String,
-    account: AccountState,
-    devices: Vec<MainDevice>,
-    transfers: Vec<TransferRow>,
-    connections: Vec<ConnectionRow>,
-    help: Option<(String, String)>,
+pub(super) struct Shown {
+    pub(super) page: Page,
+    pub(super) user: String,
+    pub(super) account: AccountState,
+    pub(super) devices: Vec<MainDevice>,
+    pub(super) transfers: Vec<TransferRow>,
+    pub(super) connections: Vec<ConnectionRow>,
+    pub(super) help: Option<(String, String)>,
     /// The Settings page: what it shows (settings.rs), its tab; locked while someone of another account controls.
-    settings: crate::settings::Shown,
-    tab: crate::settings::Tab,
-    locked: bool,
+    pub(super) settings: crate::settings::Shown,
+    pub(super) tab: crate::settings::Tab,
+    pub(super) locked: bool,
 }
 
 /// The dialogs the tray model asks through (tray.rs).
@@ -329,15 +330,11 @@ impl Presence {
         if !self.main_open.load(Ordering::Relaxed) {
             self.main = None;
             self.main_open.store(true, Ordering::Relaxed);
-            let view = MainView {
-                shown: self.shown.clone(),
-                sender: self.sender.clone(),
-                title: tr("Queqiao"),
-                help_id: String::new(),
-                code: String::new(),
-                selected: None,
-                open: self.main_open.clone(),
-            };
+            let view = MainView::new(
+                self.shown.clone(),
+                self.sender.clone(),
+                self.main_open.clone(),
+            );
             self.main = Some(gui::open(Box::new(view))?);
         }
         gui::repaint();
@@ -755,402 +752,6 @@ impl View for HelpView {
 
     fn closed(&mut self) {
         let _ = self.sender.send(Action::HelpClose);
-    }
-}
-
-/// The main window: the account's devices, help, transfers, settings (the same pages as on Windows).
-struct MainView {
-    shown: Arc<Mutex<Shown>>,
-    sender: Sender<Action>,
-    /// The title the window has (tr("Queqiao") in the language it was set in).
-    title: &'static str,
-    help_id: String,
-    code: String,
-    selected: Option<String>,
-    /// Shared with Presence: false once closed.
-    open: Arc<AtomicBool>,
-}
-
-impl MainView {
-    fn send(&self, action: Action) {
-        let _ = self.sender.send(action);
-    }
-
-    fn devices(&mut self, ui: &mut egui::Ui, shown: &Shown) {
-        if shown.account == AccountState::LoggedOut && shown.devices.is_empty() {
-            ui.label(tr("Log in to see your devices."));
-            return;
-        }
-        if shown.devices.is_empty() {
-            ui.label(tr(
-                "No devices yet: log in to this account on another PC, and it appears here.",
-            ));
-            return;
-        }
-        ui.heading(tr("My devices"));
-        for device in &shown.devices {
-            let state = if device.this_pc {
-                tr("This PC")
-            } else if device.online {
-                tr("Online")
-            } else {
-                tr("Offline")
-            };
-            let selected = self.selected.as_deref() == Some(device.id.as_str());
-            if ui
-                .selectable_label(selected, format!("{}  ·  {state}", device.name))
-                .clicked()
-            {
-                self.selected = Some(device.id.clone());
-            }
-        }
-        let Some(device) = self
-            .selected
-            .as_ref()
-            .and_then(|id| shown.devices.iter().find(|d| &d.id == id))
-        else {
-            return;
-        };
-        ui.separator();
-        ui.heading(&device.name);
-        if device.this_pc {
-            ui.label(tr("This PC: your other devices can control it."));
-            return;
-        }
-        ui.label(if device.online {
-            tr("Online: you can connect now.")
-        } else {
-            tr("Offline: a device of yours on its network can wake it.")
-        });
-        ui.horizontal(|ui| {
-            if device.online {
-                if ui.button(tr("Connect")).clicked() {
-                    self.send(Action::Connect(device.id.clone()));
-                }
-                if ui.button(tr("Send files")).clicked() {
-                    self.send(Action::Files(device.id.clone()));
-                }
-                if ui.button(tr("Command line")).clicked() {
-                    self.send(Action::Terminal(device.id.clone()));
-                }
-            } else if ui.button(tr("Wake up")).clicked() {
-                self.send(Action::Wake(device.id.clone()));
-            }
-            if ui.button(tr("Remove from this account...")).clicked() {
-                self.send(Action::Remove(device.id.clone()));
-            }
-        });
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new(tr("Recent connections")).strong());
-        let rows: Vec<&ConnectionRow> = shown
-            .connections
-            .iter()
-            .filter(|row| row.device_id == device.id)
-            .collect();
-        if rows.is_empty() {
-            ui.label(tr("No connections from this PC yet."));
-        }
-        for row in rows {
-            ui.label(format!("{}   {}", row.when, row.length));
-        }
-    }
-
-    fn help(&mut self, ui: &mut egui::Ui, shown: &Shown) {
-        ui.heading(tr("Let someone help this PC"));
-        match &shown.help {
-            Some((help_id, code)) => {
-                ui.label(format!(
-                    "{}   {}",
-                    tr("Help ID"),
-                    queqiao_core::invitation::spaced_id(help_id)
-                ));
-                ui.label(format!(
-                    "{}   {}",
-                    tr("Code"),
-                    queqiao_core::invitation::halved_code(code)
-                ));
-                ui.horizontal(|ui| {
-                    if ui.button(tr("Copy invitation")).clicked() {
-                        self.send(Action::CopyInvitation);
-                    }
-                    if ui.button(tr("New code")).clicked() {
-                        self.send(Action::HelpNewCode);
-                    }
-                    if ui.button(tr("Stop")).clicked() {
-                        self.send(Action::HelpClose);
-                    }
-                });
-            }
-            None => {
-                if ui.button(tr("Let someone help me...")).clicked() {
-                    self.send(Action::Choose(MENU_HELP));
-                }
-            }
-        }
-        if ui.button(tr("New help ID")).clicked() {
-            self.send(Action::NewHelpId);
-        }
-        ui.separator();
-        ui.heading(tr("Help someone"));
-        ui.label(tr("Type the help ID and the code you were given."));
-        ui.horizontal(|ui| {
-            ui.label(tr("Help ID"));
-            ui.text_edit_singleline(&mut self.help_id);
-        });
-        ui.horizontal(|ui| {
-            ui.label(tr("Code"));
-            ui.text_edit_singleline(&mut self.code);
-        });
-        if ui.button(tr("Connect")).clicked() && !self.help_id.trim().is_empty() {
-            self.send(Action::HelpSomeone {
-                help_id: self.help_id.trim().to_string(),
-                code: self.code.trim().to_string(),
-            });
-        }
-    }
-
-    fn transfers(&mut self, ui: &mut egui::Ui, shown: &Shown) {
-        ui.horizontal(|ui| {
-            if ui.button(tr("Open received files")).clicked() {
-                self.send(Action::OpenReceived);
-            }
-            if ui.button(tr("Clear the list")).clicked() {
-                self.send(Action::ClearTransfers);
-            }
-        });
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for row in &shown.transfers {
-                ui.label(format!(
-                    "{} {}   {}",
-                    if row.received { "↓" } else { "↑" },
-                    row.name,
-                    row.detail
-                ));
-            }
-        });
-    }
-
-    /// Settings: the tabs, then the chosen tab's cards (settings.rs), as on Windows.
-    fn settings(&mut self, ui: &mut egui::Ui, shown: &Shown) {
-        use crate::settings::{Control, Tab};
-        ui.horizontal(|ui| {
-            for tab in Tab::ALL {
-                let title = egui::RichText::new(tab.title()).size(16.0);
-                if ui.selectable_label(shown.tab == tab, title).clicked()
-                    && let Ok(mut state) = self.shown.lock()
-                {
-                    state.tab = tab;
-                }
-                ui.add_space(12.0);
-            }
-        });
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_enabled_ui(!shown.locked, |ui| {
-                    let rows = crate::settings::rows(shown.tab, &shown.settings);
-                    for (index, row) in rows.iter().enumerate() {
-                        if index > 0 && !row.sub {
-                            ui.add_space(8.0);
-                        }
-                        let frame = egui::Frame::group(ui.style())
-                            .corner_radius(10)
-                            .inner_margin(egui::Margin::symmetric(14, 10));
-                        frame.show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                if row.sub {
-                                    ui.add_space(24.0);
-                                }
-                                ui.vertical(|ui| {
-                                    ui.label(egui::RichText::new(&row.title).size(14.5));
-                                    if !row.detail.is_empty() {
-                                        ui.label(
-                                            egui::RichText::new(&row.detail).weak().size(12.5),
-                                        );
-                                    }
-                                });
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| match &row.control {
-                                        Control::Switch { id, on } => {
-                                            if switch(ui, *on).clicked() {
-                                                self.send(Action::Choose(*id));
-                                            }
-                                            ui.label(
-                                                egui::RichText::new(if *on {
-                                                    tr("On")
-                                                } else {
-                                                    tr("Off")
-                                                })
-                                                .weak(),
-                                            );
-                                        }
-                                        Control::Choice { value, options } => {
-                                            egui::ComboBox::from_id_salt((
-                                                "settings choice",
-                                                index,
-                                            ))
-                                            .selected_text(value)
-                                            .width(190.0)
-                                            .show_ui(
-                                                ui,
-                                                |ui| {
-                                                    for (id, label, chosen) in options {
-                                                        if ui
-                                                            .selectable_label(*chosen, label)
-                                                            .clicked()
-                                                        {
-                                                            self.send(Action::Choose(*id));
-                                                        }
-                                                    }
-                                                },
-                                            );
-                                        }
-                                        Control::Buttons(buttons) => {
-                                            for (id, label) in buttons.iter().rev() {
-                                                if ui.button(label).clicked() {
-                                                    self.send(Action::Choose(*id));
-                                                }
-                                            }
-                                        }
-                                        Control::Keys { id, keys } => {
-                                            if ui.button("✏").on_hover_text(tr("Change")).clicked()
-                                            {
-                                                self.send(Action::Choose(*id));
-                                            }
-                                            if keys.is_empty() {
-                                                ui.label(egui::RichText::new(tr("Not set")).weak());
-                                            }
-                                            for key in keys.iter().rev() {
-                                                ui.label(
-                                                    egui::RichText::new(format!(" {key} "))
-                                                        .color(egui::Color32::from_rgb(
-                                                            0x3D, 0x5F, 0xAE,
-                                                        ))
-                                                        .background_color(egui::Color32::from_rgb(
-                                                            0xE8, 0xED, 0xFB,
-                                                        )),
-                                                );
-                                                ui.add_space(4.0);
-                                            }
-                                        }
-                                    },
-                                );
-                            });
-                        });
-                    }
-                });
-            });
-    }
-}
-
-/// A switch as Settings shows it (Windows draws the same): blue and to the right when on.
-fn switch(ui: &mut egui::Ui, on: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(42.0, 22.0), egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let t = ui.ctx().animate_bool(response.id, on);
-        let radius = rect.height() / 2.0;
-        let fill = if on {
-            egui::Color32::from_rgb(0x3D, 0x5F, 0xAE)
-        } else {
-            egui::Color32::from_rgb(0xB6, 0xBB, 0xC9)
-        };
-        ui.painter().rect_filled(rect, radius, fill);
-        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
-        ui.painter().circle_filled(
-            egui::pos2(x, rect.center().y),
-            radius - 4.0,
-            egui::Color32::WHITE,
-        );
-    }
-    response
-}
-
-impl View for MainView {
-    fn builder(&self) -> egui::ViewportBuilder {
-        let mut builder = egui::ViewportBuilder::default()
-            .with_title(tr("Queqiao"))
-            .with_inner_size([760.0, 520.0])
-            .with_min_inner_size([560.0, 400.0]);
-        if let Some((width, height, rgba)) = super::icon::icon(64) {
-            builder = builder.with_icon(egui::IconData {
-                rgba,
-                width,
-                height,
-            });
-        }
-        builder
-    }
-
-    fn draw(&mut self, ctx: &egui::Context) -> bool {
-        if !self.open.load(Ordering::Relaxed) {
-            return false;
-        }
-        let Ok(shown) = self.shown.lock().map(|shown| shown.clone()) else {
-            return true;
-        };
-        // The title in the language in use (it can change in Settings while the window is open).
-        let title = tr("Queqiao");
-        if self.title != title {
-            self.title = title;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.to_string()));
-        }
-        egui::SidePanel::left("pages")
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.add_space(8.0);
-                ui.heading(tr("Queqiao"));
-                ui.add_space(8.0);
-                for page in Page::ALL {
-                    if ui
-                        .selectable_label(shown.page == page, page.title())
-                        .clicked()
-                        && let Ok(mut state) = self.shown.lock()
-                    {
-                        state.page = page;
-                    }
-                }
-            });
-        egui::TopBottomPanel::top("account").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let line = match shown.account {
-                    AccountState::LoggedOut => tr("Not logged in").to_string(),
-                    AccountState::Offline => {
-                        format!("{}  ·  {}", shown.user, tr("Cannot reach the server"))
-                    }
-                    AccountState::Online => shown.user.clone(),
-                };
-                ui.label(line);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let button = if shown.account == AccountState::LoggedOut {
-                        tr("Log in")
-                    } else {
-                        tr("Log out")
-                    };
-                    if ui.button(button).clicked() {
-                        self.send(Action::Account);
-                    }
-                });
-            });
-        });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label(egui::RichText::new(shown.page.subtitle()).weak());
-            ui.add_space(8.0);
-            match shown.page {
-                Page::Devices => self.devices(ui, &shown),
-                Page::Help => self.help(ui, &shown),
-                Page::Transfers => self.transfers(ui, &shown),
-                Page::Settings => self.settings(ui, &shown),
-            }
-        });
-        true
-    }
-
-    fn closed(&mut self) {
-        // Closed: Queqiao goes on in the tray (as on Windows).
-        self.open.store(false, Ordering::Relaxed);
     }
 }
 

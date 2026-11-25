@@ -4,20 +4,32 @@
 /// assets/queqiao.ico, compiled in.
 const ICO: &[u8] = include_bytes!("../../../../assets/queqiao.ico");
 
+/// assets/magpie_spread.ico: the magpie with its wings spread, for the bridge on the main window's card.
+const SPREAD: &[u8] = include_bytes!("../../../../assets/magpie_spread.ico");
+
 /// The icon as `(width, height, RGBA)`, the image nearest to `size` (larger preferred).
 pub(crate) fn icon(size: u32) -> Option<(u32, u32, Vec<u8>)> {
-    let count = usize::from(u16::from_le_bytes(ICO.get(4..6)?.try_into().ok()?));
+    image(ICO, size)
+}
+
+/// The magpie with its wings spread, as `icon` gives the icon.
+pub(crate) fn spread_magpie(size: u32) -> Option<(u32, u32, Vec<u8>)> {
+    image(SPREAD, size)
+}
+
+fn image(ico: &[u8], size: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let count = usize::from(u16::from_le_bytes(ico.get(4..6)?.try_into().ok()?));
     let mut entries = Vec::new();
     for index in 0..count {
         let at = 6 + index * 16;
-        let entry = ICO.get(at..at + 16)?;
+        let entry = ico.get(at..at + 16)?;
         let side = |byte: u8| if byte == 0 { 256 } else { u32::from(byte) };
         let length = u32::from_le_bytes(entry[8..12].try_into().ok()?) as usize;
         let offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
         entries.push((
             side(entry[0]),
             side(entry[1]),
-            ICO.get(offset..offset + length)?,
+            ico.get(offset..offset + length)?,
         ));
     }
     let (width, height, data) = entries

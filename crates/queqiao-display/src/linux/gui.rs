@@ -87,6 +87,7 @@ fn start() -> Result<Gui, String> {
                 options,
                 Box::new(move |creation| {
                     add_system_fonts(&creation.egui_ctx);
+                    creation.egui_ctx.set_visuals(super::theme::visuals());
                     let _ = ready.send(Ok(creation.egui_ctx.clone()));
                     Ok(Box::new(App {
                         incoming,
@@ -260,36 +261,74 @@ fn take_picture(ctx: &egui::Context, sender: Sender<Picture>) {
 }
 
 /// The system's font files for Chinese and Japanese (found through fontconfig's fc-match).
-pub(crate) fn system_font_files() -> Vec<String> {
-    ["sans-serif:lang=zh-cn", "sans-serif:lang=ja"]
-        .into_iter()
+pub(crate) fn system_font_files() -> Vec<(String, u32)> {
+    font_files(&["sans-serif:lang=zh-cn", "sans-serif:lang=ja"])
+}
+
+/// The files fontconfig picks for `patterns`, each with the face's index in it (a .ttc holds several: Noto Sans CJK
+/// SC is not the first).
+fn font_files(patterns: &[&str]) -> Vec<(String, u32)> {
+    patterns
+        .iter()
         .filter_map(|pattern| {
             std::process::Command::new("fc-match")
-                .args(["-f", "%{file}", pattern])
+                .args(["-f", "%{file}\n%{index}", pattern])
                 .output()
                 .ok()
                 .filter(|out| out.status.success())
                 .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
-                .filter(|path| !path.is_empty())
+                .and_then(|text| {
+                    let mut lines = text.lines();
+                    let path = lines.next()?.to_string();
+                    let index = lines
+                        .next()
+                        .and_then(|i| i.trim().parse().ok())
+                        .unwrap_or(0);
+                    (!path.is_empty()).then_some((path, index))
+                })
         })
         .collect()
 }
 
-/// The system's fonts for Chinese and Japanese, after egui's own.
+/// The system's fonts for Chinese and Japanese, after egui's own; and a bold family (theme::BOLD: the system's bold
+/// sans and bold Chinese, then the regular faces), for titles as Windows draws them in Segoe UI Semibold.
 fn add_system_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    for (index, path) in system_font_files().into_iter().enumerate() {
-        let name = format!("system-{index}");
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
+    let add = |fonts: &mut egui::FontDefinitions, name: String, path: &str, index: u32| -> bool {
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
         };
-        fonts.font_data.insert(
-            name.clone(),
-            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-        );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts.families.entry(family).or_default().push(name.clone());
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = index;
+        fonts.font_data.insert(name, std::sync::Arc::new(data));
+        true
+    };
+    for (index, (path, face)) in system_font_files().into_iter().enumerate() {
+        let name = format!("system-{index}");
+        if add(&mut fonts, name.clone(), &path, face) {
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push(name.clone());
+            }
         }
     }
+    let mut bold = Vec::new();
+    for (index, (path, face)) in font_files(&["sans-serif:bold", "sans-serif:lang=zh-cn:bold"])
+        .into_iter()
+        .enumerate()
+    {
+        let name = format!("bold-{index}");
+        if add(&mut fonts, name.clone(), &path, face) {
+            bold.push(name);
+        }
+    }
+    let proportional = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    bold.extend(proportional);
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(super::theme::BOLD.into()), bold);
     ctx.set_fonts(fonts);
 }
