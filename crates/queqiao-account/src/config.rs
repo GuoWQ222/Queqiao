@@ -108,8 +108,20 @@ impl DeviceIdentity {
     }
 }
 
+/// The account server a new installation's login form offers, and its certificate's fingerprint: given when Queqiao
+/// is built for a server (QUEQIAO_DEFAULT_SERVER as host:port, QUEQIAO_DEFAULT_PIN), else empty (typed in the form).
+/// The person can still type another server there.
+pub const DEFAULT_SERVER: &str = match option_env!("QUEQIAO_DEFAULT_SERVER") {
+    Some(server) => server,
+    None => "",
+};
+pub const DEFAULT_PIN: &str = match option_env!("QUEQIAO_DEFAULT_PIN") {
+    Some(pin) => pin,
+    None => "",
+};
+
 /// The login of one program (agent or viewer) on this PC.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SavedLogin {
     /// host:port of queqiao-server.
     pub server: String,
@@ -124,6 +136,17 @@ struct StoredLogin {
     pin: String,
     /// The refresh token, DPAPI-encrypted, hex.
     refresh_token: Option<String>,
+}
+
+/// No login yet: the server Queqiao was built for, if any.
+impl Default for SavedLogin {
+    fn default() -> Self {
+        SavedLogin {
+            server: DEFAULT_SERVER.to_string(),
+            pin: DEFAULT_PIN.to_string(),
+            refresh_token: None,
+        }
+    }
 }
 
 impl SavedLogin {
