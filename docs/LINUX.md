@@ -84,9 +84,11 @@ cc4-1 is a container: Ubuntu 22.04, root, 4 x RTX 4090 with NVIDIA's encode/deco
 `/dev/uinput`, no sound card, no monitor. There: the build, the unit tests, X11 sessions on Xvfb (capture, XTest,
 the X11 clipboard), Wayland on headless compositors (sway + xdg-desktop-portal-wlr: the ScreenCast portal and
 PipeWire; GNOME's mutter + xdg-desktop-portal-gnome: the RemoteDesktop portal and its dialog; the same with GNOME 46
-in an Ubuntu 24.04 root entered with proot, scripts/noble_root_linux.sh), PulseAudio with null sinks, NVENC/NVDEC on
-the 4090s, Linux agent and viewer against each other, and the .deb built and installed in a clean container. Not there
-(a real Linux PC is needed): KDE's portal, GNOME Shell itself (it needs systemd-logind),
+in an Ubuntu 24.04 root entered with proot, scripts/noble_root_linux.sh; KDE's KWin 5.27 + xdg-desktop-portal-kde in
+that root: the portal session and input, not its pictures), PulseAudio with null sinks, NVENC/NVDEC on the 4090s, Linux
+agent and viewer against each other, and the .deb built and installed in a clean container. Not there (a real Linux PC
+is needed): KDE's screen-cast pictures (KWin's virtual backend records none), GNOME Shell itself (it needs
+systemd-logind),
 VA-API on Intel/AMD, uinput, the systemd service on a real greeter and lock screen, KMS capture, real sound devices. Windows <-> Linux sessions need both on one network (or a reachable test server).
 
 ## Where it stands (2026-11-24)
@@ -133,7 +135,9 @@ it). On wlroots, xdg-desktop-portal-wlr (0.5, Ubuntu 22.04) asks for every frame
 may give the first change to a capture of an earlier session: on a still screen a session got no picture and ended
 after 5 s. The capture now waits only for the format PipeWire agrees on, and until its first picture commits a 1 x 1
 fully transparent overlay surface (the layer shell; no input) every 250 ms: the screen counts as changed, nothing
-shows (wayland_nudge.rs; the sway test checks it with two captures of a still screen in a row). The GUI runs natively
+shows (wayland_nudge.rs; the sway test checks it with two captures of a still screen in a row). The session's first
+picture (its snapshot, taken right after the capture opens) waits up to 5 s with the same pokes: KWin also sends none
+for a still screen. The GUI runs natively
 on Wayland (its hidden root window is a 4 x 4 transparent window there: Wayland hides no
 window; mutter refuses smaller); the session window runs through XWayland and shows its last picture again where it
 was uncovered or resized (the X server keeps none, and a still remote screen sends no new one: the session bar left a
@@ -154,8 +158,15 @@ That root (Ubuntu 24.04 on cc4-1, a container without mount rights or user names
 5.1 does not know statx), its programs as the test user from the start (proot cannot follow a change of user), with a
 system bus that keeps its user, and a library in PipeWire alone answering its sandbox check (/proc/<pid>/root, which
 proot cannot open) with "permission denied", which PipeWire takes for "not sandboxed": all for the test bench only.
-Not yet on Wayland: KDE (its portal is the same, untested), the pointer's shape apart from the picture, the banner at
-the top (Wayland programs cannot place themselves: it floats where the compositor puts it).
+KDE (Plasma 5.27, Ubuntu 24.04, in the same root; run_wayland_linux.sh DESKTOP=kde NOBLE=1): the RemoteDesktop portal
+session opens and input reaches a window (five places, a click, F24). Plasma 5.27 shows no dialog to a program that is
+not sandboxed and keeps no answer (KDE bug 479013; Plasma 6 asks, and 6.3 can pre-authorize): Queqiao's own consent
+(the account's devices allowed, "ask before a session") and its banner are what the person sees there. KWin's virtual
+backend records no frames for screen casts (its buffers are made, the stream runs, nothing comes whatever changes on
+screen), so KDE's pictures are untested here; the session's own check (the probe) stands in for the agent there.
+The KEY_UNKNOWN press that brings in the keyboard reaches the focused program on KDE (it has a keyboard already):
+nothing acts on it. Not yet on Wayland: KDE's pictures (a real KDE desktop), the pointer's shape apart from the
+picture, the banner at the top (Wayland programs cannot place themselves: it floats where the compositor puts it).
 
 Not yet on Linux: AV1 and 10-bit encoding, VA-API, the privacy screen and input block, the service and packages.
 

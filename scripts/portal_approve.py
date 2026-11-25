@@ -98,7 +98,8 @@ def once(remember):
     desktop = pyatspi.Registry.getDesktop(0)
     for app_index in range(desktop.childCount):
         app = desktop.getChildAtIndex(app_index)
-        if app is None or "portal-gnome" not in (app.name or ""):
+        # The desktop's portal backend: GNOME's or KDE's.
+        if app is None or not any(name in (app.name or "") for name in ("portal-gnome", "portal-kde")):
             continue
         for window_index in range(app.childCount):
             window = app.getChildAtIndex(window_index)

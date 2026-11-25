@@ -7,11 +7,15 @@
 #   xdg-desktop-portal-gnome: ScreenCast and RemoteDesktop, whose dialog a person answers (the tests answer it with
 #   scripts/portal_approve.py). GNOME Shell itself needs logind, which a container without systemd lacks; the portals
 #   and the compositor's screen-cast and remote-desktop services are mutter's, as under GNOME Shell.
-# Everything lives in its own runtime folder, as the test user (sway refuses root; the same user for GNOME).
-# Usage: [DESKTOP=gnome] scripts/wayland_display_linux.sh start | stop | status. `start` prints the environment to use
-#   (also kept in $folder/env: `. /tmp/queqiao_wayland/env` before running a program on the display).
-# Needs: sway, xdg-desktop-portal-wlr (sway); mutter, xdg-desktop-portal-gnome (gnome); xwayland, pipewire,
-#   wireplumber, xdg-desktop-portal, dbus.
+# - kde: KWin, KDE's compositor, on its virtual backend (software rendering; no XWayland), xdg-desktop-portal-kde:
+#   ScreenCast and RemoteDesktop through KWin's own protocols, and KDE's dialog (answered the same way; Qt's
+#   accessibility is turned on for it). Plasma's shell is not needed for those.
+# Everything lives in its own runtime folder, as the test user (sway refuses root; the same user for the others).
+# Usage: [DESKTOP=gnome|kde] scripts/wayland_display_linux.sh start | stop | status. `start` prints the environment
+#   to use (also kept in $folder/env: `. /tmp/queqiao_wayland/env` before running a program on the display).
+# Needs: sway, xdg-desktop-portal-wlr (sway); mutter, xdg-desktop-portal-gnome (gnome); kwin-wayland,
+#   xdg-desktop-portal-kde (kde: scripts/noble_root_linux.sh has them); xwayland, pipewire, wireplumber,
+#   xdg-desktop-portal, dbus.
 set -u
 folder=${QUEQIAO_WAYLAND_FOLDER:-/tmp/queqiao_wayland}
 size=${WAYLAND_SIZE:-1920x1080}
@@ -27,7 +31,7 @@ if [ "$(id -u)" = 0 ]; then
     if [ -e "$folder" ] && [ "$(stat -c %U "$folder")" != "$user" ]; then
         rm -rf "$folder"
     fi
-    if [ "$desktop" = gnome ] && ! [ -S /run/dbus/system_bus_socket ]; then
+    if [ "$desktop" != sway ] && ! [ -S /run/dbus/system_bus_socket ]; then
         mkdir -p /run/dbus && dbus-daemon --system --fork
     fi
     copy=/tmp/queqiao_wayland_display.sh
@@ -56,20 +60,21 @@ case "${1:-}" in
         fi
         exit 0 ;;
     start) ;;
-    *) echo "usage: [DESKTOP=sway|gnome] $0 start | stop | status"; exit 2 ;;
+    *) echo "usage: [DESKTOP=sway|gnome|kde] $0 start | stop | status"; exit 2 ;;
 esac
-case "$desktop" in sway | gnome) ;; *) echo "WAYLAND_FAIL no desktop $desktop (sway or gnome)"; exit 2 ;; esac
+case "$desktop" in sway | gnome | kde) ;; *) echo "WAYLAND_FAIL no desktop $desktop (sway, gnome or kde)"; exit 2 ;; esac
 
 stop
 rm -rf "$folder"
 mkdir -p -m 700 "$folder/run"
 mkdir -p "$folder/config/sway" "$folder/config/xdg-desktop-portal-wlr" "$folder/log"
 export XDG_RUNTIME_DIR=$folder/run XDG_CONFIG_HOME=$folder/config XDG_SESSION_TYPE=wayland
-if [ "$desktop" = sway ]; then
-    export XDG_CURRENT_DESKTOP=sway
-else
-    export XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_DESKTOP=gnome
-fi
+case "$desktop" in
+    sway) export XDG_CURRENT_DESKTOP=sway ;;
+    gnome) export XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_DESKTOP=gnome ;;
+    # Qt's accessibility on for every Qt program here: the tests answer KDE's dialog through it.
+    kde) export XDG_CURRENT_DESKTOP=KDE XDG_SESSION_DESKTOP=KDE KDE_FULL_SESSION=true QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 ;;
+esac
 
 # The session bus.
 eval "$(dbus-launch --sh-syntax)"
@@ -92,9 +97,14 @@ EOF
     WLR_BACKENDS=headless WLR_HEADLESS_OUTPUTS=1 WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
         setsid sway --unsupported-gpu --config "$folder/config/sway/config" > "$folder/log/compositor.log" 2>&1 \
         < /dev/null &
-else
+elif [ "$desktop" = gnome ]; then
     # Headless on a virtual monitor; mutter renders on the CPU where there is no GPU it can use.
     setsid mutter --headless --wayland --virtual-monitor "$size" > "$folder/log/compositor.log" 2>&1 < /dev/null &
+else
+    # The virtual backend: one output, no input devices, software rendering. Without XWayland: it crashed there
+    # (KWin 5.27 in the Ubuntu 24.04 root of scripts/noble_root_linux.sh), and the tests' programs are Wayland ones.
+    setsid kwin_wayland --virtual --width "${size%x*}" --height "${size#*x}" --no-lockscreen \
+        > "$folder/log/compositor.log" 2>&1 < /dev/null &
 fi
 echo $! >> "$folder/pids"
 for _ in $(seq 100); do
@@ -118,8 +128,11 @@ if [ "$desktop" = sway ]; then
     swaymsg exec "echo \$DISPLAY > $folder/x11-display" > /dev/null
     sleep 0.5
     x11=$(cat "$folder/x11-display" 2> /dev/null)
-else
+elif [ "$desktop" = gnome ]; then
     x11=$(grep -o 'Using public X11 display :[0-9]*' "$folder/log/compositor.log" | tail -1 | grep -o ':[0-9]*')
+else
+    # KDE here runs without XWayland (above).
+    x11=''
 fi
 dbus-update-activation-environment WAYLAND_DISPLAY DISPLAY="$x11" XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR XDG_CONFIG_HOME \
     XDG_SESSION_TYPE 2> /dev/null
@@ -136,8 +149,11 @@ echo $! >> "$folder/pids"
 sleep 0.5
 if [ "$desktop" = sway ]; then
     setsid /usr/libexec/xdg-desktop-portal-wlr -l DEBUG > "$folder/log/portal-backend.log" 2>&1 < /dev/null &
-else
+elif [ "$desktop" = gnome ]; then
     DISPLAY=$x11 setsid /usr/libexec/xdg-desktop-portal-gnome -v > "$folder/log/portal-backend.log" 2>&1 < /dev/null &
+else
+    kde_portal=$(ls /usr/libexec/xdg-desktop-portal-kde /usr/lib/*/libexec/xdg-desktop-portal-kde 2> /dev/null | head -1)
+    DISPLAY=$x11 setsid "$kde_portal" > "$folder/log/portal-backend.log" 2>&1 < /dev/null &
 fi
 echo $! >> "$folder/pids"
 sleep 0.5

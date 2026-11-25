@@ -8,10 +8,16 @@
 #   answers as a person would. The test window is scripts/wayland_test_window.py, a native GTK window full screen and
 #   white, started once the dialog is answered (so it is the newest window: in front, with the keyboard); the picture
 #   must be that white. (xev, an X11 window through XWayland, saw only some of the moves there.)
+# - kde (KWin, in the Ubuntu 24.04 root: NOBLE=1): KDE's portal. Plasma 5.27 asks no question of a program that is
+#   not sandboxed (KDE bug 479013; Plasma 6 does ask): a dialog, if one comes, must be answered, none is fine. KWin's
+#   virtual backend there records no frames for screen casts (its buffers are made, the stream runs, none comes,
+#   whatever changes on screen), so the session's picture cannot be checked: the probe
+#   (crates/queqiao-capture/examples/wayland_input_probe.rs) opens the same portal session as the agent and sends the
+#   input test, which must reach the test window.
 # The viewer runs on Xvfb :92 and connects by IP (M2, a test build); its input test (five pointer positions, a left
 # click, F24 down and up) must reach the test window, which logs what it gets.
 # Prints the reports and WAYLAND_LINUX_PASS or WAYLAND_LINUX_FAIL <why>.
-# NOBLE=1 (GNOME): the desktop in the Ubuntu 24.04 root of scripts/noble_root_linux.sh (GNOME 46, whose portal keeps
+# NOBLE=1 (GNOME, KDE): the desktop in the Ubuntu 24.04 root of scripts/noble_root_linux.sh (GNOME 46, whose portal keeps
 # the person's answer); the first session starts without a kept answer and the dialog's "remember" is ticked where
 # it has one. KEPT=1: a later session, which must start without a dialog, the agent offering the kept answer.
 # Usage: [DESKTOP=gnome [NOBLE=1 [KEPT=1]]] scripts/run_wayland_linux.sh (CARGO_TARGET_DIR and SECONDS_RUN from the
@@ -25,7 +31,8 @@ noble=${NOBLE:-}
 kept=${KEPT:-}
 py=/usr/bin/python3.10
 [ -n "$noble" ] && py=/usr/bin/python3
-if [ -n "$noble" ] && [ "$desktop" != gnome ]; then echo "WAYLAND_LINUX_FAIL the 24.04 root has GNOME only"; exit 0; fi
+if [ -n "$noble" ] && [ "$desktop" = sway ]; then echo "WAYLAND_LINUX_FAIL the 24.04 root has GNOME and KDE"; exit 0; fi
+if [ "$desktop" = kde ] && [ -z "$noble" ]; then echo "WAYLAND_LINUX_FAIL KDE runs in the 24.04 root (NOBLE=1)"; exit 0; fi
 out=/tmp/queqiao_wayland_test
 rm -rf "$out"; mkdir -p "$out"; chmod 777 "$out"
 started=$(date +%s)
@@ -57,11 +64,13 @@ display() {
             > "$out/noble_bus.log" 2>&1 < /dev/null &)
         sleep 2
     fi
+    # The other desktop stopped first (else it would answer the wait below), then this one, waited for by name.
+    display stop > /dev/null
     (setsid bash scripts/noble_root_linux.sh run "QUEQIAO_PIPEWIRE_PRELOAD=/usr/local/lib/queqiao-proot-shim.so \
         DESKTOP=$desktop bash $out/wayland_display_linux.sh start" \
         > "$out/display.log" 2>&1 < /dev/null &)
     for _ in $(seq 60); do
-        display status | grep -q "WAYLAND_RUNNING" && break
+        display status | grep -q "WAYLAND_RUNNING .* $desktop\$" && break
         sleep 1
     done
     display status
@@ -104,7 +113,7 @@ else
     # answers one that does, so the rest of the session runs), and the test window starts after the agent's main window
     # (no tray there) opened, so that it is the newest again.
     [ -z "$kept" ] && as_user "rm -f \$XDG_CONFIG_HOME/queqiao/portal-*.token"
-    as_user_bg "$py $out/portal_approve.py $([ -n "$kept" ] && echo 15 || echo 40) --remember > $out/approve.txt 2>&1"
+    as_user_bg "$py $out/portal_approve.py $(if [ -n "$kept" ]; then echo 15; elif [ "$desktop" = kde ]; then echo 12; else echo 40; fi) --remember > $out/approve.txt 2>&1"
     cat > "$out/window.sh" << 'EOF'
 # $1 the output folder, $2 the Python, $3 "wait" for the dialog's answer first, or the seconds to wait.
 if [ "$3" = wait ]; then
@@ -119,7 +128,8 @@ fi
 # Its Wayland protocol log too: GTK drops keys without a symbol in the keymap (F24, the test key, is one).
 WAYLAND_DEBUG=client GDK_BACKEND=wayland exec "$2" "$1/wayland_test_window.py" "$1/events.log" 60 2> "$1/protocol.log"
 EOF
-    as_user_bg "bash $out/window.sh $out $py $([ -n "$kept" ] && echo 5 || echo wait) > $out/window.err 2>&1"
+    as_user_bg "bash $out/window.sh $out $py $(if [ "$desktop" = kde ]; then echo 0; elif [ -n "$kept" ]; then echo 5; else echo wait; fi) \
+        > $out/window.err 2>&1"
 fi
 sleep 0.5
 
@@ -129,7 +139,21 @@ sleep 1
 # dialog is answered: the test starts later, after the picture (5 s): the picture then shows a still screen after the
 # session bar tucked away, which the viewer must paint again where the bar was (nothing new comes from the remote).
 input_at=${INPUT_AT:-3}
-[ "$desktop" = gnome ] && input_at=${INPUT_AT:-6}
+[ "$desktop" != sway ] && input_at=${INPUT_AT:-6}
+if [ "$desktop" = kde ]; then
+    # The probe: the portal session, then the input test (five places, a click, F24) after 3 s.
+    sleep 3
+    as_user "timeout 60 $bin/examples/wayland_input_probe 3 400 > $out/probe.out 2>&1"
+    sleep 1
+    as_user "pkill -u qqtest -f wayland_test_window; true"
+    # The dialog watcher's verdict (it watches 12 s).
+    for _ in $(seq 30); do
+        [ -s "$out/approve.txt" ] && break
+        sleep 0.5
+    done
+    echo "=== probe"; grep -vE "libEGL|pci id|^MouseMove|^MouseButton|^Key" "$out/probe.out"
+    [ -f "$out/approve.txt" ] && echo "dialog: $(cat "$out/approve.txt")"
+else
 port=$(( 47200 + RANDOM % 500 ))
 DISPLAY=:92 "$bin/queqiao-viewer" --listen "127.0.0.1:$port" --seconds "$(( seconds + 10 ))" --report "$out/viewer.txt" \
     --input-test --input-test-click --input-test-at $input_at --picture-at ${PICTURE_AT:-5} --width 960 --codec h264 --ui-pictures "$out" > "$out/viewer.out" 2>&1 &
@@ -146,13 +170,22 @@ sleep 0.3
 echo "=== agent (exit $agent_code)"; cat "$out/agent.txt" 2> /dev/null || tail -20 "$out/agent.out"
 echo "=== viewer (exit $viewer_code)"; grep -vE "^[0-9]+ ms: (path|video in)" "$out/viewer.txt" 2> /dev/null | head -60 || tail -20 "$out/viewer.out"
 [ -f "$out/approve.txt" ] && echo "dialog: $(cat "$out/approve.txt")"
+fi
 
 why=''
 [ -n "$still" ] && why="$why still-screen"
+if [ "$desktop" = kde ]; then
+    grep -q "^PROBE_DONE" "$out/probe.out" 2> /dev/null || why="$why probe"
+    grep -q "^capture: RemoteDesktop portal" "$out/probe.out" 2> /dev/null || why="$why not-remote-desktop"
+    grep -q "^input through the RemoteDesktop portal" "$out/probe.out" 2> /dev/null || why="$why input-not-portal"
+    # A dialog that came must have been answered; none is Plasma 5.27's way for programs not sandboxed.
+    grep -qE "APPROVED|no portal dialog" "$out/approve.txt" 2> /dev/null || why="$why dialog-unanswered"
+    echo "picture: not checked (KWin's virtual backend records no frames for screen casts)"
+else
 grep -q "RESULT PASS" "$out/agent.txt" 2> /dev/null || why="$why agent"
 grep -q "RESULT PASS" "$out/viewer.txt" 2> /dev/null || why="$why viewer"
 grep -q "on Wayland" "$out/agent.txt" 2> /dev/null || why="$why not-the-portal"
-if [ "$desktop" = gnome ]; then
+if [ "$desktop" != sway ]; then
     grep -q "captured through the RemoteDesktop portal" "$out/agent.txt" 2> /dev/null || why="$why not-remote-desktop"
     if [ -n "$kept" ]; then
         grep -q APPROVED "$out/approve.txt" 2> /dev/null && why="$why asked-again"
@@ -161,7 +194,7 @@ if [ "$desktop" = gnome ]; then
         grep -q APPROVED "$out/approve.txt" 2> /dev/null || why="$why not-approved"
     fi
 fi
-# The picture: sway's against the screen (grim); GNOME's must be xev's white.
+# The picture: sway's against the screen (grim); GNOME's and KDE's must be the test window's white.
 picture=$(python3 - "$out" "$desktop" << 'EOF'
 import sys
 from PIL import Image
@@ -181,6 +214,7 @@ EOF
 )
 echo "picture: mean difference $picture (viewer against the $desktop screen, 0-255)"
 case "$picture" in none*) why="$why picture" ;; *) awk "BEGIN { exit !($picture < 12) }" || why="$why picture-differs" ;; esac
+fi
 # Input: the test window's pointer positions (full screen: screen positions), the click, and F24: wev logs all three
 # (keys as X key codes, 202); on GNOME the GTK window logs the pointer and the click, its protocol log the keys (Linux
 # codes, 194).

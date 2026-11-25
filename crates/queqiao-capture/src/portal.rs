@@ -5,7 +5,7 @@
 //! out in B, G, R, X order as the X11 capture's are. Where a still screen sends no first frame (wlroots), the screen is
 //! damaged without a visible change until one comes (wayland_nudge.rs).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use queqiao_portal::PortalSession;
@@ -31,11 +31,19 @@ pub(crate) struct PortalDuplicator {
     pixels: Vec<u8>,
     stride: usize,
     seen: u64,
-    /// Until the first picture: when the stream opened, the transparent surface that damages the screen (None
-    /// before the first poke; an error where the compositor has none) and the last poke.
+    /// When the stream opened, and what damages the screen until the first picture (shared by `acquire` and
+    /// `snapshot_image`, which the session asks for first).
     opened: Instant,
+    nudge: Mutex<Nudging>,
+}
+
+/// The transparent surface that damages the screen (None before the first poke; an error where the compositor has
+/// none), the last poke, and whether a picture came (then no more pokes).
+#[derive(Default)]
+struct Nudging {
     nudge: Option<std::result::Result<Nudge, String>>,
     poked: Option<Instant>,
+    done: bool,
 }
 
 // The stream's raw parts are PipeWire's, used under its lock.
@@ -65,8 +73,7 @@ impl PortalDuplicator {
             stride: 0,
             seen: 0,
             opened: Instant::now(),
-            nudge: None,
-            poked: None,
+            nudge: Mutex::new(Nudging::default()),
         };
         // The format agreed says the size PipeWire really sends (pictures may not come yet: a still screen).
         let size = duplicator
@@ -89,20 +96,33 @@ impl PortalDuplicator {
     /// Before the first picture: damages the screen (after 100 ms without one, then every 250 ms) where the
     /// compositor lets this (the layer shell), so a still screen sends one. More than once: xdg-desktop-portal-wlr may
     /// give the first change to a capture of an earlier session still waiting for one.
-    fn nudge_until_first(&mut self) {
-        if self.seen > 0
+    fn nudge_until_first(&self) {
+        let Ok(mut state) = self.nudge.lock() else {
+            return;
+        };
+        if state.done
             || self.opened.elapsed() < Duration::from_millis(100)
-            || self
+            || state
                 .poked
                 .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
         {
             return;
         }
-        self.poked = Some(Instant::now());
-        if let Ok(nudge) = self.nudge.get_or_insert_with(Nudge::new)
+        state.poked = Some(Instant::now());
+        if let Ok(nudge) = state.nudge.get_or_insert_with(Nudge::new)
             && nudge.poke().is_err()
         {
-            self.nudge = Some(Err("the poke failed".into()));
+            state.nudge = Some(Err("the poke failed".into()));
+        }
+    }
+
+    /// A picture came: the surface goes, and no more pokes.
+    fn first_came(&self) {
+        if let Ok(mut state) = self.nudge.lock()
+            && !state.done
+        {
+            state.done = true;
+            state.nudge = None;
         }
     }
 
@@ -151,8 +171,7 @@ impl PortalDuplicator {
         }
         let accumulated = (sequence - self.seen).min(u64::from(u32::MAX)) as u32;
         self.seen = sequence;
-        // The first picture came: the surface goes.
-        self.nudge = None;
+        self.first_came();
         Ok(Some(Frame {
             present_qpc: arrived.max(1),
             acquired_qpc: qpc_now(),
@@ -167,8 +186,25 @@ impl PortalDuplicator {
     /// The screen now: the newest picture, as a BGRA image.
     pub(crate) fn snapshot_image(&self) -> Result<BgraImage> {
         let (width, height) = (self.info.width as usize, self.info.height as usize);
+        // Asked for right after the stream opened: a still screen (KWin, wlroots) sends a picture only once poked.
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.nudge_until_first();
+            let image = self.take_image(width, height)?;
+            if let Some(image) = image {
+                self.first_came();
+                return Ok(image);
+            }
+            if Instant::now() >= until {
+                return Err(Error::new("no picture from the ScreenCast portal".into()));
+            }
+        }
+    }
+
+    /// The newest picture as a BGRA image, waiting up to 250 ms for one.
+    fn take_image(&self, width: usize, height: usize) -> Result<Option<BgraImage>> {
         self.stream
-            .next(0, Duration::from_secs(2), |frame| {
+            .next(0, Duration::from_millis(250), |frame| {
                 let mut pixels = Vec::with_capacity(width * height * 4);
                 for row in frame.pixels.chunks(frame.stride.max(1)).take(height) {
                     pixels.extend_from_slice(&row[..(width * 4).min(row.len())]);
@@ -187,7 +223,6 @@ impl PortalDuplicator {
                     pixels,
                 }
             })
-            .map_err(Error::new)?
-            .ok_or_else(|| Error::new("no picture from the ScreenCast portal".into()))
+            .map_err(Error::new)
     }
 }
