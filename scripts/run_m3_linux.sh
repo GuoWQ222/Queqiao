@@ -25,7 +25,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 seconds=${SECONDS_RUN:-20}
-sessions=${SESSIONS:-direct allowed declined ui main h265 h265_10 h265_444 av1 av1_api11}
+sessions=${SESSIONS:-direct allowed declined ui main window h265 h265_10 h265_444 av1 av1_api11}
 out=/tmp/queqiao_m3
 rm -rf "$out"; mkdir -p "$out"
 export XDG_CONFIG_HOME=$out/config XDG_STATE_HOME=$out/state XDG_RUNTIME_DIR=$out/run
@@ -111,6 +111,11 @@ for label in $sessions; do
               agent_expects='command from the viewer: picture: H.265 4:4:4 10-bit'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
         ui) agent_extra=''; viewer_extra='';
             agent_expects='RESULT PASS'; viewer_expects='sessions from the device list'; both_pass=yes ;;
+        # The session window under a window manager (xfwm4 on the viewer's screen for this session): full screen on and
+        # off, from a normal and a maximised window, minimised and restored; the bar and the card show and hide with it;
+        # the card dragged out of the window stays in it, its close button closes it.
+        window) agent_extra=''; viewer_extra='--window-test --seconds 26';
+                agent_expects='RESULT PASS'; viewer_expects='window test: done'; both_pass=yes ;;
         *) echo "unknown session $label"; why="$why unknown-$label"; continue ;;
     esac
     # One session, where a viewer comes (main has none).
@@ -125,12 +130,19 @@ for label in $sessions; do
     # shellcheck disable=SC2086
     target=(--device "$device")
     [ "$label" = ui ] && target=(--ui-test "$device")
+    wm=''
+    if [ "$label" = window ]; then
+        DISPLAY=:92 xfwm4 --compositor=off --sm-client-disable > "$out/xfwm4.log" 2>&1 &
+        wm=$!
+        sleep 2
+    fi
     viewer_code=none
     if [ "$label" != main ]; then
     DISPLAY=:92 "$bin/queqiao-viewer" $account "${target[@]}" --seconds "$seconds" --input-test --width 960 \
         --codec h264 --report "$out/viewer_$label.txt" $viewer_extra > "$out/viewer_$label.out" 2>&1
     viewer_code=$?
     fi
+    [ -n "$wm" ] && { kill "$wm" 2> /dev/null; wait "$wm" 2> /dev/null; }
     # The agent leaves after its one session, or at its --seconds.
     for _ in $(seq $(( (seconds + 70) * 5 ))); do kill -0 "$agent" 2> /dev/null || break; sleep 0.2; done
     kill "$agent" 2> /dev/null
@@ -142,6 +154,19 @@ for label in $sessions; do
     grep -q "$agent_expects" "$out/agent_$label.txt" 2> /dev/null || why="$why $label-agent"
     if [ -n "$viewer_expects" ]; then
         grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
+    fi
+    # The window test's states (see the window session above).
+    if [ "$label" = window ]; then
+        for state in 'in full screen' 'after full screen' 'maximized, in full screen' 'maximized, after full screen' 'restored'; do
+            grep -q "^window test: $state: bar shown true, in front true, seen [a-z]*; card shown true, in front true " \
+                "$out/viewer_$label.txt" 2> /dev/null || why="$why window-$(echo "$state" | tr -d ' ,')"
+        done
+        grep -q '^window test: minimized: bar shown false, .*; card shown false, ' "$out/viewer_$label.txt" 2> /dev/null ||
+            why="$why window-minimized"
+        for line in 'window test: card inside the window after dragging it out: true' \
+            'window test: card closed by its button: true' 'card of figures: closed with its button'; do
+            grep -q "^$line" "$out/viewer_$label.txt" 2> /dev/null || why="$why window-card"
+        done
     fi
     case "$label" in
         h265* | av1*)
