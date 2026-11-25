@@ -117,9 +117,14 @@ with a one-time token); --terminal-test passes in run_m3_linux.sh.
 
 The viewer decodes on NVIDIA GPUs with NVDEC (CUDA): H.264, and H.265 4:2:0 and 4:4:4 at 8 and 10 bits as the GPU
 decodes them, each picture copied into memory as NVDEC lays it out (NV12, P016, three planes for 4:4:4) and drawn by
-the CPU converter Windows uses when its GPU cannot (yuv.rs); else OpenH264. run_m3_linux.sh's h265 session has
-NVENC make H.265 and NVDEC show it; h265_444 asks for 4:4:4 10-bit and gets 8-bit 4:4:4 (the Linux agent's NVENC path
-makes no 10-bit yet). AV1 is not offered yet: NVDEC decodes it, but no AV1 stream has been through it here.
+the CPU converter Windows uses when its GPU cannot (yuv.rs); else OpenH264. The agent's NVENC (CUDA, fed from memory)
+makes H.265 at 8 and 10 bits: 4:2:0 10-bit from the CPU converter's P010 (BT.709 limited range in 10 bits, 64-940 /
+64-960, the same bilinear scaling as NV12), 4:4:4 10-bit from the screen's pixels widened to R10G10B10A2 (v << 2 | v >> 6,
+red in the lowest bits: NVENC's ABGR10), which NVENC turns into YUV itself, as at 8 bits. run_m3_linux.sh's h265,
+h265_10 and h265_444 sessions have NVENC make each and NVDEC show it, and check colours: five windows (red, green,
+blue, grey, orange) on the agent's screen against the viewer's picture (at most 12 apart a channel; 8-bit 4:2:0 shows
+1, the 10-bit ones 0; red and blue swapped in the 4:4:4 packing fails it with 255). AV1 is not offered yet: NVDEC
+decodes it, but no AV1 stream has been through it here.
 
 Wayland (2026-11-25): the agent captures through the ScreenCast portal (xdg-desktop-portal, which GNOME, KDE and the
 wlroots desktops answer) and its PipeWire stream (libpipewire loaded at run time, as CUDA and PulseAudio are; only its
@@ -178,7 +183,7 @@ mutter then sends a grey square), KDE gives the pointer apart (no frames there, 
 KDE's pictures (a real KDE desktop), the banner at the top (Wayland programs cannot place themselves: it floats where
 the compositor puts it).
 
-Not yet on Linux: AV1 and 10-bit encoding, VA-API, the privacy screen and input block, the service and packages.
+Not yet on Linux: AV1 encoding, VA-API, the privacy screen and input block, the service and packages.
 
 ## Order of the work
 

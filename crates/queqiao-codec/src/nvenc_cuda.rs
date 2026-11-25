@@ -1,6 +1,6 @@
 //! NVIDIA's encoder (NVENC) on Linux: the shared session (nvenc_core.rs) on a CUDA context, fed from memory through
-//! one pitched CUDA buffer: the CPU converter's NV12 (4:2:0), or the screen's B, G, R, X (4:4:4, which NVENC turns
-//! into YUV itself, as on Windows). `libnvidia-encode.so.1` and `libcuda.so.1` come with NVIDIA's driver and are
+//! one pitched CUDA buffer: the CPU converter's NV12 (4:2:0) or P010 (10-bit 4:2:0), or the screen's B, G, R, X
+//! (4:4:4) or those widened to R10G10B10A2 (10-bit 4:4:4), which NVENC turns into YUV itself, as on Windows. `libnvidia-encode.so.1` and `libcuda.so.1` come with NVIDIA's driver and are
 //! loaded at run time.
 
 use std::mem::ManuallyDrop;
@@ -16,8 +16,12 @@ use crate::nvenc_sys as sys;
 pub(crate) enum Input {
     /// Y rows, then interleaved U, V rows (half as many).
     Nv12,
+    /// As NV12 in 16-bit samples, the 10 bits at the top.
+    P010,
     /// The screen's pixels as they are (B, G, R, X bytes), at the encode size.
     Bgrx,
+    /// The screen's pixels widened to 10 bits a colour: R10G10B10A2 words, red lowest.
+    Rgb10,
 }
 
 pub(crate) struct NvencCuda {
@@ -42,8 +46,9 @@ impl NvencCuda {
         nvenc_core::supports(format)?;
         let input = match (format.chroma444, format.ten_bit) {
             (false, false) => Input::Nv12,
+            (false, true) => Input::P010,
             (true, false) => Input::Bgrx,
-            _ => return Err(format!("{} on Linux: not yet (8-bit only)", format.name())),
+            (true, true) => Input::Rgb10,
         };
         let library = Library::open(c"libnvidia-encode.so.1")
             .map_err(|_| "no NVIDIA encoder driver (libnvidia-encode.so.1)".to_string())?;
@@ -66,7 +71,8 @@ impl NvencCuda {
         let (width, height) = (config.width as usize, config.height as usize);
         let (width_bytes, rows) = match input {
             Input::Nv12 => (width, height + height / 2),
-            Input::Bgrx => (width * 4, height),
+            Input::P010 => (width * 2, height + height / 2),
+            Input::Bgrx | Input::Rgb10 => (width * 4, height),
         };
         let (buffer, pitch) = cuda.alloc_pitch(width_bytes, rows)?;
         let registered = u32::try_from(pitch)
@@ -118,8 +124,8 @@ impl NvencCuda {
         self.core.poll(out);
     }
 
-    /// Uploads one picture and encodes it now; the frame is ready when this returns. NV12: `planes` is the Y plane
-    /// then the U, V plane, rows `pitch` bytes apart; B, G, R, X: one plane.
+    /// Uploads one picture and encodes it now; the frame is ready when this returns. NV12 and P010: `planes` is the Y
+    /// plane then the U, V plane, rows `pitch` bytes apart; B, G, R, X and R10G10B10A2: one plane.
     pub(crate) fn encode(
         &mut self,
         planes: &[&[u8]],
@@ -129,14 +135,19 @@ impl NvencCuda {
     ) -> Result<(), String> {
         let (width, height) = self.size;
         match (self.input, planes) {
-            (Input::Nv12, [y, uv]) => {
+            (Input::Nv12 | Input::P010, [y, uv]) => {
+                let row_bytes = if self.input == Input::P010 {
+                    width * 2
+                } else {
+                    width
+                };
                 self.cuda
-                    .upload(y, pitch, self.buffer, self.pitch, width, height)?;
+                    .upload(y, pitch, self.buffer, self.pitch, row_bytes, height)?;
                 let chroma = self.buffer + (self.pitch * height) as CuDevicePtr;
                 self.cuda
-                    .upload(uv, pitch, chroma, self.pitch, width, height / 2)?;
+                    .upload(uv, pitch, chroma, self.pitch, row_bytes, height / 2)?;
             }
-            (Input::Bgrx, [pixels]) => {
+            (Input::Bgrx | Input::Rgb10, [pixels]) => {
                 self.cuda
                     .upload(pixels, pitch, self.buffer, self.pitch, width * 4, height)?;
             }

@@ -9,7 +9,7 @@ use std::time::Instant;
 use queqiao_capture::{BgraImage, Context, Device, Frame};
 
 use crate::config::{EncodedFrame, EncoderChoice, EncoderConfig, SoftwareTiming};
-use crate::cpu_convert::{Tap, bgra_to_nv12, taps};
+use crate::cpu_convert::{Tap, bgra_to_nv12, bgra_to_p010, bgra_to_rgb10, taps};
 use crate::nvenc_cuda::{Input, NvencCuda};
 use crate::software_core::SoftwareCore;
 use crate::{EncodeFormat, SOFTWARE_START, VideoCodec, candidate_sizes};
@@ -206,6 +206,8 @@ pub struct ScreenEncoder {
     columns: Vec<Tap>,
     rows: Vec<Tap>,
     nv12: Vec<u8>,
+    /// 10-bit encoding: the converted picture (P010, or R10G10B10A2 words).
+    ten_bit: Vec<u8>,
     /// The frame kept for the next encode (`keep`), as Windows copies the latest frame into a texture of its own:
     /// a captured frame is valid only until the next capture.
     kept: Vec<u8>,
@@ -328,6 +330,7 @@ impl ScreenEncoder {
             screen,
             encoder,
             nv12: Vec::new(),
+            ten_bit: Vec::new(),
             kept: Vec::new(),
             kept_stride: 0,
             index: 0,
@@ -366,12 +369,14 @@ impl ScreenEncoder {
     }
 
     pub fn converter_description(&self) -> String {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get().clamp(1, 8));
         match self.encoder.input() {
-            Input::Nv12 => format!(
-                "CPU (BT.709, bilinear, {} threads)",
-                std::thread::available_parallelism().map_or(1, |n| n.get().clamp(1, 8))
-            ),
+            Input::Nv12 => format!("CPU (BT.709, bilinear, {threads} threads)"),
+            Input::P010 => format!("CPU (BT.709 in 10 bits, P010, bilinear, {threads} threads)"),
             Input::Bgrx => "none (the encoder converts the screen's pixels)".into(),
+            Input::Rgb10 => format!(
+                "CPU (the screen's pixels widened to 10 bits a colour, {threads} threads; the encoder converts them)"
+            ),
         }
     }
 
@@ -433,9 +438,33 @@ impl ScreenEncoder {
                 self.encoder
                     .encode(&[y, uv], size.0, size, picture, convert_ms, &mut out)?;
             }
+            Input::P010 => {
+                bgra_to_p010(pixels, stride, &self.columns, &self.rows, &mut self.ten_bit);
+                let (y, uv) = self.ten_bit.split_at(size.0 * size.1 * 2);
+                self.encoder
+                    .encode(&[y, uv], size.0 * 2, size, picture, 0.0, &mut out)?;
+            }
             Input::Bgrx => {
                 self.encoder
                     .encode(&[pixels], stride, size, picture, 0.0, &mut out)?;
+            }
+            Input::Rgb10 => {
+                // 4:4:4 is encoded at the screen's size: the pixels as they are, widened.
+                bgra_to_rgb10(
+                    pixels,
+                    stride,
+                    screen_width,
+                    screen_height,
+                    &mut self.ten_bit,
+                );
+                self.encoder.encode(
+                    &[&self.ten_bit],
+                    screen_width * 4,
+                    size,
+                    picture,
+                    0.0,
+                    &mut out,
+                )?;
             }
         }
         self.index += 1;
@@ -506,6 +535,7 @@ mod tests {
             columns: taps(width as u32, 1920),
             rows: taps(height as u32, 1080),
             nv12: Vec::new(),
+            ten_bit: Vec::new(),
             kept: Vec::new(),
             kept_stride: 0,
             index: 0,

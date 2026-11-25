@@ -10,7 +10,9 @@
 # both: login.bmp and devices.bmp). Then the session's forms no session opens by itself (the transfer list, the
 # password form), by examples/linux_forms_probe, with pictures (transfers.bmp, password.bmp). main: the agent alone,
 # its main window's pages pictured (main_devices.bmp ...). h265: the viewer asks for H.265 (NVENC on the agent, NVDEC
-# on the viewer). h265_444: 4:4:4 10-bit asked for (the agent makes 8-bit 4:4:4).
+# on the viewer). h265_10: H.265 10-bit (4:2:0) asked for. h265_444: 4:4:4 10-bit asked for. The H.265 sessions
+# check colours: windows of five colours on the agent's screen must show in the viewer's picture as on the screen
+# (a channel swapped, or a wrong 10-bit packing, shows there).
 # The agent's screen is Xvfb :91 with a clock and `top` (so the picture changes); the viewer's window is on Xvfb :92.
 # Everything the programs keep (the device's key, the saved logins, the single-instance lock) goes into the test's own
 # folder (XDG_CONFIG_HOME, XDG_STATE_HOME, XDG_RUNTIME_DIR), never the person's ~/.config/queqiao.
@@ -20,7 +22,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 seconds=${SECONDS_RUN:-20}
-sessions=${SESSIONS:-direct allowed declined ui main h265 h265_444}
+sessions=${SESSIONS:-direct allowed declined ui main h265 h265_10 h265_444}
 out=/tmp/queqiao_m3
 rm -rf "$out"; mkdir -p "$out"
 export XDG_CONFIG_HOME=$out/config XDG_STATE_HOME=$out/state XDG_RUNTIME_DIR=$out/run
@@ -42,12 +44,19 @@ DISPLAY=:91 xclock -update 1 -geometry 300x300+100+100 > /dev/null 2>&1 &
 clock=$!
 DISPLAY=:91 xterm -geometry 100x30+500+100 -e "top -d 0.5" > /dev/null 2>&1 &
 term=$!
+# Five colours for the colour check (centres sampled; xterms of 30x10 characters, no text).
+colours=()
+for spec in "#ff0000 100" "#00ff00 400" "#0000ff 700" "#808080 1000" "#c86432 1300"; do
+    set -- $spec
+    DISPLAY=:91 xterm -bg "$1" -fg "$1" -geometry "30x10+$2+700" -e "sleep 100000" > /dev/null 2>&1 &
+    colours+=($!)
+done
 
 # The server: a new data folder, its certificate's fingerprint (pinned by the clients) and one user.
 data=$out/server
 init=$("$bin/queqiao-server" init --data "$data" 2>&1)
 pin=$(printf '%s\n' "$init" | grep -o 'fingerprint: [0-9a-f]\{64\}' | head -1 | cut -d' ' -f2)
-if [ -z "$pin" ]; then echo "$init"; echo M3_LINUX_FAIL server-init; kill "$clock" "$term" 2> /dev/null; exit 0; fi
+if [ -z "$pin" ]; then echo "$init"; echo M3_LINUX_FAIL server-init; kill "$clock" "$term" "${colours[@]}" 2> /dev/null; exit 0; fi
 password=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
 printf '%s\n' "$password" | "$bin/queqiao-server" add-user alice --data "$data" > "$out/add_user.txt" 2>&1
 port=$(( 47600 + RANDOM % 300 ))
@@ -60,7 +69,7 @@ for _ in $(seq 50); do
     if (exec 3<> "/dev/tcp/127.0.0.1/$port") 2> /dev/null; then up=yes; break; fi
     sleep 0.2
 done
-if [ -z "$up" ]; then cat "$out/server.txt"; echo M3_LINUX_FAIL server; kill "$server" "$clock" "$term" 2> /dev/null; exit 0; fi
+if [ -z "$up" ]; then cat "$out/server.txt"; echo M3_LINUX_FAIL server; kill "$server" "$clock" "$term" "${colours[@]}" 2> /dev/null; exit 0; fi
 device=$(cat /proc/sys/kernel/hostname)
 account="--server $listen --pin $pin --user alice --password $password"
 why=''
@@ -78,12 +87,15 @@ for label in $sessions; do
         main) agent_extra="--test-main-window --ui-pictures $out --seconds 10"; viewer_extra='';
               agent_expects='main window: pictures of its pages saved'; viewer_expects=''; both_pass=yes ;;
         # H.265 asked for: NVENC makes it, NVDEC decodes it (where the GPU has them; the H.264 sessions use NVDEC too).
-        h265) agent_extra=''; viewer_extra='--codec h265';
+        h265) agent_extra=''; viewer_extra="--codec h265 --ui-pictures $out/$label --picture-at 4";
               agent_expects='command from the viewer: picture: H.265'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
-        # H.265 4:4:4 10-bit asked for, as Windows' h265 session: the Linux agent makes 4:4:4 at 8 bits (its NVENC path
-        # takes no 10-bit yet), NVDEC decodes it into three planes.
-        h265_444) agent_extra=''; viewer_extra='--codec h265 --chroma444 --ten-bit';
-              agent_expects='command from the viewer: picture: H.265 4:4:4'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
+        # H.265 10-bit (4:2:0): the CPU converter's P010 to NVENC (Main 10), NVDEC into 16-bit planes.
+        h265_10) agent_extra=''; viewer_extra="--codec h265 --ten-bit --ui-pictures $out/$label --picture-at 4";
+              agent_expects='command from the viewer: picture: H.265 4:2:0 10-bit'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
+        # H.265 4:4:4 10-bit asked for, as Windows' h265 session: the screen's pixels widened to R10G10B10A2 for NVENC,
+        # NVDEC decodes it into three 16-bit planes.
+        h265_444) agent_extra=''; viewer_extra="--codec h265 --chroma444 --ten-bit --ui-pictures $out/$label --picture-at 4";
+              agent_expects='command from the viewer: picture: H.265 4:4:4 10-bit'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
         ui) agent_extra=''; viewer_extra='';
             agent_expects='RESULT PASS'; viewer_expects='sessions from the device list'; both_pass=yes ;;
         *) echo "unknown session $label"; why="$why unknown-$label"; continue ;;
@@ -91,6 +103,7 @@ for label in $sessions; do
     # One session, where a viewer comes (main has none).
     agent_sessions=(--sessions 1)
     [ "$label" = main ] && agent_sessions=()
+    mkdir -p "$out/$label"
     # shellcheck disable=SC2086
     DISPLAY=:91 "$bin/queqiao-agent" $account "${agent_sessions[@]}" --seconds $(( seconds + 60 )) --verify-input \
         --report "$out/agent_$label.txt" $agent_extra > "$out/agent_$label.out" 2>&1 &
@@ -117,6 +130,36 @@ for label in $sessions; do
     if [ -n "$viewer_expects" ]; then
         grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
     fi
+    case "$label" in
+        h265*)
+            # The five colours in the viewer's picture (taken 4 s after the first) against the screen itself.
+            colour=$(python3 - "$out/$label/viewer_session.bmp" << 'EOF'
+import sys
+from PIL import Image, ImageGrab
+try:
+    shown = Image.open(sys.argv[1]).convert("RGB")
+    screen = ImageGrab.grab(xdisplay=":91").convert("RGB")
+except Exception as error:
+    print("COLOUR_BAD no picture:", error)
+    sys.exit()
+def mean(image, x, y, half):
+    pixels = [image.getpixel((x + dx, y + dy)) for dx in range(-half, half + 1) for dy in range(-half, half + 1)]
+    return [round(sum(p[c] for p in pixels) / len(pixels)) for c in range(3)]
+sx, sy = shown.width / screen.width, shown.height / screen.height
+worst, lines = 0, []
+for left in (100, 400, 700, 1000, 1300):
+    x, y = left + 90, 765
+    want = mean(screen, x, y, 8)
+    got = mean(shown, round(x * sx), round(y * sy), 4)
+    worst = max(worst, max(abs(a - b) for a, b in zip(want, got)))
+    lines.append(f"{want}->{got}")
+print(("COLOUR_OK" if worst <= 12 else "COLOUR_BAD"), f"largest difference {worst}:", " ".join(lines))
+EOF
+)
+            echo "colours: $colour"
+            case "$colour" in COLOUR_OK*) ;; *) why="$why $label-colours" ;; esac
+            ;;
+    esac
     if [ "$label" = direct ]; then
         for picture in viewer_session viewer_session_tucked; do
             [ -s "$out/$picture.bmp" ] && echo "picture: $picture.bmp" || why="$why direct-$picture-picture"
@@ -143,5 +186,5 @@ kill "$server" 2> /dev/null
 echo "=== forms"
 DISPLAY=:92 timeout 60 "$bin/examples/linux_forms_probe" "$out" | tee "$out/forms.txt"
 grep -q FORMS_PASS "$out/forms.txt" || why="$why forms"
-kill "$clock" "$term" 2> /dev/null
+kill "$clock" "$term" "${colours[@]}" 2> /dev/null
 if [ -z "$why" ]; then echo M3_LINUX_PASS; else echo "M3_LINUX_FAIL$why"; fi
