@@ -39,4 +39,20 @@
     <string name="pc_password_title">电脑已锁定</string>
     <string name="pc_password_text">输入电脑的 Windows 密码来解锁。</string>
     <string name="unlock">解锁</string>
+    <string name="wake_up">唤醒</string>
+    <string name="wake_sent">正在唤醒…</string>
+    <string name="help_someone">帮助他人</string>
+    <string name="help_hint">输入对方鹊桥上显示的帮助 ID 和帮助码。不填帮助码时，由对方决定。</string>
+    <string name="help_id">帮助 ID</string>
+    <string name="help_code">帮助码</string>
+    <string name="help_waiting">正在等待对方回应…</string>
+    <string name="picture">画面</string>
+    <string name="send_clipboard">发送剪贴板</string>
+    <string name="clipboard_sent">手机剪贴板已发到电脑</string>
+    <string name="clipboard_empty">手机剪贴板里没有文字</string>
+    <string name="pc_speakers_off">电脑静音</string>
+    <string name="smooth">流畅</string>
+    <string name="balanced">均衡</string>
+    <string name="sharp">清晰</string>
+    <string name="screen_n">屏幕 %1$d</string>
 </resources>

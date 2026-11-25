@@ -59,4 +59,19 @@ grep -q "input: [0-9]* events, 0 refused" "$out/agent_report.txt" || finish "MOB
 # "typed", then Chinese (zhong wen) and e-acute in UTF-8 (the script stays ASCII).
 expected=$(printf 'typed \344\270\255\346\226\207 \303\251')
 grep -qF "$expected" "$out/typed.txt" 2> /dev/null || finish "MOBILE_CORE_FAIL typed text not received as characters: $(od -c "$out/typed.txt" 2> /dev/null | head -3)"
+
+# Helping another account's PC: a second user's agent (its own test device) lets the code alone in; the probe, still
+# the first user, asks with its help ID and code (as the phone's Help someone).
+printf '%s\n' "$password" | "$bin/queqiao-server" add-user helped --data "$data" > /dev/null 2>&1
+DISPLAY=:93 "$bin/queqiao-agent" --server "127.0.0.1:$port" --pin "$pin" --user helped --password "$password" \
+    --test-device probe-helped --help-mode code --fixed-help-code 482915 --help-id-file "$out/help_id.txt" \
+    --sessions 1 --seconds 60 --report "$out/agent_help_report.txt" > "$out/agent_help.txt" 2>&1 &
+pids+=($!)
+for _ in $(seq 60); do [ -s "$out/help_id.txt" ] && break; sleep 0.5; done
+help_id=$(tr -d ' \r\n' < "$out/help_id.txt" 2> /dev/null)
+[ -n "$help_id" ] || finish "MOBILE_CORE_FAIL help: the agent gave no help ID"
+"$bin/examples/core_probe" "$probe_folder" "127.0.0.1:$port" "$pin" tester "$password" "help:$help_id:482915" 6 \
+    > "$out/probe_help.txt" 2>&1
+grep -v '^event: ' "$out/probe_help.txt" | tail -3
+grep -q CORE_PROBE_PASS "$out/probe_help.txt" || finish "MOBILE_CORE_FAIL help session"
 finish MOBILE_CORE_PASS

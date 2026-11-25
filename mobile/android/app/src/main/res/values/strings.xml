@@ -39,4 +39,20 @@
     <string name="pc_password_title">The PC is locked</string>
     <string name="pc_password_text">Type the PC\'s Windows password to unlock it.</string>
     <string name="unlock">Unlock</string>
+    <string name="wake_up">Wake up</string>
+    <string name="wake_sent">Waking it up…</string>
+    <string name="help_someone">Help someone</string>
+    <string name="help_hint">Type the help ID and code their Queqiao shows. Without a code, they are asked.</string>
+    <string name="help_id">Help ID</string>
+    <string name="help_code">Help code</string>
+    <string name="help_waiting">Waiting for the answer…</string>
+    <string name="picture">Picture</string>
+    <string name="send_clipboard">Send clipboard</string>
+    <string name="clipboard_sent">The phone\'s clipboard is on the PC now</string>
+    <string name="clipboard_empty">The phone\'s clipboard has no text</string>
+    <string name="pc_speakers_off">Mute PC</string>
+    <string name="smooth">Smooth</string>
+    <string name="balanced">Balanced</string>
+    <string name="sharp">Sharp</string>
+    <string name="screen_n">Screen %1$d</string>
 </resources>

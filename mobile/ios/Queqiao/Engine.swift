@@ -25,6 +25,14 @@ struct SessionState: Equatable {
     var passwordNeeded = false
 }
 
+/// The session's figures, once a second (as the desktop's card).
+struct Figures: Equatable {
+    var fps = 0.0
+    var mbps = 0.0
+    var rttMs: Double?
+    var relayed = false
+}
+
 /// The app's side of the Rust core (crates/queqiao-mobile, through include/queqiao_mobile.h): starts it, turns its
 /// events into state the views observe, and sends commands. One per app.
 final class Engine: ObservableObject {
@@ -37,7 +45,16 @@ final class Engine: ObservableObject {
     @Published var busy = true
     @Published var session = SessionState()
     @Published var notice = ""
+    @Published var figures = Figures()
+    /// The PC's screens: how many, which one is shown.
+    @Published var screenCount = 1
+    @Published var currentScreen = 0
+    /// A help request waits for its answer.
+    @Published var helping = false
     private(set) var ownDeviceId = ""
+    /// Simulator tests: the device to connect to once listed, and text to type once its picture shows.
+    private var testConnect = ProcessInfo.processInfo.environment["QUEQIAO_TEST_CONNECT"]
+    private var testType = ProcessInfo.processInfo.environment["QUEQIAO_TEST_TYPE"]
 
     private init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -49,6 +66,14 @@ final class Engine: ObservableObject {
         thread.start()
         // The saved login, if there is one.
         command(["resume": [String: Any]()])
+        // Tests in the Simulator (.github/workflows/ios.yml): a login given as "server|pin|user|password" (simctl passes
+        // it as SIMCTL_CHILD_QUEQIAO_TEST_LOGIN). Nothing sets it on a phone.
+        if let test = ProcessInfo.processInfo.environment["QUEQIAO_TEST_LOGIN"] {
+            let parts = test.components(separatedBy: "|")
+            if parts.count == 4 {
+                logIn(server: parts[0], pin: parts[1], user: parts[2], password: parts[3])
+            }
+        }
     }
 
     @discardableResult
@@ -73,6 +98,7 @@ final class Engine: ObservableObject {
 
     func connect(_ device: Device) {
         session = SessionState()
+        figures = Figures()
         screen = .session(device)
         command(["connect": ["device": device.id]])
     }
@@ -108,6 +134,28 @@ final class Engine: ObservableObject {
     /// Text typed on the PC as characters (any language).
     func typeText(_ text: String) { command(["text": text]) }
 
+    /// Helping someone: their help ID and code (empty: the person there is asked).
+    func help(id: String, code: String) {
+        helping = true
+        error = ""
+        command(["help": ["id": id.trimmingCharacters(in: .whitespaces), "code": code.trimmingCharacters(in: .whitespaces)]])
+    }
+
+    func wake(_ device: Device) { command(["wake": device.id]) }
+
+    func picture(fps: Int, quality: String) { command(["picture": ["fps": fps, "quality": quality]]) }
+
+    func showScreen(_ n: Int) { command(["screen": n]) }
+
+    func muteSpeakers(_ mute: Bool) { command(["mute_speakers": mute]) }
+
+    /// The phone's clipboard text to the PC's clipboard; false when it holds no text.
+    func sendPhoneClipboard() -> Bool {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return false }
+        sendClipboard(text)
+        return true
+    }
+
     private func readEvents() {
         var buffer = [UInt8](repeating: 0, count: 1 << 20)
         while true {
@@ -137,8 +185,13 @@ final class Engine: ObservableObject {
                     controllable: $0["controllable"] as? Bool ?? false
                 )
             }
+            if let name = testConnect, screen == .devices, let device = devices.first(where: { $0.name == name && $0.online }) {
+                testConnect = nil
+                connect(device)
+            }
         } else if let failure = event["error"] as? [String: Any] {
             busy = false
+            helping = false
             error = failure["message"] as? String ?? ""
         } else if let s = event["session"] as? [String: Any] {
             var state = session
@@ -146,6 +199,12 @@ final class Engine: ObservableObject {
             case "path":
                 state.relayed = s["relayed"] as? Bool ?? false
                 state.path = s["path"] as? String ?? ""
+            case "picture":
+                state.stage = "picture"
+                if let text = testType {
+                    testType = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.typeText(text) }
+                }
             case "failed":
                 state.stage = "failed"
                 state.message = s["message"] as? String ?? ""
@@ -166,6 +225,22 @@ final class Engine: ObservableObject {
             UIPasteboard.general.string = text
         } else if let text = event["notice"] as? String {
             notice = text
+        } else if let s = event["stats"] as? [String: Any] {
+            figures = Figures(
+                fps: s["fps"] as? Double ?? 0,
+                mbps: s["mbps"] as? Double ?? 0,
+                rttMs: s["rtt_ms"] as? Double,
+                relayed: s["relayed"] as? Bool ?? false
+            )
+        } else if let s = event["screens"] as? [String: Any] {
+            screenCount = max(1, (s["sizes"] as? [Any])?.count ?? 1)
+            currentScreen = s["current"] as? Int ?? 0
+        } else if let granted = event["help_granted"] as? [String: Any] {
+            helping = false
+            session = SessionState()
+            figures = Figures()
+            screen = .session(Device(id: granted["id"] as? String ?? "", name: granted["name"] as? String ?? "",
+                                     online: true, controllable: true))
         }
     }
 }

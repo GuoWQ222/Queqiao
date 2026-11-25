@@ -209,20 +209,28 @@ fun DevicesScreen(engine: Engine) {
             Text(error, color = Q.Danger, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
         }
         val others = devices.filter { it.id != engine.ownDeviceId }
-        if (others.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
-                Text(stringResource(R.string.no_devices), color = Q.Secondary, fontSize = 15.sp)
-            }
-        } else {
-            LazyColumn(
-                Modifier.fillMaxSize().navigationBarsPadding(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                items(others, key = { it.id }) { device ->
-                    DeviceCard(device, onConnect = { engine.connect(device) }, onRemove = { removing = device })
+        LazyColumn(
+            Modifier.fillMaxSize().navigationBarsPadding().imePadding(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (others.isEmpty()) {
+                item {
+                    Text(
+                        stringResource(R.string.no_devices), color = Q.Secondary, fontSize = 15.sp,
+                        modifier = Modifier.padding(vertical = 24.dp, horizontal = 8.dp),
+                    )
                 }
             }
+            items(others, key = { it.id }) { device ->
+                DeviceCard(
+                    device,
+                    onConnect = { engine.connect(device) },
+                    onWake = { engine.wake(device) },
+                    onRemove = { removing = device },
+                )
+            }
+            item { HelpCard(engine) }
         }
     }
     removing?.let { device ->
@@ -242,7 +250,7 @@ fun DevicesScreen(engine: Engine) {
 }
 
 @Composable
-fun DeviceCard(device: Device, onConnect: () -> Unit, onRemove: () -> Unit) {
+fun DeviceCard(device: Device, onConnect: () -> Unit, onWake: () -> Unit, onRemove: () -> Unit) {
     var more by remember { mutableStateOf(false) }
     Column(
         Modifier
@@ -281,10 +289,54 @@ fun DeviceCard(device: Device, onConnect: () -> Unit, onRemove: () -> Unit) {
             color = Q.HeroMuted, fontSize = 13.sp,
         )
         Spacer(Modifier.height(14.dp))
-        GoldButton(
-            stringResource(R.string.connect), Modifier.fillMaxWidth().testTag("connect:${device.name}"),
-            enabled = device.online && device.controllable, onClick = onConnect,
+        if (device.online) {
+            GoldButton(
+                stringResource(R.string.connect), Modifier.fillMaxWidth().testTag("connect:${device.name}"),
+                enabled = device.controllable, onClick = onConnect,
+            )
+        } else {
+            // Offline: woken up through another device of the account on its network (Wake-on-LAN).
+            var asked by remember { mutableStateOf(false) }
+            GoldButton(
+                stringResource(if (asked) R.string.wake_sent else R.string.wake_up),
+                Modifier.fillMaxWidth().testTag("wake:${device.name}"), enabled = !asked,
+            ) {
+                asked = true
+                onWake()
+            }
+        }
+    }
+}
+
+/** Help someone (as UU Remote's): the help ID and code the other PC shows. */
+@Composable
+fun HelpCard(engine: Engine) {
+    val helping by engine.helping.collectAsState()
+    var id by rememberSaveable { mutableStateOf("") }
+    var code by rememberSaveable { mutableStateOf("") }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Q.Card)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(stringResource(R.string.help_someone), color = Q.Text, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.help_hint), color = Q.Secondary, fontSize = 13.sp)
+        OutlinedTextField(
+            id, { id = it }, Modifier.fillMaxWidth().testTag("help_id"),
+            label = { Text(stringResource(R.string.help_id)) }, singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         )
+        OutlinedTextField(
+            code, { code = it }, Modifier.fillMaxWidth().testTag("help_code"),
+            label = { Text(stringResource(R.string.help_code)) }, singleLine = true,
+        )
+        GoldButton(
+            stringResource(if (helping) R.string.help_waiting else R.string.connect),
+            Modifier.fillMaxWidth().testTag("help_connect"), enabled = !helping && id.isNotBlank(),
+        ) { engine.help(id, code) }
     }
 }
 
@@ -349,6 +401,7 @@ fun SessionScreen(engine: Engine, device: Device, onLeave: () -> Unit) {
         }
         if (toolbar) {
             Toolbar(
+                engine = engine,
                 state = state,
                 mode = mode,
                 muted = muted,
@@ -398,6 +451,7 @@ fun SessionScreen(engine: Engine, device: Device, onLeave: () -> Unit) {
 
 @Composable
 fun Toolbar(
+    engine: Engine,
     state: SessionState,
     mode: SessionView.Mode,
     muted: Boolean,
@@ -412,19 +466,30 @@ fun Toolbar(
     modifier: Modifier = Modifier,
 ) {
     var keysOpen by remember { mutableStateOf(false) }
+    var pictureOpen by remember { mutableStateOf(false) }
+    val figures by engine.figures.collectAsState()
+    val screens by engine.screens.collectAsState()
+    var quality by rememberSaveable { mutableStateOf("balanced") }
+    var fps by rememberSaveable { mutableStateOf(60) }
+    var speakersMuted by rememberSaveable { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
     Column(
         modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
             .background(Q.Night)
             .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            // The figures, as the desktop's card: the way, the delay, frames a second, data.
+            val way = if (figures.relayed || state.relayed) stringResource(R.string.path_relayed) else stringResource(R.string.path_direct)
+            val delay = figures.rttMs?.let { " · %.0f ms".format(it) } ?: ""
             Text(
-                if (state.relayed) stringResource(R.string.path_relayed) else stringResource(R.string.path_direct),
-                color = Q.NightMuted, fontSize = 13.sp, modifier = Modifier.weight(1f),
+                way + delay + " · %.0f fps · %.1f Mbit/s".format(figures.fps, figures.mbps),
+                color = Q.NightMuted, fontSize = 13.sp, modifier = Modifier.weight(1f).testTag("figures"),
             )
             Text("✕", color = Q.NightText, fontSize = 18.sp, modifier = Modifier.clickable(onClick = onClose).padding(4.dp))
         }
@@ -456,6 +521,47 @@ fun Toolbar(
                         ToolChip(label, false, Modifier.weight(1f)) { onKeys(codes) }
                     }
                     repeat(5 - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ToolChip(stringResource(R.string.picture), pictureOpen, Modifier.weight(1f)) { pictureOpen = !pictureOpen }
+            ToolChip(stringResource(R.string.send_clipboard), false, Modifier.weight(1f)) {
+                val sent = engine.sendPhoneClipboard()
+                android.widget.Toast.makeText(
+                    context, if (sent) R.string.clipboard_sent else R.string.clipboard_empty, android.widget.Toast.LENGTH_SHORT,
+                ).show()
+            }
+            ToolChip(stringResource(R.string.pc_speakers_off), speakersMuted, Modifier.weight(1f)) {
+                speakersMuted = !speakersMuted
+                engine.muteSpeakers(speakersMuted)
+            }
+        }
+        if (pictureOpen) {
+            // Quality and frame rate (as the desktop's session bar), and the PC's screens.
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                for ((key, label) in listOf("smooth" to R.string.smooth, "balanced" to R.string.balanced, "sharp" to R.string.sharp)) {
+                    ToolChip(stringResource(label), quality == key, Modifier.weight(1f)) {
+                        quality = key
+                        engine.picture(fps, quality)
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (rate in listOf(30, 60)) {
+                    ToolChip("$rate fps", fps == rate, Modifier.weight(1f)) {
+                        fps = rate
+                        engine.picture(fps, quality)
+                    }
+                }
+            }
+            if (screens.count > 1) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (n in 0 until screens.count) {
+                        ToolChip(stringResource(R.string.screen_n, n + 1), screens.current == n, Modifier.weight(1f)) {
+                            engine.showScreen(n)
+                        }
+                    }
                 }
             }
         }

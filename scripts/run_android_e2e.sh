@@ -59,7 +59,7 @@ adb logcat > "$out/logcat.txt" 2>&1 &
 pids+=($!)
 adb shell am instrument -w -e server "10.0.2.2:$port" -e pin "$pin" -e user tester -e password "$password" \
     -e device "$device" com.queqiao.app.test/androidx.test.runner.AndroidJUnitRunner > "$out/instrument.txt" 2>&1
-for name in login devices session toolbar after; do
+for name in login devices session toolbar after failure; do
     adb exec-out run-as com.queqiao.app cat "files/test_pictures/$name.png" > "$out/$name.png" 2> /dev/null
     head -c 4 "$out/$name.png" 2> /dev/null | grep -q PNG || rm -f "$out/$name.png"
 done

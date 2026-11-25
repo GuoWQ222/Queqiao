@@ -33,6 +33,22 @@ struct SessionView: View {
     @State private var muted = false
     @State private var password = ""
     @State private var audio: AudioPlayer?
+    @State private var pictureOpen = false
+    @State private var quality = "balanced"
+    @State private var fps = 60
+    @State private var speakersMuted = false
+    @State private var clipboardNote: LocalizedStringKey?
+
+    private var figuresText: String {
+        let figures = engine.figures
+        var parts = [NSLocalizedString(
+            figures.relayed || engine.session.relayed ? "Through the server (relayed)" : "Direct connection",
+            comment: "")]
+        if let rtt = figures.rttMs { parts.append(String(format: "%.0f ms", rtt)) }
+        parts.append(String(format: "%.0f fps", figures.fps))
+        parts.append(String(format: "%.1f Mbit/s", figures.mbps))
+        return parts.joined(separator: " · ")
+    }
 
     var body: some View {
         ZStack {
@@ -111,8 +127,10 @@ struct SessionView: View {
     private var toolPanel: some View {
         VStack(spacing: 12) {
             HStack {
-                Text(engine.session.relayed ? "Through the server (relayed)" : "Direct connection")
+                // The figures, as the desktop's card: the way, the delay, frames a second, data.
+                Text(figuresText)
                     .font(.system(size: 13)).foregroundColor(Q.nightMuted)
+                    .accessibilityIdentifier("figures")
                 Spacer()
                 Button { tools = false } label: {
                     Image(systemName: "xmark").foregroundColor(Q.nightText).padding(4)
@@ -148,6 +166,49 @@ struct SessionView: View {
                         ForEach(0..<5, id: \.self) { column in
                             let key = keys[row * 5 + column]
                             ToolChip(title: LocalizedStringKey(key.0)) { screenView?.combo(key.1) }
+                        }
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                ToolChip(title: "Picture", selected: pictureOpen) { pictureOpen.toggle() }
+                ToolChip(title: "Send clipboard") {
+                    clipboardNote = engine.sendPhoneClipboard()
+                        ? LocalizedStringKey("The phone's clipboard is on the PC now")
+                        : LocalizedStringKey("The phone's clipboard has no text")
+                }
+                ToolChip(title: "Mute PC", selected: speakersMuted) {
+                    speakersMuted.toggle()
+                    engine.muteSpeakers(speakersMuted)
+                }
+            }
+            if let note = clipboardNote {
+                Text(note).font(.system(size: 12)).foregroundColor(Q.nightMuted)
+            }
+            if pictureOpen {
+                // Quality and frame rate (as the desktop's session bar), and the PC's screens.
+                HStack(spacing: 6) {
+                    ForEach([("smooth", "Smooth"), ("balanced", "Balanced"), ("sharp", "Sharp")], id: \.0) { item in
+                        ToolChip(title: LocalizedStringKey(item.1), selected: quality == item.0) {
+                            quality = item.0
+                            engine.picture(fps: fps, quality: quality)
+                        }
+                    }
+                }
+                HStack(spacing: 6) {
+                    ForEach([30, 60], id: \.self) { rate in
+                        ToolChip(title: LocalizedStringKey("\(rate) fps"), selected: fps == rate) {
+                            fps = rate
+                            engine.picture(fps: fps, quality: quality)
+                        }
+                    }
+                }
+                if engine.screenCount > 1 {
+                    HStack(spacing: 6) {
+                        ForEach(0..<engine.screenCount, id: \.self) { n in
+                            ToolChip(title: "Screen \(n + 1)", selected: engine.currentScreen == n) {
+                                engine.showScreen(n)
+                            }
                         }
                     }
                 }

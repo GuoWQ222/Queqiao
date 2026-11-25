@@ -1,6 +1,10 @@
 package com.queqiao.app
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +30,12 @@ data class SessionState(
     val passwordNeeded: Boolean = false,
 )
 
+/** The session's figures, once a second (as the desktop's card). */
+data class Figures(val fps: Double = 0.0, val mbps: Double = 0.0, val rttMs: Double? = null, val relayed: Boolean = false)
+
+/** The PC's screens: how many and which one is shown. */
+data class Screens(val count: Int = 1, val current: Int = 0)
+
 /**
  * The app's side of the core: starts it, turns its events into state the screens observe, and sends commands. One
  * per app (the core keeps the account and the session).
@@ -44,6 +54,14 @@ class Engine private constructor(context: Context) {
     val session: StateFlow<SessionState> = _session
     private val _clipboard = MutableStateFlow("")
     val clipboard: StateFlow<String> = _clipboard
+    private val _figures = MutableStateFlow(Figures())
+    val figures: StateFlow<Figures> = _figures
+    private val _screens = MutableStateFlow(Screens())
+    val screens: StateFlow<Screens> = _screens
+    private val _helping = MutableStateFlow(false)
+    /** A help request is waiting for its answer. */
+    val helping: StateFlow<Boolean> = _helping
+    private val app = context.applicationContext
     var ownDeviceId = ""
         private set
 
@@ -81,6 +99,7 @@ class Engine private constructor(context: Context) {
 
     fun connect(device: Device) {
         _session.value = SessionState()
+        _figures.value = Figures()
         _screen.value = Screen.Session(device)
         command(JSONObject().put("connect", JSONObject().put("device", device.id)))
     }
@@ -121,6 +140,31 @@ class Engine private constructor(context: Context) {
     /** Text typed on the PC as characters (any language). */
     fun typeText(text: String) = command(JSONObject().put("text", text))
 
+    /** Helping someone: their help ID and code (empty: the person there is asked). */
+    fun help(id: String, code: String) {
+        _helping.value = true
+        _error.value = ""
+        command(JSONObject().put("help", JSONObject().put("id", id.trim()).put("code", code.trim())))
+    }
+
+    fun wake(device: Device) = command(JSONObject().put("wake", device.id))
+
+    fun picture(fps: Int, quality: String) =
+        command(JSONObject().put("picture", JSONObject().put("fps", fps).put("quality", quality)))
+
+    fun showScreen(n: Int) = command(JSONObject().put("screen", n))
+
+    fun muteSpeakers(mute: Boolean) = command(JSONObject().put("mute_speakers", mute))
+
+    /** The phone's clipboard text to the PC's clipboard. */
+    fun sendPhoneClipboard(): Boolean {
+        val manager = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val text = manager.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(app)?.toString()
+        if (text.isNullOrEmpty()) return false
+        sendClipboard(text)
+        return true
+    }
+
     private fun onEvent(event: JSONObject) {
         when {
             event.has("logged_in") -> {
@@ -143,6 +187,7 @@ class Engine private constructor(context: Context) {
             event.has("error") -> {
                 val error = event.getJSONObject("error")
                 _busy.value = false
+                _helping.value = false
                 _error.value = error.optString("message")
                 if (error.optString("what") == "server" && _screen.value is Screen.Devices) {
                     _error.value = error.optString("message")
@@ -167,7 +212,35 @@ class Engine private constructor(context: Context) {
                     _session.value = _session.value.copy(passwordNeeded = false)
                 }
             }
-            event.has("clipboard") -> _clipboard.value = event.optString("clipboard")
+            event.has("clipboard") -> {
+                // The PC's clipboard on the phone (as UU Remote shares it).
+                val text = event.optString("clipboard")
+                _clipboard.value = text
+                Handler(Looper.getMainLooper()).post {
+                    val manager = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    manager.setPrimaryClip(ClipData.newPlainText("Queqiao", text))
+                }
+            }
+            event.has("stats") -> {
+                val s = event.getJSONObject("stats")
+                _figures.value = Figures(
+                    fps = s.optDouble("fps", 0.0),
+                    mbps = s.optDouble("mbps", 0.0),
+                    rttMs = if (s.isNull("rtt_ms")) null else s.optDouble("rtt_ms"),
+                    relayed = s.optBoolean("relayed"),
+                )
+            }
+            event.has("screens") -> {
+                val s = event.getJSONObject("screens")
+                _screens.value = Screens(s.optJSONArray("sizes")?.length() ?: 1, s.optInt("current"))
+            }
+            event.has("help_granted") -> {
+                val g = event.getJSONObject("help_granted")
+                _helping.value = false
+                _session.value = SessionState()
+                _figures.value = Figures()
+                _screen.value = Screen.Session(Device(g.optString("id"), g.optString("name"), true, true))
+            }
         }
     }
 

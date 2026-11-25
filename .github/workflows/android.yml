@@ -58,7 +58,9 @@ jobs:
       - name: Build the server and the Linux agent
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q xvfb x11-apps
+          # The agent's windows (egui on OpenGL through Mesa, winit on X11), the test's clock.
+          sudo apt-get install -y -q xvfb x11-apps libegl1 libgl1 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 \
+            libgbm1 libwayland-egl1 libxkbcommon-x11-0 libxcursor1 libxi6 libxrandr2 fonts-dejavu-core
           set -o pipefail
           cargo build -q --release --features queqiao-agent/test-switches -p queqiao-server -p queqiao-agent 2>&1 | tee /tmp/android_e2e/build_agent.txt
 

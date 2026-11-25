@@ -95,21 +95,20 @@ struct DevicesView: View {
                     .padding(.vertical, 8)
             }
             let others = engine.devices.filter { $0.id != engine.ownDeviceId }
-            if others.isEmpty {
-                Spacer()
-                Text("No other devices on this account yet. Install Queqiao on a PC and log in there with this account.")
-                    .font(.system(size: 15)).foregroundColor(Q.secondary).multilineTextAlignment(.center).padding(32)
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(others) { device in
-                            DeviceCard(device: device, onConnect: { engine.connect(device) },
-                                       onRemove: { removing = device })
-                        }
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    if others.isEmpty {
+                        Text("No other devices on this account yet. Install Queqiao on a PC and log in there with this account.")
+                            .font(.system(size: 15)).foregroundColor(Q.secondary).multilineTextAlignment(.center)
+                            .padding(.vertical, 24)
                     }
-                    .padding(16)
+                    ForEach(others) { device in
+                        DeviceCard(device: device, onConnect: { engine.connect(device) },
+                                   onWake: { engine.wake(device) }, onRemove: { removing = device })
+                    }
+                    HelpCard()
                 }
+                .padding(16)
             }
         }
         .background(Color.white)
@@ -126,7 +125,9 @@ struct DevicesView: View {
 struct DeviceCard: View {
     let device: Device
     let onConnect: () -> Void
+    let onWake: () -> Void
     let onRemove: () -> Void
+    @State private var wakeAsked = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -141,12 +142,53 @@ struct DeviceCard: View {
                 }
             }
             Text(device.online ? "Online" : "Offline").font(.system(size: 13)).foregroundColor(Q.heroMuted)
-            GoldButton(title: "Connect", enabled: device.online && device.controllable, action: onConnect)
+            if device.online {
+                GoldButton(title: "Connect", enabled: device.controllable, action: onConnect)
+                    .padding(.top, 10)
+                    .accessibilityIdentifier("connect:\(device.name)")
+            } else {
+                // Offline: woken up through another device of the account on its network (Wake-on-LAN).
+                GoldButton(title: wakeAsked ? "Waking it up…" : "Wake up", enabled: !wakeAsked) {
+                    wakeAsked = true
+                    onWake()
+                }
                 .padding(.top, 10)
-                .accessibilityIdentifier("connect:\(device.name)")
+            }
         }
         .padding(16)
         .background(LinearGradient(colors: [Q.heroTop, Q.heroBottom], startPoint: .top, endPoint: .bottom))
+        .cornerRadius(12)
+    }
+}
+
+/// Help someone (as UU Remote's): the help ID and code the other PC shows.
+struct HelpCard: View {
+    @EnvironmentObject var engine: Engine
+    @State private var id = ""
+    @State private var code = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Help someone").font(.system(size: 17, weight: .bold)).foregroundColor(Q.text)
+            Text("Type the help ID and code their Queqiao shows. Without a code, they are asked.")
+                .font(.system(size: 13)).foregroundColor(Q.secondary)
+            TextField("Help ID", text: $id)
+                .textFieldStyle(.roundedBorder)
+                .keyboardType(.numberPad)
+                .accessibilityIdentifier("help_id")
+            TextField("Help code", text: $code)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.characters)
+                .disableAutocorrection(true)
+                .accessibilityIdentifier("help_code")
+            GoldButton(title: engine.helping ? "Waiting for the answer…" : "Connect",
+                       enabled: !engine.helping && !id.isEmpty) {
+                engine.help(id: id, code: code)
+            }
+            .accessibilityIdentifier("help_connect")
+        }
+        .padding(16)
+        .background(Color(hex: 0xF5F6FA))
         .cornerRadius(12)
     }
 }

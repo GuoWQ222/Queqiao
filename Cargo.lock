@@ -2879,7 +2879,9 @@ name = "queqiao-mobile"
 version = "0.1.0"
 dependencies = [
  "jni 0.21.1",
+ "openh264",
  "openssl",
+ "opusic-sys",
  "queqiao-account",
  "queqiao-core",
  "queqiao-transport",

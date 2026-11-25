@@ -13,10 +13,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use queqiao_account::{Account, AccountEvent, DeviceIdentity, SavedLogin, new_session_id};
+use queqiao_account::{
+    Account, AccountEvent, ClientMessage, DeviceIdentity, SavedLogin, new_session_id,
+};
 use queqiao_core::account::Role as AccountRole;
 use queqiao_core::protocol::{
-    CodecPreference, Command as RemoteCommand, InputEvent, Message, MouseButton, VideoCodec, hevc,
+    CodecPreference, Command as RemoteCommand, InputEvent, Message, MouseButton, Quality,
+    VideoCodec, hevc,
 };
 use queqiao_transport::{Addresses, Peer, PeerEvent, Role, Signaling};
 use serde_json::{Value, json};
@@ -105,6 +108,13 @@ enum Request {
     Clipboard(String),
     Text(String),
     RemoveDevice(String),
+    /// Help the device with this help ID (another account's), with its code (empty: the person there decides).
+    Help {
+        id: String,
+        code: String,
+    },
+    /// Wake the account's offline device up (Wake-on-LAN through another of its devices).
+    Wake(String),
     Stop,
 }
 
@@ -165,7 +175,10 @@ impl Core {
     /// {"connect": {"device": id}}, {"disconnect": {}}, {"move": {"x", "y"}} (0..1 of the picture),
     /// {"button": {"button": "left"|"right"|"middle", "down": bool}}, {"wheel": {"delta", "horizontal"}},
     /// {"key": {"scancode", "extended", "down"}}, {"command": "ctrl_alt_del"|"lock"|...}, {"password": text},
-    /// {"clipboard": text}, {"text": typed text, as characters on the PC}, {"remove_device": id}. False for something it does not know.
+    /// {"clipboard": text}, {"text": typed text, as characters on the PC}, {"remove_device": id},
+    /// {"help": {"id", "code"}}, {"wake": id}, {"picture": {"fps", "quality": "smooth"|"balanced"|"sharp"}},
+    /// {"resolution": short side or 0}, {"screen": n}, {"max_bitrate": kbit/s or 0}, {"mute_speakers": bool},
+    /// {"lock_after": bool}. False for something it does not know.
     pub fn command(&self, json: &str) -> bool {
         match parse(json) {
             Some(request) => self.requests.send(request).is_ok(),
@@ -281,6 +294,26 @@ fn parse(json: &str) -> Option<Request> {
         "clipboard" => Request::Clipboard(body.as_str()?.to_string()),
         "text" => Request::Text(body.as_str()?.to_string()),
         "remove_device" => Request::RemoveDevice(body.as_str()?.to_string()),
+        "help" => Request::Help {
+            id: text("id"),
+            code: text("code"),
+        },
+        "wake" => Request::Wake(body.as_str()?.to_string()),
+        "picture" => Request::Remote(RemoteCommand::Picture {
+            fps: number("fps").clamp(0.0, 240.0) as u8,
+            quality: match text("quality").as_str() {
+                "smooth" => Quality::Smooth,
+                "sharp" => Quality::Sharp,
+                _ => Quality::Balanced,
+            },
+        }),
+        "resolution" => Request::Remote(RemoteCommand::Resolution(body.as_u64()?.min(8192) as u16)),
+        "screen" => Request::Remote(RemoteCommand::Screen(body.as_u64()?.min(255) as u8)),
+        "max_bitrate" => Request::Remote(RemoteCommand::MaxBitrate(
+            body.as_u64()?.min(1_000_000) as u32
+        )),
+        "mute_speakers" => Request::Remote(RemoteCommand::MuteSpeakers(body.as_bool()?)),
+        "lock_after" => Request::Remote(RemoteCommand::LockAfter(body.as_bool()?)),
         _ => return None,
     })
 }
@@ -292,6 +325,14 @@ struct Session {
     started: Instant,
     frames: u64,
     channel_open: bool,
+    /// The figures of the second going on (frames, bytes), and when it began.
+    second_frames: u32,
+    second_bytes: usize,
+    second_started: Instant,
+    /// The last round trip (Ping to Pong), ms.
+    rtt_ms: Option<f64>,
+    ping_id: u32,
+    relayed: bool,
 }
 
 struct Engine {
@@ -336,6 +377,37 @@ impl Engine {
                     self.end_session(&ended);
                     break;
                 }
+            }
+            // Once a second in a session: a round trip measured (Ping), and the figures for the app (as the desktop's card).
+            let mut figures = None;
+            if let Some(session) = self.session.as_mut()
+                && session.channel_open
+                && session.second_started.elapsed() >= Duration::from_secs(1)
+            {
+                let seconds = session.second_started.elapsed().as_secs_f64();
+                let fps = f64::from(session.second_frames) / seconds;
+                let mbps = session.second_bytes as f64 * 8.0 / seconds / 1e6;
+                session.second_frames = 0;
+                session.second_bytes = 0;
+                session.second_started = Instant::now();
+                session.ping_id = session.ping_id.wrapping_add(1);
+                let sent_us = session.started.elapsed().as_micros() as u64;
+                session.peer.send_data(
+                    Message::Ping {
+                        id: session.ping_id,
+                        sent_us,
+                    }
+                    .encode(),
+                );
+                figures = Some(json!({"stats": {
+                    "fps": (fps * 10.0).round() / 10.0,
+                    "mbps": (mbps * 100.0).round() / 100.0,
+                    "rtt_ms": session.rtt_ms.map(|ms| (ms * 10.0).round() / 10.0),
+                    "relayed": session.relayed,
+                }}));
+            }
+            if let Some(figures) = figures {
+                self.emit(figures);
             }
             // The account's: waited on when nothing else is going on.
             let wait = if busy || self.session.is_some() {
@@ -403,6 +475,12 @@ impl Engine {
                     account.remove_device(&device);
                 }
             }
+            Request::Wake(device) => {
+                if let Some(account) = &self.account {
+                    account.send(ClientMessage::Wake { device_id: device });
+                }
+            }
+            Request::Help { id, code } => self.help(&id, &code),
             Request::Stop => {}
         }
     }
@@ -468,6 +546,28 @@ impl Engine {
         }
     }
 
+    /// Helping someone (as the desktop's Help someone): their help ID and code; when the code is right, a session with
+    /// that PC. Without a code the person there is asked (the server waits for their answer).
+    fn help(&mut self, help_id: &str, code: &str) {
+        let help_id: String = help_id
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+        let Some(account) = self.account.as_mut() else {
+            self.emit(json!({"error": {"what": "help", "message": "not logged in"}}));
+            return;
+        };
+        match account.request_help(&help_id, code.trim()) {
+            Ok(device) => {
+                self.emit(json!({"help_granted": {"id": device.id, "name": device.name}}));
+                self.connect(&device.id);
+            }
+            Err(error) => {
+                self.emit(json!({"error": {"what": "help", "message": error.to_string()}}));
+            }
+        }
+    }
+
     fn connect(&mut self, device: &str) {
         self.end_session("another session");
         if self.account.is_none() {
@@ -498,6 +598,12 @@ impl Engine {
                     started,
                     frames: 0,
                     channel_open: false,
+                    second_frames: 0,
+                    second_bytes: 0,
+                    second_started: Instant::now(),
+                    rtt_ms: None,
+                    ping_id: 0,
+                    relayed: false,
                 });
             }
             Err(error) => {
@@ -541,6 +647,8 @@ impl Engine {
                 ..
             } => {
                 session.frames += 1;
+                session.second_frames += 1;
+                session.second_bytes += data.len();
                 let first = session.frames == 1;
                 self.frames.push(
                     Frame {
@@ -560,9 +668,14 @@ impl Engine {
                 self.audio.push(AudioPacket { data, time_48khz }, 100);
             }
             PeerEvent::Path(path) => {
+                session.relayed = path.starts_with("relayed");
                 self.emit(json!({"session": {"state": "path", "path": path, "relayed": path.starts_with("relayed")}}));
             }
             PeerEvent::Data(bytes) => match Message::decode(&bytes) {
+                Some(Message::Pong { id, sent_us }) if id == session.ping_id => {
+                    let now = session.started.elapsed().as_micros() as u64;
+                    session.rtt_ms = Some(now.saturating_sub(sent_us) as f64 / 1000.0);
+                }
                 Some(Message::ClipboardText(text)) => self.emit(json!({"clipboard": text})),
                 Some(Message::Notice(text)) => self.emit(json!({"notice": text})),
                 Some(Message::PasswordNeeded { reason, tries_left }) => {

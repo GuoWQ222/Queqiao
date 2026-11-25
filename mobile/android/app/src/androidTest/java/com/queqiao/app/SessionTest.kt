@@ -49,6 +49,15 @@ class SessionTest {
 
     @Test
     fun logInConnectControlDisconnect() {
+        try {
+            session()
+        } catch (failure: Throwable) {
+            picture("failure")
+            throw failure
+        }
+    }
+
+    private fun session() {
         val device = arg("device")
         // A saved login from an earlier run: log out first.
         rule.waitUntil(20_000) { rule.exists("user") || rule.exists("menu") }

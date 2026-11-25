@@ -1,7 +1,7 @@
 //! The mobile core as the apps use it, on a desktop (scripts/run_mobile_core_probe.sh): logs in, waits for the device
 //! in the list, connects, counts frames and sound packets, sends a click and typing, disconnects. The events it got
 //! are printed as they come.
-//! Usage: core_probe <folder> <server> <pin> <user> <password> <device name> [seconds, default 10]
+//! Usage: core_probe <folder> <server> <pin> <user> <password> <device name, or help:<help ID>:<code>> [seconds, default 10]
 //! Prints CORE_PROBE_PASS frames=N keyframes=K audio=A or CORE_PROBE_FAIL <why>.
 
 use queqiao_mobile::Core;
@@ -32,33 +32,57 @@ fn main() {
         false
     };
     core.command(&json!({"login": {"server": args[2], "pin": args[3], "user": args[4], "password": args[5]}}).to_string());
+    // "help:<help ID>:<code>" instead of a device name: helping another account's PC with its help ID and code.
+    let help = args[6].strip_prefix("help:").map(|rest| {
+        let (id, code) = rest.split_once(':').unwrap_or((rest, ""));
+        (id.to_string(), code.to_string())
+    });
     let mut device_id = String::new();
-    let listed = events(
-        &core,
-        Instant::now() + Duration::from_secs(20),
-        &mut |value| {
-            if let Some(Value::Array(list)) = value.get("devices") {
-                for device in list {
-                    if device["name"] == args[6] && device["online"] == true {
-                        device_id = device["id"].as_str().unwrap_or("").to_string();
-                        return true;
+    let listed = help.is_some()
+        || events(
+            &core,
+            Instant::now() + Duration::from_secs(20),
+            &mut |value| {
+                if let Some(Value::Array(list)) = value.get("devices") {
+                    for device in list {
+                        if device["name"] == args[6] && device["online"] == true {
+                            device_id = device["id"].as_str().unwrap_or("").to_string();
+                            return true;
+                        }
                     }
                 }
-            }
-            false
-        },
-    );
+                false
+            },
+        );
     if !listed {
         println!("CORE_PROBE_FAIL the device was not listed online");
         return;
     }
-    core.command(&json!({"connect": {"device": device_id}}).to_string());
+    match &help {
+        Some((id, code)) => {
+            core.command(&json!({"help": {"id": id, "code": code}}).to_string());
+        }
+        None => {
+            core.command(&json!({"connect": {"device": device_id}}).to_string());
+        }
+    }
+    let mut figures = 0;
     let started = Instant::now();
     let (mut frames, mut keyframes, mut audio, mut bytes) = (0u64, 0u64, 0u64, 0usize);
     let mut sent_input = false;
     while started.elapsed() < Duration::from_secs(seconds) {
         while let Some(event) = core.next_event(Duration::ZERO) {
             println!("event: {event}");
+            if event.contains("\"stats\"")
+                && event.contains("\"rtt_ms\":")
+                && !event.contains("\"rtt_ms\":null")
+            {
+                figures += 1;
+            }
+            if event.contains("\"error\"") && help.is_some() {
+                println!("CORE_PROBE_FAIL help: {event}");
+                return;
+            }
             if event.contains("\"failed\"") {
                 println!("CORE_PROBE_FAIL the session failed");
                 return;
@@ -99,6 +123,11 @@ fn main() {
         "{frames} frames ({:.2} MB), {keyframes} keyframes, {audio} sound packets",
         bytes as f64 / 1e6
     );
+    if figures == 0 {
+        println!("CORE_PROBE_FAIL no figures with a round trip came");
+        return;
+    }
+    println!("{figures} seconds of figures with a round trip");
     if frames >= 30 && keyframes >= 1 {
         println!("CORE_PROBE_PASS frames={frames} keyframes={keyframes} audio={audio}");
     } else {

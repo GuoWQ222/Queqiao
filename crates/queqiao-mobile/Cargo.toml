@@ -25,3 +25,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 # The PC's sound decoded into samples for iOS (src/pcm.rs); Android decodes Opus with MediaCodec.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 opusic-sys = "0.7"
+
+[dev-dependencies]
+# examples/test_agent: a stand-in PC streaming a test picture (the iOS Simulator's tests on a Mac).
+openh264 = "0.9"
