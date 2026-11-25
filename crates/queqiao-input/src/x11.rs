@@ -34,14 +34,24 @@ struct State {
     wheel: (i32, i32),
 }
 
-/// Injects input into the X display named by $DISPLAY.
+/// Injects input into the X display named by $DISPLAY, or in a Wayland session into the compositor (wayland.rs),
+/// where XTEST would reach only XWayland's windows.
 pub struct Injector {
     screen: ScreenRect,
     state: Mutex<Option<State>>,
+    /// The Wayland injector, or why there is none, in a Wayland session.
+    wayland: Option<Mutex<Result<crate::wayland::WaylandInput, String>>>,
 }
 
 impl Injector {
     pub fn new(screen: ScreenRect) -> Self {
+        if crate::wayland::wayland_session() {
+            return Injector {
+                screen,
+                state: Mutex::new(None),
+                wayland: Some(Mutex::new(crate::wayland::WaylandInput::new(screen))),
+            };
+        }
         let state = x11rb::connect(None).ok().and_then(|(connection, number)| {
             let root = connection.setup().roots.get(number)?.root;
             connection.xtest_get_version(2, 2).ok()?.reply().ok()?;
@@ -54,6 +64,7 @@ impl Injector {
         Injector {
             screen,
             state: Mutex::new(state),
+            wayland: None,
         }
     }
 
@@ -64,6 +75,15 @@ impl Injector {
 
     /// Injects one event; an error if the X server has no XTEST or refused it.
     pub fn inject(&self, event: &InputEvent) -> Result<(), String> {
+        if let Some(wayland) = &self.wayland {
+            let mut wayland = wayland
+                .lock()
+                .map_err(|_| "the injector broke".to_string())?;
+            return match wayland.as_mut() {
+                Ok(input) => input.inject(self.screen, event),
+                Err(error) => Err(error.clone()),
+            };
+        }
         let mut guard = self
             .state
             .lock()

@@ -58,11 +58,18 @@ fn start() -> Result<Gui, String> {
         .name("queqiao-gui".into())
         .spawn(move || {
             let options = eframe::NativeOptions {
-                // The root window is not shown: every window is a viewport of its own.
+                // The root window is not shown: every window is a viewport of its own. Wayland has no hidden windows
+                // (winit maps it anyway): there it is one transparent pixel of fixed size, which tiling compositors
+                // float instead of giving it a tile.
                 viewport: egui::ViewportBuilder::default()
                     .with_title("Queqiao")
                     .with_visible(false)
-                    .with_inner_size([1.0, 1.0]),
+                    .with_inner_size([1.0, 1.0])
+                    .with_min_inner_size([1.0, 1.0])
+                    .with_max_inner_size([1.0, 1.0])
+                    .with_resizable(false)
+                    .with_decorations(false)
+                    .with_transparent(true),
                 event_loop_builder: Some(Box::new(|builder| {
                     builder.with_any_thread(true);
                 })),

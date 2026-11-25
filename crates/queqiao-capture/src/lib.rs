@@ -3,8 +3,13 @@
 //! - Windows (`win.rs`): DXGI Desktop Duplication; frames stay on the GPU as D3D11 textures on the duplicator's
 //!   device. Needs a Direct3D 11 GPU and a process in the interactive session; per-monitor DPI aware.
 //! - Linux under X11 (`x11.rs`): MIT-SHM into memory shared with the X server, DAMAGE for changes, XFixes for the
-//!   pointer, RandR for the monitors.
+//!   pointer, RandR for the monitors. In a Wayland session (`portal.rs`): the ScreenCast portal's PipeWire stream
+//!   (`pipewire.rs`, libpipewire loaded at run time).
 
+#[cfg(target_os = "linux")]
+mod pipewire;
+#[cfg(target_os = "linux")]
+mod portal;
 #[cfg(windows)]
 mod win;
 #[cfg(target_os = "linux")]

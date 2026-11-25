@@ -27,3 +27,7 @@ windows = { workspace = true, features = [
 x11rb = { version = "0.13", features = ["xtest", "xfixes"] }
 libc = "0.2"
 png = "0.17"
+# Wayland (wayland.rs): the wlroots virtual pointer and the virtual keyboard protocol.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }

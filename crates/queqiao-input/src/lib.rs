@@ -16,6 +16,8 @@ mod clipboard;
 #[cfg(target_os = "linux")]
 mod clipboard_x11;
 pub mod scancode;
+#[cfg(target_os = "linux")]
+mod wayland;
 #[cfg(windows)]
 mod win;
 #[cfg(target_os = "linux")]

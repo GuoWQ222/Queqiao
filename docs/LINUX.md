@@ -118,7 +118,21 @@ the CPU converter Windows uses when its GPU cannot (yuv.rs); else OpenH264. run_
 NVENC make H.265 and NVDEC show it; h265_444 asks for 4:4:4 10-bit and gets 8-bit 4:4:4 (the Linux agent's NVENC path
 makes no 10-bit yet). AV1 is not offered yet: NVDEC decodes it, but no AV1 stream has been through it here.
 
-Not yet on Linux: AV1 and 10-bit encoding, VA-API, Wayland, the privacy screen and input block, the service and packages.
+Wayland (2026-11-25): the agent captures through the ScreenCast portal (xdg-desktop-portal, which GNOME, KDE and the
+wlroots desktops answer) and its PipeWire stream (libpipewire loaded at run time, as CUDA and PulseAudio are; only its
+stable C API, the format pods written by hand: it builds without PipeWire's headers and runs with any PipeWire 0.3 or
+later), and injects input through the wlroots compositors' virtual pointer and virtual keyboard (the keymap the seat
+uses, else libxkbcommon's default). The GUI runs natively on Wayland (its hidden root window is a floating
+transparent pixel there: Wayland hides no window); the session window runs through XWayland. Tested on cc4-1 on a
+virtual Wayland display (the user, 2026-11-25: passing on cc4-1's virtual screens is enough): scripts/
+wayland_display_linux.sh starts headless sway with XWayland, PipeWire, WirePlumber and the portals as the user
+qqtest (sway refuses root); scripts/run_wayland_linux.sh runs a session against it: the viewer's picture against the
+Wayland screen (grim), and the input test as wev (a native Wayland program) sees it. Not yet on Wayland: GNOME's and
+KDE's input (the RemoteDesktop portal), the portal's restore token (GNOME and KDE ask the person each session until
+then), the pointer's shape apart from the picture, the banner at the top (Wayland programs cannot place themselves:
+it floats where the compositor puts it).
+
+Not yet on Linux: AV1 and 10-bit encoding, VA-API, the privacy screen and input block, the service and packages.
 
 ## Order of the work
 

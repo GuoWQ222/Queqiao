@@ -1,0 +1,631 @@
+//! A PipeWire video stream for screen capture on Wayland (docs/LINUX.md): libpipewire-0.3.so.0 is loaded at run time
+//! (as CUDA and PulseAudio are), so Queqiao starts where it is missing and builds without its headers. Only the stable
+//! C API is used: a thread loop, a context on the portal's connection (its file descriptor), one input stream on the
+//! portal's node. The formats it may send (EnumFormat) and the one it chose (Format) are SPA pods, written and read
+//! here by hand. Each frame is copied out in the stream's `process` callback (on PipeWire's thread) and handed over
+//! under a lock; the buffer goes back to PipeWire at once.
+
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+// SPA's types (spa/utils/type.h), parameters, format keys and values (spa/param/*.h).
+const TYPE_ID: u32 = 3;
+const TYPE_RECTANGLE: u32 = 10;
+const TYPE_FRACTION: u32 = 11;
+const TYPE_OBJECT: u32 = 15;
+const TYPE_CHOICE: u32 = 19;
+const TYPE_OBJECT_FORMAT: u32 = 0x40003;
+const PARAM_ENUM_FORMAT: u32 = 3;
+const PARAM_FORMAT: u32 = 4;
+const FORMAT_MEDIA_TYPE: u32 = 1;
+const FORMAT_MEDIA_SUBTYPE: u32 = 2;
+const FORMAT_VIDEO_FORMAT: u32 = 0x20001;
+const FORMAT_VIDEO_SIZE: u32 = 0x20003;
+const FORMAT_VIDEO_FRAMERATE: u32 = 0x20004;
+const MEDIA_TYPE_VIDEO: u32 = 2;
+const MEDIA_SUBTYPE_RAW: u32 = 1;
+const CHOICE_RANGE: u32 = 1;
+const CHOICE_ENUM: u32 = 3;
+/// The 32-bit formats taken (spa_video_format): the B G R order first, which the encoders take as it is.
+pub const VIDEO_FORMAT_RGBX: u32 = 7;
+pub const VIDEO_FORMAT_BGRX: u32 = 8;
+pub const VIDEO_FORMAT_RGBA: u32 = 11;
+pub const VIDEO_FORMAT_BGRA: u32 = 12;
+const STREAM_FLAG_AUTOCONNECT: u32 = 1 << 0;
+const STREAM_FLAG_MAP_BUFFERS: u32 = 1 << 2;
+const DIRECTION_INPUT: u32 = 0;
+const STREAM_STATE_ERROR: c_int = -1;
+
+#[repr(C)]
+struct SpaChunk {
+    offset: u32,
+    size: u32,
+    stride: i32,
+    flags: i32,
+}
+
+#[repr(C)]
+struct SpaData {
+    type_: u32,
+    flags: u32,
+    fd: i64,
+    mapoffset: u32,
+    maxsize: u32,
+    data: *mut c_void,
+    chunk: *mut SpaChunk,
+}
+
+#[repr(C)]
+struct SpaBuffer {
+    n_metas: u32,
+    n_datas: u32,
+    metas: *mut c_void,
+    datas: *mut SpaData,
+}
+
+#[repr(C)]
+struct PwBuffer {
+    buffer: *mut SpaBuffer,
+}
+
+#[repr(C)]
+struct SpaPod {
+    size: u32,
+    type_: u32,
+}
+
+/// pw_stream_events, version 0 (the fields every PipeWire 0.3 has).
+#[repr(C)]
+struct StreamEvents {
+    version: u32,
+    destroy: Option<unsafe extern "C" fn(*mut c_void)>,
+    state_changed: Option<unsafe extern "C" fn(*mut c_void, c_int, c_int, *const c_char)>,
+    control_info: Option<unsafe extern "C" fn(*mut c_void, u32, *const c_void)>,
+    io_changed: Option<unsafe extern "C" fn(*mut c_void, u32, *mut c_void, u32)>,
+    param_changed: Option<unsafe extern "C" fn(*mut c_void, u32, *const SpaPod)>,
+    add_buffer: Option<unsafe extern "C" fn(*mut c_void, *mut PwBuffer)>,
+    remove_buffer: Option<unsafe extern "C" fn(*mut c_void, *mut PwBuffer)>,
+    process: Option<unsafe extern "C" fn(*mut c_void)>,
+    drained: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+/// struct spa_hook: storage PipeWire fills (a list link, callbacks, a destructor, private data); kept larger than it.
+#[repr(C)]
+struct SpaHook([usize; 8]);
+
+type Opaque = *mut c_void;
+
+struct Api {
+    library: Opaque,
+    init: unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char),
+    thread_loop_new: unsafe extern "C" fn(*const c_char, *const c_void) -> Opaque,
+    thread_loop_get_loop: unsafe extern "C" fn(Opaque) -> Opaque,
+    thread_loop_start: unsafe extern "C" fn(Opaque) -> c_int,
+    thread_loop_stop: unsafe extern "C" fn(Opaque),
+    thread_loop_lock: unsafe extern "C" fn(Opaque),
+    thread_loop_unlock: unsafe extern "C" fn(Opaque),
+    thread_loop_destroy: unsafe extern "C" fn(Opaque),
+    context_new: unsafe extern "C" fn(Opaque, Opaque, usize) -> Opaque,
+    context_connect_fd: unsafe extern "C" fn(Opaque, c_int, Opaque, usize) -> Opaque,
+    context_destroy: unsafe extern "C" fn(Opaque),
+    core_disconnect: unsafe extern "C" fn(Opaque) -> c_int,
+    properties_new_string: unsafe extern "C" fn(*const c_char) -> Opaque,
+    stream_new: unsafe extern "C" fn(Opaque, *const c_char, Opaque) -> Opaque,
+    stream_add_listener:
+        unsafe extern "C" fn(Opaque, *mut SpaHook, *const StreamEvents, *mut c_void),
+    stream_connect: unsafe extern "C" fn(Opaque, u32, u32, u32, *mut *const SpaPod, u32) -> c_int,
+    stream_disconnect: unsafe extern "C" fn(Opaque) -> c_int,
+    stream_destroy: unsafe extern "C" fn(Opaque),
+    stream_dequeue_buffer: unsafe extern "C" fn(Opaque) -> *mut PwBuffer,
+    stream_queue_buffer: unsafe extern "C" fn(Opaque, *mut PwBuffer) -> c_int,
+}
+
+/// A function's address from dlsym as the function pointer type `T` (pointer-sized).
+fn function_pointer<T: Copy>(address: *mut c_void) -> T {
+    assert_eq!(size_of::<T>(), size_of::<*mut c_void>());
+    unsafe { std::mem::transmute_copy::<*mut c_void, T>(&address) }
+}
+
+impl Api {
+    fn open() -> Result<Api, String> {
+        let library = unsafe {
+            libc::dlopen(
+                c"libpipewire-0.3.so.0".as_ptr(),
+                libc::RTLD_NOW | libc::RTLD_LOCAL,
+            )
+        };
+        if library.is_null() {
+            return Err("PipeWire (libpipewire-0.3.so.0) is not installed".into());
+        }
+        let get = |name: &CStr| -> Result<*mut c_void, String> {
+            let address = unsafe { libc::dlsym(library, name.as_ptr()) };
+            if address.is_null() {
+                Err(format!("PipeWire: no {}", name.to_string_lossy()))
+            } else {
+                Ok(address)
+            }
+        };
+        macro_rules! function {
+            ($name:literal) => {
+                function_pointer(get($name)?)
+            };
+        }
+        Ok(Api {
+            library,
+            init: function!(c"pw_init"),
+            thread_loop_new: function!(c"pw_thread_loop_new"),
+            thread_loop_get_loop: function!(c"pw_thread_loop_get_loop"),
+            thread_loop_start: function!(c"pw_thread_loop_start"),
+            thread_loop_stop: function!(c"pw_thread_loop_stop"),
+            thread_loop_lock: function!(c"pw_thread_loop_lock"),
+            thread_loop_unlock: function!(c"pw_thread_loop_unlock"),
+            thread_loop_destroy: function!(c"pw_thread_loop_destroy"),
+            context_new: function!(c"pw_context_new"),
+            context_connect_fd: function!(c"pw_context_connect_fd"),
+            context_destroy: function!(c"pw_context_destroy"),
+            core_disconnect: function!(c"pw_core_disconnect"),
+            properties_new_string: function!(c"pw_properties_new_string"),
+            stream_new: function!(c"pw_stream_new"),
+            stream_add_listener: function!(c"pw_stream_add_listener"),
+            stream_connect: function!(c"pw_stream_connect"),
+            stream_disconnect: function!(c"pw_stream_disconnect"),
+            stream_destroy: function!(c"pw_stream_destroy"),
+            stream_dequeue_buffer: function!(c"pw_stream_dequeue_buffer"),
+            stream_queue_buffer: function!(c"pw_stream_queue_buffer"),
+        })
+    }
+}
+
+impl Drop for Api {
+    fn drop(&mut self) {
+        // Not closed: PipeWire's own threads may still run its code while the process lives.
+        let _ = self.library;
+    }
+}
+
+// SPA pods, written by hand: [size u32][type u32][body], each padded to 8 bytes.
+fn pod(type_: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + body.len() + 7);
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&type_.to_le_bytes());
+    out.extend_from_slice(body);
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+fn words(values: &[u32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// A choice of `kind` among values of `child_type`, each `values_per` words.
+fn choice(kind: u32, child_type: u32, child_words: u32, values: &[u32]) -> Vec<u8> {
+    let mut body = words(&[kind, 0, child_words * 4, child_type]);
+    body.extend(words(values));
+    pod(TYPE_CHOICE, &body)
+}
+
+fn property(key: u32, value: Vec<u8>) -> Vec<u8> {
+    let mut out = words(&[key, 0]);
+    out.extend(value);
+    out
+}
+
+/// The EnumFormat pod: raw video, these 32-bit formats, any size up to 8192, up to 240 frames a second.
+fn enum_format(width: u32, height: u32) -> Vec<u8> {
+    let mut body = words(&[TYPE_OBJECT_FORMAT, PARAM_ENUM_FORMAT]);
+    body.extend(property(
+        FORMAT_MEDIA_TYPE,
+        pod(TYPE_ID, &words(&[MEDIA_TYPE_VIDEO])),
+    ));
+    body.extend(property(
+        FORMAT_MEDIA_SUBTYPE,
+        pod(TYPE_ID, &words(&[MEDIA_SUBTYPE_RAW])),
+    ));
+    body.extend(property(
+        FORMAT_VIDEO_FORMAT,
+        choice(
+            CHOICE_ENUM,
+            TYPE_ID,
+            1,
+            &[
+                VIDEO_FORMAT_BGRX,
+                VIDEO_FORMAT_BGRX,
+                VIDEO_FORMAT_BGRA,
+                VIDEO_FORMAT_RGBX,
+                VIDEO_FORMAT_RGBA,
+            ],
+        ),
+    ));
+    body.extend(property(
+        FORMAT_VIDEO_SIZE,
+        choice(
+            CHOICE_RANGE,
+            TYPE_RECTANGLE,
+            2,
+            &[width.max(1), height.max(1), 1, 1, 8192, 8192],
+        ),
+    ));
+    body.extend(property(
+        FORMAT_VIDEO_FRAMERATE,
+        choice(CHOICE_RANGE, TYPE_FRACTION, 2, &[60, 1, 0, 1, 240, 1]),
+    ));
+    pod(TYPE_OBJECT, &body)
+}
+
+fn word(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// The first value of a pod (a choice's default) as words: (its type, its body).
+fn first_value(value_type: u32, body: &[u8]) -> Option<(u32, &[u8])> {
+    if value_type == TYPE_CHOICE {
+        let child_size = word(body, 8)? as usize;
+        let child_type = word(body, 12)?;
+        Some((child_type, body.get(16..16 + child_size)?))
+    } else {
+        Some((value_type, body))
+    }
+}
+
+/// The video format and size of a Format pod (`pod`: its header and body).
+fn parse_format(pod: &[u8]) -> Option<(u32, u32, u32)> {
+    let size = word(pod, 0)? as usize;
+    if word(pod, 4)? != TYPE_OBJECT || pod.len() < 8 + size {
+        return None;
+    }
+    let body = &pod[8..8 + size];
+    let (mut format, mut extent) = (None, None);
+    let mut at = 8;
+    while at + 16 <= body.len() {
+        let key = word(body, at)?;
+        let value_size = word(body, at + 8)? as usize;
+        let value_type = word(body, at + 12)?;
+        let value = body.get(at + 16..at + 16 + value_size)?;
+        match (key, first_value(value_type, value)) {
+            (FORMAT_VIDEO_FORMAT, Some((TYPE_ID, value))) => format = word(value, 0),
+            (FORMAT_VIDEO_SIZE, Some((TYPE_RECTANGLE, value))) => {
+                extent = Some((word(value, 0)?, word(value, 4)?))
+            }
+            _ => {}
+        }
+        at += 16 + value_size.div_ceil(8) * 8;
+    }
+    let (width, height) = extent?;
+    Some((format?, width, height))
+}
+
+/// The latest frame, copied out of PipeWire's buffer.
+#[derive(Default)]
+pub struct Frame {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    /// spa_video_format: BGRx, BGRA, RGBx or RGBA.
+    pub format: u32,
+    /// Counts the frames that came.
+    pub sequence: u64,
+    /// When it came (`qpc_now`).
+    pub arrived_qpc: i64,
+}
+
+/// What the stream's callbacks (on PipeWire's thread) share with the capture's thread.
+struct Shared {
+    api: *const Api,
+    stream: Opaque,
+    /// The format PipeWire chose: (spa_video_format, width, height).
+    format: Mutex<Option<(u32, u32, u32)>>,
+    state: AtomicI32,
+    error: Mutex<Option<String>>,
+    frame: Mutex<Frame>,
+    arrived: Condvar,
+}
+
+unsafe extern "C" fn on_state(data: *mut c_void, _old: c_int, state: c_int, error: *const c_char) {
+    let shared = unsafe { &*data.cast::<Shared>() };
+    shared.state.store(state, Ordering::Relaxed);
+    if state == STREAM_STATE_ERROR {
+        let text = if error.is_null() {
+            "the stream failed".into()
+        } else {
+            unsafe { CStr::from_ptr(error) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        if let Ok(mut error) = shared.error.lock() {
+            *error = Some(text);
+        }
+        // Under the frame's lock, so a waiter cannot miss it.
+        let _frame = shared.frame.lock();
+        shared.arrived.notify_all();
+    }
+}
+
+unsafe extern "C" fn on_param(data: *mut c_void, id: u32, param: *const SpaPod) {
+    let shared = unsafe { &*data.cast::<Shared>() };
+    if id != PARAM_FORMAT || param.is_null() {
+        return;
+    }
+    let size = unsafe { (*param).size } as usize;
+    let bytes = unsafe { std::slice::from_raw_parts(param.cast::<u8>(), 8 + size) };
+    if let Ok(mut format) = shared.format.lock() {
+        *format = parse_format(bytes);
+    }
+}
+
+unsafe extern "C" fn on_process(data: *mut c_void) {
+    let shared = unsafe { &*data.cast::<Shared>() };
+    let api = unsafe { &*shared.api };
+    let buffer = unsafe { (api.stream_dequeue_buffer)(shared.stream) };
+    if buffer.is_null() {
+        return;
+    }
+    let spa = unsafe { &*(*buffer).buffer };
+    let format = shared.format.lock().ok().and_then(|format| *format);
+    if spa.n_datas > 0
+        && let Some((format, width, height)) = format
+    {
+        let data = unsafe { &*spa.datas };
+        let chunk = unsafe { &*data.chunk };
+        // A buffer without memory here (DMA-BUF, not asked for) or an empty one (nothing changed) is passed over.
+        if !data.data.is_null() && chunk.size > 0 {
+            let stride = if chunk.stride > 0 {
+                chunk.stride as usize
+            } else {
+                width as usize * 4
+            };
+            let start = chunk.offset as usize % data.maxsize.max(1) as usize;
+            let length = (chunk.size as usize).min(data.maxsize as usize - start);
+            let bytes =
+                unsafe { std::slice::from_raw_parts(data.data.cast::<u8>().add(start), length) };
+            if let Ok(mut frame) = shared.frame.lock() {
+                frame.pixels.clear();
+                frame.pixels.extend_from_slice(bytes);
+                frame.width = width;
+                frame.height = height;
+                frame.stride = stride;
+                frame.format = format;
+                frame.sequence += 1;
+                frame.arrived_qpc = crate::qpc_now();
+                shared.arrived.notify_all();
+            }
+        }
+    }
+    unsafe { (api.stream_queue_buffer)(shared.stream, buffer) };
+}
+
+static EVENTS: StreamEvents = StreamEvents {
+    version: 0,
+    destroy: None,
+    state_changed: Some(on_state),
+    control_info: None,
+    io_changed: None,
+    param_changed: Some(on_param),
+    add_buffer: None,
+    remove_buffer: None,
+    process: Some(on_process),
+    drained: None,
+};
+
+/// A running stream of the portal's node.
+pub struct Stream {
+    api: Box<Api>,
+    thread_loop: Opaque,
+    context: Opaque,
+    core: Opaque,
+    shared: Box<Shared>,
+    _hook: Box<SpaHook>,
+}
+
+// The raw pointers are PipeWire's, used under its thread loop's lock.
+unsafe impl Send for Stream {}
+
+impl Stream {
+    /// Connects to the portal's PipeWire (`fd`, from OpenPipeWireRemote) and streams `node`, `size` the screen's.
+    pub fn open(fd: std::os::fd::OwnedFd, node: u32, size: (u32, u32)) -> Result<Stream, String> {
+        use std::os::fd::IntoRawFd;
+        let api = Box::new(Api::open()?);
+        unsafe { (api.init)(std::ptr::null_mut(), std::ptr::null_mut()) };
+        let thread_loop =
+            unsafe { (api.thread_loop_new)(c"queqiao-pipewire".as_ptr(), std::ptr::null()) };
+        if thread_loop.is_null() {
+            return Err("PipeWire: no thread loop".into());
+        }
+        let context = unsafe {
+            (api.context_new)(
+                (api.thread_loop_get_loop)(thread_loop),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if context.is_null() {
+            unsafe { (api.thread_loop_destroy)(thread_loop) };
+            return Err("PipeWire: no context".into());
+        }
+        let mut shared = Box::new(Shared {
+            api: &*api,
+            stream: std::ptr::null_mut(),
+            format: Mutex::new(None),
+            state: AtomicI32::new(0),
+            error: Mutex::new(None),
+            frame: Mutex::new(Frame::default()),
+            arrived: Condvar::new(),
+        });
+        let mut hook = Box::new(SpaHook([0; 8]));
+        let made = (|| {
+            if unsafe { (api.thread_loop_start)(thread_loop) } < 0 {
+                return Err("PipeWire: the thread loop did not start".to_string());
+            }
+            unsafe { (api.thread_loop_lock)(thread_loop) };
+            let result = (|| {
+                // The portal's connection: PipeWire takes the descriptor over.
+                let core = unsafe {
+                    (api.context_connect_fd)(context, fd.into_raw_fd(), std::ptr::null_mut(), 0)
+                };
+                if core.is_null() {
+                    return Err("PipeWire: the portal's connection was refused".to_string());
+                }
+                let properties =
+                    CString::new("media.type=Video media.category=Capture media.role=Screen")
+                        .unwrap();
+                let stream = unsafe {
+                    (api.stream_new)(
+                        core,
+                        c"queqiao-screen".as_ptr(),
+                        (api.properties_new_string)(properties.as_ptr()),
+                    )
+                };
+                if stream.is_null() {
+                    return Err("PipeWire: no stream".to_string());
+                }
+                shared.stream = stream;
+                unsafe {
+                    (api.stream_add_listener)(
+                        stream,
+                        &mut *hook,
+                        &EVENTS,
+                        (&mut *shared as *mut Shared).cast(),
+                    )
+                };
+                let formats = enum_format(size.0, size.1);
+                let mut params = [formats.as_ptr().cast::<SpaPod>()];
+                let connected = unsafe {
+                    (api.stream_connect)(
+                        stream,
+                        DIRECTION_INPUT,
+                        node,
+                        STREAM_FLAG_AUTOCONNECT | STREAM_FLAG_MAP_BUFFERS,
+                        params.as_mut_ptr(),
+                        1,
+                    )
+                };
+                if connected < 0 {
+                    return Err(format!(
+                        "PipeWire: connecting the stream failed ({connected})"
+                    ));
+                }
+                Ok(core)
+            })();
+            unsafe { (api.thread_loop_unlock)(thread_loop) };
+            result
+        })();
+        match made {
+            Ok(core) => Ok(Stream {
+                api,
+                thread_loop,
+                context,
+                core,
+                shared,
+                _hook: hook,
+            }),
+            Err(error) => {
+                unsafe {
+                    (api.thread_loop_stop)(thread_loop);
+                    (api.context_destroy)(context);
+                    (api.thread_loop_destroy)(thread_loop);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Waits up to `wait` for a frame newer than `after` (a sequence number) and hands it to `take`.
+    pub fn next<T>(
+        &self,
+        after: u64,
+        wait: Duration,
+        take: impl FnOnce(&Frame) -> T,
+    ) -> Result<Option<T>, String> {
+        let until = Instant::now() + wait;
+        let mut frame = self
+            .shared
+            .frame
+            .lock()
+            .map_err(|_| "PipeWire: poisoned".to_string())?;
+        loop {
+            if let Some(error) = self
+                .shared
+                .error
+                .lock()
+                .ok()
+                .and_then(|error| error.clone())
+            {
+                return Err(format!("PipeWire: {error}"));
+            }
+            if frame.sequence > after {
+                return Ok(Some(take(&frame)));
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            frame = self
+                .shared
+                .arrived
+                .wait_timeout(frame, left)
+                .map_err(|_| "PipeWire: poisoned".to_string())?
+                .0;
+        }
+    }
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let api = &self.api;
+        unsafe {
+            (api.thread_loop_lock)(self.thread_loop);
+            if !self.shared.stream.is_null() {
+                (api.stream_disconnect)(self.shared.stream);
+                (api.stream_destroy)(self.shared.stream);
+            }
+            (api.core_disconnect)(self.core);
+            (api.thread_loop_unlock)(self.thread_loop);
+            (api.thread_loop_stop)(self.thread_loop);
+            (api.context_destroy)(self.context);
+            (api.thread_loop_destroy)(self.thread_loop);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_format_pod_reads_back() {
+        // A Format as PipeWire fixes it: BGRx, 1920x1080 (plain values), and the framerate as a choice.
+        let mut body = words(&[TYPE_OBJECT_FORMAT, PARAM_FORMAT]);
+        body.extend(property(
+            FORMAT_MEDIA_TYPE,
+            pod(TYPE_ID, &words(&[MEDIA_TYPE_VIDEO])),
+        ));
+        body.extend(property(
+            FORMAT_VIDEO_FORMAT,
+            pod(TYPE_ID, &words(&[VIDEO_FORMAT_BGRX])),
+        ));
+        body.extend(property(
+            FORMAT_VIDEO_SIZE,
+            pod(TYPE_RECTANGLE, &words(&[1920, 1080])),
+        ));
+        body.extend(property(
+            FORMAT_VIDEO_FRAMERATE,
+            choice(CHOICE_RANGE, TYPE_FRACTION, 2, &[60, 1, 0, 1, 240, 1]),
+        ));
+        assert_eq!(
+            parse_format(&pod(TYPE_OBJECT, &body)),
+            Some((VIDEO_FORMAT_BGRX, 1920, 1080))
+        );
+        // Our EnumFormat reads back with the defaults first.
+        assert_eq!(
+            parse_format(&enum_format(1280, 720)),
+            Some((VIDEO_FORMAT_BGRX, 1280, 720))
+        );
+    }
+}

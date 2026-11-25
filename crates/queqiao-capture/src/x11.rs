@@ -34,7 +34,7 @@ pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub stride: usize,
-    pixels: *const u8,
+    pub(crate) pixels: *const u8,
 }
 
 impl Frame {
@@ -139,7 +139,115 @@ impl Drop for Segment {
 }
 
 /// Capture of one monitor of an X display.
-pub struct Duplicator {
+/// The screen's updates, as Windows' Duplicator: from the X server (MIT-SHM, `X11Duplicator`), or in a Wayland
+/// session from the ScreenCast portal through PipeWire (portal.rs), where X11 reaches only XWayland's windows.
+pub struct Duplicator(Capture);
+
+enum Capture {
+    X11(Box<X11Duplicator>),
+    Portal(Box<crate::portal::PortalDuplicator>),
+}
+
+impl Duplicator {
+    /// The primary monitor (RandR's primary, else the first; on Wayland the one shared).
+    pub fn primary() -> Result<Self> {
+        Self::new(usize::MAX)
+    }
+
+    /// Monitor `index` of `screens()` (`usize::MAX`: the primary one). On Wayland the portal shares the monitor the
+    /// person (or its settings) choose.
+    pub fn new(index: usize) -> Result<Self> {
+        if crate::portal::wayland_session() {
+            return Ok(Duplicator(Capture::Portal(Box::new(
+                crate::portal::PortalDuplicator::new()?,
+            ))));
+        }
+        Ok(Duplicator(Capture::X11(Box::new(X11Duplicator::new(
+            index,
+        )?))))
+    }
+
+    pub fn info(&self) -> &OutputInfo {
+        match &self.0 {
+            Capture::X11(capture) => &capture.info,
+            Capture::Portal(capture) => capture.info(),
+        }
+    }
+
+    /// The device frames are on (as on Windows; see [`Device`]).
+    pub fn device(&self) -> &Device {
+        &Device
+    }
+
+    /// The device's context (as on Windows; see [`Context`]).
+    pub fn context(&self) -> &Context {
+        &Context
+    }
+
+    /// The next frame: at once if the screen changed since the last one, else after waiting up to `timeout_ms` for a
+    /// change; `None` if nothing changed. The frame is valid until the next `acquire` or `release`.
+    pub fn acquire(&mut self, timeout_ms: u32) -> Result<Option<Frame>> {
+        match &mut self.0 {
+            Capture::X11(capture) => capture.acquire(timeout_ms),
+            Capture::Portal(capture) => capture.acquire(timeout_ms),
+        }
+    }
+
+    pub fn release(&mut self) -> Result<()> {
+        if let Capture::X11(capture) = &mut self.0 {
+            capture.holding_frame = false;
+        }
+        Ok(())
+    }
+
+    /// The frame's pixels as a packed BGRA image (alpha set).
+    pub fn copy_to_cpu(&mut self, frame: &Frame) -> Result<BgraImage> {
+        let row = frame.width as usize * 4;
+        let mut pixels = Vec::with_capacity(row * frame.height as usize);
+        for line in frame
+            .pixels()
+            .chunks(frame.stride.max(1))
+            .take(frame.height as usize)
+        {
+            pixels.extend_from_slice(&line[..row.min(line.len())]);
+        }
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
+        Ok(BgraImage {
+            width: frame.width,
+            height: frame.height,
+            pixels,
+        })
+    }
+
+    /// The screen now, as a BGRA image (not counted as a frame).
+    pub fn snapshot_image(&self) -> Result<BgraImage> {
+        match &self.0 {
+            Capture::X11(capture) => capture.snapshot_image(),
+            Capture::Portal(capture) => capture.snapshot_image(),
+        }
+    }
+
+    /// A new pointer shape since it was last taken (on Wayland the pointer is in the pictures).
+    pub fn take_pointer_shape(&mut self) -> Option<PointerShapeRaw> {
+        match &mut self.0 {
+            Capture::X11(capture) => capture.pointer_shape.take(),
+            Capture::Portal(_) => None,
+        }
+    }
+
+    /// The pointer's visibility, when it changed since it was last taken.
+    pub fn take_pointer_visible(&mut self) -> Option<bool> {
+        match &mut self.0 {
+            Capture::X11(capture) => capture.take_pointer_visible(),
+            Capture::Portal(_) => None,
+        }
+    }
+}
+
+/// The X server's screen: MIT-SHM, DAMAGE for changes, XFixes for the pointer.
+pub(crate) struct X11Duplicator {
     connection: RustConnection,
     root: u32,
     info: OutputInfo,
@@ -157,16 +265,11 @@ pub struct Duplicator {
 }
 
 // The connection and the segment are used from one thread at a time.
-unsafe impl Send for Duplicator {}
+unsafe impl Send for X11Duplicator {}
 
-impl Duplicator {
-    /// The primary monitor (RandR's primary, else the first).
-    pub fn primary() -> Result<Self> {
-        Self::new(usize::MAX)
-    }
-
+impl X11Duplicator {
     /// Monitor `index` of `screens()` (`usize::MAX`: the primary one).
-    pub fn new(index: usize) -> Result<Self> {
+    fn new(index: usize) -> Result<Self> {
         let (connection, screen_number) = x11rb::connect(None).map_err(Error::from_x11)?;
         let root = connection.setup().roots[screen_number].root;
         for (name, extension) in [
@@ -221,7 +324,7 @@ impl Duplicator {
             left: monitor.left,
             top: monitor.top,
         };
-        let mut duplicator = Duplicator {
+        let mut duplicator = X11Duplicator {
             connection,
             root,
             info,
@@ -239,23 +342,7 @@ impl Duplicator {
         Ok(duplicator)
     }
 
-    pub fn info(&self) -> &OutputInfo {
-        &self.info
-    }
-
-    /// The device frames are on (as on Windows; see [`Device`]).
-    pub fn device(&self) -> &Device {
-        &Device
-    }
-
-    /// The device's context (as on Windows; see [`Context`]).
-    pub fn context(&self) -> &Context {
-        &Context
-    }
-
-    /// The next frame: at once if the screen changed since the last one, else after waiting up to `timeout_ms` for a
-    /// change; `None` if nothing changed. The frame is valid until the next `acquire` or `release`.
-    pub fn acquire(&mut self, timeout_ms: u32) -> Result<Option<Frame>> {
+    fn acquire(&mut self, timeout_ms: u32) -> Result<Option<Frame>> {
         self.holding_frame = false;
         self.drain_events()?;
         if self.changes == 0 && !self.first {
@@ -307,26 +394,7 @@ impl Duplicator {
         Ok(Some(frame))
     }
 
-    pub fn release(&mut self) -> Result<()> {
-        self.holding_frame = false;
-        Ok(())
-    }
-
-    /// The frame's pixels as a packed BGRA image (alpha set).
-    pub fn copy_to_cpu(&mut self, frame: &Frame) -> Result<BgraImage> {
-        let mut pixels = frame.pixels().to_vec();
-        for pixel in pixels.as_chunks_mut::<4>().0 {
-            pixel[3] = 255;
-        }
-        Ok(BgraImage {
-            width: frame.width,
-            height: frame.height,
-            pixels,
-        })
-    }
-
-    /// The screen now, as a BGRA image (not counted as a frame).
-    pub fn snapshot_image(&self) -> Result<BgraImage> {
+    fn snapshot_image(&self) -> Result<BgraImage> {
         // A plain GetImage of the monitor, apart from the shared memory and the changes counted (as Windows takes a GDI
         // screenshot beside desktop duplication).
         let info = &self.info;
@@ -363,13 +431,7 @@ impl Duplicator {
         })
     }
 
-    /// A new pointer shape since it was last taken.
-    pub fn take_pointer_shape(&mut self) -> Option<PointerShapeRaw> {
-        self.pointer_shape.take()
-    }
-
-    /// The pointer's visibility, when it changed since it was last taken.
-    pub fn take_pointer_visible(&mut self) -> Option<bool> {
+    fn take_pointer_visible(&mut self) -> Option<bool> {
         if !self.pointer_visible_changed {
             return None;
         }
@@ -451,7 +513,7 @@ impl Duplicator {
     }
 }
 
-impl Drop for Duplicator {
+impl Drop for X11Duplicator {
     fn drop(&mut self) {
         let _ = self.connection.damage_destroy(self.damage);
         let _ = self.connection.shm_detach(self.segment.xid);
@@ -553,6 +615,14 @@ impl Error {
         Error {
             message,
             restart: false,
+        }
+    }
+
+    /// An error after which capturing starts again.
+    pub(crate) fn restart(message: impl Into<String>) -> Error {
+        Error {
+            message: message.into(),
+            restart: true,
         }
     }
 
