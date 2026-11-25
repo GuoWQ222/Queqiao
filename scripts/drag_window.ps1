@@ -2,7 +2,8 @@
 # second for -Seconds after -Delay, as when a person drags it; then closed. The person's own windows are not touched.
 # Runs in the desktop session (scripts\run_m4_local.ps1 starts it as a session task). Prints DRAG_DONE <moves> or
 # DRAG_FAIL <reason>. ASCII only.
-param([double]$Delay = 0, [double]$Seconds = 10)
+# -Period: seconds for one circle (4: an ordinary drag; under 1: flung about as fast as a hand can).
+param([double]$Delay = 0, [double]$Seconds = 10, [double]$Period = 4)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -50,9 +51,9 @@ $moves = 0
 $started = Get-Date
 while (((Get-Date) - $started).TotalSeconds -lt $Seconds) {
     $t = ((Get-Date) - $started).TotalSeconds
-    # A circle across most of the screen, once every 4 s.
-    $x = [int](($screenWidth - $width) / 2 + ($screenWidth - $width) * 0.4 * [Math]::Cos($t * [Math]::PI / 2))
-    $y = [int](($screenHeight - $height) / 2 + ($screenHeight - $height) * 0.4 * [Math]::Sin($t * [Math]::PI / 2))
+    # A circle across most of the screen, once every -Period seconds.
+    $x = [int](($screenWidth - $width) / 2 + ($screenWidth - $width) * 0.4 * [Math]::Cos($t * 2 * [Math]::PI / $Period))
+    $y = [int](($screenHeight - $height) / 2 + ($screenHeight - $height) * 0.4 * [Math]::Sin($t * 2 * [Math]::PI / $Period))
     [DragWin]::SetWindowPos($window, [IntPtr]::Zero, $x, $y, $width, $height, 0x10) | Out-Null
     $moves++
     Start-Sleep -Milliseconds 16

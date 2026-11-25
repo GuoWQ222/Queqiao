@@ -214,6 +214,28 @@ pub(crate) fn check(status: sys::mfxStatus, what: &str) -> Result<sys::mfxStatus
     }
 }
 
+/// mfxExtEncoderResetOption (mfxstructures.h; not in the generated bindings): whether a reset starts a new sequence.
+#[repr(C)]
+struct ResetOption {
+    header: sys::mfxExtBuffer,
+    start_new_sequence: u16,
+    reserved: [u16; 11],
+}
+
+/// The coding options the encoder is opened with: no HRD conformance (no buffering parameters in the stream's
+/// headers). With them, a new bitrate changed the headers, so a reset could only begin a new sequence (refused
+/// with StartNewSequence off: status -15, sunshine 2026-11-26).
+fn coding_option() -> Box<sys::mfxExtCodingOption> {
+    let mut option: Box<sys::mfxExtCodingOption> = Box::new(unsafe { zeroed() });
+    option.Header = sys::mfxExtBuffer {
+        BufferId: sys::MFX_EXTBUFF_CODING_OPTION as u32,
+        BufferSz: size_of::<sys::mfxExtCodingOption>() as u32,
+    };
+    option.NalHrdConformance = sys::MFX_CODINGOPTION_OFF as u16;
+    option.VuiNalHrdParameters = sys::MFX_CODINGOPTION_OFF as u16;
+    option
+}
+
 /// kbit/s for the 16-bit fields, with the multiplier the parameters carry.
 fn kbps(bits: u32, multiplier: u16) -> u16 {
     (bits / 1000 / u32::from(multiplier.max(1))).clamp(1, u32::from(u16::MAX)) as u16
@@ -227,6 +249,9 @@ pub(crate) struct VplEncoder {
     api: Api,
     session: sys::mfxSession,
     params: sys::mfxVideoParam,
+    /// The coding options given with `params` (their ExtParam points here while the encoder lives).
+    coding: Box<sys::mfxExtCodingOption>,
+    extra: Box<[*mut sys::mfxExtBuffer; 1]>,
     context: ID3D11DeviceContext,
     buffer: Vec<u8>,
     ready: Vec<EncodedFrame>,
@@ -259,6 +284,8 @@ impl VplEncoder {
             api,
             session: null_mut(),
             params: unsafe { zeroed() },
+            coding: coding_option(),
+            extra: Box::new([null_mut()]),
             context: unsafe { device.GetImmediateContext() }?,
             buffer: Vec::new(),
             ready: Vec::new(),
@@ -291,6 +318,9 @@ impl VplEncoder {
             "set the D3D11 device",
         )?;
         self.params = params(config, self.format);
+        self.extra[0] = (&raw mut *self.coding).cast::<sys::mfxExtBuffer>();
+        self.params.ExtParam = self.extra.as_mut_ptr();
+        self.params.NumExtParam = 1;
         let mut checked = self.params;
         check(
             unsafe { (self.api.query)(self.session, &mut self.params, &mut checked) },
@@ -432,7 +462,10 @@ impl VplEncoder {
         Ok(())
     }
 
-    /// Changes the bitrate of the running encoder (a reset of its rate control: no keyframe, no new sequence).
+    /// Changes the bitrate of the running encoder: a reset of its rate control that goes on with the same sequence
+    /// (StartNewSequence off). Without it the reset began a new sequence with a keyframe (measured on sunshine's Iris
+    /// Xe 2026-11-26: every change, up or down, one more keyframe; in a session over a phone's network each one is many
+    /// times a frame's size and held the picture up).
     pub(crate) fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
         unsafe {
             let mfx = &mut self.params.__bindgen_anon_1.mfx;
@@ -442,11 +475,24 @@ impl VplEncoder {
             settings.__bindgen_anon_3.MaxKbps =
                 kbps((f64::from(bitrate) * PEAK) as u32, multiplier);
         }
-        check(
-            unsafe { (self.api.reset)(self.session, &mut self.params) },
-            "reset (bitrate)",
-        )
-        .map(|_| ())
+        let mut option = ResetOption {
+            header: sys::mfxExtBuffer {
+                BufferId: sys::MFX_EXTBUFF_ENCODER_RESET_OPTION as u32,
+                BufferSz: size_of::<ResetOption>() as u32,
+            },
+            start_new_sequence: sys::MFX_CODINGOPTION_OFF as u16,
+            reserved: [0; 11],
+        };
+        let mut buffers = [
+            (&raw mut *self.coding).cast::<sys::mfxExtBuffer>(),
+            (&raw mut option).cast::<sys::mfxExtBuffer>(),
+        ];
+        self.params.ExtParam = buffers.as_mut_ptr();
+        self.params.NumExtParam = 2;
+        let status = unsafe { (self.api.reset)(self.session, &mut self.params) };
+        self.params.ExtParam = self.extra.as_mut_ptr();
+        self.params.NumExtParam = 1;
+        check(status, "reset (bitrate)").map(|_| ())
     }
 }
 

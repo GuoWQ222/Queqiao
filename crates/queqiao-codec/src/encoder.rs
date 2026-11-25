@@ -18,6 +18,17 @@ pub use crate::config::{EncodedFrame, EncoderChoice, EncoderConfig, SoftwareTimi
 use crate::vpl::VplEncoder;
 
 /// One of the GPU makers' encoders, for `format`.
+/// Whether `device` is on an Intel GPU (its adapter's PCI vendor 0x8086).
+fn intel_gpu(device: &ID3D11Device) -> bool {
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    use windows::core::Interface;
+    device
+        .cast::<IDXGIDevice>()
+        .and_then(|dxgi| unsafe { dxgi.GetAdapter() })
+        .and_then(|adapter| unsafe { adapter.GetDesc() })
+        .is_ok_and(|desc| desc.VendorId == 0x8086)
+}
+
 fn open_vendor(
     kind: EncoderChoice,
     device: &ID3D11Device,
@@ -116,6 +127,16 @@ impl H264Encoder {
                 });
             }
             return Err(Error::new(E_FAIL, skipped.join("; ")));
+        }
+        // H.264 on an Intel GPU: its encoder through oneVPL first. Windows' own (the Quick Sync MFT) starts a new
+        // sequence with a keyframe at every bitrate change, however it is told (measured on sunshine's Iris Xe
+        // 2026-11-26), and a session changes the bitrate whenever the network's estimate does: over a phone's network
+        // the keyframes, many times a frame's size, held the picture up. oneVPL changes it within the sequence.
+        if choice == EncoderChoice::Auto && intel_gpu(device) {
+            match open_vendor(EncoderChoice::Vpl, device, config, config.format) {
+                Ok(backend) => return Ok(Self { backend, skipped }),
+                Err(error) => skipped.push(format!("Vpl: {}", error.message())),
+            }
         }
         if choice == EncoderChoice::Software {
             skipped.push("hardware encoders: not tried (software forced)".into());
