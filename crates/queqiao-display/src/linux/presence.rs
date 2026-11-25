@@ -368,9 +368,12 @@ impl Presence {
             "settings test: {cards} cards on {} tabs",
             crate::settings::Tab::ALL.len()
         ));
+        // Twice (on, then back): the settings stay as they were (later tests sharing them were asked first,
+        // 2026-11-26).
+        let clicked = self.sender.send(Action::Choose(MENU_ASK)).is_ok()
+            && self.sender.send(Action::Choose(MENU_ASK)).is_ok();
         lines.push(format!(
-            "settings test: clicked the switch of asking before each session: {}",
-            self.sender.send(Action::Choose(MENU_ASK)).is_ok()
+            "settings test: clicked the switch of asking before each session twice: {clicked}"
         ));
         let before = queqiao_core::text::language();
         let _ = self.choose(crate::tray::MENU_LANGUAGE_EN);

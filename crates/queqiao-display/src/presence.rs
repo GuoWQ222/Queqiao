@@ -391,11 +391,13 @@ impl Presence {
             "settings test: display language {before:?} -> {after:?} after choosing English, the main window's title: {title}"
         ));
         let _ = self.choose(crate::tray::MENU_LANGUAGE_SYSTEM);
-        // On the window as it is now (made again for each language): the loop takes the click as any other.
+        // On the window as it is now (made again for each language): the loop takes the clicks as any other. Twice
+        // (on, then back): the settings stay as they were (later tests sharing them were asked first, 2026-11-26).
         if let Some(main) = self.main.as_mut() {
+            let clicked = main.click_setting_for_test(crate::tray::MENU_ASK)
+                && main.click_setting_for_test(crate::tray::MENU_ASK);
             lines.push(format!(
-                "settings test: clicked the switch of asking before each session: {}",
-                main.click_setting_for_test(crate::tray::MENU_ASK)
+                "settings test: clicked the switch of asking before each session twice: {clicked}"
             ));
         }
         lines

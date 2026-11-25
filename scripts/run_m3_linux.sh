@@ -155,10 +155,13 @@ for label in $sessions; do
     if [ -n "$viewer_expects" ]; then
         grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
     fi
-    # The main window's Settings: its cards, a click on a switch reaching the agent, English chosen and drawn.
+    # The main window's Settings: its cards, two clicks on a switch reaching the agent (on, then back as it was: later
+    # sessions share these settings), English chosen and drawn.
     if [ "$label" = main ]; then
-        for line in 'settings test: [0-9]* cards on 4 tabs' 'settings test: clicked the switch of asking before each session: true' \
-            'the person at this PC set: ask before each session: ' \
+        for line in 'settings test: [0-9]* cards on 4 tabs' \
+            'settings test: clicked the switch of asking before each session twice: true' \
+            'the person at this PC set: ask before each session: true' \
+            'the person at this PC set: ask before each session: false' \
             "settings test: display language [A-Za-z]* -> English after choosing English, the main window's title: Queqiao"; do
             grep -q "^$line" "$out/agent_$label.txt" 2> /dev/null || why="$why main-settings"
         done

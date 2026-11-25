@@ -97,7 +97,7 @@ try {
     # agent; choosing English drew the windows in it (unless QUEQIAO_LANG holds Chinese, which wins).
     $text = if (Test-Path -LiteralPath $report) { @(Get-Content -LiteralPath $report -Encoding UTF8) } else { @() }
     $text | Where-Object { $_ -match '^settings test|set: ask before' }
-    $wanted = @('^settings test: \d+ controls answer clicks where they are drawn: yes$', '^settings test: clicked the switch of asking before each session: true$', '^the person at this PC set: ask before each session: ')
+    $wanted = @('^settings test: \d+ controls answer clicks where they are drawn: yes$', '^settings test: clicked the switch of asking before each session twice: true$', '^the person at this PC set: ask before each session: true$', '^the person at this PC set: ask before each session: false$')
     if ($Lang -ne 'zh') { $wanted += "^settings test: display language \w+ -> English after choosing English, the main window's title: Queqiao$" }
     foreach ($pattern in $wanted) {
         if (-not ($text | Where-Object { $_ -match $pattern })) { $failed += "settings ($pattern)" }
