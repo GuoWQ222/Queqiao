@@ -430,7 +430,8 @@ try {
                 $wanted = '^window test: minimized: bar shown false, in front \w+, seen \w+; card shown false, '
                 if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label viewer (expected '$wanted')" }
                 # The card dragged far out of the window stays inside it; its close button closes it.
-                foreach ($wanted in '^window test: card inside the window after dragging it out: true$', '^window test: card closed by its button: true$', '^card of figures: closed with its button$') {
+                # And this PC's input method stays out of the session window (that PC's composes).
+                foreach ($wanted in '^window test: card inside the window after dragging it out: true$', '^window test: card closed by its button: true$', '^card of figures: closed with its button$', "^this PC's input method in the session window: off$") {
                     if (-not ($text | Where-Object { $_ -match $wanted })) { $failed += "$label viewer (expected '$wanted')" }
                 }
             }

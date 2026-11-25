@@ -399,6 +399,12 @@ impl Window {
         self.visible.get()
     }
 
+    /// Whether this PC's input method composes in the session window: never (the window takes keys from X itself, with
+    /// no XIM or input method module), so keys go to that PC as they are, for its own input method.
+    pub fn has_input_method(&self) -> bool {
+        false
+    }
+
     /// Maximises the window, or restores it (EWMH: both maximised states at once); tests.
     pub fn set_maximized(&self, on: bool) {
         let message = ClientMessageEvent::new(

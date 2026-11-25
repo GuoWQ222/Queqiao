@@ -702,6 +702,15 @@ pub(crate) fn run_session(
     )
     .map_err(|e| lines.push(format!("overlay: {}", describe(e))))
     .ok();
+    // Keys go to that PC for its own input method: this PC's never composes in the session window.
+    lines.push(format!(
+        "this PC's input method in the session window: {}",
+        if window.has_input_method() {
+            "on"
+        } else {
+            "off"
+        }
+    ));
     // The card of figures (the network's state) shows from the start; the person drags it about or closes it.
     if let Some(overlay) = overlay.as_mut() {
         overlay.set_card(true);

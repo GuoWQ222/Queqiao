@@ -17,6 +17,9 @@ use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::Ime::{
+    HIMC, IACE_CHILDREN, ImmAssociateContextEx, ImmGetContext, ImmReleaseContext,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE,
@@ -96,6 +99,14 @@ impl Window {
                 None,
             )
         }?;
+        // No input method of this PC in the session window: keys go to that PC as they are, for its own input method
+        // to compose (both PCs' candidate windows showed at once, 2026-11-26). The window (and any child) has no
+        // input context, so while it has the keyboard only that PC's input method shows; every other window keeps
+        // this PC's, so it takes over again as soon as the keyboard goes back to them.
+        unsafe {
+            let _ = ImmAssociateContextEx(hwnd, HIMC::default(), 0);
+            let _ = ImmAssociateContextEx(hwnd, HIMC::default(), IACE_CHILDREN);
+        }
         let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
         // Files dropped from Explorer come as WM_DROPFILES.
         unsafe { DragAcceptFiles(hwnd, true) };
@@ -328,6 +339,18 @@ impl Window {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             )
         };
+    }
+
+    /// Whether this PC's input method has an input context in the session window (it must not: that PC's composes).
+    pub fn has_input_method(&self) -> bool {
+        unsafe {
+            let context = ImmGetContext(self.hwnd);
+            let has = !context.is_invalid();
+            if has {
+                let _ = ImmReleaseContext(self.hwnd, context);
+            }
+            has
+        }
     }
 
     /// Maximises the window, or restores it (tests; the person uses the title bar).

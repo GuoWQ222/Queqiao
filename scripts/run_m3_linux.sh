@@ -164,7 +164,8 @@ for label in $sessions; do
         grep -q '^window test: minimized: bar shown false, .*; card shown false, ' "$out/viewer_$label.txt" 2> /dev/null ||
             why="$why window-minimized"
         for line in 'window test: card inside the window after dragging it out: true' \
-            'window test: card closed by its button: true' 'card of figures: closed with its button'; do
+            'window test: card closed by its button: true' 'card of figures: closed with its button' \
+            "this PC's input method in the session window: off"; do
             grep -q "^$line" "$out/viewer_$label.txt" 2> /dev/null || why="$why window-card"
         done
     fi
