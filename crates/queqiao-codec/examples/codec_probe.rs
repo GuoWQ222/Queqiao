@@ -32,6 +32,8 @@ struct Stats {
     decoded: usize,
     bytes: usize,
     psnr: Vec<f64>,
+    /// The first frames' sizes in bytes (the keyframe first).
+    first_sizes: Vec<usize>,
     decode_ms: Vec<f64>,
     mismatched: usize,
     first_nal_types: Vec<u8>,
@@ -202,6 +204,23 @@ fn run(
         "decode call, ms: {}",
         summary(&mut stats.decode_ms)
     ));
+    // The first frames as they came (before `summary` sorts them): the keyframe's quality and size.
+    let first: Vec<String> = stats
+        .psnr
+        .iter()
+        .take(5)
+        .map(|db| format!("{db:.1}"))
+        .collect();
+    lines.push(format!(
+        "first frames: luma PSNR, dB {}; kB {}",
+        first.join(" "),
+        stats
+            .first_sizes
+            .iter()
+            .map(|bytes| format!("{:.1}", *bytes as f64 / 1000.0))
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
     lines.push(format!("luma PSNR, dB: {}", summary(&mut stats.psnr)));
     let min_psnr = stats.psnr.first().copied().unwrap_or(0.0);
     let all_decoded = stats.decoded == frames as usize && stats.mismatched == 0;
@@ -236,6 +255,9 @@ fn decode_and_compare(
         }
         stats.encoded += 1;
         stats.bytes += frame.data.len();
+        if stats.first_sizes.len() < 5 {
+            stats.first_sizes.push(frame.data.len());
+        }
         let mut decoded: Vec<DecodedFrame> = Vec::new();
         let started = Instant::now();
         decoder

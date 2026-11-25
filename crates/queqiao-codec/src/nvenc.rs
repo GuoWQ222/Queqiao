@@ -4,7 +4,7 @@
 //! program still starts on PCs without NVIDIA graphics.
 //!
 //! Formats (`EncodeFormat`): H.264 4:2:0 or 4:4:4, H.265 4:2:0 or 4:4:4, H.265 in 8 or 10 bits; 4:4:4 from RGB
-//! textures, which NVENC converts to YUV 4:4:4 itself.
+//! textures, which NVENC converts to YUV 4:4:4 itself. AV1 (8-bit 4:2:0, from NV12) where the driver has API 12.
 
 use windows::Win32::Foundation::{E_FAIL, FreeLibrary, HMODULE};
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11Texture2D};
@@ -19,7 +19,6 @@ use windows::core::{Error, Interface, Result, s, w};
 use crate::encoder::{EncodedFrame, EncoderConfig};
 use crate::format::EncodeFormat;
 use crate::nvenc_core::{self, CreateInstance, MaxVersion, NvencCore};
-use crate::nvenc_sys as sys;
 
 /// The texture NVENC takes for `format`: YUV 4:2:0 from the converter (NV12, P010); for 4:4:4 the screen's RGB
 /// (scaled only), which NVENC turns into YUV 4:4:4 itself (its D3D11 input has no packed 10-bit YUV 4:4:4).
@@ -68,7 +67,7 @@ impl NvencEncoder {
         let core = NvencCore::open(
             create,
             max_version,
-            sys::NV_ENC_DEVICE_TYPE_DIRECTX,
+            nvenc_core::DEVICE_DIRECTX,
             device.as_raw(),
             config,
             format,
@@ -81,11 +80,11 @@ impl NvencEncoder {
     }
 
     pub(crate) fn name(&self) -> &str {
-        &self.core.name
+        self.core.name()
     }
 
     pub(crate) fn format(&self) -> EncodeFormat {
-        self.core.format
+        self.core.format()
     }
 
     pub(crate) fn poll(&mut self, out: &mut Vec<EncodedFrame>) {
@@ -94,7 +93,7 @@ impl NvencEncoder {
 
     /// The texture format `encode` takes.
     pub(crate) fn input_format(&self) -> DXGI_FORMAT {
-        input_format(self.core.format)
+        input_format(self.core.format())
     }
 
     /// Encodes one texture (in `input_format`) now; the frame is ready when this returns. Each texture is
@@ -114,7 +113,7 @@ impl NvencEncoder {
                 self.core
                     .register(
                         key,
-                        sys::NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX,
+                        nvenc_core::RESOURCE_DIRECTX,
                         input.as_raw(),
                         (desc.Width, desc.Height),
                         0,

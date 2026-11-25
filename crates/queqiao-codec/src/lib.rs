@@ -48,6 +48,12 @@ mod nvenc_cuda;
 #[allow(warnings, clippy::all)]
 #[cfg_attr(target_os = "linux", path = "nvenc_sys_linux.rs")]
 mod nvenc_sys;
+// The same for NVENC API 12.0 (AV1), from nv-codec-headers at tag n12.0.16.1 (tools/gen_nvenc.ps1 -Tag n12.0.16.1;
+// on Linux the same bindgen options without the Windows target, on cc4-1); used where the driver has 12.0.
+#[rustfmt::skip]
+#[allow(warnings, clippy::all)]
+#[cfg_attr(target_os = "linux", path = "nvenc_sys12_linux.rs")]
+mod nvenc_sys12;
 mod format;
 #[cfg(target_os = "linux")]
 mod linux_decode;
@@ -144,10 +150,11 @@ pub fn av1_obu_types(data: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(windows)]
-/// Whether this PC can encode `codec` (H.264 always: OpenH264 is built in; other codecs on `device`'s GPU, through
-/// Media Foundation). A registered encoder is not enough: one is opened (1280x720 at 60 fps) and closed again. Measured
-/// 2026-11-22 on a 12th-gen Intel Iris Xe: its driver registers "Intel Hardware Accelerated AV1 Encoder MFT", which
-/// refuses every format with E_FAIL, as that GPU has no AV1 encoding hardware. Takes about 30 ms where it works.
+/// Whether this PC can encode `codec` (H.264 always: OpenH264 is built in; other codecs on `device`'s GPU: AV1 through
+/// NVENC directly where the NVIDIA driver has API 12, else through Media Foundation). A registered encoder is not
+/// enough: one is opened (1280x720 at 60 fps) and closed again. Measured 2026-11-22 on a 12th-gen Intel Iris Xe: its
+/// driver registers "Intel Hardware Accelerated AV1 Encoder MFT", which refuses every format with E_FAIL, as that GPU
+/// has no AV1 encoding hardware. Takes about 30 ms where it works.
 pub fn can_encode(
     codec: VideoCodec,
     device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
@@ -159,6 +166,11 @@ pub fn can_encode(
         codec,
         ..EncoderConfig::for_screen(1280, 720, 60)
     };
+    if codec == VideoCodec::Av1
+        && nvenc::NvencEncoder::open(device, &config, EncodeFormat::H264).is_ok()
+    {
+        return true;
+    }
     mf::MfEncoder::open(device, &config, &mut Vec::new()).is_some()
 }
 

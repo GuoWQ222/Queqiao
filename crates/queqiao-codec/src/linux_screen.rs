@@ -55,14 +55,9 @@ pub struct H264Encoder {
 
 impl H264Encoder {
     /// Opens an encoder for pictures of `config`'s size: NVENC unless software is forced, then OpenH264 for H.264
-    /// unless a GPU encoder is forced. H.265 and 4:4:4: NVENC only.
+    /// unless a GPU encoder is forced. H.265, AV1 (NVENC API 12) and 4:4:4: NVENC only.
     pub fn new(config: &EncoderConfig, choice: EncoderChoice) -> Result<Self> {
         let mut skipped = Vec::new();
-        if config.codec == VideoCodec::Av1 {
-            return Err(Error::new(
-                "AV1: no encoder on Linux yet (NVENC's AV1 needs API 12, VA-API comes next)",
-            ));
-        }
         match choice {
             EncoderChoice::Software => {
                 skipped.push("hardware encoders: not tried (software forced)".into());
@@ -181,8 +176,8 @@ impl H264Encoder {
     }
 }
 
-/// Whether this PC can encode `codec` (as Windows' can_encode): H.264 always (OpenH264 is built in), H.265 when NVENC
-/// opens (1280x720 at 60 fps, closed again), AV1 not on Linux yet.
+/// Whether this PC can encode `codec` (as Windows' can_encode): H.264 always (OpenH264 is built in), H.265 and AV1
+/// when NVENC opens for it (1280x720 at 60 fps, closed again; AV1 needs NVENC API 12 and a GPU that makes AV1).
 pub fn can_encode(codec: VideoCodec, _device: &Device) -> bool {
     match codec {
         VideoCodec::H264 => true,
@@ -195,7 +190,13 @@ pub fn can_encode(codec: VideoCodec, _device: &Device) -> bool {
             };
             NvencCuda::open(CUDA_GPU, &config, format).is_ok()
         }
-        VideoCodec::Av1 => false,
+        VideoCodec::Av1 => {
+            let config = EncoderConfig {
+                codec,
+                ..EncoderConfig::for_screen(1280, 720, 60)
+            };
+            NvencCuda::open(CUDA_GPU, &config, EncodeFormat::H264).is_ok()
+        }
     }
 }
 
@@ -583,9 +584,11 @@ mod tests {
         assert!(frames[0].keyframe);
     }
 
+    /// AV1 where NVENC makes it (API 12 and a GPU with AV1): its keyframe carries the sequence header (what a decoder
+    /// starts from), the next frame does not. Elsewhere the error says AV1.
     #[test]
-    fn av1_is_not_on_linux_yet() {
-        let error = ScreenEncoder::with_codec(
+    fn av1_where_nvenc_makes_it() {
+        let made = ScreenEncoder::with_codec(
             &Device,
             &Context,
             (1920, 1080),
@@ -593,10 +596,28 @@ mod tests {
             false,
             None,
             VideoCodec::Av1,
-        )
-        .err()
-        .unwrap();
-        assert!(error.message().contains("AV1"), "{error}");
+        );
+        if !can_encode(VideoCodec::Av1, &Device) {
+            let error = made.err().unwrap();
+            assert!(error.message().contains("AV1"), "{error}");
+            return;
+        }
+        let mut encoder = made.unwrap();
+        assert!(
+            encoder.encoder().name().contains("NVENC AV1"),
+            "{}",
+            encoder.encoder().name()
+        );
+        let key = encoder
+            .encode_bgra(&picture(1920, 1080, 0), 1920 * 4, true)
+            .unwrap();
+        assert!(key[0].keyframe);
+        assert!(crate::is_keyframe(VideoCodec::Av1, &key[0].data));
+        let next = encoder
+            .encode_bgra(&picture(1920, 1080, 32), 1920 * 4, false)
+            .unwrap();
+        assert!(!next[0].keyframe);
+        assert!(!crate::is_keyframe(VideoCodec::Av1, &next[0].data));
     }
 
     #[test]

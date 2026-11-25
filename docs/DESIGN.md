@@ -62,14 +62,28 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
 9. **Encoders: Media Foundation and direct vendor SDKs, compared** (user decision 2026-11-20): direct NVENC,
    AMF and oneVPL paths are built beside Media Foundation and measured against it on the same machines; AMD
    cannot be tested on the current machines.
-   NVENC (direct, `QUEQIAO_FORCE=encode:nvenc`) is built against API 11.1 so drivers from R470 (2021) work: the
-   newest header (13.1) was refused by a March 2026 driver (supports 13.0). Measured on the RTX 5080 PC,
+   NVENC (direct, `QUEQIAO_FORCE=encode:nvenc`) is built against two API versions, the same session code for each
+   (nvenc_session.rs): 12.0 where the driver has it (R522 on Windows, R520 on Linux, late 2022), which adds AV1, and
+   11.1 for drivers from R470 (2021), which make H.264 and H.265 as before; never the newest header, which needs the
+   newest driver (13.1 was refused by a March 2026 driver that supports 13.0). `QUEQIAO_NVENC_API=11` keeps a newer
+   driver on 11.1, to test that path. Measured on the RTX 5080 PC,
    2560x1440 at 60 fps, live screen: Media Foundation 2.99 ms per frame (p95 3.12), NVENC P1 2.45 ms (p95
    2.61), NVENC P4 3.68 ms (p95 3.77); round-trip luma PSNR at about the same data rate: Media Foundation
    70-76 dB, NVENC P4 66-68 dB, P1 61-63 dB (NVENC with a one-frame VBV; keyframes may use 8x a frame's bits,
    2x gave a 19 dB first picture). So on NVIDIA the direct path saves about 0.5 ms only with the fastest,
    lowest-quality preset; Media Foundation stays the default. What the direct SDK adds is control Media
    Foundation does not expose (bitrate changes without a keyframe, intra refresh, 4:4:4 for sharp text).
+   **AV1 is the default where both ends can (user decision 2026-11-25: "AV1 encoding as the default, the existing
+   encoding as fallback"):** with the viewer's codec on Automatic (its default) the agent makes AV1 when the viewer's
+   GPU decodes it and the agent has an AV1 encoder: NVENC directly (API 12; Windows and Linux), else on Windows the
+   GPU's AV1 encoder through Media Foundation (Intel Arc, AMD, NVIDIA with an older driver); otherwise H.264 as before
+   (H.265 when asked for). NVENC's AV1 is 8-bit 4:2:0 from NV12; 4:4:4 and 10 bits stay H.265. NVENC does not apply
+   the keyframe scale to AV1 (its first picture got one frame's bits: 41 kB, 20.5 dB on the 5080 at 12.4 Mbit/s), so
+   the buffer is 8 frames for each AV1 keyframe alone (165 kB, 35.6 dB; H.264 with the scale 255 kB, 33.7 dB) and one
+   frame again right after (a larger buffer for every frame let P-frames reach 2.4x their share). Tested: the PC (RTX
+   5080) makes AV1 through NVENC for the M4 viewer, explicitly and by default; with `QUEQIAO_NVENC_API=11` NVIDIA's
+   AV1 Media Foundation encoder takes over; Linux (RTX 4090) makes AV1 and its viewer decodes it with NVDEC
+   (run_m3_linux.sh av1, av1_api11 falls back to H.264).
 10. **Build requirements:** Rust, Visual Studio Build Tools (C++), and NASM on the PATH: without NASM, OpenH264
    builds silently without its assembly and runs about 5x slower (measured 35 ms instead of 6.6 ms per 1080p
    frame); `scripts\check.ps1` warns when NASM is missing.

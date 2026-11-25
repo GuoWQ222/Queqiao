@@ -10,7 +10,9 @@
 # both: login.bmp and devices.bmp). Then the session's forms no session opens by itself (the transfer list, the
 # password form), by examples/linux_forms_probe, with pictures (transfers.bmp, password.bmp). main: the agent alone,
 # its main window's pages pictured (main_devices.bmp ...). h265: the viewer asks for H.265 (NVENC on the agent, NVDEC
-# on the viewer). h265_10: H.265 10-bit (4:2:0) asked for. h265_444: 4:4:4 10-bit asked for. The H.265 sessions
+# on the viewer). h265_10: H.265 10-bit (4:2:0) asked for. h265_444: 4:4:4 10-bit asked for. av1: the viewer leaves the
+# codec to the agent (Automatic, the default), which makes AV1 (NVENC API 12) as both can; av1_api11: the same with the
+# agent kept on NVENC API 11.1 (an older driver), which falls back to H.264. The H.265 and AV1 sessions
 # check colours: windows of five colours on the agent's screen must show in the viewer's picture as on the screen
 # (a channel swapped, or a wrong 10-bit packing, shows there).
 # The agent's screen is Xvfb :91 with a clock and `top` (so the picture changes); the viewer's window is on Xvfb :92.
@@ -22,7 +24,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 seconds=${SECONDS_RUN:-20}
-sessions=${SESSIONS:-direct allowed declined ui main h265 h265_10 h265_444}
+sessions=${SESSIONS:-direct allowed declined ui main h265 h265_10 h265_444 av1 av1_api11}
 out=/tmp/queqiao_m3
 rm -rf "$out"; mkdir -p "$out"
 export XDG_CONFIG_HOME=$out/config XDG_STATE_HOME=$out/state XDG_RUNTIME_DIR=$out/run
@@ -74,6 +76,7 @@ device=$(cat /proc/sys/kernel/hostname)
 account="--server $listen --pin $pin --user alice --password $password"
 why=''
 for label in $sessions; do
+    agent_env=''
     case $label in
         direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out --terminal-test";
                 agent_expects='test text from the other side received: yes'; viewer_expects='test text from the other side received: yes'; both_pass=yes ;;
@@ -94,6 +97,12 @@ for label in $sessions; do
               agent_expects='command from the viewer: picture: H.265 4:2:0 10-bit'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
         # H.265 4:4:4 10-bit asked for, as Windows' h265 session: the screen's pixels widened to R10G10B10A2 for NVENC,
         # NVDEC decodes it into three 16-bit planes.
+        # The default (Automatic): AV1 where the agent makes it and the viewer's GPU decodes it.
+        av1) agent_extra=''; viewer_extra="--codec automatic --ui-pictures $out/$label --picture-at 4";
+              agent_expects='command from the viewer: picture: AV1 (NVIDIA NVENC AV1'; viewer_expects='the picture is AV1 now'; both_pass=yes ;;
+        # An older driver (NVENC API 11.1, forced): no AV1, so Automatic gives H.264 through NVENC as before.
+        av1_api11) agent_env=QUEQIAO_NVENC_API=11; agent_extra=''; viewer_extra="--codec automatic --ui-pictures $out/$label --picture-at 4";
+              agent_expects='command from the viewer: picture: H.264 (NVIDIA NVENC H.264 4:2:0 (direct, API 11.1)'; viewer_expects=''; both_pass=yes ;;
         h265_444) agent_extra=''; viewer_extra="--codec h265 --chroma444 --ten-bit --ui-pictures $out/$label --picture-at 4";
               agent_expects='command from the viewer: picture: H.265 4:4:4 10-bit'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
         ui) agent_extra=''; viewer_extra='';
@@ -105,7 +114,7 @@ for label in $sessions; do
     [ "$label" = main ] && agent_sessions=()
     mkdir -p "$out/$label"
     # shellcheck disable=SC2086
-    DISPLAY=:91 "$bin/queqiao-agent" $account "${agent_sessions[@]}" --seconds $(( seconds + 60 )) --verify-input \
+    env $agent_env DISPLAY=:91 "$bin/queqiao-agent" $account "${agent_sessions[@]}" --seconds $(( seconds + 60 )) --verify-input \
         --report "$out/agent_$label.txt" $agent_extra > "$out/agent_$label.out" 2>&1 &
     agent=$!
     sleep 2
@@ -131,7 +140,7 @@ for label in $sessions; do
         grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
     fi
     case "$label" in
-        h265*)
+        h265* | av1*)
             # The five colours in the viewer's picture (taken 4 s after the first) against the screen itself.
             colour=$(python3 - "$out/$label/viewer_session.bmp" << 'EOF'
 import sys

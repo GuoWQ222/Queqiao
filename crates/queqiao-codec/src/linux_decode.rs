@@ -170,21 +170,20 @@ impl H264Decoder {
     }
 }
 
-/// Whether this PC can decode `codec`: H.264 always (OpenH264 is built in), H.265 with NVDEC. AV1 not yet: NVDEC decodes
-/// it (nvdec_linux.rs), but no AV1 stream has been through it end to end here (Linux makes none yet), so the viewer
-/// does not ask for it.
+/// Whether this PC can decode `codec`: H.264 always (OpenH264 is built in), H.265 and AV1 where NVDEC decodes them.
 pub fn can_decode(codec: VideoCodec) -> bool {
     let caps = crate::nvdec_linux::caps();
     match codec {
         VideoCodec::H264 => true,
         VideoCodec::H265 => caps.is_some_and(|caps| caps.hevc != 0),
-        VideoCodec::Av1 => false,
+        VideoCodec::Av1 => caps.is_some_and(|caps| caps.av1),
     }
 }
 
-/// Whether the GPU decodes AV1 itself: not offered yet (see `can_decode`).
+/// Whether the GPU decodes AV1 itself (NVDEC): what the viewer needs to ask for AV1 by default. Linux has no AV1
+/// decoder on the CPU, so this is the same as `can_decode(Av1)`.
 pub fn av1_decodes_on_gpu(_device: &Device) -> bool {
-    false
+    can_decode(VideoCodec::Av1)
 }
 
 /// What H.265 this PC decodes (`protocol::hevc` bits): what NVDEC decodes (Main, Main 10, 4:4:4, 4:4:4 10-bit).

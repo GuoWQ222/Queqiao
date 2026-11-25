@@ -61,6 +61,29 @@ impl H264Encoder {
         choice: EncoderChoice,
     ) -> Result<Self> {
         let mut skipped = Vec::new();
+        // AV1: NVIDIA's encoder directly where its driver has NVENC API 12 (R522 and later), else the GPU's own AV1
+        // encoder through Media Foundation (Intel Arc, AMD, NVIDIA with an older driver). oneVPL and AMF make H.264 and
+        // H.265 here, so they are not asked.
+        if config.codec == crate::VideoCodec::Av1 {
+            if matches!(
+                choice,
+                EncoderChoice::Auto | EncoderChoice::Hardware | EncoderChoice::Nvenc
+            ) {
+                match open_vendor(EncoderChoice::Nvenc, device, config, config.format) {
+                    Ok(backend) => return Ok(Self { backend, skipped }),
+                    Err(error) => skipped.push(format!("Nvenc: {}", error.message())),
+                }
+            }
+            if choice != EncoderChoice::Nvenc
+                && let Some(encoder) = MfEncoder::open(device, config, &mut skipped)
+            {
+                return Ok(Self {
+                    backend: Backend::Hardware(encoder),
+                    skipped,
+                });
+            }
+            return Err(Error::new(E_FAIL, skipped.join("; ")));
+        }
         // H.265, 4:4:4 and 10-bit: the GPU makers' encoders, whichever this GPU has (as UU Remote); H.264 through
         // one when it is forced (tests). Windows' encoder after them for plain H.265.
         let forced_vendor = matches!(
@@ -93,15 +116,6 @@ impl H264Encoder {
                 });
             }
             return Err(Error::new(E_FAIL, skipped.join("; ")));
-        }
-        // AV1: only the GPU's encoder through Media Foundation.
-        if config.codec != crate::VideoCodec::H264 {
-            return MfEncoder::open(device, config, &mut skipped)
-                .map(|encoder| Self {
-                    backend: Backend::Hardware(encoder),
-                    skipped: Vec::new(),
-                })
-                .ok_or_else(|| Error::new(E_FAIL, skipped.join("; ")));
         }
         if choice == EncoderChoice::Software {
             skipped.push("hardware encoders: not tried (software forced)".into());

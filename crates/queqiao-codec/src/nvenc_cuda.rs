@@ -9,7 +9,6 @@ use crate::config::{EncodedFrame, EncoderConfig};
 use crate::cuda::{CuDevicePtr, Cuda, Library};
 use crate::format::EncodeFormat;
 use crate::nvenc_core::{self, CreateInstance, MaxVersion, NvencCore, Registered};
-use crate::nvenc_sys as sys;
 
 /// What the encoder takes from memory for a format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,12 +61,12 @@ impl NvencCuda {
         let mut core = NvencCore::open(
             create,
             max_version,
-            sys::NV_ENC_DEVICE_TYPE_CUDA,
+            nvenc_core::DEVICE_CUDA,
             cuda.context(),
             config,
             format,
         )?;
-        core.name = format!("{}, CUDA on {}", core.name, cuda.device_name);
+        core.add_to_name(&format!(", CUDA on {}", cuda.device_name));
         let (width, height) = (config.width as usize, config.height as usize);
         let (width_bytes, rows) = match input {
             Input::Nv12 => (width, height + height / 2),
@@ -80,7 +79,7 @@ impl NvencCuda {
             .and_then(|pitch_u32| {
                 core.register(
                     buffer as usize,
-                    sys::NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
+                    nvenc_core::RESOURCE_CUDA_DEVICE_PTR,
                     buffer as *mut std::ffi::c_void,
                     (config.width, config.height),
                     pitch_u32,
@@ -108,11 +107,11 @@ impl NvencCuda {
     }
 
     pub(crate) fn name(&self) -> &str {
-        &self.core.name
+        self.core.name()
     }
 
     pub(crate) fn format(&self) -> EncodeFormat {
-        self.core.format
+        self.core.format()
     }
 
     /// What `encode` takes.
