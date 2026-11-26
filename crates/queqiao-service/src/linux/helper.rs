@@ -7,6 +7,8 @@
 //!   itself, through the desktop's own consent (GNOME's portal), which KMS would go round;
 //! - during a session, injects the agent's input through the kernel (uinput), but never on the person's own desktop:
 //!   there the agent injects as the person;
+//! - pictures and input only while its own session is on the screen: never another session that took the screen
+//!   (another user switched in) in the moment before the service ends this pair;
 //! - during a session off the person's own desktop, shows the session banner where it can (an X11 screen); where it
 //!   cannot (GNOME shows no other program on its sign-in and lock screens) it tells the agent, which then tells the
 //!   person afterwards (the person's choice, 2026-11-25).
@@ -36,6 +38,8 @@ struct Shared {
     banner: Mutex<Option<String>>,
     banner_generation: AtomicU64,
     desktop: Mutex<String>,
+    /// The session on the screen is this helper's own (logind's active session).
+    mine: AtomicBool,
     injector: Mutex<Option<UinputInjector>>,
     writer: Mutex<Writer>,
 }
@@ -51,6 +55,14 @@ impl Shared {
         self.desktop
             .lock()
             .is_ok_and(|desktop| *desktop == OWN_DESKTOP)
+    }
+
+    /// Whether this helper may show and operate the screen: only its own session's lock or sign-in screen. Never the
+    /// person's own desktop (the agent works there as the person), and never another session that took the screen
+    /// (another user switched in; the sign-in screen of a user switch) in the moment before the service ends this
+    /// pair: the security review of 2026-11-26 found that window open for input and pictures.
+    fn may_operate(&self) -> bool {
+        self.mine.load(Ordering::SeqCst) && !self.on_own_desktop()
     }
 }
 
@@ -104,6 +116,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         banner: Mutex::new(None),
         banner_generation: AtomicU64::new(0),
         desktop: Mutex::new(String::new()),
+        mine: AtomicBool::new(false),
         injector: Mutex::new(None),
         writer: Mutex::new(writer),
     });
@@ -172,7 +185,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 ));
             }
             Some(ToHelper::Input { event, .. }) => {
-                if !shared.session.load(Ordering::SeqCst) || shared.on_own_desktop() {
+                if !shared.session.load(Ordering::SeqCst) || !shared.may_operate() {
                     refused += 1;
                     continue;
                 }
@@ -226,7 +239,11 @@ fn watch(shared: &Shared, session: &str, sign_in: bool) {
     };
     let mut last = String::new();
     loop {
-        let name = match logind.active() {
+        let active = logind.active();
+        // Set before the name changes, so input and pictures stop at once when another session takes the screen.
+        let mine = matches!(&active, Ok(Some(active)) if active.id == session);
+        shared.mine.store(mine, Ordering::SeqCst);
+        let name = match active {
             Ok(Some(active)) if active.id == session => {
                 if sign_in || active.is_sign_in() {
                     "Greeter"
@@ -284,13 +301,18 @@ fn capture_loop(shared: &Shared) {
             continue;
         };
         let generation = shared.generation.load(Ordering::SeqCst);
-        if shared.on_own_desktop() {
+        if !shared.may_operate() {
             report(
                 shared,
                 &mut last_error,
-                "the person's own desktop takes input: the agent captures it itself there".into(),
+                if shared.on_own_desktop() {
+                    "the person's own desktop takes input: the agent captures it itself there"
+                        .into()
+                } else {
+                    "another session is on the screen: not captured".into()
+                },
             );
-            while shared.generation.load(Ordering::SeqCst) == generation {
+            while shared.generation.load(Ordering::SeqCst) == generation && !shared.may_operate() {
                 std::thread::sleep(Duration::from_millis(30));
             }
             continue;
@@ -362,7 +384,7 @@ fn capture_round(shared: &Shared, kms: &Kms, index: usize, generation: u64) -> R
     let mut last_state = None;
     let mut last_hash = None;
     let mut last_look = Instant::now() - LOOK_GAP;
-    while shared.generation.load(Ordering::SeqCst) == generation && !shared.on_own_desktop() {
+    while shared.generation.load(Ordering::SeqCst) == generation && shared.may_operate() {
         let state = kms.state(&screen)?;
         if Some(state) != last_state || last_look.elapsed() >= LOOK_GAP {
             last_look = Instant::now();

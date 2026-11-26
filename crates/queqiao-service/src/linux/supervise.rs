@@ -111,6 +111,8 @@ struct Pair {
     to_agent: Outbox,
     started: Instant,
     started_unix: u64,
+    /// The helper's private copy of the X authority file (see `private_authority`).
+    authority_copy: Option<PathBuf>,
 }
 
 impl Pair {
@@ -118,6 +120,9 @@ impl Pair {
         let (agent, helper) = (self.agent.pid, self.helper.pid);
         self.agent.end();
         self.helper.end();
+        if let Some(copy) = &self.authority_copy {
+            let _ = std::fs::remove_file(copy);
+        }
         log::line(&format!(
             "session {}: helper {helper} and agent {agent} ended: {reason}",
             self.session.id
@@ -157,6 +162,50 @@ fn x_server_authority(display: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The largest X authority file taken (they hold a few cookies: well under 1 KiB).
+const MAX_AUTHORITY: u64 = 64 * 1024;
+
+/// A private copy of an X authority file for the desktop helper: `/run/queqiao/xauth-<pair>`, root's only (0600). The
+/// helper reads that copy, never a path a person's programs name: it is root and may read any file, and the security
+/// review of 2026-11-26 found it read whatever file a person's XAUTHORITY named and sent the "cookie" in it to the X
+/// server. The original is opened without following a link at its end, must be a plain file (not a pipe or device,
+/// which could also hold the service up), at most MAX_AUTHORITY, and, when `owner` is given, that person's own (a
+/// path through a linked folder to someone else's file fails this too).
+fn private_authority(path: &str, owner: Option<u32>, copy: &Path) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))?;
+    let meta = file.metadata().map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path} is not a plain file"));
+    }
+    if let Some(owner) = owner
+        && meta.uid() != owner
+    {
+        return Err(format!("{path} is not the person's own file"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_AUTHORITY + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{path}: {e}"))?;
+    if bytes.len() as u64 > MAX_AUTHORITY {
+        return Err(format!("{path} is too large for an X authority file"));
+    }
+    let _ = std::fs::remove_file(copy);
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(copy)
+        .map_err(|e| format!("{}: {e}", copy.display()))?;
+    out.write_all(&bytes)
+        .map_err(|e| format!("{}: {e}", copy.display()))
 }
 
 fn start_pair(
@@ -207,15 +256,28 @@ fn start_pair(
     if logon {
         helper_arguments.push("--sign-in".into());
     }
+    let mut authority_copy = None;
     if session.kind == "x11" && !session.display.is_empty() {
+        // The person's own (named by their programs: theirs only), else the X server's (root's command line).
         let authority = environment
             .iter()
             .find(|(name, _)| name == "XAUTHORITY")
-            .map(|(_, value)| value.clone())
-            .or_else(|| x_server_authority(&session.display));
+            .map(|(_, value)| (value.clone(), (!logon).then_some(session.uid)))
+            .or_else(|| x_server_authority(&session.display).map(|path| (path, None)));
         helper_arguments.extend(["--x11-display".to_string(), session.display.clone()]);
-        if let Some(authority) = authority {
-            helper_arguments.extend(["--x11-authority".to_string(), authority]);
+        if let Some((path, owner)) = authority {
+            let copy = Path::new(RUNTIME).join(format!("xauth-{id}"));
+            match private_authority(&path, owner, &copy) {
+                Ok(()) => {
+                    helper_arguments
+                        .extend(["--x11-authority".to_string(), copy.display().to_string()]);
+                    authority_copy = Some(copy);
+                }
+                Err(error) => log::line(&format!(
+                    "session {}: the X authority file is not used ({error}): no banner on that screen",
+                    session.id
+                )),
+            }
         }
     }
     let helper = launch::start(
@@ -224,7 +286,12 @@ fn start_pair(
         &Identity::Helper,
         &launch::plain_environment(None),
         &helper_ends.for_child()?,
-    )?;
+    )
+    .inspect_err(|_| {
+        if let Some(copy) = &authority_copy {
+            let _ = std::fs::remove_file(copy);
+        }
+    })?;
     drop(helper_ends);
     let (ours, theirs) = queqiao_local::channel()?;
     let mut inherit = theirs.for_child()?.to_vec();
@@ -252,6 +319,9 @@ fn start_pair(
         Ok(agent) => agent,
         Err(error) => {
             helper.end();
+            if let Some(copy) = &authority_copy {
+                let _ = std::fs::remove_file(copy);
+            }
             return Err(error);
         }
     };
@@ -263,6 +333,9 @@ fn start_pair(
     {
         agent.end();
         helper.end();
+        if let Some(copy) = &authority_copy {
+            let _ = std::fs::remove_file(copy);
+        }
         return Err(format!("handing over the device: {error}"));
     }
     let to_agent = Outbox::new(to_agent);
@@ -314,6 +387,7 @@ fn start_pair(
         to_agent,
         started: Instant::now(),
         started_unix: queqiao_update::unix_now(),
+        authority_copy,
     })
 }
 
@@ -634,5 +708,42 @@ fn supervise(logind: &Logind) {
     }
     if let Some(old) = pair.take() {
         old.end("the service stops");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn only_a_persons_own_plain_authority_file_is_copied() {
+        let dir = std::env::temp_dir().join(format!("queqiao-xauth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let me = std::fs::metadata(&dir).unwrap().uid();
+        let own = dir.join("own");
+        std::fs::write(&own, b"cookie").unwrap();
+        let copy = dir.join("copy");
+        let text = |path: &Path| path.to_str().unwrap().to_string();
+        // The person's own plain file: copied, root's only.
+        private_authority(&text(&own), Some(me), &copy).unwrap();
+        assert_eq!(std::fs::read(&copy).unwrap(), b"cookie");
+        assert_eq!(std::fs::metadata(&copy).unwrap().mode() & 0o777, 0o600);
+        // Someone else's file, a link (even to their own), a pipe (without waiting on it), too large: refused.
+        assert!(private_authority(&text(&own), Some(me.wrapping_add(1)), &copy).is_err());
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&own, &link).unwrap();
+        assert!(private_authority(&text(&link), Some(me), &copy).is_err());
+        let pipe = dir.join("pipe");
+        let name = std::ffi::CString::new(text(&pipe)).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(private_authority(&text(&pipe), Some(me), &copy).is_err());
+        let large = dir.join("large");
+        std::fs::write(&large, vec![0u8; MAX_AUTHORITY as usize + 1]).unwrap();
+        assert!(private_authority(&text(&large), Some(me), &copy).is_err());
+        // The X server's own file (from its command line, no owner asked): copied whoever owns it.
+        private_authority(&text(&own), None, &copy).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

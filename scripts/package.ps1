@@ -18,7 +18,24 @@ if ($Ship) {
     }
     if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) { 'WARNING nasm not on PATH: OpenH264 is built without its assembly (about 5x slower)' }
     $cargo = "$env:USERPROFILE\.cargo\bin\cargo.exe"
+    # The build machine's folders out of the programs: Rust keeps each library's source path for its error messages
+    # (C:\Users\<name>\.cargo\registry\src\<mirror>\...: the builder's user name and mirror, the security review of
+    # 2026-11-26). Rewritten to "cargo\..." and "rustup\..."; separated by 0x1F, so a path with spaces stays whole.
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { "$env:USERPROFILE\.cargo" }
+    $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { "$env:USERPROFILE\.rustup" }
+    $remap = @("--remap-path-prefix=$cargoHome=cargo", "--remap-path-prefix=$rustupHome=rustup", "--remap-path-prefix=$root=queqiao")
+    $env:CARGO_ENCODED_RUSTFLAGS = $remap -join [char]0x1F
+    # The C libraries keep their files' paths too (libopus' checks: 260 of them in the agent): MSVC trims the start
+    # of those with /d1trimfile. The flags are split at spaces, so a Cargo folder with a space in it cannot be given
+    # (the check below then says so).
+    $cflags, $cxxflags = $env:CFLAGS, $env:CXXFLAGS
+    if ($cargoHome -notmatch ' ') {
+        $env:CFLAGS = "$cflags /d1trimfile:$cargoHome\".Trim()
+        $env:CXXFLAGS = "$cxxflags /d1trimfile:$cargoHome\".Trim()
+    }
     $built = @(& $cargo build --release --target-dir (Join-Path $root 'target\ship') -p queqiao-agent -p queqiao-viewer -p queqiao-service -p queqiao-setup 2>&1 | ForEach-Object { "$_" })
+    Remove-Item Env:\CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+    $env:CFLAGS, $env:CXXFLAGS = $cflags, $cxxflags
     if ($LASTEXITCODE) { $built | Select-Object -Last 15; 'PACKAGE_FAIL the shipping build'; return }
     $Bin = Join-Path $root 'target\ship\release'
     # Each program must refuse an option for the tests at once (exit code 2) instead of acting on it.
@@ -33,6 +50,18 @@ if ($Ship) {
     $said = "$(& (Join-Path $Bin 'queqiao-service.exe') install --agent-arguments x --never-an-option 2>&1)"
     if ($said -notmatch 'unknown option --agent-arguments') { "PACKAGE_FAIL queqiao-service.exe took --agent-arguments ($said)"; return }
     'refused as it should: queqiao-service.exe install --agent-arguments'
+    # Nothing of the build machine in what ships: its user folder, Cargo's and rustup's (as text or UTF-16).
+    foreach ($exe in 'queqiao-agent.exe', 'queqiao-viewer.exe', 'queqiao-service.exe', 'queqiao-setup.exe') {
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $Bin $exe))
+        $decoded = @([Text.Encoding]::ASCII.GetString($bytes), [Text.Encoding]::Unicode.GetString($bytes))
+        foreach ($folder in @($env:USERPROFILE, $cargoHome, $rustupHome) | Where-Object { $_ }) {
+            if (@($decoded | Where-Object { $_.IndexOf($folder, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) {
+                "PACKAGE_FAIL $exe holds the build machine's folder $folder"
+                return
+            }
+        }
+    }
+    'no build machine folders in the programs'
 }
 $release = if ($Bin) { $Bin } else { Join-Path $root 'target\release' }
 $programs = @('queqiao-viewer.exe', 'queqiao-agent.exe', 'queqiao-service.exe') | ForEach-Object { Join-Path $release $_ }
