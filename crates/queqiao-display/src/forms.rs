@@ -1158,6 +1158,78 @@ pub fn copy_text(owner: HWND, text: &str) -> bool {
     }
 }
 
+/// The question before taking control of a PC another device of the account controls
+/// ([`crate::take_over_question`]): a task dialog with Take Control and Cancel (as UU Remote's), owned by `owner`;
+/// true for Take Control. Task dialogs need the common controls 6 (the programs' manifest): looked up when asked, so
+/// a program without them still starts, and asks with OK and Cancel instead.
+pub(crate) fn confirm_take_over_owned(owner: Option<HWND>, controller: &str) -> bool {
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    use windows::Win32::UI::Controls::{
+        TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDCBF_CANCEL_BUTTON, TDF_ALLOW_DIALOG_CANCELLATION,
+        TDF_POSITION_RELATIVE_TO_WINDOW,
+    };
+    type TaskDialogIndirect = unsafe extern "system" fn(
+        *const TASKDIALOGCONFIG,
+        *mut i32,
+        *mut i32,
+        *mut windows::core::BOOL,
+    ) -> windows::core::HRESULT;
+    const TAKE_OVER: i32 = 100;
+    let (title, text, action) = crate::take_over_question(controller);
+    let (title_w, text_w, action_w) = (wide(&title), wide(&text), wide(&action));
+    let buttons = [TASKDIALOG_BUTTON {
+        nButtonID: TAKE_OVER,
+        pszButtonText: PCWSTR(action_w.as_ptr()),
+    }];
+    // SAFETY: a plain C struct; every field that matters is set below (the rest stays zero: none).
+    let mut config: TASKDIALOGCONFIG = unsafe { std::mem::zeroed() };
+    config.cbSize = size_of::<TASKDIALOGCONFIG>() as u32;
+    config.hwndParent = owner.unwrap_or_default();
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    config.pszWindowTitle = PCWSTR(title_w.as_ptr());
+    config.pszMainInstruction = PCWSTR(title_w.as_ptr());
+    config.pszContent = PCWSTR(text_w.as_ptr());
+    config.cButtons = buttons.len() as u32;
+    config.pButtons = buttons.as_ptr();
+    config.nDefaultButton = TAKE_OVER;
+    let function = unsafe { LoadLibraryW(w!("comctl32.dll")) }
+        .ok()
+        .and_then(|module| unsafe {
+            GetProcAddress(module, windows::core::s!("TaskDialogIndirect"))
+        });
+    if let Some(function) = function {
+        // SAFETY: TaskDialogIndirect has this signature (commctrl.h).
+        let function: TaskDialogIndirect = unsafe { std::mem::transmute(function) };
+        let mut pressed = 0i32;
+        let shown = unsafe {
+            function(
+                &config,
+                &mut pressed,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if shown.is_ok() {
+            return pressed == TAKE_OVER;
+        }
+    }
+    let answer = unsafe {
+        MessageBoxW(
+            owner,
+            PCWSTR(text_w.as_ptr()),
+            PCWSTR(title_w.as_ptr()),
+            MB_OKCANCEL | MB_ICONQUESTION,
+        )
+    };
+    answer == IDOK
+}
+
+/// As [`confirm_take_over_owned`], on its own (the viewer, before its window).
+pub fn confirm_take_over(controller: &str) -> bool {
+    confirm_take_over_owned(None, controller)
+}
+
 /// A message box with an information icon.
 pub fn show_info(title: &str, text: &str) {
     let (title, text) = (wide(title), wide(text));

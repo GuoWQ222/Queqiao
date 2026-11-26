@@ -30,7 +30,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use queqiao_core::account::{ServerMessage, TurnAccess, signed_bytes};
-use queqiao_transport::{Error, IceServers, Signaling, TurnServer};
+use queqiao_transport::{Error, IceServers, Interruption, SessionRequest, Signaling, TurnServer};
 use tungstenite::Message;
 
 pub use config::{DeviceIdentity, SavedLogin, folder as data_folder};
@@ -90,6 +90,8 @@ pub enum AccountEvent {
         name: String,
         macs: Vec<String>,
     },
+    /// Agent: `by`, a device of the account, ended the session controlling this PC.
+    EndControl(String),
     Closed(String),
 }
 
@@ -112,13 +114,18 @@ pub struct Account {
     /// The connection to the server ended (seen by `still_trusted`).
     closed: bool,
     role: Role,
+    /// What the server can do beyond the first protocol (`queqiao_core::account::features`).
+    features: Vec<String>,
+    /// This login made the account (a new name in the one login form).
+    pub created: bool,
 }
 
 /// How a connection logs in.
 enum Credentials<'a> {
     /// The saved refresh token.
     Saved,
-    Password(&'a str, &'a str),
+    /// A name and password; `create`: a name the server does not know makes the account (one form for both).
+    Password(&'a str, &'a str, bool),
     /// A new account with this name and password.
     NewAccount(&'a str, &'a str),
 }
@@ -135,10 +142,28 @@ impl Account {
         password: Option<(&str, &str)>,
     ) -> Result<Account, Error> {
         let credentials = match password {
-            Some((user, password)) => Credentials::Password(user, password),
+            Some((user, password)) => Credentials::Password(user, password, false),
             None => Credentials::Saved,
         };
         Self::open(login, device, role, credentials)
+    }
+
+    /// One form for logging in and signing up (the user, 2026-11-26): a known name logs in with its password; a name
+    /// the server does not know makes the account and logs in (on a server that takes new accounts; `created` then
+    /// says so, for the person to be told). An earlier server refuses a new name as a wrong login.
+    pub fn log_in_or_create(
+        login: &mut SavedLogin,
+        device: &DeviceIdentity,
+        role: Role,
+        user: &str,
+        password: &str,
+    ) -> Result<Account, Error> {
+        Self::open(
+            login,
+            device,
+            role,
+            Credentials::Password(user, password, true),
+        )
     }
 
     /// A new account (on a server that takes new accounts: `serve --allow-signup`), logged in at once: the refresh
@@ -199,7 +224,7 @@ impl Account {
         let mut socket = tls::open(tcp, &login.server, &login.pin)?;
 
         let first = match credentials {
-            Credentials::Password(user, password) => ClientMessage::Login {
+            Credentials::Password(user, password, create) => ClientMessage::Login {
                 user: user.to_string(),
                 password: password.to_string(),
                 device_id: device.id.clone(),
@@ -207,6 +232,7 @@ impl Account {
                 role,
                 public_key: key.public_hex().to_string(),
                 machine: device.machine(),
+                create,
             },
             Credentials::NewAccount(user, password) => ClientMessage::Register {
                 user: user.to_string(),
@@ -241,17 +267,19 @@ impl Account {
                 _ => {}
             }
         };
-        let (user, device_id, devices) = match welcome {
+        let (user, device_id, devices, features, created) = match welcome {
             ServerMessage::Welcome {
                 user,
                 device_id,
                 refresh_token,
                 devices,
+                features,
+                created,
             } => {
                 if let Some(token) = refresh_token {
                     login.refresh_token = Some(token);
                 }
-                (user, device_id, devices)
+                (user, device_id, devices, features, created)
             }
             ServerMessage::Error { message } => return Err(Error(message)),
             other => return Err(Error(format!("unexpected answer: {other:?}"))),
@@ -280,7 +308,36 @@ impl Account {
             role,
             helpers: Vec::new(),
             closed: false,
+            features,
+            created,
         })
+    }
+
+    /// Whether the server can do `feature` (`queqiao_core::account::features`).
+    pub fn supports(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+
+    /// Agent: tells the account who controls this device now (None: nobody), on a server that shows it.
+    pub fn set_control_state(&self, controller: Option<&str>) {
+        if self.supports(queqiao_core::account::features::CONTROL_STATE) {
+            self.send(ClientMessage::ControlState {
+                controller: controller.unwrap_or_default().to_string(),
+            });
+        }
+    }
+
+    /// Ends the session controlling the account's device `device_id` (its "Disconnect"), on a server that can.
+    pub fn end_control(&self, device_id: &str) -> Result<(), Error> {
+        if !self.supports(queqiao_core::account::features::CONTROL_STATE) {
+            return Err(Error(
+                "the server cannot end another device's session (update it)".into(),
+            ));
+        }
+        self.send(ClientMessage::EndControl {
+            device_id: device_id.to_string(),
+        });
+        Ok(())
     }
 
     /// Checks a signal from another device: it must come from a device of the account whose key matches the
@@ -564,6 +621,84 @@ pub struct SessionSignal<'a> {
 impl Signaling for SessionSignal<'_> {
     fn peer_trusted(&mut self) -> bool {
         self.account.still_trusted(&self.device)
+    }
+
+    /// An agent's session: another device's hello (checked: a device of the account, or one a help code joined, with
+    /// its pinned key's signature; anything else is dropped), or a device of the account ending this session.
+    fn interruption(&mut self) -> Option<Interruption> {
+        if self.account.role != Role::Agent {
+            return None;
+        }
+        // What arrived is taken in first (it waits in `pending` for the program's own loop).
+        let _ = self.account.still_trusted(&self.device);
+        let at = self.account.pending.iter().position(|event| match event {
+            AccountEvent::Signal {
+                from_role: Role::Viewer,
+                kind,
+                session,
+                ..
+            } => kind == "hello" && *session != self.session,
+            AccountEvent::EndControl(_) => true,
+            _ => false,
+        })?;
+        match self.account.pending.remove(at)? {
+            AccountEvent::EndControl(by) => Some(Interruption::Ended { by }),
+            AccountEvent::Signal {
+                from,
+                from_name,
+                from_role,
+                session,
+                kind,
+                body,
+                signature,
+            } => {
+                self.account
+                    .check_signal(&from, from_role, &session, &kind, &body, &signature)
+                    .ok()?;
+                let helper = self.account.helper_account(&from).map(str::to_string);
+                Some(Interruption::Request(SessionRequest {
+                    from,
+                    from_name,
+                    helper,
+                    session,
+                    body,
+                    signature,
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    fn answer_request(&mut self, request: &SessionRequest, kind: &str, body: &str) {
+        let signature =
+            self.account
+                .signature(&request.from, Role::Viewer, &request.session, kind, body);
+        self.account.send(ClientMessage::Signal {
+            to: request.from.clone(),
+            to_role: Role::Viewer,
+            session: request.session.clone(),
+            kind: kind.to_string(),
+            body: body.to_string(),
+            signature,
+        });
+    }
+
+    /// Back at the front, as it came: the program's loop checks it again (signature, account, consent) once this
+    /// session ended.
+    fn requeue(&mut self, request: SessionRequest) {
+        self.account.pending.push_front(AccountEvent::Signal {
+            from: request.from,
+            from_name: request.from_name,
+            from_role: Role::Viewer,
+            session: request.session,
+            kind: "hello".to_string(),
+            body: request.body,
+            signature: request.signature,
+        });
+    }
+
+    fn set_controller(&mut self, controller: Option<&str>) {
+        self.account.set_control_state(controller);
     }
 
     fn send(&mut self, kind: &str, body: &str) -> Result<(), Error> {

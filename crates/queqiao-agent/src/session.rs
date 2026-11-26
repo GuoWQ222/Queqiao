@@ -13,6 +13,7 @@ use queqiao_capture::{
 use queqiao_codec::{EncodeFormat, ScreenEncoder};
 use queqiao_core::protocol::MAX_CLIPBOARD_TEXT;
 use queqiao_core::protocol::{Command, InputEvent, Message};
+use queqiao_core::text::trf;
 use queqiao_display::PresenceEvent;
 use queqiao_files::{ImageReceiver, ImageSender, image_fingerprint, test_picture};
 use queqiao_files::{Outcome, Transfers, downloads_folder};
@@ -21,7 +22,10 @@ use queqiao_input::{
 };
 use queqiao_local::FromHelper;
 use queqiao_terminal::{TerminalMessage, Terminals};
-use queqiao_transport::{Addresses, Peer, PeerEvent, Role, START_BITRATE, Signaling, Stream};
+use queqiao_transport::{
+    Addresses, BUSY, Interruption, Peer, PeerEvent, Role, START_BITRATE, Signaling, Stream,
+    check_hello,
+};
 
 use crate::options::Options;
 use crate::platform::{
@@ -461,6 +465,9 @@ pub(crate) struct Permissions {
     pub(crate) helper: bool,
     /// The viewer rebuilds lost video packets from parity (its hello said "fec"): it is sent parity.
     pub(crate) fec: bool,
+    /// The controlling device's name as the account's other devices see it (one controller at a time: they are shown
+    /// it, and a device asking for a session meanwhile is told it is busy with it).
+    pub(crate) controller: String,
 }
 
 /// Files copied to the clipboard go over at once up to this many bytes in all.
@@ -587,6 +594,7 @@ pub(crate) fn session(
         terminal: allow_terminal,
         helper,
         fec,
+        controller,
     } = permissions;
     // Told once per secure desktop that someone helping cannot operate it.
     let mut secure_refused_told = false;
@@ -854,6 +862,9 @@ pub(crate) fn session(
         }};
     }
     let mut trust_checked = Instant::now();
+    // Requests of other devices and "end this session" from the account, looked at four times a second.
+    let mut interruptions_checked = Instant::now();
+    let mut controller_told = false;
     // The lock screen (as UU): the picture and input wait for this PC's Windows password; at the sign-in screen (nobody
     // signed in) for the password of the Windows user who set it up.
     let mut gate = if options.logon {
@@ -915,6 +926,58 @@ pub(crate) fn session(
                         .to_string(),
                 );
                 break 'session;
+            }
+        }
+        // One device controls this PC at a time (the user, 2026-11-26, as UU Remote): a device of the account that asks
+        // to take control (its person confirmed it) ends this session and gets the next; any other request is told this
+        // PC is busy, and with whom (someone of another account only that it is). A device of the account may also end
+        // this session from its device list ("Disconnect").
+        if interruptions_checked.elapsed() >= Duration::from_millis(250) {
+            interruptions_checked = Instant::now();
+            while let Some(interruption) = signal.interruption() {
+                match interruption {
+                    Interruption::Ended { by } => {
+                        let notice = trf(
+                            "{device}, a device of your account, ended this remote control session.",
+                            &[("device", &by)],
+                        );
+                        peer.send_data(Message::Notice(notice).encode());
+                        lines.push(format!("{by} ended this session from its device list"));
+                        closed = Some(format!("ended from {by}"));
+                        ended_here = true;
+                        break 'session;
+                    }
+                    Interruption::Request(request) => {
+                        let take_over = request.helper.is_none()
+                            && check_hello(&request.body, "agent").is_ok_and(|h| h.take_over);
+                        if take_over {
+                            let notice = trf(
+                                "{device}, a device of your account, took over control of this PC.",
+                                &[("device", &request.from_name)],
+                            );
+                            peer.send_data(Message::Notice(notice).encode());
+                            lines.push(format!(
+                                "{} took over control of this PC",
+                                request.from_name
+                            ));
+                            closed = Some(format!("taken over by {}", request.from_name));
+                            ended_here = true;
+                            // Its hello is taken up as soon as this session is over.
+                            signal.requeue(request);
+                            break 'session;
+                        }
+                        let named = if request.helper.is_none() {
+                            controller.as_str()
+                        } else {
+                            ""
+                        };
+                        signal.answer_request(&request, "error", &format!("{BUSY}{named}"));
+                        lines.push(format!(
+                            "{} asked for a session meanwhile: told this PC is busy",
+                            request.from_name
+                        ));
+                    }
+                }
             }
         }
         if !end_pressed
@@ -990,7 +1053,14 @@ pub(crate) fn session(
             };
             watch.event(event_name, kind);
             match event {
-                PeerEvent::Connected => connected_after = Some(started.elapsed()),
+                PeerEvent::Connected => {
+                    connected_after = Some(started.elapsed());
+                    // The account's devices are shown who controls this PC now.
+                    if !controller_told {
+                        signal.set_controller(Some(&controller));
+                        controller_told = true;
+                    }
+                }
                 PeerEvent::KeyframeRequested => {
                     stats.keyframe_requests += 1;
                     force_keyframe = true;
@@ -1992,6 +2062,9 @@ pub(crate) fn session(
         ));
     }
     tell_afterwards(&mut unseen, viewer, options.logon, ui, links, lines);
+    if controller_told {
+        signal.set_controller(None);
+    }
     if closed.is_none() || ended_here {
         // Our end (time is up, or the person here ended it): tell the viewer at once.
         peer.send_data(Message::Leave.encode());

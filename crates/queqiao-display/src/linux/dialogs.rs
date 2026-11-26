@@ -17,6 +17,8 @@ enum Kind {
         error: bool,
     },
     Confirm,
+    /// A question with its own action button (the label) beside Cancel; the action is the default.
+    Action(String),
     /// The items (id, text, checked); the answer is the chosen id.
     Menu(Vec<(u16, String, bool)>),
 }
@@ -135,6 +137,19 @@ impl View for DialogView {
                             answer = Some(Answer::Ok(String::new()));
                         }
                     }
+                    Kind::Action(ref label) => {
+                        if ui.button(tr("Cancel")).clicked() {
+                            answer = Some(Answer::Cancel);
+                        }
+                        // The action in the accent colour, as the main window's buttons (UU Remote's dialog).
+                        let action = egui::Button::new(
+                            egui::RichText::new(label.as_str()).color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(0x3B, 0x7B, 0xF6));
+                        if ui.add(action).clicked() || enter {
+                            answer = Some(Answer::Ok(String::new()));
+                        }
+                    }
                 },
             );
         });
@@ -195,6 +210,16 @@ pub fn menu(title: &str, items: &[(u16, &str, bool)]) -> Option<u16> {
 /// Yes or no (no unless Yes is pressed).
 pub fn confirm(title: &str, text: &str) -> bool {
     matches!(ask(title, text, Kind::Confirm, ""), Some(Answer::Ok(_)))
+}
+
+/// The question before taking control of a PC another device of the account controls ([`crate::take_over_question`]):
+/// true for Take Control, false for Cancel or a closed window.
+pub fn confirm_take_over(controller: &str) -> bool {
+    let (title, text, action) = crate::take_over_question(controller);
+    matches!(
+        ask(&title, &text, Kind::Action(action), ""),
+        Some(Answer::Ok(_))
+    )
 }
 
 pub fn show_info(title: &str, text: &str) {

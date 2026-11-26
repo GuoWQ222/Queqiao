@@ -224,6 +224,9 @@ type PanelTest = (Instant, u8, Option<(i32, i32)>);
 /// Tests: how many steps the window test (--window-test) takes.
 const WINDOW_TEST_STEPS: u8 = 14;
 
+/// A notice the agent sent at most this long before ending the session explains why it ended.
+const NOTICE_BEFORE_LEAVE: Duration = Duration::from_secs(3);
+
 /// A session that is not connected after this long is given up.
 pub(crate) const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
@@ -744,6 +747,8 @@ pub(crate) fn run_session(
     window.set_full_screen(options.full_screen);
     window.check_menu_item(MENU_SOUND, sound_on);
     let mut closed = None;
+    // The agent's last notice and when it came (shown if the agent ends the session right after it).
+    let mut last_notice: Option<(String, Instant)> = None;
 
     'session: loop {
         if let Some(overlay) = overlay.as_mut() {
@@ -1843,7 +1848,21 @@ pub(crate) fn run_session(
                     }
                     Some(Message::Pong { .. } | Message::FrameInfo { .. }) => {}
                     Some(Message::Leave) => {
-                        closed = Some("the agent ended the session".to_string());
+                        // Ended there with a word for this side (another device of the account took control, or ended
+                        // it from its device list): the person is shown it, as the window closes.
+                        match last_notice
+                            .take()
+                            .filter(|(_, at)| at.elapsed() < NOTICE_BEFORE_LEAVE)
+                        {
+                            Some((notice, _)) => {
+                                closed = Some(format!("the agent ended the session: {notice}"));
+                                if options.may_ask() {
+                                    window.set_visible(false);
+                                    queqiao_display::show_info(tr("Queqiao"), &notice);
+                                }
+                            }
+                            None => closed = Some("the agent ended the session".to_string()),
+                        }
                         break 'session;
                     }
                     Some(Message::Screens { current, sizes })
@@ -1882,6 +1901,7 @@ pub(crate) fn run_session(
                     Some(Message::Notice(text)) => {
                         lines.push(format!("notice from that PC: {text}"));
                         status.notice(&text);
+                        last_notice = Some((text, Instant::now()));
                     }
                     Some(Message::PasswordNeeded { reason, tries_left }) => {
                         use queqiao_core::protocol::PasswordReason;

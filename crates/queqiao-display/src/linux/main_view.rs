@@ -32,6 +32,11 @@ const DEVICE_ROW: f32 = 36.0;
 const HERO: [f32; 4] = [LEFT, 92.0, CONTENT, 180.0];
 const ACTIONS: [f32; 4] = [LEFT, 288.0, CONTENT, 52.0];
 const RECENT_Y: f32 = 360.0;
+/// The "being controlled" banner under the heading, and how far it moves the rest of the page down (as Windows').
+const BANNER: [f32; 4] = [LEFT, 90.0, CONTENT, 46.0];
+const BANNER_SPACE: f32 = 58.0;
+const BANNER_BACK: Color32 = Color32::from_rgb(0xEA, 0xF2, 0xFE);
+const BANNER_EDGE: Color32 = Color32::from_rgb(0xC6, 0xDC, 0xF6);
 const BIRD: f32 = 36.0;
 
 /// The magpie pictures, made once the window is drawn first.
@@ -212,6 +217,38 @@ impl MainView {
                                 theme::SIDE_TEXT,
                             );
                             name_width = chip.left() - row.left() - 36.0;
+                        }
+                        if !device.controlled_by.is_empty() {
+                            // Being controlled (as UU Remote's list): a screen and the one device controlling it.
+                            let chip = Rect::from_min_size(
+                                Pos2::new(
+                                    row.left() + 30.0 + name_width - 34.0,
+                                    row.center().y - 10.0,
+                                ),
+                                Vec2::new(34.0, 20.0),
+                            );
+                            painter.rect_filled(chip, CornerRadius::same(8), theme::SIDE_CHIP);
+                            theme::icon(
+                                painter,
+                                Icon::Devices,
+                                Rect::from_center_size(
+                                    Pos2::new(chip.left() + 11.0, chip.center().y),
+                                    Vec2::splat(12.0),
+                                ),
+                                theme::GOLD,
+                            );
+                            theme::text_in(
+                                painter,
+                                Rect::from_min_max(
+                                    Pos2::new(chip.left() + 18.0, chip.top()),
+                                    chip.right_bottom(),
+                                ),
+                                Align2::CENTER_CENTER,
+                                "1",
+                                theme::regular(12.0),
+                                theme::SIDE_TEXT,
+                            );
+                            name_width -= 40.0;
                         }
                         theme::text_in(
                             painter,
@@ -486,12 +523,21 @@ impl MainView {
             theme::regular(12.0),
             theme::SECONDARY,
         );
-        self.hero(ui, page, shown, &device);
-        self.actions(ui, page, &device);
+        // Another device of the account controls it (UU Remote's "被控中", the user, 2026-11-26): the banner, with
+        // Disconnect; the rest of the page below it.
+        let below = if device.controlled_by.is_empty() {
+            0.0
+        } else {
+            self.banner(ui, page, &device);
+            BANNER_SPACE
+        };
+        self.hero(ui, page, shown, &device, below);
+        self.actions(ui, page, &device, below);
         // Recent connections.
+        let recent_y = RECENT_Y + below;
         theme::text_in(
             &painter,
-            at(LEFT, RECENT_Y, CONTENT, 24.0),
+            at(LEFT, recent_y, CONTENT, 24.0),
             Align2::LEFT_CENTER,
             tr("Recent connections"),
             theme::bold(16.0),
@@ -511,7 +557,7 @@ impl MainView {
             };
             theme::text_in(
                 &painter,
-                at(LEFT, RECENT_Y + 32.0, CONTENT, 20.0),
+                at(LEFT, recent_y + 32.0, CONTENT, 20.0),
                 Align2::LEFT_CENTER,
                 empty,
                 theme::regular(12.0),
@@ -519,7 +565,7 @@ impl MainView {
             );
         }
         for (index, row) in rows.into_iter().enumerate() {
-            let y = RECENT_Y + 32.0 + index as f32 * 38.0;
+            let y = recent_y + 32.0 + index as f32 * 38.0;
             theme::icon(
                 &painter,
                 Icon::Devices,
@@ -552,12 +598,83 @@ impl MainView {
         }
     }
 
+    /// The "being controlled" banner under the heading (as the Windows main window's): a pale blue band, a screen, the
+    /// label, a divider, the sentence, Disconnect on the right.
+    fn banner(&mut self, ui: &mut egui::Ui, page: Rect, device: &MainDevice) {
+        let painter = ui.painter().clone();
+        let at = |x: f32, y: f32, w: f32, h: f32| {
+            Rect::from_min_size(page.min + Vec2::new(x, y), Vec2::new(w, h))
+        };
+        let band = at(BANNER[0], BANNER[1], BANNER[2], BANNER[3]);
+        painter.rect_filled(band, CornerRadius::same(10), BANNER_BACK);
+        painter.rect_stroke(
+            band,
+            CornerRadius::same(10),
+            Stroke::new(1.0_f32, BANNER_EDGE),
+            StrokeKind::Inside,
+        );
+        let (label, words) = crate::model::controlled_banner();
+        theme::icon(
+            &painter,
+            Icon::Devices,
+            Rect::from_center_size(
+                Pos2::new(band.left() + 26.0, band.center().y),
+                Vec2::splat(18.0),
+            ),
+            theme::ACCENT,
+        );
+        let galley = theme::fitted(&painter, label, theme::bold(14.0), theme::ACCENT, 160.0);
+        let label_right = band.left() + 46.0 + galley.size().x;
+        painter.galley(
+            Pos2::new(band.left() + 46.0, band.center().y - galley.size().y / 2.0),
+            galley,
+            theme::ACCENT,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(label_right + 12.0, band.top() + 14.0),
+                Pos2::new(label_right + 12.0, band.bottom() - 14.0),
+            ],
+            Stroke::new(1.0_f32, BANNER_EDGE),
+        );
+        let end = Rect::from_min_size(
+            Pos2::new(band.right() - 114.0, band.center().y - 14.0),
+            Vec2::new(102.0, 28.0),
+        );
+        // The sentence on one line where it fits (Chinese), else wrapped onto two, centred in the band.
+        let area = Rect::from_min_max(
+            Pos2::new(label_right + 26.0, band.top()),
+            Pos2::new(end.left() - 10.0, band.bottom()),
+        );
+        let galley = painter.layout(
+            words.to_string(),
+            theme::regular(12.0),
+            theme::ACCENT,
+            area.width(),
+        );
+        painter.galley(
+            Pos2::new(area.left(), area.center().y - galley.size().y / 2.0),
+            galley,
+            theme::ACCENT,
+        );
+        if theme::button(ui, end, tr("Disconnect"), true) {
+            self.send(Action::EndControl(device.id.clone()));
+        }
+    }
+
     /// The card: a night sky, this PC and the device joined by a dotted arch, three magpies on it while the device is
-    /// online (the bridge forms), the gold button under it.
-    fn hero(&mut self, ui: &mut egui::Ui, page: Rect, shown: &Shown, device: &MainDevice) {
+    /// online (the bridge forms), the gold button under it. `below`: lower by this (the banner above it).
+    fn hero(
+        &mut self,
+        ui: &mut egui::Ui,
+        page: Rect,
+        shown: &Shown,
+        device: &MainDevice,
+        below: f32,
+    ) {
         let painter = ui.painter().clone();
         let card = Rect::from_min_size(
-            page.min + Vec2::new(HERO[0], HERO[1]),
+            page.min + Vec2::new(HERO[0], HERO[1] + below),
             Vec2::new(HERO[2], HERO[3]),
         );
         // The gradient: a mesh from the top colour to the bottom one, then the corners rounded off with the page's white.
@@ -702,9 +819,9 @@ impl MainView {
     }
 
     /// The tools under the card: Send files, Command line, Wake up, More (each where it can be used now).
-    fn actions(&mut self, ui: &mut egui::Ui, page: Rect, device: &MainDevice) {
+    fn actions(&mut self, ui: &mut egui::Ui, page: Rect, device: &MainDevice, below: f32) {
         let row = Rect::from_min_size(
-            page.min + Vec2::new(ACTIONS[0], ACTIONS[1]),
+            page.min + Vec2::new(ACTIONS[0], ACTIONS[1] + below),
             Vec2::new(ACTIONS[2], ACTIONS[3]),
         );
         let painter = ui.painter().clone();

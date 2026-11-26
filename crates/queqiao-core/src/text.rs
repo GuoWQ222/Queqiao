@@ -964,6 +964,38 @@ const CHINESE: &[(&str, &str)] = &[
     ("Off", "关"),
     ("Not set", "未设置"),
     ("Change", "修改"),
+    // One device controls a PC at a time (as UU Remote, 2026-11-26).
+    ("Being controlled", "被控中"),
+    (
+        "A device on your account is currently controlling this computer.",
+        "当前有本账号设备正在控制此电脑。",
+    ),
+    ("Disconnect", "断开远控"),
+    ("Take Control", "接管设备"),
+    (
+        "Taking control will disconnect {device}. Do you want to continue?",
+        "接管设备后将断开 {device} 的远程控制。是否继续？",
+    ),
+    (
+        "{device}, a device of your account, took over control of this PC.",
+        "本账号设备 {device} 已接管此电脑。",
+    ),
+    (
+        "{device}, a device of your account, ended this remote control session.",
+        "本账号设备 {device} 已断开此次远程控制。",
+    ),
+    (
+        "{controller} is controlling {device} now.",
+        "{controller} 正在控制 {device}。",
+    ),
+    (
+        "{device} is in a session with someone helping from another account.",
+        "{device} 正在接受其他账号的远程协助。",
+    ),
+    (
+        "{device} stays with the device controlling it.",
+        "{device} 仍由当前控制它的设备控制。",
+    ),
 ];
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use queqiao_display::{
     DeviceList, DeviceRow, HelpAction, HelpForm, ListAction, LoginAction, LoginFields, LoginForm,
     ask_secret, ask_text, confirm, popup_menu,
 };
-use queqiao_transport::{Addresses, Peer, Role, Signaling};
+use queqiao_transport::{Addresses, Peer, Role, Signaling, busy_controller};
 
 use crate::options::*;
 use crate::platform;
@@ -85,6 +85,19 @@ pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<
         lines.push(format!("removed {found} from the account"));
         return Ok(true);
     }
+    // Tests: the main window's "Disconnect" for that device (the session controlling it ends).
+    if let Some(key) = &options.end_control {
+        let found = account
+            .devices
+            .iter()
+            .find(|d| d.id == *key || d.name.eq_ignore_ascii_case(key))
+            .map(|d| d.id.clone())
+            .ok_or_else(|| format!("{key} is not on the account"))?;
+        account.end_control(&found).map_err(|e| e.to_string())?;
+        std::thread::sleep(Duration::from_millis(800));
+        lines.push(format!("asked to end the session controlling {found}"));
+        return Ok(true);
+    }
     if options.list {
         for device in &account.devices {
             let state = if device.controllable {
@@ -97,8 +110,13 @@ pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<
             } else {
                 ""
             };
+            let controlled = if device.controlled_by.is_empty() {
+                String::new()
+            } else {
+                format!(", controlled by {}", device.controlled_by)
+            };
             lines.push(format!(
-                "device {} ({}): {state}{own}",
+                "device {} ({}): {state}{own}{controlled}",
                 device.name, device.id
             ));
         }
@@ -111,7 +129,8 @@ pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<
         let mut running = Vec::new();
         for key in [first, second] {
             let target = wait_for_device(&mut account, key, Duration::from_secs(30))?;
-            let (peer, started) = start_peer(&mut account, &target, Addresses::All)?;
+            let (peer, started) =
+                start_peer(&mut account, &target, options, Addresses::All, lines)?;
             running.push((
                 target.name.clone(),
                 session_thread(
@@ -469,7 +488,7 @@ fn device_list(
                 match account.devices.iter().find(|d| d.id == id).cloned() {
                     Some(target) if target.controllable && options.ui_test.is_none() => {
                         // On a thread of its own: the list stays usable, for more sessions at once.
-                        match start_peer(account, &target, Addresses::All) {
+                        match start_peer(account, &target, options, Addresses::All, lines) {
                             Ok((peer, started)) => {
                                 list.set_status(&trf(
                                     "Connected to {name}.",
@@ -604,7 +623,8 @@ fn device_list(
                     | AccountEvent::HelpRequested { .. }
                     | AccountEvent::HelpGranted(_)
                     | AccountEvent::HelpAsked { .. }
-                    | AccountEvent::WakeRequest { .. } => {}
+                    | AccountEvent::WakeRequest { .. }
+                    | AccountEvent::EndControl(_) => {}
                 }
             }
         }
@@ -791,6 +811,64 @@ fn ask_for_help_target(
     }
 }
 
+/// Says hello to `target`'s agent on a new session (its id), taking control from the device that has it when the
+/// person says so: one device controls a PC at a time (the user, 2026-11-26, as UU Remote). None: the person let the
+/// other device keep it.
+fn hello_to(
+    account: &mut Account,
+    target: &Device,
+    options: &Options,
+    lines: &mut Vec<String>,
+) -> Result<Option<String>, String> {
+    let mut take_over = options.take_over;
+    loop {
+        let id = new_session_id();
+        let mut signal = account.session(&target.id, AccountRole::Agent, &id);
+        let error = match signal.hello_with("viewer", take_over) {
+            Ok(_) => return Ok(Some(id)),
+            Err(error) => error.0,
+        };
+        let Some(controller) = busy_controller(&error) else {
+            return Err(error);
+        };
+        lines.push(format!(
+            "{} is busy: {} controls it",
+            target.name,
+            if controller.is_empty() {
+                "someone helping"
+            } else {
+                controller
+            }
+        ));
+        // Someone of another account helping there cannot be taken over (they are named to nobody), and a test asks
+        // nobody.
+        if take_over || controller.is_empty() || !options.may_ask() {
+            return Err(busy_text(&target.name, controller));
+        }
+        if !queqiao_display::confirm_take_over(controller) {
+            lines.push(format!("the person let {controller} keep control"));
+            return Ok(None);
+        }
+        lines.push(format!("the person takes control from {controller}"));
+        take_over = true;
+    }
+}
+
+/// Why a PC cannot be controlled now: another device has it.
+fn busy_text(target: &str, controller: &str) -> String {
+    if controller.is_empty() {
+        trf(
+            "{device} is in a session with someone helping from another account.",
+            &[("device", target)],
+        )
+    } else {
+        trf(
+            "{controller} is controlling {device} now.",
+            &[("controller", controller), ("device", target)],
+        )
+    }
+}
+
 fn connect_to(
     account: &mut Account,
     target: &Device,
@@ -800,9 +878,10 @@ fn connect_to(
     addresses: Addresses,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
-    let id = new_session_id();
+    let Some(id) = hello_to(account, target, options, lines)? else {
+        return Ok(true);
+    };
     let mut signal = account.session(&target.id, AccountRole::Agent, &id);
-    signal.hello("viewer").map_err(|e| e.to_string())?;
     let (began, since) = (queqiao_account::connections::local_now(), Instant::now());
     let result = session(
         options,
@@ -834,11 +913,17 @@ fn remember(device_id: &str, device_name: &str, began: String, since: Instant) {
 fn start_peer(
     account: &mut Account,
     target: &Device,
+    options: &Options,
     addresses: Addresses,
+    lines: &mut Vec<String>,
 ) -> Result<(Peer, Instant), String> {
-    let id = new_session_id();
+    let Some(id) = hello_to(account, target, options, lines)? else {
+        return Err(trf(
+            "{device} stays with the device controlling it.",
+            &[("device", &target.name)],
+        ));
+    };
     let mut signal = account.session(&target.id, AccountRole::Agent, &id);
-    signal.hello("viewer").map_err(|e| e.to_string())?;
     let started = Instant::now();
     let peer = Peer::start_with(Role::Viewer, &mut signal, addresses).map_err(|e| e.to_string())?;
     Ok((peer, started))

@@ -76,11 +76,16 @@ pub(super) enum Action {
     Choose(u16),
     OpenMain,
     Connect(String),
+    /// The "being controlled" banner's Disconnect.
+    EndControl(String),
     Files(String),
     Terminal(String),
     Wake(String),
     Remove(String),
-    HelpSomeone { help_id: String, code: String },
+    HelpSomeone {
+        help_id: String,
+        code: String,
+    },
     CopyInvitation,
     NewHelpId,
     HelpNewCode,
@@ -543,7 +548,27 @@ impl Presence {
         match action {
             Action::Choose(item) => self.choose(item),
             Action::OpenMain => self.show_main(None).ok().map(|()| PresenceEvent::MainShown),
-            Action::Connect(id) => Some(PresenceEvent::Connect(id)),
+            // One device controls a PC at a time (as UU Remote): with another device in control, the person is asked.
+            Action::Connect(id) => {
+                let controller = self
+                    .shown
+                    .lock()
+                    .ok()
+                    .and_then(|shown| {
+                        shown
+                            .devices
+                            .iter()
+                            .find(|d| d.id == id)
+                            .map(|d| d.controlled_by.clone())
+                    })
+                    .unwrap_or_default();
+                if controller.is_empty() {
+                    Some(PresenceEvent::Connect(id))
+                } else {
+                    dialogs::confirm_take_over(&controller).then_some(PresenceEvent::TakeOver(id))
+                }
+            }
+            Action::EndControl(id) => Some(PresenceEvent::EndControl(id)),
             Action::Files(id) => Some(PresenceEvent::SendFiles(id)),
             Action::Terminal(id) => Some(PresenceEvent::OpenCommandLine(id)),
             Action::Wake(id) => Some(PresenceEvent::Wake(id)),

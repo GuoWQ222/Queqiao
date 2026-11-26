@@ -41,8 +41,9 @@ pub use file_window::{FileWindow, show_in_folder};
 #[cfg(windows)]
 pub use forms::{
     DeviceList, HelpForm, LoginForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList,
-    SetupAction, SetupForm, ask_secret, ask_text, confirm, copy_text, owner_from_raw, pick_files,
-    popup_menu, save_screen_picture, save_window_picture, show_error, show_info,
+    SetupAction, SetupForm, ask_secret, ask_text, confirm, confirm_take_over, copy_text,
+    owner_from_raw, pick_files, popup_menu, save_screen_picture, save_window_picture, show_error,
+    show_info,
 };
 #[cfg(windows)]
 pub use icon::app_icon;
@@ -50,15 +51,15 @@ pub use icon::app_icon;
 pub use linux::{
     ConsentPrompt, DeviceList, Error, FileWindow, HelpForm, Hwnd, LoginForm, PICK_CLOSED,
     PasswordAction, PasswordForm, PickList, Presence, Presenter, PrivacyScreen, Rect, RemoteCursor,
-    SessionBanner, SessionOverlay, Window, ask_secret, ask_text, confirm, fit, owner_from_raw,
-    pick_files, popup_menu, save_screen_picture, save_window_picture, show_error, show_in_folder,
-    show_info, show_running_main,
+    SessionBanner, SessionOverlay, Window, ask_secret, ask_text, confirm, confirm_take_over, fit,
+    owner_from_raw, pick_files, popup_menu, save_screen_picture, save_window_picture, show_error,
+    show_in_folder, show_info, show_running_main,
 };
 pub use model::{
     AccountState, BAR_END, BAR_MORE, BarButton, ConnectionRow, DeviceRow, Figures, FileItem,
     FileKind, FilePane, FileWindowEvent, HelpAction, HelpMode, JobCommand, JobRow, JobRowState,
     ListAction, LoginAction, LoginFields, MainDevice, Page, PasswordCheck, PresenceEvent,
-    TransferRow, WindowEvent, normalize_code, size_text,
+    TransferRow, WindowEvent, controlled_banner, normalize_code, size_text, take_over_question,
 };
 #[cfg(windows)]
 pub use overlay::SessionOverlay;

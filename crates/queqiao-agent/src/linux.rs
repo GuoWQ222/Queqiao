@@ -300,6 +300,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             terminal: settings.allow_terminal,
             helper: false,
             fec: hello.fec,
+            controller: viewer.to_string(),
         },
         &mut links,
         &mut deferred,

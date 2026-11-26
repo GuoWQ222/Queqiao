@@ -354,6 +354,20 @@ pub(crate) fn run_account(
                     ));
                 }
                 PresenceEvent::Connect(device) => platform::open_viewer(&["--open", &device], lines),
+                // The person said Take Control: the device controlling it now is disconnected.
+                PresenceEvent::TakeOver(device) => {
+                    platform::open_viewer(&["--open", &device, "--take-over"], lines)
+                }
+                PresenceEvent::EndControl(device) => match account.as_ref() {
+                    Some(online) => match online.end_control(&device) {
+                        Ok(()) => lines.push(format!("main window: the session on {device} ends")),
+                        Err(error) => {
+                            lines.push(format!("main window: end control: {error}"));
+                            notify(true, error.0);
+                        }
+                    },
+                    None => lines.push("main window: end control: not online".into()),
+                },
                 PresenceEvent::SendFiles(device) => {
                     platform::open_viewer(&["--open", &device, "--then", "files"], lines)
                 }
@@ -701,7 +715,7 @@ pub(crate) fn run_account(
                     }
                 }
                 let started_at = std::time::SystemTime::now();
-                match session(
+                let outcome = session(
                     options,
                     &mut signal,
                     &shown_name,
@@ -714,11 +728,19 @@ pub(crate) fn run_account(
                         terminal: settings.allow_terminal && helper.is_none(),
                         helper: helper.is_some(),
                         fec: hello.fec,
+                        controller: match &helper {
+                            Some(user) => format!("{from_name} ({user})"),
+                            None => from_name.clone(),
+                        },
                     },
                     links,
                     &mut deferred,
                     lines,
-                ) {
+                );
+                // However it ended (a failure before it was under way included): nobody controls this PC now.
+                drop(signal);
+                online.set_control_state(None);
+                match outcome {
                     Ok(outcome) => {
                         passed &= outcome.passed;
                         ui::record_session(&from_name, &from, started_at, &outcome.ended);
@@ -863,6 +885,10 @@ pub(crate) fn run_account(
                 | AccountEvent::HelpGranted(_),
             )
             | None => {}
+            // No session runs (one that does takes it itself): nothing to end.
+            Some(AccountEvent::EndControl(by)) => {
+                lines.push(format!("{by} asked to end the session here: none runs"));
+            }
         }
     }
     lines.push(format!("{sessions} sessions"));
@@ -1150,6 +1176,7 @@ fn main_devices(
             name: device.name.clone(),
             online: device.controllable || device.online,
             this_pc: device.id == this,
+            controlled_by: device.controlled_by.clone(),
         })
         .collect();
     rows.sort_by_key(|row| (!row.this_pc, !row.online, row.name.to_lowercase()));

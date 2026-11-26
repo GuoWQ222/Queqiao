@@ -129,13 +129,71 @@ pub trait Signaling {
     /// Exchanges hellos: both sides must speak the same protocol version and have different roles.
     /// Returns the other side's.
     fn hello(&mut self, role: &str) -> Result<Hello, Error> {
-        self.send("hello", &hello_body(role))?;
+        self.hello_with(role, false)
+    }
+
+    /// As `hello`; a viewer's with `take_over` ends the session another device has with that PC (the person
+    /// confirmed it). An agent busy with another device answers a hello without it with "busy:<that device>"
+    /// ([`busy_controller`]).
+    fn hello_with(&mut self, role: &str, take_over: bool) -> Result<Hello, Error> {
+        let mut body = hello_body(role);
+        if take_over {
+            body.push_str(" takeover");
+        }
+        self.send("hello", &body)?;
         check_hello(&self.expect("hello")?, role)
     }
+
+    /// During a session: what else came for this program (another device asking for a session, or a device of the
+    /// account ending this one), if anything. None on a direct connection.
+    fn interruption(&mut self) -> Option<Interruption> {
+        None
+    }
+
+    /// Answers `request` (another session's) with `kind` and `body` (an "error" refusing it).
+    fn answer_request(&mut self, _request: &SessionRequest, _kind: &str, _body: &str) {}
+
+    /// Puts `request` back for the program's own loop, which takes it up once this session ended.
+    fn requeue(&mut self, _request: SessionRequest) {}
+
+    /// An agent's word to the account on who controls this device now (None: nobody), shown in its device list.
+    fn set_controller(&mut self, _controller: Option<&str>) {}
+}
+
+/// Another device's request for a session, come in during one (`Signaling::interruption`): its hello, signature
+/// checked already.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionRequest {
+    pub from: String,
+    pub from_name: String,
+    /// The account of a device of another account (joined by a help code); None for the account's own.
+    pub helper: Option<String>,
+    pub session: String,
+    pub body: String,
+    pub signature: String,
+}
+
+/// What came for a program during a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Interruption {
+    Request(SessionRequest),
+    /// A device of the account ended this session (`by`: its name).
+    Ended {
+        by: String,
+    },
+}
+
+/// An agent's answer to a hello while another device controls it: "busy:" and that device's name.
+pub const BUSY: &str = "busy:";
+
+/// The device controlling the PC, when `error` is an agent's "busy" answer (empty name: someone helping).
+pub fn busy_controller(error: &str) -> Option<&str> {
+    error.strip_prefix(BUSY)
 }
 
 /// Our hello: "queqiao <protocol version> <role> <what we can do>". What we can do: "fec", we rebuild lost video
-/// packets from parity (crate::fec). Earlier programs read the first three words only, so they ignore it.
+/// packets from parity (crate::fec). Earlier programs read the first three words only, so they ignore it. A viewer
+/// taking control from another device adds "takeover" (`Signaling::hello_with`).
 pub fn hello_body(role: &str) -> String {
     format!("queqiao {} {role} fec", queqiao_core::PROTOCOL_VERSION)
 }
@@ -146,6 +204,8 @@ pub struct Hello {
     pub role: String,
     /// It rebuilds lost video packets from parity: send it parity.
     pub fec: bool,
+    /// A viewer taking control: the session another device has with this PC ends (the person confirmed it).
+    pub take_over: bool,
 }
 
 /// Checks the other side's hello (same protocol version, the other role) and returns it.
@@ -162,10 +222,11 @@ pub fn check_hello(body: &str, role: &str) -> Result<Hello, Error> {
     if their_role == role {
         return Err(Error(format!("both sides are {role}s")));
     }
-    let fec = parts.any(|word| word == "fec");
+    let words: Vec<&str> = parts.collect();
     Ok(Hello {
         role: their_role,
-        fec,
+        fec: words.contains(&"fec"),
+        take_over: words.contains(&"takeover"),
     })
 }
 
@@ -199,5 +260,11 @@ mod hello_tests {
         // Earlier programs read the first three words: they are as before.
         assert!(ours.starts_with(&format!("{earlier} ")));
         assert!(check_hello(&ours, "viewer").is_err());
+        // Taking control: said after what it can do, read only when said.
+        assert!(!hello.take_over);
+        let taking = check_hello(&format!("{ours} takeover"), "agent").unwrap();
+        assert!(taking.take_over && taking.fec);
+        assert_eq!(busy_controller("busy:Office PC"), Some("Office PC"));
+        assert_eq!(busy_controller("the person at that PC declined"), None);
     }
 }

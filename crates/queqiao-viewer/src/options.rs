@@ -26,6 +26,11 @@ pub(crate) struct Options {
     pub(crate) device: Option<String>,
     /// With --open: what to do as soon as the session is up (the main window's "Send files" and "Command line").
     pub(crate) then: Option<Then>,
+    /// Opened from the main window (--open): the person is there, so a question (taking control) may be asked.
+    pub(crate) opened: bool,
+    /// Take control from the device that has it (one controller at a time): the person confirmed it (--take-over, the
+    /// main window's Take Control), or a test.
+    pub(crate) take_over: bool,
     /// With --device: a second device of the account at the same time (tests: several sessions at once).
     pub(crate) also_device: Option<String>,
     pub(crate) list: bool,
@@ -95,6 +100,8 @@ pub(crate) struct Options {
     pub(crate) help_go: bool,
     /// Tests: take this device (name or id) out of the account, then leave.
     pub(crate) remove_device: Option<String>,
+    /// Tests: end the session controlling this device (name or id), as the main window's Disconnect, then leave.
+    pub(crate) end_control: Option<String>,
     /// Tests: the passwords given (in turn) when the PC asks for its Windows password.
     pub(crate) test_passwords: Vec<String>,
     /// Press Connect in the help form once it is drawn (tests).
@@ -136,6 +143,11 @@ impl Options {
             && self.ui_test.is_none()
             && self.report.is_none()
     }
+
+    /// A person is there to answer a question (the device list, or the main window's Connect); never in a test run.
+    pub(crate) fn may_ask(&self) -> bool {
+        (self.interactive() || self.opened) && self.report.is_none() && self.ui_test.is_none()
+    }
 }
 
 /// The command line. A shipping build reads only `--force`, which only chooses among the media paths (the device
@@ -150,7 +162,12 @@ pub(crate) fn parse(mut args: impl Iterator<Item = String>) -> Option<Options> {
             "--force" => queqiao_core::set_forced(&args.next()?),
             // The main window (the agent's): a device of the account, or helping someone with their help ID and
             // code (as a link). Each does what a click there does.
-            "--open" => options.device = Some(args.next()?),
+            "--open" => {
+                options.device = Some(args.next()?);
+                options.opened = true;
+            }
+            // The main window's Take Control: the person confirmed ending the other device's session.
+            "--take-over" => options.take_over = true,
             "--then" => {
                 options.then = Some(match args.next()?.as_str() {
                     "files" => Then::Files,
@@ -264,6 +281,7 @@ pub(crate) fn test_switch(
         }),
         "--trust-new-key" => options.trust_new_key = args.next(),
         "--remove-device" => options.remove_device = Some(args.next()?),
+        "--end-control" => options.end_control = Some(args.next()?),
         "--test-password" => {
             options.test_passwords = args.next()?.split(',').map(str::to_string).collect()
         }

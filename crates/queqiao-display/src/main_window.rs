@@ -136,6 +136,8 @@ const ID_NEW_HELP_ID: u16 = 324;
 const ID_TRANSFERS: u16 = 330;
 const ID_OPEN_RECEIVED: u16 = 331;
 const ID_CLEAR_TRANSFERS: u16 = 332;
+/// The "being controlled" banner's Disconnect (ends the session another device has with that PC).
+const ID_END_CONTROL: u16 = 340;
 const ID_CLOSE: u16 = 0xFFFF;
 
 // Windows 11's title bar colours (dwmapi.h); earlier Windows ignore them.
@@ -160,6 +162,10 @@ pub(crate) enum MainAction {
     /// A setting or a menu command (a tray menu id: `Presence::choose`).
     Choose(u16),
     Connect(String),
+    /// Connect, taking control from the device that has it (the person said Take Control).
+    TakeOver(String),
+    /// The banner's Disconnect: the session another device has with that PC ends.
+    EndControl(String),
     /// Connect, then send files to it (a file picker in the session).
     Files(String),
     /// Connect, then open a command line on it.
@@ -741,8 +747,24 @@ impl MainWindow {
                 None
             }
             ID_ACCOUNT => Some(MainAction::Account),
-            // Enter on the Devices page, a double click in the list, or the card's button.
-            ID_CONNECT => self.selected_device().map(MainAction::Connect),
+            // Enter on the Devices page, a double click in the list, or the card's button. One device controls a PC at a
+            // time (as UU Remote): with another device in control, the person is asked first.
+            ID_CONNECT => {
+                let id = self.selected_device()?;
+                match self.selected_controller() {
+                    Some(controller) => {
+                        crate::forms::confirm_take_over_owned(Some(self.hwnd), &controller)
+                            .then_some(MainAction::TakeOver(id))
+                    }
+                    None => Some(MainAction::Connect(id)),
+                }
+            }
+            ID_END_CONTROL => STATE.with_borrow(|state| {
+                let state = state.as_ref()?;
+                let device = state.devices.get(state.selected?)?;
+                (!device.controlled_by.is_empty())
+                    .then(|| MainAction::EndControl(device.id.clone()))
+            }),
             ID_FILES => self.selected_device().map(MainAction::Files),
             ID_TERMINAL => self.selected_device().map(MainAction::Terminal),
             ID_WAKE => self.selected_device().map(MainAction::Wake),
@@ -789,6 +811,15 @@ impl MainWindow {
             let state = state.as_ref()?;
             let device = state.devices.get(state.selected?)?;
             (!device.this_pc).then(|| device.id.clone())
+        })
+    }
+
+    /// The device controlling the chosen one now, if any.
+    fn selected_controller(&self) -> Option<String> {
+        STATE.with_borrow(|state| {
+            let state = state.as_ref()?;
+            let device = state.devices.get(state.selected?)?;
+            (!device.controlled_by.is_empty()).then(|| device.controlled_by.clone())
         })
     }
 
@@ -1068,6 +1099,31 @@ fn text_width(dc: HDC, value: &str, font: HFONT) -> i32 {
     area.right - area.left
 }
 
+/// How tall `value` is in `font`, wrapped to `width` pixels.
+fn wrapped_height(dc: HDC, value: &str, font: HFONT, width: i32) -> i32 {
+    if value.is_empty() {
+        return 0;
+    }
+    let mut value: Vec<u16> = value.encode_utf16().collect();
+    let mut area = RECT {
+        right: width,
+        ..RECT::default()
+    };
+    unsafe {
+        let old = SelectObject(dc, font.into());
+        DrawTextW(
+            dc,
+            &mut value,
+            &mut area,
+            windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT(
+                DT_CALCRECT_FLAG | DT_WORDBREAK.0 | DT_LEFT.0 | DT_NOPREFIX.0,
+            ),
+        );
+        SelectObject(dc, old);
+    }
+    area.bottom - area.top
+}
+
 const DT_CALCRECT_FLAG: u32 = 0x400;
 const LINE: u32 = DT_LEFT.0 | DT_SINGLELINE.0 | DT_VCENTER.0 | DT_END_ELLIPSIS.0;
 const CENTRED: u32 = DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0 | DT_END_ELLIPSIS.0;
@@ -1075,6 +1131,115 @@ const CENTRED: u32 = DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0 | DT_END_ELLIP
 /// The chosen device, from the state.
 fn chosen(state: &State) -> Option<&MainDevice> {
     state.devices.get(state.selected?)
+}
+
+/// Under the heading while a device of the account controls the chosen one (UU Remote's "被控中", the user,
+/// 2026-11-26): the banner, its Disconnect, and how far it moves the page's parts below it down.
+const BANNER: [i32; 4] = [LEFT, 90, CONTENT, 46];
+const BANNER_END: [i32; 4] = [LEFT + CONTENT - 114, 99, 102, 28];
+const BANNER_SPACE: i32 = 58;
+/// A pale blue band, its words in the accent blue (0x00BBGGRR).
+const BANNER_BACK: u32 = 0x00FE_F2EA;
+const BANNER_EDGE: u32 = 0x00F6_DCC6;
+/// Segoe MDL2 Assets' screen.
+const GLYPH_CONTROLLED: &str = "\u{E7F4}";
+
+/// The chosen device, when another device controls it.
+fn controlled(state: &State) -> Option<&MainDevice> {
+    if state.account == AccountState::LoggedOut {
+        return None;
+    }
+    chosen(state).filter(|device| !device.controlled_by.is_empty())
+}
+
+fn below_banner(state: &State) -> i32 {
+    if controlled(state).is_some() {
+        BANNER_SPACE
+    } else {
+        0
+    }
+}
+
+/// The card, the tools under it and the recent connections: lower while the banner shows.
+fn hero(state: &State) -> [i32; 4] {
+    [HERO[0], HERO[1] + below_banner(state), HERO[2], HERO[3]]
+}
+
+fn actions(state: &State) -> [i32; 4] {
+    [
+        ACTIONS[0],
+        ACTIONS[1] + below_banner(state),
+        ACTIONS[2],
+        ACTIONS[3],
+    ]
+}
+
+fn recent_y(state: &State) -> i32 {
+    RECENT_Y + below_banner(state)
+}
+
+/// The "being controlled" banner: a screen, the label, a divider, the sentence, Disconnect on the right.
+fn paint_banner(dc: HDC, state: &State) {
+    if controlled(state).is_none() {
+        return;
+    }
+    let s = state.scale;
+    let f = &state.fonts;
+    let band = rect_of(BANNER, s);
+    outlined(dc, &band, px(10, s), BANNER_BACK, BANNER_EDGE);
+    let (label, words) = crate::model::controlled_banner();
+    text(
+        dc,
+        GLYPH_CONTROLLED,
+        rect(LEFT + 16, BANNER[1], 22, BANNER[3], s),
+        f.glyph,
+        ACCENT,
+        LINE,
+    );
+    let label_left = px(LEFT + 46, s);
+    let label_right = label_left + text_width(dc, label, f.body_bold);
+    text(
+        dc,
+        label,
+        RECT {
+            left: label_left,
+            right: label_right,
+            ..band
+        },
+        f.body_bold,
+        ACCENT,
+        LINE,
+    );
+    fill(
+        dc,
+        &RECT {
+            left: label_right + px(12, s),
+            top: band.top + px(14, s),
+            right: label_right + px(12, s) + px(1, s).max(1),
+            bottom: band.bottom - px(14, s),
+        },
+        BANNER_EDGE,
+    );
+    let end = rect_of(BANNER_END, s);
+    // The sentence on one line where it fits (Chinese), else two, centred in the band.
+    let (left, right) = (label_right + px(26, s), end.left - px(10, s));
+    let height = wrapped_height(dc, words, f.small, right - left).min(band.bottom - band.top);
+    let top = band.top + ((band.bottom - band.top) - height) / 2;
+    text(
+        dc,
+        words,
+        RECT {
+            left,
+            top,
+            right,
+            bottom: top + height,
+        },
+        f.small,
+        ACCENT,
+        DT_LEFT.0 | DT_WORDBREAK.0 | DT_END_ELLIPSIS.0,
+    );
+    outlined(dc, &end, px(6, s), WHITE, BANNER_EDGE);
+    text(dc, tr("Disconnect"), end, f.small, TEXT_COLOR, CENTRED);
 }
 
 /// The card's button on the Devices page: where it is and what it does (None: no button).
@@ -1086,7 +1251,13 @@ fn go_button(state: &State) -> Option<([i32; 4], u16, &'static str)> {
     if device.this_pc {
         return None;
     }
-    let place = [HERO[0] + HERO[2] / 2 - 70, HERO[1] + HERO[3] - 54, 140, 38];
+    let hero_at = hero(state);
+    let place = [
+        hero_at[0] + hero_at[2] / 2 - 70,
+        hero_at[1] + hero_at[3] - 54,
+        140,
+        38,
+    ];
     Some(if device.online {
         (place, ID_CONNECT, tr("Connect"))
     } else {
@@ -1098,8 +1269,9 @@ fn go_button(state: &State) -> Option<([i32; 4], u16, &'static str)> {
 fn action_cells(state: &State) -> [([i32; 4], u16, &'static str, &'static str, bool); 4] {
     let (online, other) =
         chosen(state).map_or((false, false), |device| (device.online, !device.this_pc));
-    let width = ACTIONS[2] / 4;
-    let cell = |index: i32| [ACTIONS[0] + index * width, ACTIONS[1], width, ACTIONS[3]];
+    let row = actions(state);
+    let width = row[2] / 4;
+    let cell = |index: i32| [row[0] + index * width, row[1], width, row[3]];
     [
         (
             cell(0),
@@ -1447,10 +1619,11 @@ fn paint_device_page(dc: HDC, state: &State) {
         LINE,
     );
 
+    paint_banner(dc, state);
     paint_hero(dc, state, device);
 
     // The tools.
-    outlined(dc, &rect_of(ACTIONS, s), px(12, s), WHITE, DIVIDER);
+    outlined(dc, &rect_of(actions(state), s), px(12, s), WHITE, DIVIDER);
     for (index, (place, _, glyph, label, enabled)) in action_cells(state).into_iter().enumerate() {
         if index > 0 {
             fill(
@@ -1490,10 +1663,11 @@ fn paint_device_page(dc: HDC, state: &State) {
     }
 
     // The latest connections to it from this PC.
+    let recent_top = recent_y(state);
     text(
         dc,
         tr("Recent connections"),
-        rect(LEFT, RECENT_Y, CONTENT, 22, s),
+        rect(LEFT, recent_top, CONTENT, 22, s),
         f.section,
         TEXT_COLOR,
         LINE,
@@ -1513,14 +1687,14 @@ fn paint_device_page(dc: HDC, state: &State) {
         text(
             dc,
             none,
-            rect(LEFT, RECENT_Y + 28, CONTENT, 22, s),
+            rect(LEFT, recent_top + 28, CONTENT, 22, s),
             f.small,
             SECONDARY,
             LINE,
         );
     }
     for (index, row) in recent.into_iter().enumerate() {
-        let y = RECENT_Y + 30 + index as i32 * RECENT_ROW;
+        let y = recent_top + 30 + index as i32 * RECENT_ROW;
         let place = rect(LEFT, y, CONTENT, RECENT_ROW - 6, s);
         rounded(dc, &place, px(8, s), CARD);
         text(
@@ -1563,7 +1737,9 @@ fn paint_device_page(dc: HDC, state: &State) {
 fn paint_hero(dc: HDC, state: &State, device: &MainDevice) {
     let s = state.scale;
     let f = &state.fonts;
-    let card = rect_of(HERO, s);
+    // Under the banner while another device controls it.
+    let hero_at = hero(state);
+    let card = rect_of(hero_at, s);
     unsafe {
         let region = CreateRoundRectRgn(
             card.left,
@@ -1639,7 +1815,7 @@ fn paint_hero(dc: HDC, state: &State, device: &MainDevice) {
         text(
             dc,
             GLYPH_DEVICES,
-            rect(x - 40, HERO[1] + 34, 80, 40, s),
+            rect(x - 40, hero_at[1] + 34, 80, 40, s),
             f.glyph_hero,
             glyph_color,
             CENTRED,
@@ -1647,7 +1823,7 @@ fn paint_hero(dc: HDC, state: &State, device: &MainDevice) {
         text(
             dc,
             name,
-            rect(x - 80, HERO[1] + 76, 160, 20, s),
+            rect(x - 80, hero_at[1] + 76, 160, 20, s),
             f.body_bold,
             name_color,
             CENTRED,
@@ -1655,7 +1831,7 @@ fn paint_hero(dc: HDC, state: &State, device: &MainDevice) {
         text(
             dc,
             under,
-            rect(x - 80, HERO[1] + 96, 160, 18, s),
+            rect(x - 80, hero_at[1] + 96, 160, 18, s),
             f.small,
             HERO_MUTED,
             CENTRED,
@@ -1663,7 +1839,7 @@ fn paint_hero(dc: HDC, state: &State, device: &MainDevice) {
     };
     if device.this_pc {
         end(
-            HERO[0] + HERO[2] / 2,
+            hero_at[0] + hero_at[2] / 2,
             WHITE,
             this_name,
             tr("This PC"),
@@ -1672,14 +1848,20 @@ fn paint_hero(dc: HDC, state: &State, device: &MainDevice) {
         text(
             dc,
             tr("Your other devices connect to it from their own Queqiao."),
-            rect(HERO[0] + 20, HERO[1] + HERO[3] - 44, HERO[2] - 40, 22, s),
+            rect(
+                hero_at[0] + 20,
+                hero_at[1] + hero_at[3] - 44,
+                hero_at[2] - 40,
+                22,
+                s,
+            ),
             f.small,
             HERO_MUTED,
             CENTRED,
         );
         return;
     }
-    let (left_x, right_x) = (HERO[0] + 92, HERO[0] + HERO[2] - 92);
+    let (left_x, right_x) = (hero_at[0] + 92, hero_at[0] + hero_at[2] - 92);
     end(left_x, WHITE, this_name, tr("This PC"), WHITE);
     let (device_color, status) = if device.online {
         (WHITE, tr("Online"))
@@ -1688,9 +1870,9 @@ fn paint_hero(dc: HDC, state: &State, device: &MainDevice) {
     };
     end(right_x, device_color, &device.name, status, device_color);
     // The arch: dotted, from beside one PC to beside the other, its top near the card's top.
-    let (x0, y0) = (f64::from(left_x + 52), f64::from(HERO[1] + 60));
+    let (x0, y0) = (f64::from(left_x + 52), f64::from(hero_at[1] + 60));
     let (x2, y2) = (f64::from(right_x - 52), y0);
-    let (x1, y1) = ((x0 + x2) / 2.0, f64::from(HERO[1]) + 6.0);
+    let (x1, y1) = ((x0 + x2) / 2.0, f64::from(hero_at[1]) + 6.0);
     let at = |t: f64| {
         let u = 1.0 - t;
         (
@@ -1976,6 +2158,44 @@ fn draw_device(item: &DRAWITEMSTRUCT, state: &State) {
         text(dc, label, chip, f.small, SIDE_TEXT, CENTRED);
         name_right = chip.left - px(6, s);
     }
+    if !device.controlled_by.is_empty() {
+        // Being controlled (as UU Remote's list): a screen and the one device controlling it.
+        let chip = RECT {
+            left: name_right - px(32, s),
+            top: y + px(9, s),
+            right: name_right,
+            bottom: y + px(27, s),
+        };
+        rounded(
+            dc,
+            &chip,
+            px(8, s),
+            if picked { SIDE_BG } else { SIDE_CHIP },
+        );
+        text(
+            dc,
+            GLYPH_CONTROLLED,
+            RECT {
+                right: chip.left + px(19, s),
+                ..chip
+            },
+            f.small_glyph,
+            GOLD,
+            CENTRED,
+        );
+        text(
+            dc,
+            "1",
+            RECT {
+                left: chip.left + px(16, s),
+                ..chip
+            },
+            f.small,
+            SIDE_TEXT,
+            CENTRED,
+        );
+        name_right = chip.left - px(6, s);
+    }
     text(
         dc,
         &device.name,
@@ -2068,6 +2288,9 @@ fn hit(state: &State, x: i32, y: i32) -> Option<u16> {
     }
     if state.page != Page::Devices {
         return None;
+    }
+    if controlled(state).is_some() && inside(BANNER_END, x, y) {
+        return Some(ID_END_CONTROL);
     }
     if let Some((place, command, _)) = go_button(state)
         && inside(place, x, y)

@@ -32,6 +32,20 @@ pub struct Device {
     pub online: bool,
     /// The device's Ed25519 public key, hex (64 characters).
     pub public_key: String,
+    /// The device controlling it now (its name, as its agent reported it); empty when nobody does. One device
+    /// controls a PC at a time (the user, 2026-11-26; as UU Remote): others see it, and taking control ends that one's
+    /// session. Empty from servers before it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub controlled_by: String,
+}
+
+/// What a server can do beyond the first protocol, listed in `Welcome` (programs send those messages only to a
+/// server that names them).
+pub mod features {
+    /// `ControlState` and `EndControl`; the device list's `controlled_by`.
+    pub const CONTROL_STATE: &str = "control_state";
+    /// `Login` with `create`: a new name makes the account.
+    pub const LOGIN_OR_CREATE: &str = "login_or_create";
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +65,11 @@ pub enum ClientMessage {
         /// and name (it stayed in the list, offline, 2026-11-26). Empty from programs before it.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         machine: String,
+        /// One form for both (the user, 2026-11-26): a name the server does not know makes a new account with this
+        /// password, on a server that takes new accounts (`features::LOGIN_OR_CREATE`); a known name logs in as ever.
+        /// Earlier servers ignore it (a new name is then refused as a wrong login).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        create: bool,
     },
     Resume {
         refresh_token: String,
@@ -109,6 +128,12 @@ pub enum ClientMessage {
     DeviceInfo { macs: Vec<String> },
     /// Wake a device of this account that is offline, through another device of the account on its network.
     Wake { device_id: String },
+    /// Agent: the device controlling it now (its name), empty when the session ended; the account's device list shows
+    /// it (`Device::controlled_by`). Only to a server with `features::CONTROL_STATE`.
+    ControlState { controller: String },
+    /// End the session controlling the account's device `device_id` (its banner's "Disconnect"): the server tells
+    /// that device's agent (`ServerMessage::EndControl`). Only to a server with `features::CONTROL_STATE`.
+    EndControl { device_id: String },
 }
 
 /// Relay access for one device: TURN long-term credentials that the server's TURN part accepts for new
@@ -131,6 +156,13 @@ pub enum ServerMessage {
         /// A new refresh token after a password login (keep it; the old one, if any, is replaced).
         refresh_token: Option<String>,
         devices: Vec<Device>,
+        /// What this server can do beyond the first protocol (`features`); none from servers before it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+        /// This login made the account (`Login` with `create` and a new name): the person is told, so a mistyped
+        /// name is noticed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        created: bool,
     },
     Devices {
         devices: Vec<Device>,
@@ -199,6 +231,10 @@ pub enum ServerMessage {
         name: String,
         macs: Vec<String>,
     },
+    /// To an agent: `by`, a device of the account, ended the session controlling this PC (`ClientMessage::EndControl`).
+    EndControl {
+        by: String,
+    },
 }
 
 /// What a signal's signature covers: a fixed label, the session, the kind, sender and receiver (device ids and
@@ -249,11 +285,52 @@ mod tests {
             device_id: "d".into(),
             refresh_token: None,
             devices: vec![],
+            features: vec![],
+            created: false,
         };
         let text = serde_json::to_string(&welcome).unwrap();
         assert_eq!(
             serde_json::from_str::<ServerMessage>(&text).unwrap(),
             welcome
+        );
+    }
+
+    #[test]
+    fn new_fields_stay_out_of_the_way_of_earlier_programs() {
+        // An earlier server's Welcome and device (no features, no controller) read as none.
+        let earlier = r#"{"type":"welcome","user":"u","device_id":"d","refresh_token":null,"devices":[{"id":"a","name":"PC","controllable":true,"online":true,"public_key":"00"}]}"#;
+        match serde_json::from_str::<ServerMessage>(earlier).unwrap() {
+            ServerMessage::Welcome {
+                features,
+                created,
+                devices,
+                ..
+            } => {
+                assert!(features.is_empty() && !created);
+                assert!(devices[0].controlled_by.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        // A login without `create` is written as before (an earlier server reads it the same).
+        let login = ClientMessage::Login {
+            user: "u".into(),
+            password: "p".into(),
+            device_id: "d".into(),
+            device_name: "n".into(),
+            role: Role::Viewer,
+            public_key: "00".into(),
+            machine: String::new(),
+            create: false,
+        };
+        assert!(!serde_json::to_string(&login).unwrap().contains("create"));
+        let control = ClientMessage::ControlState {
+            controller: "Office PC".into(),
+        };
+        let text = serde_json::to_string(&control).unwrap();
+        assert!(text.contains("\"type\":\"control_state\""));
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&text).unwrap(),
+            control
         );
     }
 }

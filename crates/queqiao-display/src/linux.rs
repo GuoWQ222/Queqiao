@@ -25,7 +25,7 @@ mod window;
 
 pub use banner::{ConsentPrompt, SessionBanner};
 pub use cursor::RemoteCursor;
-pub use dialogs::{ask_secret, ask_text, show_error, show_info};
+pub use dialogs::{ask_secret, ask_text, confirm_take_over, show_error, show_info};
 pub use file_window::{FileWindow, show_in_folder};
 pub use forms::{owner_from_raw, pick_files, popup_menu, save_screen_picture, save_window_picture};
 pub use lists::{DeviceList, HelpForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList};

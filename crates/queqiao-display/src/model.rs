@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use queqiao_core::text::tr;
+use queqiao_core::text::{tr, trf};
 use std::time::Duration;
 
 /// Checks a typed settings password.
@@ -55,6 +55,11 @@ pub enum PresenceEvent {
     CheckWakeOnLan,
     /// The main window: connect to this device of the account.
     Connect(String),
+    /// The main window: connect to this device, taking control from the device that has it (the person said Take
+    /// Control).
+    TakeOver(String),
+    /// The main window's "being controlled" banner: Disconnect (the session another device has with it ends).
+    EndControl(String),
     /// The main window: connect to this device and send it files (a file picker in the session).
     SendFiles(String),
     /// The main window: connect to this device and open a command line on it.
@@ -111,6 +116,31 @@ pub struct MainDevice {
     pub online: bool,
     /// This PC itself (not to be connected to).
     pub this_pc: bool,
+    /// The device controlling it now (its name), empty when none: one controls a PC at a time (the user, 2026-11-26,
+    /// as UU Remote). Its page shows the "being controlled" banner, and Connect asks before taking control.
+    pub controlled_by: String,
+}
+
+/// The device page's banner while a device of the account controls that PC (UU Remote's "被控中"): its label and
+/// text.
+pub fn controlled_banner() -> (&'static str, &'static str) {
+    (
+        tr("Being controlled"),
+        tr("A device on your account is currently controlling this computer."),
+    )
+}
+
+/// The question before taking control of a PC that `controller` (a device of the account) controls: the title, the
+/// text and the action's label (beside Cancel), as UU Remote's "接管设备".
+pub fn take_over_question(controller: &str) -> (String, String, String) {
+    (
+        tr("Take Control").to_string(),
+        trf(
+            "Taking control will disconnect {device}. Do you want to continue?",
+            &[("device", controller)],
+        ),
+        tr("Take Control").to_string(),
+    )
 }
 
 /// One file in the Transfers page.

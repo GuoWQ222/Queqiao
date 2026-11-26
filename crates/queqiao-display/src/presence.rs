@@ -517,6 +517,8 @@ impl Presence {
                 event
             }
             MainAction::Connect(id) => Some(PresenceEvent::Connect(id)),
+            MainAction::TakeOver(id) => Some(PresenceEvent::TakeOver(id)),
+            MainAction::EndControl(id) => Some(PresenceEvent::EndControl(id)),
             MainAction::Files(id) => Some(PresenceEvent::SendFiles(id)),
             MainAction::Terminal(id) => Some(PresenceEvent::OpenCommandLine(id)),
             MainAction::Wake(id) => Some(PresenceEvent::Wake(id)),

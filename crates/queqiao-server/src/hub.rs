@@ -365,6 +365,32 @@ struct Connection {
     user_id: i64,
     device_name: String,
     sender: Outbox,
+    /// An agent's: the device controlling it now, as it reported (`ClientMessage::ControlState`); gone with the
+    /// connection.
+    controlled_by: String,
+}
+
+/// What this server can do beyond the first protocol (`ServerMessage::Welcome`'s `features`).
+fn features(signup: bool) -> Vec<String> {
+    let mut features = vec![queqiao_core::account::features::CONTROL_STATE.to_string()];
+    if signup {
+        features.push(queqiao_core::account::features::LOGIN_OR_CREATE.to_string());
+    }
+    features
+}
+
+/// A controller's name as the device list shows it: one line, at most 80 characters, no control or bidi
+/// characters (an agent reports it; the account's other devices draw it).
+fn clean_controller(name: &str) -> String {
+    name.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        })
+        .take(80)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 pub struct Hub {
@@ -488,6 +514,29 @@ impl Hub {
             }
             _ => return Err("no login".into()),
         };
+        // One form for logging in and signing up (the user, 2026-11-26): a name nobody has yet makes the account, on a
+        // server that takes new ones, as a `Register` (its checks, its limit per address); any other name logs in.
+        let first = match first {
+            ClientMessage::Login {
+                user,
+                password,
+                device_id,
+                device_name,
+                role,
+                public_key,
+                machine,
+                create: true,
+            } if self.signup && self.name_is_free(&user) => ClientMessage::Register {
+                user,
+                password,
+                device_id,
+                device_name,
+                role,
+                public_key,
+                machine,
+            },
+            other => other,
+        };
         let account_name = match &first {
             ClientMessage::Login { user, .. } | ClientMessage::Register { user, .. } => {
                 Some(user.trim().to_lowercase())
@@ -550,6 +599,8 @@ impl Hub {
                 checked
             }
         };
+        // Logged in: a registration that got this far made the account.
+        let created = registering && checked.is_ok();
         let (identity, new_token, new_device) = match checked {
             Ok(result) => result,
             Err(Refusal { message, .. }) => {
@@ -581,6 +632,7 @@ impl Hub {
                 user_id: identity.user_id,
                 device_name: identity.device_name.clone(),
                 sender: sender.clone(),
+                controlled_by: String::new(),
             },
         );
         if let Some(old) = replaced {
@@ -591,6 +643,8 @@ impl Hub {
             device_id: identity.device_id.clone(),
             refresh_token: new_token,
             devices: self.device_list(identity.user_id),
+            features: features(self.signup),
+            created,
         };
         let _ = sender.send(Outgoing::Message(welcome));
         self.push_devices(identity.user_id);
@@ -797,6 +851,7 @@ impl Hub {
                     controllable: false,
                     online: true,
                     public_key: viewer_key,
+                    controlled_by: String::new(),
                 },
                 user: ask.viewer_user.clone(),
             }));
@@ -810,6 +865,7 @@ impl Hub {
                     controllable: true,
                     online: true,
                     public_key: agent_key,
+                    controlled_by: String::new(),
                 },
             }));
     }
@@ -925,6 +981,7 @@ impl Hub {
                     controllable: false,
                     online: true,
                     public_key: viewer_key,
+                    controlled_by: String::new(),
                 },
                 user: identity.user.clone(),
             }));
@@ -984,6 +1041,7 @@ impl Hub {
                             controllable: false,
                             online: true,
                             public_key: viewer_key,
+                            controlled_by: String::new(),
                         },
                         user: identity.user.clone(),
                     }));
@@ -995,6 +1053,7 @@ impl Hub {
                         controllable: true,
                         online: true,
                         public_key: agent_key,
+                        controlled_by: String::new(),
                     },
                 }));
             }
@@ -1149,6 +1208,15 @@ impl Hub {
     }
 
     /// Tells the account's connections (all but `except`) `message`.
+    /// Whether no account has the name `user` yet (an error looking counts as taken: nothing is made then).
+    fn name_is_free(&self, user: &str) -> bool {
+        self.store
+            .lock()
+            .ok()
+            .and_then(|store| store.user_exists(user).ok())
+            .is_some_and(|exists| !exists)
+    }
+
     fn notify_account(&self, user_id: i64, except: Option<&(String, Role)>, notice: ServerMessage) {
         if let Ok(online) = self.online.lock() {
             for (key, connection) in online.iter() {
@@ -1278,6 +1346,7 @@ impl Hub {
                 role,
                 public_key,
                 machine,
+                create: false,
             });
         }
         match first {
@@ -1289,6 +1358,7 @@ impl Hub {
                 role,
                 public_key,
                 machine,
+                create: _,
             } => {
                 // The device's fields, and whether it may log in to this account, before the password: once that is
                 // right nothing refuses the login any more, and a new device is announced (the security review of
@@ -1570,6 +1640,46 @@ impl Hub {
             ClientMessage::RequestHelp { help_id, code } => {
                 self.request_help(identity, &help_id, &code, sender, address)
             }
+            // An agent's word on who controls it: kept with its connection, shown in the account's device list.
+            ClientMessage::ControlState { controller } => {
+                if identity.role != Role::Agent {
+                    return;
+                }
+                let controller = clean_controller(&controller);
+                let changed = self.online.lock().is_ok_and(|mut online| {
+                    match online.get_mut(&(identity.device_id.clone(), Role::Agent)) {
+                        Some(connection) if connection.controlled_by != controller => {
+                            connection.controlled_by = controller;
+                            true
+                        }
+                        _ => false,
+                    }
+                });
+                if changed {
+                    self.push_devices(identity.user_id);
+                }
+            }
+            // A device of the account ends the session controlling another of its devices: that one's agent is told.
+            ClientMessage::EndControl { device_id } => {
+                let agent = self.online.lock().ok().and_then(|online| {
+                    online
+                        .get(&(device_id.clone(), Role::Agent))
+                        .filter(|c| c.user_id == identity.user_id)
+                        .map(|c| c.sender.clone())
+                });
+                let reply = match agent {
+                    Some(agent) => {
+                        let by = identity.device_name.clone();
+                        let _ = agent.send(Outgoing::Message(ServerMessage::EndControl { by }));
+                        None
+                    }
+                    // The same answer whether it is offline or not the account's.
+                    None => Some(format!("device {device_id} is not online")),
+                };
+                if let Some(message) = reply {
+                    let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
+                }
+            }
             ClientMessage::Logout => {
                 if let Ok(store) = self.store.lock() {
                     let _ = store.revoke_token(&identity.device_id, role_name(identity.role));
@@ -1608,6 +1718,7 @@ impl Hub {
                 Device {
                     controllable: agent.is_some(),
                     online: agent.is_some() || viewer.is_some(),
+                    controlled_by: agent.map(|c| c.controlled_by.clone()).unwrap_or_default(),
                     id,
                     name,
                     public_key,

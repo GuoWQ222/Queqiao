@@ -18,7 +18,10 @@ pub use peer::{
     Addresses, AudioSender, Peer, PeerEvent, Role, START_BITRATE, STREAM_IN_FLIGHT, Stream, tune,
 };
 pub use resolve::resolve_server;
-pub use signal::{Hello, Signal, Signaling, check_hello, hello_body};
+pub use signal::{
+    BUSY, Hello, Interruption, SessionRequest, Signal, Signaling, busy_controller, check_hello,
+    hello_body,
+};
 pub use turn::{IceServers, TurnServer};
 
 /// A transport error, with a readable reason.
