@@ -1,10 +1,12 @@
 Copyright (c) 2026 GuoWQ222. All rights reserved.
 
-Queqiao, its source code, documentation, icons and every other part of this repository not listed in
-THIRD_PARTY_NOTICES.md, is the copyright holder's. No licence is granted: it may not be copied, modified, distributed,
-published or used in any form without the copyright holder's written permission.
+You may download, install and run Queqiao for your own use.
 
-GitHub's Terms of Service allow GitHub's users to view this public repository and fork it on GitHub; nothing beyond
-that is permitted by this repository being public.
+Redistribution or sale of Queqiao, in whole or in part, requires prior written permission from
+the copyright holder. This applies to original and modified versions, including source code,
+binaries, documentation and icons. It covers free redistribution, hosting a download mirror,
+selling copies separately and bundling copies with a paid product. The copyright holder reserves
+all other rights and may take legal action against infringement.
 
-The parts listed in THIRD_PARTY_NOTICES.md are under their own licences, which this notice does not change.
+GitHub users may view and fork this public repository on GitHub under its Terms of Service.
+Third-party components remain subject to their respective licences. See THIRD_PARTY_NOTICES.md.

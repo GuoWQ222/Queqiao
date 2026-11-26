@@ -157,8 +157,11 @@ computer are bypassed for the server connection.
 
 ## License
 
-Copyright © 2026 GuoWQ222. All rights reserved. No part of Queqiao may be copied, modified, distributed or used
-without the copyright holder's written permission: see [LICENSE](LICENSE).
+Copyright © 2026 GuoWQ222. **All rights reserved. Infringement may result in legal action.**
+
+You may download, install and run Queqiao for your own use. Redistribution or sale of any part of Queqiao
+requires the copyright holder's prior written permission. This covers free redistribution, download mirrors
+and sales of Queqiao on its own or bundled with a paid product. It applies to original and modified versions. See [LICENSE](LICENSE).
 
 The third-party parts (a patched sctp-proto, bindings generated from NVIDIA's, Intel's and AMD's MIT-licensed
 headers, and the crates compiled in) keep their own licences: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
