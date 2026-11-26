@@ -36,12 +36,17 @@ struct LoginView: View {
                     Text("Log in with your Queqiao account to see your devices.")
                         .font(.system(size: 14)).foregroundColor(Q.secondary)
                     field("Account", text: $user, id: "user")
+                    // The keyboard's Go key logs in (the button may sit under the keyboard).
                     SecureField("Password", text: $password)
                         .textFieldStyle(.roundedBorder)
+                        .submitLabel(.go)
+                        .onSubmit(logIn)
                         .accessibilityIdentifier("password")
                     if showServer {
                         field("Server", text: $server, id: "server", keyboard: .URL)
                         field("Server key (SHA-256)", text: $pin, id: "pin")
+                            .submitLabel(.go)
+                            .onSubmit(logIn)
                     } else {
                         Button("Another server…") { showServer = true }
                             .font(.system(size: 14)).foregroundColor(Q.accent)
@@ -50,10 +55,7 @@ struct LoginView: View {
                         Text(engine.error).font(.system(size: 14)).foregroundColor(Q.danger)
                             .accessibilityIdentifier("error")
                     }
-                    GoldButton(title: "Log in",
-                               enabled: !engine.busy && !user.isEmpty && !password.isEmpty && !server.isEmpty) {
-                        engine.logIn(server: server, pin: pin, user: user, password: password)
-                    }
+                    GoldButton(title: "Log in", enabled: ready, action: logIn)
                     .accessibilityIdentifier("login")
                     if engine.busy {
                         HStack { Spacer(); ProgressView(); Spacer() }
@@ -63,6 +65,12 @@ struct LoginView: View {
             }
         }
         .background(Color.white)
+    }
+
+    private var ready: Bool { !engine.busy && !user.isEmpty && !password.isEmpty && !server.isEmpty }
+
+    private func logIn() {
+        if ready { engine.logIn(server: server, pin: pin, user: user, password: password) }
     }
 
     private func field(_ title: LocalizedStringKey, text: Binding<String>, id: String,
