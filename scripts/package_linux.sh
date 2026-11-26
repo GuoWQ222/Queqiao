@@ -29,9 +29,26 @@ echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "version $version 
 
 features=()
 [ $test = 1 ] && features=(--features "queqiao-agent/test-switches,queqiao-viewer/test-switches,queqiao-service/test-switches")
+build_dir=$target
+if [ $test = 0 ]; then
+    # A shipping build: nothing of the build machine in the programs. Rust keeps each library's source path for its
+    # error messages (/root/.cargo/registry/src/<mirror>/..., the builder's folders: the security review of
+    # 2026-11-26): rewritten to cargo/..., rustup/..., queqiao/..., target/.... In a folder of its own (as Windows'
+    # target\ship): with other flags than the tests' builds, a shared one would build everything again each time.
+    cargo_home=${CARGO_HOME:-$HOME/.cargo}
+    rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
+    build_dir=$target/ship
+    sep=$(printf '\037')
+    export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=$cargo_home=cargo$sep--remap-path-prefix=$rustup_home=rustup$sep--remap-path-prefix=$build_dir=target$sep--remap-path-prefix=$ws=queqiao"
+    # The C and C++ libraries keep their files' paths too (libopus' checks): the compiler rewrites them likewise.
+    prefix_maps="-ffile-prefix-map=$cargo_home=cargo -ffile-prefix-map=$build_dir=target -ffile-prefix-map=$ws=queqiao"
+    export CFLAGS="${CFLAGS:-} $prefix_maps" CXXFLAGS="${CXXFLAGS:-} $prefix_maps"
+fi
 # shellcheck disable=SC2086
-(cd "$ws" && QUEQIAO_VERSION=$version cargo build --release -q ${CARGO_ARGS:-} \
+(cd "$ws" && CARGO_TARGET_DIR=$build_dir QUEQIAO_VERSION=$version cargo build --release -q ${CARGO_ARGS:-} \
     -p queqiao-agent -p queqiao-viewer -p queqiao-service "${features[@]}") || fail build
+unset CARGO_ENCODED_RUSTFLAGS CFLAGS CXXFLAGS
+bin=$build_dir/release
 
 mkdir -p "$out" || fail "out folder"
 stage=$out/stage-$version
@@ -80,7 +97,7 @@ while read -r source path mode; do
     mkdir -p "$stage$(dirname "$path")"
     case "$source" in
         @queqiao-*)
-            install -m "$mode" "$target/release/${source#@}" "$stage$path" || fail "copy ${source#@}"
+            install -m "$mode" "$bin/${source#@}" "$stage$path" || fail "copy ${source#@}"
             strip --strip-unneeded "$stage$path" 2> /dev/null || true
             ;;
         @pam) install -m "$mode" "$ws/packaging/linux/pam.debian" "$stage$path" || fail pam ;;
@@ -88,6 +105,19 @@ while read -r source path mode; do
         *) install -m "$mode" "$ws/$source" "$stage$path" || fail "copy $source" ;;
     esac
 done < "$ws/packaging/linux/files.txt"
+
+# Nothing of the build machine in the programs as they ship (stripped: the symbol table, with the assembler's file
+# names, is gone by then).
+if [ $test = 0 ]; then
+    for program in queqiao-agent queqiao-viewer queqiao-service; do
+        for folder in "$HOME" "$cargo_home" "$rustup_home" "$target" "$ws"; do
+            if grep -q -a -F -- "$folder/" "$stage/usr/lib/queqiao/$program"; then
+                fail "$program holds the build machine's folder $folder"
+            fi
+        done
+    done
+    echo "no build machine folders in the programs"
+fi
 
 # The .deb.
 deb_root=$out/deb-$version
