@@ -11,6 +11,9 @@ argon2 = "0.6"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 getrandom.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+# HMAC-SHA256 for the relay servers' link (ring is already in the build through rustls).
+ring = "0.17"
+serde.workspace = true
 rusqlite = { version = "0.43", features = ["bundled"] }
 rustls.workspace = true
 rustls-pki-types.workspace = true

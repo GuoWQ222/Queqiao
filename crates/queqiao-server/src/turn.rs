@@ -16,10 +16,16 @@
 //! - At most 4 allocations per device, a fixed port range, nonces that change every hour.
 //!
 //! STUN Binding requests (what is my public address?) are answered for anyone, as every STUN server does.
+//!
+//! On a relay server of its own (`queqiao-server relay`) the secret is the key the account server gave that relay, so
+//! credentials the account server made for it work there and nowhere else. A server that knows its capacity
+//! (`--capacity-mbps`) shares it fairly once nearly all of it is in use: every allocation keeps what it uses up to an
+//! equal share, and those that want more share the rest (no limit while there is room; the user, 2026-11-26).
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -47,6 +53,14 @@ const RELAY_RATE: f64 = 12.5e6;
 const RELAY_BURST: f64 = 4e6;
 /// Expired and revoked allocations are removed this often.
 const SWEEP: Duration = Duration::from_secs(10);
+/// The fair share is worked out this often: above SHARE_FROM of the capacity in use, each allocation's rate is limited
+/// to the max-min fair level for SHARE_TO of it; below, the level grows by SHARE_GROW a step until there is no limit.
+/// Never below SHARE_FLOOR (1 Mbit/s), so a session always has enough for its control and a small picture.
+const SHARE_STEP: Duration = Duration::from_secs(1);
+const SHARE_FROM: f64 = 0.92;
+const SHARE_TO: f64 = 0.88;
+const SHARE_GROW: f64 = 1.05;
+const SHARE_FLOOR: f64 = 125e3;
 
 pub struct TurnConfig {
     /// UDP address for STUN and TURN (port 3478 by default).
@@ -60,17 +74,55 @@ pub struct TurnConfig {
     /// When each device's program had its relay credentials revoked (Unix seconds): those made until then no longer
     /// work. Kept for CREDENTIAL_SECONDS, after which they have expired anyway.
     pub revoked: Mutex<HashMap<(String, String), u64>>,
+    /// What this server may send in all, bytes a second (`--capacity-mbps`); 0: unknown, no sharing.
+    pub capacity: f64,
+    /// Bytes relayed so far (each went out once), and the allocations now: for the load reports.
+    pub relayed: AtomicU64,
+    pub allocations: AtomicUsize,
+}
+
+/// Relay credentials made with `secret` for a logged-in program ("agent", "viewer") of a device of an account:
+/// (username, password, expiry in Unix seconds). The username names all three (signed by the password), for the
+/// quotas per device and per account, and for revoking them.
+pub fn credentials_with(
+    secret: &[u8],
+    account: i64,
+    device: &str,
+    program: &str,
+) -> (String, String, u64) {
+    let expires = unix_now() + CREDENTIAL_SECONDS;
+    let username = format!("{expires}:{account}:{device}:{program}");
+    let password = hex(&stun::hmac_sha1(secret, username.as_bytes()));
+    (username, password, expires)
 }
 
 impl TurnConfig {
-    /// Relay credentials for a logged-in program ("agent", "viewer") of a device of an account: (username, password,
-    /// expiry in Unix seconds). The username names all three (signed by the password), for the quotas per device and
-    /// per account, and for revoking them.
+    /// A configuration with nothing revoked or relayed yet.
+    pub fn new(
+        listen: SocketAddr,
+        public_ip: IpAddr,
+        relay_ports: (u16, u16),
+        allow_private: bool,
+        secret: [u8; 32],
+        capacity: f64,
+    ) -> TurnConfig {
+        TurnConfig {
+            listen,
+            public_ip,
+            relay_ports,
+            allow_private,
+            secret,
+            revoked: Mutex::new(HashMap::new()),
+            capacity,
+            relayed: AtomicU64::new(0),
+            allocations: AtomicUsize::new(0),
+        }
+    }
+
+    /// Credentials for this server's own relay (`credentials_with` its secret).
+    #[cfg(test)]
     pub fn credentials(&self, account: i64, device: &str, program: &str) -> (String, String, u64) {
-        let expires = unix_now() + CREDENTIAL_SECONDS;
-        let username = format!("{expires}:{account}:{device}:{program}");
-        let password = hex(&stun::hmac_sha1(&self.secret, username.as_bytes()));
-        (username, password, expires)
+        credentials_with(&self.secret, account, device, program)
     }
 
     /// host:port of the STUN/TURN service for clients.
@@ -81,14 +133,23 @@ impl TurnConfig {
     /// The relay credentials `programs` ("agent", "viewer") of `device` were given until now stop working, and their
     /// allocations end at the next sweep (the security review of 2026-11-22: a logout, a removed device or a new
     /// password left them working for an hour, and the allocations made with them for as long as they were renewed).
+    #[cfg(test)]
     pub fn revoke(&self, device: &str, programs: &[&str]) {
-        let now = unix_now();
+        self.revoke_at(device, programs, unix_now());
+    }
+
+    /// As `revoke`, for credentials made until `at` (Unix seconds): the account server's word on a relay server. A
+    /// later revocation of the same program stays (an earlier one arriving late changes nothing).
+    pub fn revoke_at(&self, device: &str, programs: &[&str], at: u64) {
         let mut revoked = self
             .revoked
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for program in programs {
-            revoked.insert((device.to_string(), (*program).to_string()), now);
+            let entry = revoked
+                .entry((device.to_string(), (*program).to_string()))
+                .or_insert(at);
+            *entry = (*entry).max(at);
         }
     }
 
@@ -219,10 +280,13 @@ struct Allocation {
 }
 
 /// What an allocation may still relay (the security review of 2026-11-22: there was no limit, so one allocation was
-/// an anonymous UDP proxy at any rate).
+/// an anonymous UDP proxy at any rate), and what it relayed since the fair share was last worked out.
 struct Budget {
     bytes: f64,
     at: Instant,
+    /// Bytes a second it may relay: RELAY_RATE, or its fair share while the server is nearly full.
+    rate: f64,
+    used: u64,
 }
 
 impl Budget {
@@ -230,20 +294,80 @@ impl Budget {
         Budget {
             bytes: RELAY_BURST,
             at: now,
+            rate: RELAY_RATE,
+            used: 0,
         }
     }
 
     /// Whether `length` bytes may go now (they are taken off if so).
     fn take(&mut self, now: Instant, length: usize) -> bool {
         let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
-        self.bytes = (self.bytes + elapsed * RELAY_RATE).min(RELAY_BURST);
+        self.bytes = (self.bytes + elapsed * self.rate).min(RELAY_BURST);
         self.at = now;
         if self.bytes < length as f64 {
             return false;
         }
         self.bytes -= length as f64;
+        self.used += length as u64;
         true
     }
+}
+
+/// The max-min fair rate for allocations relaying at `rates` within `capacity`: those under it keep what they use, the
+/// rest get it. Infinite when all of them fit.
+fn fair_level(rates: &[f64], capacity: f64) -> f64 {
+    let mut sorted = rates.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let mut left = capacity;
+    for (index, rate) in sorted.iter().enumerate() {
+        let share = left / (sorted.len() - index) as f64;
+        if *rate <= share {
+            left -= rate;
+        } else {
+            return share;
+        }
+    }
+    f64::INFINITY
+}
+
+/// The next limit for every allocation after one SHARE_STEP: cut to the fair level when nearly all of `capacity` is in
+/// use, otherwise grown back a step towards no limit (infinite). `capacity` 0: never limited.
+fn next_level(level: f64, rates: &[f64], capacity: f64) -> f64 {
+    if capacity <= 0.0 {
+        return f64::INFINITY;
+    }
+    let total: f64 = rates.iter().sum();
+    if total > SHARE_FROM * capacity {
+        fair_level(rates, SHARE_TO * capacity).max(SHARE_FLOOR)
+    } else if level.is_finite() {
+        let grown = level * SHARE_GROW;
+        if grown >= RELAY_RATE {
+            f64::INFINITY
+        } else {
+            grown
+        }
+    } else {
+        level
+    }
+}
+
+/// Works out the fair share every SHARE_STEP and counts the allocations.
+fn share(config: &TurnConfig, state: &State, level: &mut f64, elapsed: f64) {
+    let Ok(mut allocations) = state.lock() else {
+        return;
+    };
+    let rates: Vec<f64> = allocations
+        .values()
+        .map(|allocation| allocation.budget.used as f64 / elapsed.max(0.001))
+        .collect();
+    *level = next_level(*level, &rates, config.capacity);
+    for allocation in allocations.values_mut() {
+        allocation.budget.used = 0;
+        allocation.budget.rate = level.min(RELAY_RATE);
+    }
+    config
+        .allocations
+        .store(allocations.len(), Ordering::Relaxed);
 }
 
 /// The account and the device a relay username was made for ("expiry:account:device:program"; no account in the
@@ -347,6 +471,23 @@ pub async fn serve(config: Arc<TurnConfig>) -> std::io::Result<()> {
             sweep(&sweep_config, &sweeper);
         }
     });
+    let sharer = state.clone();
+    let share_config = config.clone();
+    tokio::spawn(async move {
+        let mut level = f64::INFINITY;
+        let mut last = Instant::now();
+        loop {
+            tokio::time::sleep(SHARE_STEP).await;
+            let now = Instant::now();
+            share(
+                &share_config,
+                &sharer,
+                &mut level,
+                (now - last).as_secs_f64(),
+            );
+            last = now;
+        }
+    });
     let mut next_port = config.relay_ports.0;
     let mut buffer = vec![0u8; 65536];
     loop {
@@ -411,6 +552,11 @@ fn handle(
         let allowed = until > now
             && allocation.permitted(config.public_ip, peer, now)
             && allocation.budget.take(now, payload.len());
+        if allowed {
+            config
+                .relayed
+                .fetch_add(payload.len() as u64, Ordering::Relaxed);
+        }
         return allowed.then(|| Action::Relay(allocation.relay.clone(), peer, payload.to_vec()));
     }
     let message = Message::decode(packet)?;
@@ -425,9 +571,14 @@ fn handle(
             let allocation = allocations.get_mut(&client)?;
             let peer = message.address(attr::XOR_PEER_ADDRESS)?;
             let data = message.get(attr::DATA)?;
-            (allocation.permitted(config.public_ip, peer, now)
-                && allocation.budget.take(now, data.len()))
-            .then(|| Action::Relay(allocation.relay.clone(), peer, data.to_vec()))
+            let allowed = allocation.permitted(config.public_ip, peer, now)
+                && allocation.budget.take(now, data.len());
+            if allowed {
+                config
+                    .relayed
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
+            }
+            allowed.then(|| Action::Relay(allocation.relay.clone(), peer, data.to_vec()))
         }
         (Class::Request, method::ALLOCATE) => Some(check_allocate(
             config,
@@ -530,7 +681,7 @@ fn check_allocate(
 
 #[allow(clippy::too_many_arguments)]
 async fn allocate(
-    config: &TurnConfig,
+    config: &Arc<TurnConfig>,
     state: &State,
     main: &Arc<UdpSocket>,
     next_port: &mut u16,
@@ -566,7 +717,7 @@ async fn allocate(
         main.clone(),
         state.clone(),
         client,
-        config.public_ip,
+        config.clone(),
     ));
     if let Ok(mut allocations) = state.lock() {
         allocations.insert(
@@ -735,8 +886,9 @@ async fn relay_to_client(
     main: Arc<UdpSocket>,
     state: State,
     client: SocketAddr,
-    public_ip: IpAddr,
+    config: Arc<TurnConfig>,
 ) {
+    let public_ip = config.public_ip;
     let mut buffer = vec![0u8; 65536];
     loop {
         let (length, peer) = match relay.recv_from(&mut buffer).await {
@@ -755,6 +907,7 @@ async fn relay_to_client(
             if !allocation.permitted(public_ip, peer, now) || !allocation.budget.take(now, length) {
                 continue;
             }
+            config.relayed.fetch_add(length as u64, Ordering::Relaxed);
             match allocation.by_peer.get(&peer) {
                 Some(&number) => stun::channel_data(number, &buffer[..length]),
                 None => Message::new(
@@ -821,14 +974,63 @@ mod tests {
     use super::*;
 
     fn config(allow_private: bool) -> TurnConfig {
-        TurnConfig {
-            listen: "0.0.0.0:3478".parse().unwrap(),
-            public_ip: "198.51.100.1".parse().unwrap(),
-            relay_ports: (47200, 47399),
+        TurnConfig::new(
+            "0.0.0.0:3478".parse().unwrap(),
+            "198.51.100.1".parse().unwrap(),
+            (47200, 47399),
             allow_private,
-            secret: [9; 32],
-            revoked: Mutex::new(HashMap::new()),
+            [9; 32],
+            0.0,
+        )
+    }
+
+    #[test]
+    fn a_full_relay_is_shared_fairly_and_an_empty_one_not_at_all() {
+        let mbit = 125e3;
+        // Room to spare (40 of 100 Mbit/s): no limit, and none comes.
+        let capacity = 100.0 * mbit;
+        assert!(next_level(f64::INFINITY, &[20.0 * mbit, 20.0 * mbit], capacity).is_infinite());
+        // Full (one wants 90, two 10): the small ones keep theirs, the big one gets the rest of 88 %.
+        let level = next_level(
+            f64::INFINITY,
+            &[90.0 * mbit, 10.0 * mbit, 10.0 * mbit],
+            capacity,
+        );
+        assert!((level - 68.0 * mbit).abs() < 1.0, "{}", level / mbit);
+        // Two that both want everything: half of 88 % each.
+        let even = fair_level(&[80.0 * mbit, 80.0 * mbit], 88.0 * mbit);
+        assert!((even - 44.0 * mbit).abs() < 1.0);
+        // Once there is room again the limit grows back, a step at a time, until it is gone.
+        let mut level = 44.0 * mbit;
+        for _ in 0..200 {
+            level = next_level(level, &[10.0 * mbit], capacity);
         }
+        assert!(level.is_infinite());
+        // Never under the floor, however many share; no capacity given: never limited.
+        let crowd = vec![10.0 * mbit; 1000];
+        assert_eq!(next_level(f64::INFINITY, &crowd, capacity), SHARE_FLOOR);
+        assert!(next_level(44.0 * mbit, &crowd, 0.0).is_infinite());
+    }
+
+    #[test]
+    fn a_relay_server_takes_the_credentials_made_with_its_own_key_only() {
+        let relay = config(false);
+        let (username, password, _) = credentials_with(&[9; 32], 7, "dev1", "agent");
+        assert_eq!(
+            hex(&stun::hmac_sha1(&relay.secret, username.as_bytes())),
+            password
+        );
+        let (other_name, other_password, _) = credentials_with(&[8; 32], 7, "dev1", "agent");
+        assert_ne!(
+            hex(&stun::hmac_sha1(&relay.secret, other_name.as_bytes())),
+            other_password
+        );
+        // A revocation from the account server stops what was made until then; an older one arriving late does not
+        // undo a newer one.
+        relay.revoke_at("dev1", &["agent"], unix_now() + CREDENTIAL_SECONDS);
+        assert!(relay.is_revoked(&username));
+        relay.revoke_at("dev1", &["agent"], 1);
+        assert!(relay.is_revoked(&username));
     }
 
     #[test]

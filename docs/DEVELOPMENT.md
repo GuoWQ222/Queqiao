@@ -19,7 +19,7 @@ Queqiao does and how to use it, see the [README](../README.md); for the design, 
 | `crates/queqiao-input` | Injects the viewer's mouse and keyboard on the controlled side (SendInput; XTest, wlroots virtual devices or the RemoteDesktop portal); the clipboard |
 | `crates/queqiao-portal` | The Wayland desktop portal session shared by capture and input (GNOME, KDE) |
 | `crates/queqiao-account` | Client side of queqiao-server: TLS WebSocket with a pinned certificate, login (and sign-up), device list, session signalling; the saved login (DPAPI on Windows, the Secret Service on Linux) |
-| `crates/queqiao-server` | Accounts (Argon2id), devices, presence and signalling over TLS WebSockets, SQLite; the STUN/TURN relay |
+| `crates/queqiao-server` | Accounts (Argon2id), devices, presence and signalling over TLS WebSockets, SQLite; the STUN/TURN relay; relay servers that join it (choosing the relay per session) and a standby's live copy of the accounts |
 | `crates/queqiao-service` | The optional service on a controlled computer: keeps the agent running for whoever is signed in, and one for the sign-in, lock, Ctrl+Alt+Del and UAC screens; applies updates (Windows); systemd with KMS, uinput and PAM (Linux) |
 | `crates/queqiao-local` | The private channels between the service, its desktop helper and the agent |
 | `crates/queqiao-setup` | The Windows installer (one signed file carrying the signed programs), uninstall, updates, and the release tools (`pack`, `release-key`, `release`) |
@@ -78,7 +78,34 @@ fingerprint; `queqiao-server add-user <name>` adds a user (the password on stand
 `remove-device` take things away; `queqiao-server serve --name <its address>` runs it: accounts on TCP 47100, STUN/TURN
 on UDP 3478, relayed addresses on UDP 47200-47399 (`--listen`, `--turn-port`, `--relay-ports`, `--public-ip`;
 `--relay-private` also relays to private addresses, for servers on a LAN only; `--allow-signup` lets people make
-accounts from the login window, at most 3 an hour from one address).
+accounts from the login window, at most 3 an hour from one address; `--capacity-mbps` is what the server may send in
+all, 100 by default).
+
+### Several relays and a standby
+
+One server holds the accounts (the account server); the relayed traffic, the only heavy traffic, is spread over relay
+servers that join it:
+
+```sh
+# On the account server: let relay "shanghai" join (prints its key once)
+queqiao-server add-relay shanghai --data <folder> | ssh shanghai 'queqiao-server relay-key --data <its folder>'
+
+# On the relay server: STUN/TURN only, linked to the account server (its certificate pinned)
+queqiao-server relay --central <account server>:47100 --pin <its fingerprint> --public-ip <this server's address> \
+    --capacity-mbps 100 --data <its folder> [--standby]
+```
+
+- Each device measures its round trip to every relay after logging in. Each session gets the relay nearest to both of
+  its devices that has room, with the next two as backups: a relay that does not answer while the session is set up
+  is left for the next one. Relays report their load every 2 s, and one nearly full shares its capacity fairly
+  between its sessions. `remove-relay <name>` takes one out at once; `relays` lists them.
+- A relay checks the relay passwords itself (the account server makes them with that relay's key) and is told of every
+  password that was revoked (a logout, a removed device, a new account password).
+- `--standby` also keeps a live copy of the accounts in its folder: a full copy first, then each change as it is made
+  (a change log written by triggers, so the command-line tools' changes are in it too). The programs are told of the
+  standby and keep it with their login. To make it the account server: stop its relay (and the old account server, if
+  it still runs) and run `queqiao-server serve` on its folder. Saved logins work there as before; relays given it as a
+  second `--central`/`--pin` link to it.
 
 ## Tests
 
@@ -94,6 +121,8 @@ Programs that capture the screen or show windows must run in the signed-in perso
 | `scripts\run_m7_setup.ps1`, `run_m7_update.ps1`, `run_m7_service_update.ps1`, `run_m7_agent_login.ps1` | The installer, updates, the login from the tray |
 | `scripts/run_login_linux.sh` | The one login form: a new name makes the account, a wrong password is refused, the right one logs in |
 | `scripts/run_takeover_linux.sh`, `scripts\run_takeover_windows.ps1` | One device controls a computer at a time: busy, Take Control, Disconnect |
+| `scripts/run_relays_linux.sh` | Two relay servers joined to an account server: a wrong key and an unknown relay refused, both ends of a session on the same relay, the next one when it does not answer, a relay taken out |
+| `scripts/run_standby_linux.sh` | A standby's copy of the accounts: a full copy, then a new user as a change; the standby made the account server, and logins falling back to it |
 | `scripts/run_android_e2e.sh`, `scripts/run_ios_simulator_smoke.sh` | The phone apps against a server and an agent (in CI) |
 
 Checks of one machine's capture and encoders (release builds in `target\release\examples`): `scripts\run_probes.ps1`,

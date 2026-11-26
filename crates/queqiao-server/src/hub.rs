@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use queqiao_core::account::{ClientMessage, Device, Role, ServerMessage, TurnAccess};
+use queqiao_core::account::{ClientMessage, Device, Role, ServerMessage, Standby, TurnAccess};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -20,8 +20,18 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use sha2::{Digest, Sha256};
 
-use crate::store::Store;
-use crate::turn::TurnConfig;
+use crate::link::{FromRelay, ToRelay, nonce_valid, proof_valid};
+use crate::relays::Relays;
+use crate::replica::{BATCH, Batch, Change};
+use crate::store::{Store, random_hex, valid_relay_name};
+
+type Sink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<TcpStream>>,
+    Message,
+>;
+type Stream = futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<TcpStream>>,
+>;
 
 /// Messages are small (an SDP is a few kB): anything over 256 kB is refused.
 const MAX_MESSAGE: usize = 256 * 1024;
@@ -368,11 +378,16 @@ struct Connection {
     /// An agent's: the device controlling it now, as it reported (`ClientMessage::ControlState`); gone with the
     /// connection.
     controlled_by: String,
+    /// How far the device is from each relay (address: milliseconds), as it measured (`RelayRtts`).
+    rtts: HashMap<String, u32>,
 }
 
 /// What this server can do beyond the first protocol (`ServerMessage::Welcome`'s `features`).
 fn features(signup: bool) -> Vec<String> {
-    let mut features = vec![queqiao_core::account::features::CONTROL_STATE.to_string()];
+    let mut features = vec![
+        queqiao_core::account::features::CONTROL_STATE.to_string(),
+        queqiao_core::account::features::RELAYS.to_string(),
+    ];
     if signup {
         features.push(queqiao_core::account::features::LOGIN_OR_CREATE.to_string());
     }
@@ -401,7 +416,8 @@ pub struct Hub {
     store: Mutex<Store>,
     failures: Mutex<Failures>,
     waiting: Mutex<Waiting>,
-    turn: Option<Arc<TurnConfig>>,
+    /// The relays handed out: this server's own TURN part and the relay servers that joined it.
+    relays: Arc<Relays>,
     online: Mutex<HashMap<(String, Role), Connection>>,
     next_id: AtomicU64,
     /// Agents taking help requests, by device id.
@@ -427,14 +443,14 @@ struct Identity {
 }
 
 impl Hub {
-    pub fn new(store: Store, turn: Option<Arc<TurnConfig>>, signup: bool) -> Arc<Hub> {
+    pub fn new(store: Store, relays: Arc<Relays>, signup: bool) -> Arc<Hub> {
         Arc::new(Hub {
             signup,
             signups: Mutex::new(HashMap::new()),
             store: Mutex::new(store),
             failures: Mutex::new(Failures::default()),
             waiting: Mutex::new(Waiting::default()),
-            turn,
+            relays,
             online: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             help: Mutex::new(HashMap::new()),
@@ -508,12 +524,17 @@ impl Hub {
         .map_err(|e| format!("WebSocket: {e}"))?;
         let (mut sink, mut stream) = socket.split();
 
-        let first = match timeout(Duration::from_secs(15), stream.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                serde_json::from_str::<ClientMessage>(&text).map_err(|e| e.to_string())?
-            }
+        let text = match timeout(Duration::from_secs(15), stream.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => text,
             _ => return Err("no login".into()),
         };
+        // A relay server joining (`queqiao-server relay`), not a program.
+        if let Ok(FromRelay::Hello { name, nonce }) = serde_json::from_str::<FromRelay>(&text) {
+            return self
+                .relay_link(sink, stream, name, nonce, address, waiting)
+                .await;
+        }
+        let first = serde_json::from_str::<ClientMessage>(&text).map_err(|e| e.to_string())?;
         // One form for logging in and signing up (the user, 2026-11-26): a name nobody has yet makes the account, on a
         // server that takes new ones, as a `Register` (its checks, its limit per address); any other name logs in.
         let first = match first {
@@ -633,6 +654,7 @@ impl Hub {
                 device_name: identity.device_name.clone(),
                 sender: sender.clone(),
                 controlled_by: String::new(),
+                rtts: HashMap::new(),
             },
         );
         if let Some(old) = replaced {
@@ -645,6 +667,8 @@ impl Hub {
             devices: self.device_list(identity.user_id),
             features: features(self.signup),
             created,
+            relays: self.relays.addresses(),
+            standbys: self.standbys(),
         };
         let _ = sender.send(Outgoing::Message(welcome));
         self.push_devices(identity.user_id);
@@ -721,6 +745,234 @@ impl Hub {
         }
         self.push_devices(identity.user_id);
         Ok(())
+    }
+
+    /// A relay server joining (`link`): it proves it holds the key `add-relay` made for `name` (a wrong one counts as a
+    /// failed login does, from its address), then reports where it is and its load until the link ends; revocations
+    /// go to it from `Relays`. A relay taken out with `remove-relay`, or given a new key, is dropped at its next report.
+    async fn relay_link(
+        self: Arc<Hub>,
+        mut sink: Sink,
+        mut stream: Stream,
+        name: String,
+        relay_nonce: String,
+        address: Option<IpAddr>,
+        waiting: WaitingTurn,
+    ) -> Result<(), String> {
+        let send =
+            |message: &ToRelay| Message::text(serde_json::to_string(message).unwrap_or_default());
+        if let Err(minutes) = self.begin_try(address, None) {
+            let message = format!("too many failed tries: try again in {minutes} minutes");
+            let _ = timeout(SEND_TIMEOUT, sink.send(send(&ToRelay::Error { message }))).await;
+            return Err("relay: too many failed tries".into());
+        }
+        let key = if valid_relay_name(&name) && nonce_valid(&relay_nonce) {
+            self.store
+                .lock()
+                .ok()
+                .and_then(|store| store.relay_key(&name).ok().flatten())
+        } else {
+            None
+        };
+        let server_nonce = random_hex(32)?;
+        let challenge = ToRelay::Challenge {
+            nonce: server_nonce.clone(),
+        };
+        timeout(SEND_TIMEOUT, sink.send(send(&challenge)))
+            .await
+            .map_err(|_| "relay: sending timed out")?
+            .map_err(|e| e.to_string())?;
+        let proof = match timeout(Duration::from_secs(15), stream.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => match serde_json::from_str::<FromRelay>(&text) {
+                Ok(FromRelay::Proof { proof }) => proof,
+                _ => String::new(),
+            },
+            _ => return Err("relay: no proof".into()),
+        };
+        // The same answer for a name that is not a relay of this server and for a wrong key.
+        let Some(key) =
+            key.filter(|key| proof_valid(key, &name, &relay_nonce, &server_nonce, &proof))
+        else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let message = "refused: not a relay of this server, or not its key".to_string();
+            let _ = timeout(SEND_TIMEOUT, sink.send(send(&ToRelay::Error { message }))).await;
+            return Err("relay refused".into());
+        };
+        self.forgive(address, None, true);
+        drop(waiting);
+        timeout(SEND_TIMEOUT, sink.send(send(&ToRelay::Welcome)))
+            .await
+            .map_err(|_| "relay: sending timed out")?
+            .map_err(|e| e.to_string())?;
+        let (relay_sender, mut receiver) = unbounded_channel::<String>();
+        let changes_sender = relay_sender.clone();
+        let mut replicating = false;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.relays.joined(&name, key, id, relay_sender);
+        eprintln!("relay {name} joined");
+        let result = loop {
+            tokio::select! {
+                incoming = timeout(IDLE, stream.next()) => match incoming {
+                    Ok(Some(Ok(Message::Text(text)))) => {
+                        let message = serde_json::from_str::<FromRelay>(&text);
+                        // A standby: where it would serve the accounts, kept for the programs (`Welcome`), and the
+                        // accounts' changes streamed to it from where it stands (once per link).
+                        if let Ok(FromRelay::Replicate { after, accounts, pin }) = &message
+                            && !replicating
+                        {
+                            let pin_ok = pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_hexdigit());
+                            if accounts.parse::<SocketAddr>().is_ok() && pin_ok
+                                && let Ok(store) = self.store.lock()
+                            {
+                                let _ = store.set_standby(&name, accounts, &pin.to_ascii_lowercase());
+                            }
+                            replicating = true;
+                            eprintln!("standby {name}: copying the accounts from change {after}");
+                            tokio::spawn(self.clone().stream_changes(name.clone(), changes_sender.clone(), *after));
+                        }
+                        if let Ok(FromRelay::Load { address: at, capacity_mbps, rate_mbps, allocations }) = message
+                        {
+                            let still = self
+                                .store
+                                .lock()
+                                .ok()
+                                .and_then(|store| store.relay_key(&name).ok().flatten())
+                                == Some(key);
+                            if !still {
+                                let message = "this relay was taken out of the server".to_string();
+                                let _ = timeout(SEND_TIMEOUT, sink.send(send(&ToRelay::Error { message }))).await;
+                                break Err(format!("relay {name}: taken out"));
+                            }
+                            let sane = |mbps: f64| if mbps.is_finite() { mbps.clamp(0.0, 1e6) } else { 0.0 };
+                            if let Ok(at) = at.parse::<SocketAddr>()
+                                && !at.ip().is_unspecified()
+                                && at.port() != 0
+                            {
+                                self.relays.report(&name, id, at.to_string(), sane(capacity_mbps), sane(rate_mbps), allocations);
+                            }
+                        }
+                    }
+                    Ok(Some(Ok(Message::Ping(data)))) => {
+                        if !matches!(timeout(SEND_TIMEOUT, sink.send(Message::Pong(data))).await, Ok(Ok(()))) {
+                            break Ok(());
+                        }
+                    }
+                    Ok(Some(Ok(Message::Close(_))) | None | Some(Err(_))) | Err(_) => break Ok(()),
+                    Ok(Some(Ok(_))) => {}
+                },
+                outgoing = receiver.recv() => match outgoing {
+                    Some(text) => {
+                        if !matches!(timeout(SEND_TIMEOUT, sink.send(Message::text(text))).await, Ok(Ok(()))) {
+                            break Ok(());
+                        }
+                    }
+                    None => break Ok(()),
+                },
+            }
+        };
+        self.relays.left(&name, id);
+        eprintln!("relay {name} left");
+        result
+    }
+
+    /// A standby's copy of the accounts (replica.rs): a full copy when it has none or is too far behind, then each
+    /// change as it is made (looked for every second), until its link ends.
+    async fn stream_changes(
+        self: Arc<Hub>,
+        name: String,
+        sender: UnboundedSender<String>,
+        mut after: i64,
+    ) {
+        loop {
+            let batch = self
+                .store
+                .lock()
+                .map_err(|e| e.to_string())
+                .and_then(|store| store.next_for_standby(after));
+            let messages = match batch {
+                Ok(Batch::Copy { upto, rows }) => {
+                    eprintln!(
+                        "standby {name}: a full copy, {} rows, up to change {upto}",
+                        rows.len()
+                    );
+                    after = upto;
+                    let chunks: Vec<&[Change]> = rows.chunks(BATCH).collect();
+                    if chunks.is_empty() {
+                        vec![ToRelay::Changes {
+                            reset: true,
+                            upto,
+                            changes: Vec::new(),
+                        }]
+                    } else {
+                        let last = chunks.len() - 1;
+                        chunks
+                            .iter()
+                            .enumerate()
+                            .map(|(index, chunk)| ToRelay::Changes {
+                                reset: index == 0,
+                                upto: if index == last { upto } else { 0 },
+                                changes: chunk.to_vec(),
+                            })
+                            .collect()
+                    }
+                }
+                Ok(Batch::Changes(changes)) if changes.is_empty() => {
+                    if sender.is_closed() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Ok(Batch::Changes(changes)) => {
+                    let upto = changes.last().map_or(after, |change| change.seq);
+                    after = upto;
+                    vec![ToRelay::Changes {
+                        reset: false,
+                        upto,
+                        changes,
+                    }]
+                }
+                Err(error) => {
+                    eprintln!("standby {name}: {error}");
+                    if sender.is_closed() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+            for message in messages {
+                let Ok(text) = serde_json::to_string(&message) else {
+                    continue;
+                };
+                if sender.send(text).is_err() {
+                    return;
+                }
+            }
+            // One catching up does not get everything at once.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Keeps the change log to its last changes (replica.rs).
+    pub fn prune_changes(&self) {
+        if let Ok(store) = self.store.lock()
+            && let Err(error) = store.prune_changes()
+        {
+            eprintln!("change log: {error}");
+        }
+    }
+
+    /// The standbys the programs may fall back to (`Welcome`).
+    fn standbys(&self) -> Vec<Standby> {
+        self.store
+            .lock()
+            .ok()
+            .and_then(|store| store.standbys().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(server, pin)| Standby { server, pin })
+            .collect()
     }
 
     /// Wake-on-LAN for an offline device of the account: another agent of the account that connects from the
@@ -1200,11 +1452,9 @@ impl Hub {
         }
     }
 
-    /// The relay credentials `role` of `device` was given stop working (TurnConfig::revoke).
+    /// The relay credentials `role` of `device` was given stop working, on every relay (Relays::revoke).
     fn revoke_relay(&self, device: &str, role: Role) {
-        if let Some(turn) = &self.turn {
-            turn.revoke(device, &[role_name(role)]);
-        }
+        self.relays.revoke(device, &[role_name(role)]);
     }
 
     /// Tells the account's connections (all but `except`) `message`.
@@ -1507,26 +1757,82 @@ impl Hub {
                     let _ = sender.send(Outgoing::Message(ServerMessage::Error { message }));
                 }
             }
-            ClientMessage::GetIceServers => {
-                // Relay credentials only ever go to a logged-in device, for itself.
-                let (stun, turn) = match &self.turn {
-                    Some(config) => {
-                        let (username, password, expires) = config.credentials(
-                            identity.user_id,
-                            &identity.device_id,
-                            role_name(identity.role),
-                        );
-                        let access = TurnAccess {
-                            address: config.address(),
-                            username,
-                            password,
-                            expires,
-                        };
-                        (Some(config.address()), Some(access))
-                    }
-                    None => (None, None),
+            ClientMessage::GetIceServers { peer, prefer } => {
+                // Relay credentials only ever go to a logged-in device, for itself: for the relays nearest to it and
+                // the session's other device, with room (Relays::assign), each made with that relay's key.
+                let opposite = match identity.role {
+                    Role::Agent => Role::Viewer,
+                    Role::Viewer => Role::Agent,
                 };
-                let _ = sender.send(Outgoing::Message(ServerMessage::IceServers { stun, turn }));
+                let peer = peer.filter(|peer| *peer != identity.device_id);
+                let (mine, other) = match self.online.lock() {
+                    Ok(online) => (
+                        online
+                            .get(&(identity.device_id.clone(), identity.role))
+                            .map(|connection| connection.rtts.clone())
+                            .unwrap_or_default(),
+                        peer.as_ref().and_then(|peer| {
+                            let connection = online.get(&(peer.clone(), opposite))?;
+                            Some((connection.user_id, connection.rtts.clone()))
+                        }),
+                    ),
+                    Err(_) => (HashMap::new(), None),
+                };
+                // Only a device it may have a session with counts: its own account's, or one a help code joined.
+                let allowed = |user_id: i64| {
+                    user_id == identity.user_id
+                        || peer
+                            .as_deref()
+                            .is_some_and(|peer| self.granted(&identity.device_id, peer))
+                };
+                let (peer, theirs) = match other {
+                    Some((user_id, rtts)) if allowed(user_id) => (peer, Some(rtts)),
+                    _ => (None, None),
+                };
+                let assigned = self.relays.assign(
+                    &identity.device_id,
+                    peer.as_deref(),
+                    &mine,
+                    theirs.as_ref(),
+                    prefer.as_deref(),
+                );
+                let mut accesses = assigned.into_iter().map(|relay| {
+                    let (username, password, expires) = crate::turn::credentials_with(
+                        &relay.key,
+                        identity.user_id,
+                        &identity.device_id,
+                        role_name(identity.role),
+                    );
+                    TurnAccess {
+                        address: relay.address,
+                        username,
+                        password,
+                        expires,
+                    }
+                });
+                let turn = accesses.next();
+                let backups = accesses.collect();
+                let stun = turn.as_ref().map(|access| access.address.clone());
+                let _ = sender.send(Outgoing::Message(ServerMessage::IceServers {
+                    stun,
+                    turn,
+                    backups,
+                }));
+            }
+            ClientMessage::RelayRtts { rtts } => {
+                // Only for relays this server hands out, within reason.
+                let rtts: HashMap<String, u32> = rtts
+                    .into_iter()
+                    .take(32)
+                    .filter(|rtt| self.relays.is_relay(&rtt.relay))
+                    .map(|rtt| (rtt.relay, rtt.ms.min(10_000)))
+                    .collect();
+                if let Ok(mut online) = self.online.lock()
+                    && let Some(connection) =
+                        online.get_mut(&(identity.device_id.clone(), identity.role))
+                {
+                    connection.rtts = rtts;
+                }
             }
             ClientMessage::RemoveDevice { device_id } => {
                 let removed = self

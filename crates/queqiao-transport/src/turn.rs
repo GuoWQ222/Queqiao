@@ -26,7 +26,10 @@ pub struct TurnServer {
 #[derive(Clone, Debug, Default)]
 pub struct IceServers {
     pub stun: Option<SocketAddr>,
+    /// The relay to use (the server chose the one nearest to both ends with room to spare).
     pub turn: Option<TurnServer>,
+    /// Other relays in order, tried when `turn` does not answer while the candidates are gathered.
+    pub backups: Vec<TurnServer>,
 }
 
 /// First retransmission after 250 ms, then doubling, five tries (about 7.75 s in all).

@@ -16,10 +16,28 @@
 //!     shell history show it).
 //! queqiao-server remove-user <name> [--data <folder>]
 //!     Takes a user out, with their devices and logins.
+//!
+//! Several relays (the user, 2026-11-26: spread the relayed traffic over the servers): the account server hands out
+//! its own relay and those of the relay servers that joined it, each session the one nearest to both ends with room.
+//! queqiao-server add-relay <name> [--data <folder>]
+//!     On the account server: lets relay <name> join; prints its key ("name:key") once, for `relay-key` there.
+//! queqiao-server remove-relay <name> [--data <folder>] / queqiao-server relays [--data <folder>]
+//! queqiao-server relay-key [--data <folder>]
+//!     On a relay server: keeps the key (one line on standard input, never the command line) in relay.key.
+//! queqiao-server relay --central <host:port> --pin <sha256> --public-ip <IP> [--data <folder>] [--turn-port 3478]
+//!                      [--relay-ports 47200-47399] [--capacity-mbps 100] [--standby [--accounts-port 47100]]
+//!     Runs STUN/TURN only, joined to the account server at --central (its certificate pinned). More than one
+//!     --central/--pin: the first that takes it (the account server, then a standby made the account server).
+//!     --standby: also keeps a live copy of the accounts in its folder; `serve` on that folder makes it the account
+//!     server (stop the relay first, and the old account server if it still runs).
+//! --capacity-mbps (serve and relay): what the server may send in all; nearly full, it shares that fairly.
 //! Without arguments it prints its version.
 
 mod cert;
 mod hub;
+mod link;
+mod relays;
+mod replica;
 mod store;
 mod turn;
 
@@ -28,6 +46,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use store::Store;
+
+/// A server's capacity when none is given (the user's servers: 100 to 200 Mbit/s each, 2026-11-26).
+const DEFAULT_CAPACITY_MBPS: f64 = 100.0;
 
 fn main() {
     let banner = queqiao_core::banner(env!("CARGO_PKG_NAME"));
@@ -38,6 +59,11 @@ fn main() {
         Some("remove-user") => remove_user(&args[1..]),
         Some("remove-device") => remove_device(&args[1..]),
         Some("init") => init(&args[1..]),
+        Some("add-relay") => add_relay(&args[1..]),
+        Some("remove-relay") => remove_relay(&args[1..]),
+        Some("relays") => list_relays(&args[1..]),
+        Some("relay-key") => relay_key(&args[1..]),
+        Some("relay") => relay(&args[1..]),
         _ => {
             println!("{banner}");
             println!(
@@ -46,12 +72,25 @@ fn main() {
             println!(
                 "                            [--public-ip <IP>] [--turn-port 3478] [--relay-ports 47200-47399] [--relay-private]"
             );
+            println!("                            [--capacity-mbps 100]");
             println!("       queqiao-server init [--data <folder>] [--name <host or IP>]...");
             println!(
                 "       queqiao-server add-user <name> [--data <folder>]   (the password on standard input)"
             );
             println!("       queqiao-server remove-user <name> [--data <folder>]");
             println!("       queqiao-server remove-device <user> <device id> [--data <folder>]");
+            println!(
+                "       queqiao-server add-relay <name> | remove-relay <name> | relays   [--data <folder>]"
+            );
+            println!(
+                "       queqiao-server relay-key [--data <folder>]   (the key add-relay printed, on standard input)"
+            );
+            println!(
+                "       queqiao-server relay --central <host:port> --pin <sha256> --public-ip <IP> [--data <folder>]"
+            );
+            println!(
+                "                            [--turn-port 3478] [--relay-ports 47200-47399] [--capacity-mbps 100] [--standby]"
+            );
             return;
         }
     };
@@ -151,6 +190,172 @@ fn init(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The first argument when it is not an option.
+fn plain_argument<'a>(args: &'a [String], usage: &str) -> Result<&'a str, String> {
+    args.first()
+        .filter(|name| !name.starts_with("--"))
+        .map(String::as_str)
+        .ok_or_else(|| usage.to_string())
+}
+
+/// Lets relay `name` join; its key goes to standard output only, once, as "name:key" for `relay-key`.
+fn add_relay(args: &[String]) -> Result<(), String> {
+    let name = plain_argument(
+        args,
+        "usage: queqiao-server add-relay <name> [--data <folder>]",
+    )?;
+    let store = Store::open(&data_folder(args)?.join("queqiao.db"))?;
+    let key = store.add_relay(name)?;
+    eprintln!(
+        "relay {name} may join; give the next line to `queqiao-server relay-key` on it, and to nobody else:"
+    );
+    println!("{name}:{}", store::hex(&key));
+    Ok(())
+}
+
+fn remove_relay(args: &[String]) -> Result<(), String> {
+    let name = plain_argument(
+        args,
+        "usage: queqiao-server remove-relay <name> [--data <folder>]",
+    )?;
+    let store = Store::open(&data_folder(args)?.join("queqiao.db"))?;
+    if store.remove_relay(name)? {
+        println!("relay {name} removed");
+        Ok(())
+    } else {
+        Err(format!("no relay {name}"))
+    }
+}
+
+fn list_relays(args: &[String]) -> Result<(), String> {
+    let store = Store::open(&data_folder(args)?.join("queqiao.db"))?;
+    for (name, created) in store.relays()? {
+        println!("{name} (added {created})");
+    }
+    Ok(())
+}
+
+/// The key `add-relay` printed, from standard input into relay.key (its owner's only).
+fn relay_key(args: &[String]) -> Result<(), String> {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprint!("relay key (name:key): ");
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    let (name, _) = link::parse_key_line(&line)?;
+    let path = data_folder(args)?.join("relay.key");
+    write_private(&path, line.trim().as_bytes())?;
+    println!("relay {name}: key kept in {}", path.display());
+    Ok(())
+}
+
+/// Writes a file only its owner may read (on Linux; the data folder is its owner's only anyway).
+fn write_private(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.write_all(data)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The capacity option (Mbit/s), DEFAULT_CAPACITY_MBPS without it.
+fn capacity_mbps(args: &[String]) -> Result<f64, String> {
+    match values(args, "--capacity-mbps").pop() {
+        Some(value) => value
+            .parse::<f64>()
+            .ok()
+            .filter(|mbps| mbps.is_finite() && *mbps >= 0.0)
+            .ok_or_else(|| "--capacity-mbps: a number of Mbit/s (0: no sharing)".to_string()),
+        None => Ok(DEFAULT_CAPACITY_MBPS),
+    }
+}
+
+/// A relay server: STUN/TURN with the key the account server gave it, joined to that server.
+fn relay(args: &[String]) -> Result<(), String> {
+    let folder = data_folder(args)?;
+    // The account server and its standbys, in order, each --central with the --pin after it.
+    let centrals: Vec<(String, String)> = values(args, "--central")
+        .into_iter()
+        .zip(values(args, "--pin"))
+        .collect();
+    if centrals.is_empty() || centrals.len() != values(args, "--central").len() {
+        return Err(
+            "relay: --central <host:port> --pin <its certificate fingerprint>, for each account server".into(),
+        );
+    }
+    let central = centrals
+        .iter()
+        .map(|(address, _)| address.as_str())
+        .collect::<Vec<_>>()
+        .join(", then ");
+    let Some(public_ip) = values(args, "--public-ip").pop() else {
+        return Err("relay: --public-ip <the address clients reach this server at>".into());
+    };
+    // A standby keeps a copy of the accounts in its folder, and the certificate it would serve them with.
+    let standby = if args.iter().any(|arg| arg == "--standby") {
+        let (_, pin) = cert::load_or_create(&folder, std::slice::from_ref(&public_ip))?;
+        let port = values(args, "--accounts-port")
+            .pop()
+            .unwrap_or_else(|| "47100".into());
+        let accounts = format!("{public_ip}:{port}");
+        accounts
+            .parse::<SocketAddr>()
+            .map_err(|e| format!("--accounts-port: {e}"))?;
+        println!(
+            "standby: a copy of the accounts in {}; would serve them at {accounts}, certificate {pin}",
+            folder.display()
+        );
+        Some(link::StandbySide {
+            store: std::sync::Mutex::new(Store::open(&folder.join("queqiao.db"))?),
+            accounts,
+            pin,
+        })
+    } else {
+        None
+    };
+    let path = folder.join("relay.key");
+    let line = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{}: {e} (queqiao-server relay-key first)", path.display()))?;
+    let (name, key) = link::parse_key_line(&line)?;
+    let capacity = capacity_mbps(args)?;
+    let mut config = turn_config(args, &[])?.ok_or("relay: --turn-port 0 leaves nothing to do")?;
+    config.secret = key;
+    let turn = Arc::new(config);
+    println!("{}", queqiao_core::banner(env!("CARGO_PKG_NAME")));
+    println!(
+        "relay {name}: STUN/TURN on UDP {} for {}, relay ports {}-{}, {capacity} Mbit/s; account server {central}",
+        turn.listen, turn.public_ip, turn.relay_ports.0, turn.relay_ports.1
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async move {
+        let side = link::RelaySide {
+            centrals,
+            name,
+            key,
+            turn: turn.clone(),
+            capacity_mbps: capacity,
+            standby,
+        };
+        tokio::select! {
+            result = turn::serve(turn) => result.map_err(|e| format!("STUN/TURN: {e}")),
+            () = link::keep_linked(side) => Ok(()),
+        }
+    })
+}
+
 fn serve(args: &[String]) -> Result<(), String> {
     let folder = data_folder(args)?;
     let listen: SocketAddr = values(args, "--listen")
@@ -194,8 +399,26 @@ fn serve(args: &[String]) -> Result<(), String> {
             "no (queqiao-server add-user)"
         }
     );
-    let hub = hub::Hub::new(store, turn.clone(), signup);
+    let capacity = capacity_mbps(args)?;
+    let relays = relays::Relays::new(turn.clone(), capacity);
+    let hub = hub::Hub::new(store, relays.clone(), signup);
     runtime.block_on(async move {
+        tokio::spawn(relays.clone().watch_local());
+        // The change log keeps the last changes only (a standby further behind gets a full copy).
+        let pruning = hub.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                pruning.prune_changes();
+            }
+        });
+        // The relays' state in the log every few minutes.
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                println!("relays: {}", relays.summary());
+            }
+        });
         let accounts = hub.serve(listen, tokio_rustls::TlsAcceptor::from(tls));
         match turn {
             Some(turn) => tokio::select! {
@@ -237,12 +460,12 @@ fn turn_config(args: &[String], names: &[String]) -> Result<Option<turn::TurnCon
     };
     let mut secret = [0u8; 32];
     getrandom::fill(&mut secret).map_err(|e| e.to_string())?;
-    Ok(Some(turn::TurnConfig {
-        listen: SocketAddr::new(IpAddr::from([0, 0, 0, 0]), port),
+    Ok(Some(turn::TurnConfig::new(
+        SocketAddr::new(IpAddr::from([0, 0, 0, 0]), port),
         public_ip,
         relay_ports,
-        allow_private: args.iter().any(|arg| arg == "--relay-private"),
+        args.iter().any(|arg| arg == "--relay-private"),
         secret,
-        revoked: std::sync::Mutex::new(std::collections::HashMap::new()),
-    }))
+        capacity_mbps(args)? * 1e6 / 8.0,
+    )))
 }

@@ -46,6 +46,28 @@ pub mod features {
     pub const CONTROL_STATE: &str = "control_state";
     /// `Login` with `create`: a new name makes the account.
     pub const LOGIN_OR_CREATE: &str = "login_or_create";
+    /// Several relays (the user, 2026-11-26: spread the relayed traffic over the servers): `Welcome` lists them for
+    /// `RelayRtts`, `GetIceServers` names the session's other device, and `IceServers` carries `backups`.
+    pub const RELAYS: &str = "relays";
+}
+
+/// A standby account server that keeps a live copy of the accounts: where a program connects when the account server
+/// cannot be reached, and its certificate's SHA-256 (the account server, whose certificate is pinned, vouches for it).
+/// It takes logins only once it has been made the account server (`queqiao-server serve` on its copy).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Standby {
+    /// host:port (TCP) of its accounts.
+    pub server: String,
+    pub pin: String,
+}
+
+/// How long a STUN check to one relay took from this device (`ClientMessage::RelayRtts`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayRtt {
+    /// The relay's STUN address as `Welcome` listed it.
+    pub relay: String,
+    /// The shortest round trip of a few checks, in milliseconds.
+    pub ms: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,8 +123,18 @@ pub enum ClientMessage {
     },
     /// Revoke this device's refresh token: the next start needs the password again.
     Logout,
-    /// The STUN and TURN servers for a session, with fresh relay credentials.
-    GetIceServers,
+    /// The STUN and TURN servers for a session, with fresh relay credentials. `peer`: the session's other device
+    /// (its id), so that both ends get the same relay, the one nearest to both (only to a server with
+    /// `features::RELAYS`; without it the message is as before).
+    GetIceServers {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer: Option<String>,
+        /// Tests (`QUEQIAO_FORCE=relay:<IP>`): the relay at this address first, if the server hands it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefer: Option<String>,
+    },
+    /// How far each relay of `Welcome`'s list is from this device (only to a server with `features::RELAYS`).
+    RelayRtts { rtts: Vec<RelayRtt> },
     /// Remove a device of this account: its saved logins end and it is disconnected.
     RemoveDevice { device_id: String },
     /// Change the account's password: every saved login of the account ends and the account's other
@@ -163,6 +195,13 @@ pub enum ServerMessage {
         /// name is noticed.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         created: bool,
+        /// The relays' STUN addresses (host:port, UDP), for the device to measure (`RelayRtts`); none from servers
+        /// before `features::RELAYS`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        relays: Vec<String>,
+        /// The standby account servers, for when this one cannot be reached (the program keeps them with its login).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        standbys: Vec<Standby>,
     },
     Devices {
         devices: Vec<Device>,
@@ -182,7 +221,11 @@ pub enum ServerMessage {
     IceServers {
         /// host:port of a STUN server (UDP), if any.
         stun: Option<String>,
+        /// The relay to use.
         turn: Option<TurnAccess>,
+        /// Other relays in order, for when `turn` does not answer.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        backups: Vec<TurnAccess>,
     },
     /// Something the person should know.
     Notice {
@@ -287,6 +330,11 @@ mod tests {
             devices: vec![],
             features: vec![],
             created: false,
+            relays: vec!["198.51.100.7:3478".into()],
+            standbys: vec![Standby {
+                server: "198.51.100.8:47100".into(),
+                pin: "ab".repeat(32),
+            }],
         };
         let text = serde_json::to_string(&welcome).unwrap();
         assert_eq!(
@@ -332,5 +380,57 @@ mod tests {
             serde_json::from_str::<ClientMessage>(&text).unwrap(),
             control
         );
+    }
+
+    #[test]
+    fn relays_are_added_without_changing_what_earlier_programs_send_and_read() {
+        // Without a peer, GetIceServers is the earlier message exactly, and the earlier message still reads.
+        let plain = ClientMessage::GetIceServers {
+            peer: None,
+            prefer: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"type":"get_ice_servers"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(r#"{"type":"get_ice_servers"}"#).unwrap(),
+            plain
+        );
+        let named = ClientMessage::GetIceServers {
+            peer: Some("d2".into()),
+            prefer: Some("198.51.100.8".into()),
+        };
+        let text = serde_json::to_string(&named).unwrap();
+        assert_eq!(serde_json::from_str::<ClientMessage>(&text).unwrap(), named);
+        // An earlier server's IceServers has no backups; an earlier program reads a new one (it ignores them).
+        let earlier = r#"{"type":"ice_servers","stun":"198.51.100.7:3478","turn":null}"#;
+        match serde_json::from_str::<ServerMessage>(earlier).unwrap() {
+            ServerMessage::IceServers { backups, .. } => assert!(backups.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        let access = TurnAccess {
+            address: "198.51.100.8:3478".into(),
+            username: "1:2:d:agent".into(),
+            password: "p".into(),
+            expires: 1,
+        };
+        let new = ServerMessage::IceServers {
+            stun: Some("198.51.100.7:3478".into()),
+            turn: Some(access.clone()),
+            backups: vec![access],
+        };
+        let text = serde_json::to_string(&new).unwrap();
+        assert!(text.contains("\"backups\""));
+        assert_eq!(serde_json::from_str::<ServerMessage>(&text).unwrap(), new);
+        let rtts = ClientMessage::RelayRtts {
+            rtts: vec![RelayRtt {
+                relay: "198.51.100.7:3478".into(),
+                ms: 31,
+            }],
+        };
+        let text = serde_json::to_string(&rtts).unwrap();
+        assert!(text.contains("\"type\":\"relay_rtts\""));
+        assert_eq!(serde_json::from_str::<ClientMessage>(&text).unwrap(), rtts);
     }
 }

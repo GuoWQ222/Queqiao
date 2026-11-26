@@ -220,9 +220,15 @@ pub(crate) fn run(
                     Ok(ServerMessage::PasswordChanged { refresh_token }) => {
                         AccountEvent::PasswordChanged(refresh_token)
                     }
-                    Ok(ServerMessage::IceServers { stun, turn }) => {
-                        AccountEvent::IceServers { stun, turn }
-                    }
+                    Ok(ServerMessage::IceServers {
+                        stun,
+                        turn,
+                        backups,
+                    }) => AccountEvent::IceServers {
+                        stun,
+                        turn,
+                        backups,
+                    },
                     Ok(ServerMessage::HelpOpen { help_id }) => AccountEvent::HelpOpen(help_id),
                     Ok(ServerMessage::HelpClosed { reason }) => AccountEvent::HelpClosed(reason),
                     Ok(ServerMessage::HelpRequested { device, user }) => {

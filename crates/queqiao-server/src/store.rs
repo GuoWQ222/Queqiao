@@ -23,7 +23,7 @@ pub struct WakeInfo {
 }
 
 pub struct Store {
-    db: Connection,
+    pub(crate) db: Connection,
 }
 
 pub struct UserRow {
@@ -44,7 +44,10 @@ impl Store {
                  created INTEGER NOT NULL, last_seen INTEGER NOT NULL, public_key TEXT NOT NULL DEFAULT '');
              CREATE TABLE IF NOT EXISTS refresh_tokens (
                  hash TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES devices(id), role TEXT NOT NULL,
-                 user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);",
+                 user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS relays (
+                 name TEXT PRIMARY KEY, secret TEXT NOT NULL, created INTEGER NOT NULL,
+                 accounts TEXT NOT NULL DEFAULT '', pin TEXT NOT NULL DEFAULT '');",
         )
         .map_err(|e| e.to_string())?;
         // User names are one account whatever their upper and lower case ("Alice" is "alice"): the lockout counts by
@@ -99,7 +102,90 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         }
-        Ok(Store { db })
+        let store = Store { db };
+        // The change log a standby copies the accounts from (replica.rs).
+        store.install_change_log()?;
+        Ok(store)
+    }
+
+    /// A relay that keeps a standby copy of the accounts: where it would serve them and its certificate, for the
+    /// programs to fall back to (`Welcome`'s standbys). Unchanged values are not written again.
+    pub fn set_standby(&self, name: &str, accounts: &str, pin: &str) -> Result<(), String> {
+        self.db
+            .execute(
+                "UPDATE relays SET accounts = ?2, pin = ?3 WHERE name = ?1 AND (accounts != ?2 OR pin != ?3)",
+                params![name, accounts, pin],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// The standbys' account addresses and certificate fingerprints.
+    pub fn standbys(&self) -> Result<Vec<(String, String)>, String> {
+        let mut query = self
+            .db
+            .prepare(
+                "SELECT accounts, pin FROM relays WHERE accounts != '' AND pin != '' ORDER BY name",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+    }
+
+    /// A relay server that may join (`queqiao-server add-relay`): its key (32 random bytes) to give it, once. A name
+    /// that has one already gets a new one (the old key stops working at its next connection).
+    pub fn add_relay(&self, name: &str) -> Result<[u8; 32], String> {
+        if !valid_relay_name(name) {
+            return Err("a relay name is 1 to 32 letters, digits, - or _".into());
+        }
+        let key: [u8; 32] = random_bytes(32)?
+            .try_into()
+            .map_err(|_| "no random bytes".to_string())?;
+        self.db
+            .execute(
+                "INSERT INTO relays (name, secret, created) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET secret = excluded.secret, created = excluded.created",
+                params![name, hex(&key), now()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(key)
+    }
+
+    /// A relay's key, if it may join.
+    pub fn relay_key(&self, name: &str) -> Result<Option<[u8; 32]>, String> {
+        let secret: Option<String> = self
+            .db
+            .query_row("SELECT secret FROM relays WHERE name = ?1", [name], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|e| e.to_string())?;
+        Ok(secret
+            .and_then(|secret| unhex(&secret))
+            .and_then(|key| key.try_into().ok()))
+    }
+
+    /// The relays that may join, by name (with when they were added, Unix seconds).
+    pub fn relays(&self) -> Result<Vec<(String, i64)>, String> {
+        let mut query = self
+            .db
+            .prepare("SELECT name, created FROM relays ORDER BY name")
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
+    }
+
+    /// Takes a relay out (a running server drops it at once: its key is looked up at each connection and report);
+    /// false when there was none of that name.
+    pub fn remove_relay(&self, name: &str) -> Result<bool, String> {
+        self.db
+            .execute("DELETE FROM relays WHERE name = ?1", [name])
+            .map(|count| count > 0)
+            .map_err(|e| e.to_string())
     }
 
     pub fn add_user(&self, name: &str, password: &str) -> Result<(), String> {
@@ -703,7 +789,15 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex(text: &str) -> Option<Vec<u8>> {
+/// A relay's name: what the lists and logs show, so plain (1 to 32 of a-z, A-Z, 0-9, - and _).
+pub fn valid_relay_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+pub fn unhex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
     }
@@ -722,6 +816,36 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relays_are_added_given_a_new_key_and_removed() {
+        let dir = std::env::temp_dir().join(format!("queqiao-store-relays-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        assert!(store.add_relay("").is_err() && store.add_relay("bad name").is_err());
+        assert!(store.add_relay(&"x".repeat(33)).is_err());
+        let first = store.add_relay("shanghai").unwrap();
+        assert_eq!(store.relay_key("shanghai").unwrap(), Some(first));
+        assert_eq!(store.relay_key("chengdu").unwrap(), None);
+        // Added again: a new key, the old one no longer matches.
+        let second = store.add_relay("shanghai").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(store.relay_key("shanghai").unwrap(), Some(second));
+        store.add_relay("chengdu").unwrap();
+        let names: Vec<String> = store
+            .relays()
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["chengdu", "shanghai"]);
+        assert!(store.remove_relay("shanghai").unwrap());
+        assert!(!store.remove_relay("shanghai").unwrap());
+        assert_eq!(store.relay_key("shanghai").unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn user_names_are_one_whatever_their_case() {

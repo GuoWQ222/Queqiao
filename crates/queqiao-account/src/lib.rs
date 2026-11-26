@@ -21,6 +21,8 @@ mod keyring;
 mod keys;
 mod local_password;
 mod notes;
+mod relay_rtt;
+mod standbys;
 mod tls;
 
 use std::collections::VecDeque;
@@ -67,6 +69,7 @@ pub enum AccountEvent {
     IceServers {
         stun: Option<String>,
         turn: Option<TurnAccess>,
+        backups: Vec<TurnAccess>,
     },
     /// Agent: help requests are open under this help ID.
     HelpOpen(String),
@@ -193,35 +196,30 @@ impl Account {
         } else {
             KnownDevices::load()?
         };
-        // By name too past a proxy's made-up addresses (resolve_server), each address in turn.
-        let addresses = queqiao_transport::resolve_server(&login.server)?;
-        let mut failures = Vec::new();
-        let mut connected = None;
-        for address in addresses {
-            // Straight out of this PC's network card, past a proxy's TUN adapter, for a server on the internet.
-            let (tcp, tried) =
-                queqiao_transport::connect_direct_noted(address, Duration::from_secs(10));
-            match tcp {
-                Ok(tcp) => {
-                    // The way it went, after any address that did not answer first.
-                    let mut route = failures.clone();
-                    route.extend(tried);
-                    connected = Some((tcp, route));
+        // The account server; when it cannot be reached, the standbys it named, in order (one of them may have been
+        // made the account server: it has everyone's logins). Test devices keep them only in test builds' files.
+        let keeps_standbys = !device.in_memory || cfg!(feature = "test-files");
+        let standbys = if keeps_standbys {
+            standbys::load(&login.server, &login.pin)
+        } else {
+            Vec::new()
+        };
+        let mut reached = reach(&login.server, &login.pin);
+        let mut via_standby = false;
+        if reached.is_err() {
+            for standby in &standbys {
+                if let Ok((socket, mut route, local_ip)) = reach(&standby.server, &standby.pin) {
+                    route.push(format!(
+                        "{} could not be reached: connected to its standby {}",
+                        login.server, standby.server
+                    ));
+                    reached = Ok((socket, route, local_ip));
+                    via_standby = true;
                     break;
                 }
-                Err(e) => failures.push(format!("{address}: {e} ({})", tried.join("; "))),
             }
         }
-        let (tcp, route) = connected.ok_or_else(|| {
-            Error(format!(
-                "cannot reach {}: {}",
-                login.server,
-                failures.join("; ")
-            ))
-        })?;
-        tcp.set_nodelay(true)?;
-        let local_ip = tcp.local_addr()?.ip();
-        let mut socket = tls::open(tcp, &login.server, &login.pin)?;
+        let (mut socket, route, local_ip) = reached?;
 
         let first = match credentials {
             Credentials::Password(user, password, create) => ClientMessage::Login {
@@ -267,7 +265,7 @@ impl Account {
                 _ => {}
             }
         };
-        let (user, device_id, devices, features, created) = match welcome {
+        let (user, device_id, devices, features, created, relays) = match welcome {
             ServerMessage::Welcome {
                 user,
                 device_id,
@@ -275,11 +273,17 @@ impl Account {
                 devices,
                 features,
                 created,
+                relays,
+                standbys: named,
             } => {
                 if let Some(token) = refresh_token {
                     login.refresh_token = Some(token);
                 }
-                (user, device_id, devices, features, created)
+                // The account server's own word on its standbys (a standby's welcome changes nothing kept).
+                if keeps_standbys && !via_standby {
+                    let _ = standbys::save(&login.server, &login.pin, &named);
+                }
+                (user, device_id, devices, features, created, relays)
             }
             ServerMessage::Error { message } => return Err(Error(message)),
             other => return Err(Error(format!("unexpected answer: {other:?}"))),
@@ -293,6 +297,14 @@ impl Account {
                 let reason = tls::run(socket, command_receiver, &event_sender);
                 let _ = event_sender.send(AccountEvent::Closed(reason));
             })?;
+        // How far each relay is, for the server to choose the nearest for each session (in the background).
+        if features
+            .iter()
+            .any(|f| f == queqiao_core::account::features::RELAYS)
+            && !relays.is_empty()
+        {
+            relay_rtt::spawn(local_ip, relays, command_sender.clone());
+        }
         Ok(Account {
             commands: command_sender,
             events: event_receiver,
@@ -767,9 +779,17 @@ impl Signaling for SessionSignal<'_> {
         Ok(self.account.local_ip)
     }
 
-    /// Asks the server for its STUN and TURN servers and fresh relay credentials (waits up to 5 s).
+    /// Asks the server for its STUN and TURN servers and fresh relay credentials (waits up to 5 s). A server with
+    /// several relays is told the other device, so both ends get the same one, the nearest to both.
     fn ice_servers(&mut self) -> Result<IceServers, Error> {
-        self.account.send(ClientMessage::GetIceServers);
+        let relays = self
+            .account
+            .supports(queqiao_core::account::features::RELAYS);
+        let peer = relays.then(|| self.device.clone());
+        // Tests: QUEQIAO_FORCE=relay:<IP> asks for the relay at that address first.
+        let prefer = queqiao_core::forced("relay").filter(|_| relays);
+        self.account
+            .send(ClientMessage::GetIceServers { peer, prefer });
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut other = Vec::new();
         let result = loop {
@@ -780,20 +800,33 @@ impl Signaling for SessionSignal<'_> {
                 ));
             }
             match self.account.next_event(left) {
-                Some(AccountEvent::IceServers { stun, turn }) => {
-                    let turn = match turn {
-                        Some(access) => Some(TurnServer {
+                Some(AccountEvent::IceServers {
+                    stun,
+                    turn,
+                    backups,
+                }) => {
+                    let server = |access: TurnAccess| -> Result<TurnServer, Error> {
+                        Ok(TurnServer {
                             address: resolve(&access.address)?,
                             username: access.username,
                             password: access.password,
-                        }),
+                        })
+                    };
+                    let turn = match turn {
+                        Some(access) => Some(server(access)?),
                         None => None,
                     };
+                    // A backup whose name does not resolve is left out, not the session.
+                    let backups = backups.into_iter().filter_map(|a| server(a).ok()).collect();
                     let stun = match stun {
                         Some(address) => Some(resolve(&address)?),
                         None => None,
                     };
-                    break Ok(IceServers { stun, turn });
+                    break Ok(IceServers {
+                        stun,
+                        turn,
+                        backups,
+                    });
                 }
                 Some(AccountEvent::Closed(reason)) => break Err(Error(reason)),
                 Some(event) => other.push(event),
@@ -805,6 +838,36 @@ impl Signaling for SessionSignal<'_> {
         }
         result
     }
+}
+
+/// Connects to `server` (straight out of this PC's network card, each of its addresses in turn) and opens TLS with
+/// `pin` and the WebSocket: the socket, the way it went (for the reports), and this PC's address on it.
+fn reach(server: &str, pin: &str) -> Result<(tls::Socket, Vec<String>, IpAddr), Error> {
+    // By name too past a proxy's made-up addresses (resolve_server), each address in turn.
+    let addresses = queqiao_transport::resolve_server(server)?;
+    let mut failures = Vec::new();
+    let mut connected = None;
+    for address in addresses {
+        // Straight out of this PC's network card, past a proxy's TUN adapter, for a server on the internet.
+        let (tcp, tried) =
+            queqiao_transport::connect_direct_noted(address, Duration::from_secs(10));
+        match tcp {
+            Ok(tcp) => {
+                // The way it went, after any address that did not answer first.
+                let mut route = failures.clone();
+                route.extend(tried);
+                connected = Some((tcp, route));
+                break;
+            }
+            Err(e) => failures.push(format!("{address}: {e} ({})", tried.join("; "))),
+        }
+    }
+    let (tcp, route) = connected
+        .ok_or_else(|| Error(format!("cannot reach {server}: {}", failures.join("; "))))?;
+    tcp.set_nodelay(true)?;
+    let local_ip = tcp.local_addr()?.ip();
+    let socket = tls::open(tcp, server, pin)?;
+    Ok((socket, route, local_ip))
 }
 
 fn resolve(address: &str) -> Result<SocketAddr, Error> {

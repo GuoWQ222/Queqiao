@@ -4,7 +4,12 @@
 //! describe. Gathering stops after 1.5 s at most; whatever did not answer by then is left out.
 //!
 //! `QUEQIAO_FORCE=network:relay` offers the relayed address only, so the session must go through TURN.
+//!
+//! With several relays (the server lists backups), the first is asked; when it refuses, or has not answered after
+//! RELAY_FALLBACK, the next one is asked too, and the first in the server's order that gives an address is used (any
+//! other that does is given back).
 
+use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +23,9 @@ use crate::{Error, err};
 
 pub(crate) const GATHER_LIMIT: Duration = Duration::from_millis(1500);
 const BINDING_RTO: Duration = Duration::from_millis(250);
+/// How long a relay may take to give an address before the next one is asked as well: a relay answers within one
+/// round trip (under 300 ms from anywhere it is offered), and this leaves the next one most of the gathering time.
+const RELAY_FALLBACK: Duration = Duration::from_millis(600);
 
 pub(crate) struct Gathered {
     pub candidates: Vec<Candidate>,
@@ -35,19 +43,38 @@ pub(crate) fn gather(
     let started = Instant::now();
     let deadline = started + GATHER_LIMIT;
     let mut notes = Vec::new();
-    let mut turn = servers
-        .turn
-        .as_ref()
-        .map(|server| TurnClient::new(server, started));
+    // The relays in the server's order; each asked when the one before refused or was slow (RELAY_FALLBACK).
+    let mut queue: VecDeque<_> = servers.turn.iter().chain(&servers.backups).collect();
+    let mut turns: Vec<(TurnClient, Instant)> = Vec::new();
+    if let Some(first) = queue.pop_front() {
+        turns.push((TurnClient::new(first, started), started));
+    }
     // A plain STUN binding only without TURN (an allocation reports the public address too).
-    let mut binding = match (&turn, servers.stun, relay_only) {
-        (None, Some(server), false) => Some(Binding::new(server)),
+    let mut binding = match (turns.is_empty(), servers.stun, relay_only) {
+        (true, Some(server), false) => Some(Binding::new(server)),
         _ => None,
     };
     let mut buffer = vec![0u8; 2048];
     loop {
         let now = Instant::now();
-        if let Some(client) = turn.as_mut() {
+        // The latest relay asked refused, or is slow: the next one too.
+        if let Some((latest, asked)) = turns.last()
+            && latest.relayed.is_none()
+            && (latest.failure.is_some() || now >= *asked + RELAY_FALLBACK)
+            && let Some(next) = queue.pop_front()
+        {
+            notes.push(format!(
+                "relay {} {}: asking {} too",
+                latest.server,
+                latest.failure.clone().unwrap_or_else(|| format!(
+                    "gave no address in {} ms",
+                    RELAY_FALLBACK.as_millis()
+                )),
+                next.address
+            ));
+            turns.push((TurnClient::new(next, now), now));
+        }
+        for (client, _) in &mut turns {
             client.poll(now);
             for datagram in client.take_outbox() {
                 let _ = socket.send_to(&datagram, client.server);
@@ -56,21 +83,25 @@ pub(crate) fn gather(
         if let Some(binding) = binding.as_mut() {
             binding.send_if_due(socket, now);
         }
-        let turn_done = turn
-            .as_ref()
-            .is_none_or(|client| client.relayed.is_some() || client.failure.is_some());
+        let turn_done = turns.iter().any(|(client, _)| client.relayed.is_some())
+            || (queue.is_empty() && turns.iter().all(|(client, _)| client.failure.is_some()));
         let binding_done = binding
             .as_ref()
             .is_none_or(|binding| binding.mapped.is_some());
         if (turn_done && binding_done) || now >= deadline {
             break;
         }
+        let fallback = turns
+            .last()
+            .filter(|(latest, _)| latest.relayed.is_none() && !queue.is_empty())
+            .map(|(_, asked)| *asked + RELAY_FALLBACK);
         let next = [
             Some(deadline),
-            turn.as_ref().and_then(TurnClient::next_deadline),
+            fallback,
             binding.as_ref().map(|binding| binding.next_send),
         ]
         .into_iter()
+        .chain(turns.iter().map(|(client, _)| client.next_deadline()))
         .flatten()
         .min()
         .unwrap_or(deadline);
@@ -86,8 +117,8 @@ pub(crate) fn gather(
                 {
                     continue;
                 }
-                if let Some(client) = turn.as_mut()
-                    && from == client.server
+                if let Some((client, _)) =
+                    turns.iter_mut().find(|(client, _)| from == client.server)
                 {
                     let _ = client.handle(packet, Instant::now());
                 }
@@ -99,6 +130,26 @@ pub(crate) fn gather(
         }
     }
 
+    // The first relay in the server's order that gave an address; any other that did gets it back now.
+    let chosen = turns
+        .iter()
+        .position(|(client, _)| client.relayed.is_some());
+    let mut turn = None;
+    let mut failed = None;
+    for (index, (mut client, _)) in turns.into_iter().enumerate() {
+        if Some(index) == chosen {
+            turn = Some(client);
+        } else if client.relayed.is_some() {
+            client.close(Instant::now());
+            for datagram in client.take_outbox() {
+                let _ = socket.send_to(&datagram, client.server);
+            }
+        } else if failed.is_none() {
+            // The first relay's reason, for the report when none gave an address.
+            failed = Some(client);
+        }
+    }
+    let turn = turn.or(failed);
     let mut candidates = Vec::new();
     if !relay_only {
         candidates.push(Candidate::host(host, "udp").map_err(err)?);
