@@ -100,8 +100,8 @@
 |---|---|:---:|:---:|
 | **Windows** | Windows 10（1809 或更高版本）、Windows 11，x64 | ✅ | ✅ 安装服务后也可访问登录界面 |
 | **Linux** | glibc 2.35 或更高版本（Ubuntu 22.04+、Debian 12+、Fedora 36+），x86_64 | ✅ | ✅ 支持 X11 和 Wayland，安装服务后也可访问登录界面 |
-| **Android** | Android 8.0 或更高版本 | 计划支持 | ❌ 不支持 |
-| **iOS / iPadOS** | iOS 15 或更高版本 | 计划支持 | ❌ 不支持，iOS 不允许应用远程控制本机 |
+| **Android** | Android 8.0 或更高版本 | 即将推出 | ❌ 不支持 |
+| **iOS / iPadOS** | iOS 15 或更高版本 | 即将推出 | ❌ 不支持，iOS 不允许应用远程控制本机 |
 
 ### Linux 桌面环境
 

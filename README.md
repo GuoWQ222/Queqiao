@@ -100,8 +100,8 @@ Sessions on a phone work the same way. Choose a device and tap **Connect**. Tap 
 |---|---|:---:|:---:|
 | **Windows** | Windows 10 (1809 or later), Windows 11; x64 | ✅ | ✅ including the sign-in screen, with the service |
 | **Linux** | glibc 2.35 or later (Ubuntu 22.04+, Debian 12+, Fedora 36+); x86_64 | ✅ | ✅ on X11 and Wayland, including the sign-in screen, with the service |
-| **Android** | Android 8.0 or later | Planned | ❌ Not supported |
-| **iOS / iPadOS** | iOS 15 or later | Planned | ❌ Not supported (iOS does not allow apps to remotely control the device) |
+| **Android** | Android 8.0 or later | Coming soon | ❌ Not supported |
+| **iOS / iPadOS** | iOS 15 or later | Coming soon | ❌ Not supported (iOS does not allow apps to remotely control the device) |
 
 ### Linux desktops
 
