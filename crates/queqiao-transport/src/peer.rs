@@ -31,11 +31,12 @@ use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::channel::ChannelId;
 use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
-use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
+use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
 use crate::fec;
 use crate::flow::{self, Flow};
 use crate::gather::{ExtraDeadline, gather, gather_extra};
+use crate::punch::{self, NatInfo, Puncher};
 use crate::quic::{self, Quic, QuicEvent};
 use crate::signal::Signaling;
 use crate::turn::{Incoming, TurnClient};
@@ -291,15 +292,14 @@ impl Peer {
                     .filter_map(|ip| extra(ip.into())),
             );
         }
-        let stun = servers
-            .stun
-            .or(servers.turn.as_ref().map(|turn| turn.address));
+        // The servers each socket asks: the first for its server-reflexive candidate, all of them for what its NAT does.
+        let stun = crate::gather::nat_servers(&servers);
         let deadline = ExtraDeadline::new(Instant::now());
         let (gathered, found) = std::thread::scope(|scope| {
             let jobs: Vec<_> = extras
                 .iter()
                 .map(|extra| {
-                    let deadline = &deadline;
+                    let (deadline, stun) = (&deadline, &stun);
                     scope.spawn(move || gather_extra(&extra.socket, extra.local, stun, deadline))
                 })
                 .collect();
@@ -328,6 +328,10 @@ impl Peer {
         // The other side's relayed candidates (its TURN allocations): a path to one of them goes through a relay
         // although this side sends straight to it.
         let remote_relays: Vec<SocketAddr>;
+        // The other side's NATs and the key punch packets are signed with (from both SDPs).
+        let remote_nats: Vec<NatInfo>;
+        let punch_key: Option<punch::Key>;
+        let remote_candidates: Vec<SocketAddr>;
         set_sctp_timeouts();
         let mut rtc = tune(
             RtcConfig::new()
@@ -346,9 +350,15 @@ impl Peer {
         // Mihomo on sunshine, 2026-11-23: the session went through it): then this PC's own uplinks come first
         // and the tunnel is the fallback, as UU Remote gives VPN networks a cost.
         let mut uplink_candidates = Vec::new();
-        for (candidates, extra_notes) in found {
+        // What each IPv4 socket's NAT does, for the other side (in the SDP) and for punching.
+        let mut local_nats: Vec<NatInfo> = gathered.nat.into_iter().collect();
+        for (candidates, extra_notes, nat) in found {
             uplink_candidates.extend(candidates);
             notes.extend(extra_notes);
+            local_nats.extend(nat);
+        }
+        if ipv6_only {
+            local_nats.clear();
         }
         let (first, then) = if main_is_tunnel {
             notes.push(format!(
@@ -388,18 +398,24 @@ impl Peer {
                     Some(identity) => quic::add_to_sdp(&offer.to_sdp_string(), identity),
                     None => offer.to_sdp_string(),
                 };
+                let offer = punch::add_to_sdp(&offer, &local_nats);
                 signal.send("offer", &offer)?;
                 let answer = signal.expect("answer")?;
                 peer_quic = quic::from_sdp(&answer);
                 remote_relays = relayed_candidates(&answer);
+                remote_nats = punch::from_sdp(&answer);
+                remote_candidates = candidates_of(&answer, None);
+                punch_key = punch::Key::from_sdps(&offer, &answer);
                 let answer = SdpAnswer::from_sdp_string(&answer).map_err(err)?;
                 rtc.sdp_api().accept_answer(pending, answer).map_err(err)?;
             }
             Role::Agent => {
-                let offer = signal.expect("offer")?;
-                peer_quic = quic::from_sdp(&offer);
-                remote_relays = relayed_candidates(&offer);
-                let offer = SdpOffer::from_sdp_string(&offer).map_err(err)?;
+                let offer_text = signal.expect("offer")?;
+                peer_quic = quic::from_sdp(&offer_text);
+                remote_relays = relayed_candidates(&offer_text);
+                remote_nats = punch::from_sdp(&offer_text);
+                remote_candidates = candidates_of(&offer_text, None);
+                let offer = SdpOffer::from_sdp_string(&offer_text).map_err(err)?;
                 let answer = rtc.sdp_api().accept_offer(offer).map_err(err)?;
                 let answer = match (&identity, &peer_quic) {
                     (Some(identity), Some(_)) => {
@@ -407,9 +423,49 @@ impl Peer {
                     }
                     _ => answer.to_sdp_string(),
                 };
+                // Only to a Queqiao that punches too (it sent its own NAT): an older one is not told.
+                let answer = if remote_nats.is_empty() {
+                    answer
+                } else {
+                    punch::add_to_sdp(&answer, &local_nats)
+                };
+                punch_key = punch::Key::from_sdps(&offer_text, &answer);
                 signal.send("answer", &answer)?;
             }
         }
+        // What the other side's NAT does, and the plan for each pair of sockets (this side's, the other's).
+        for info in &remote_nats {
+            notes.push(format!(
+                "NAT of the other side's {}: {} (public {})",
+                info.base,
+                info.nat.describe(),
+                info.public
+            ));
+        }
+        let puncher = match punch_key {
+            // Tests: QUEQIAO_FORCE=punch:off (ICE alone, to compare).
+            Some(key)
+                if !relay_only
+                    && !local_nats.is_empty()
+                    && !remote_nats.is_empty()
+                    && queqiao_core::forced("punch").as_deref() != Some("off") =>
+            {
+                let controlling = role == Role::Viewer;
+                let mut random = || {
+                    let mut bytes = [0u8; 2];
+                    let _ = getrandom::fill(&mut bytes);
+                    u16::from_le_bytes(bytes)
+                };
+                let mut plans = Vec::new();
+                for local in &local_nats {
+                    for remote in &remote_nats {
+                        plans.extend(punch::plan(local, remote, controlling, &mut random));
+                    }
+                }
+                Some(Puncher::new(key, plans, Instant::now()))
+            }
+            _ => None,
+        };
 
         let quic = match (&identity, &peer_quic) {
             (Some(identity), Some(fingerprint)) => {
@@ -482,6 +538,11 @@ impl Peer {
             extras,
             arrived,
             stop_extras,
+            punch: puncher,
+            arrivals,
+            waker: waker.clone(),
+            wake_to,
+            remote_candidates,
             connected: false,
             dtls_notes: (0, 0),
             path: None,
@@ -797,13 +858,20 @@ fn receive_extra(
 /// The relayed candidates of an SDP (`a=candidate:<foundation> <component> <transport> <priority> <address> <port>
 /// typ relay ...`): the other side's TURN allocations.
 pub(crate) fn relayed_candidates(sdp: &str) -> Vec<SocketAddr> {
+    candidates_of(sdp, Some("relay"))
+}
+
+/// The addresses of an SDP's candidates, of one type (`typ <kind>`) or all.
+fn candidates_of(sdp: &str, kind: Option<&str>) -> Vec<SocketAddr> {
     sdp.lines()
         .filter_map(|line| line.trim().strip_prefix("a=candidate:"))
         .filter_map(|candidate| {
             let parts: Vec<&str> = candidate.split_whitespace().collect();
-            let kind = parts.iter().position(|part| *part == "typ")?;
-            if parts.get(kind + 1) != Some(&"relay") {
-                return None;
+            if let Some(kind) = kind {
+                let at = parts.iter().position(|part| *part == "typ")?;
+                if parts.get(at + 1) != Some(&kind) {
+                    return None;
+                }
             }
             let ip: IpAddr = parts.get(4)?.parse().ok()?;
             let port: u16 = parts.get(5)?.parse().ok()?;
@@ -851,6 +919,14 @@ struct Network {
     extras: Vec<Extra>,
     arrived: Receiver<Arriving>,
     stop_extras: Arc<AtomicBool>,
+    /// Punching for a direct path (`punch`) while the other side punches too; a new socket that finds one becomes an
+    /// extra socket (its thread gets `arrivals`, `waker` and `wake_to` as the others').
+    punch: Option<Puncher>,
+    arrivals: Sender<Arriving>,
+    waker: Arc<UdpSocket>,
+    wake_to: SocketAddr,
+    /// Every address the other side offered (its SDP's candidates) and every one punching handed to ICE since.
+    remote_candidates: Vec<SocketAddr>,
     connected: bool,
     /// DTLS packets noted before connecting (out, in): where the handshake goes and how long it takes.
     dtls_notes: (u32, u32),
@@ -906,6 +982,9 @@ impl Network {
         // viewer's checks wake it; through TURN they are dropped until we have sent something ourselves
         // (permissions), so nothing would move. Hence a timeout input at once, and short waits until
         // connected (tests/relay_ice.rs).
+        // Punching first: its packet to the other side's public address leaves before ICE's checks, so on a NAT that
+        // counts its ports up it gets the next one, the one the other side predicts.
+        self.punch_tick()?;
         let start = self.clock(Instant::now());
         self.rtc.handle_input(Input::Timeout(start)).map_err(err)?;
         let mut immediate = 0u32;
@@ -913,6 +992,9 @@ impl Network {
             let Some(mut deadline) = self.drain()? else {
                 return Ok(());
             };
+            if let Some(at) = self.punch_tick()? {
+                deadline = deadline.min(at);
+            }
             // Tests: what the bottleneck has carried goes out, and the loop wakes for the next.
             self.release_shaped();
             if let Some(next) = self
@@ -980,6 +1062,10 @@ impl Network {
             // layer's queue (30 packets) and ended the session: "DTLS error: receive queue full" (M4, 2026-11-23,
             // once uplinks came before a tunnel).
             if let Ok(arriving) = self.arrived.try_recv() {
+                if punch::is_punch(&arriving.contents) {
+                    self.on_punch(arriving.destination, arriving.source, &arriving.contents);
+                    continue;
+                }
                 self.dtls_note(
                     false,
                     &arriving.contents,
@@ -1014,6 +1100,11 @@ impl Network {
                     if self.turn.as_ref().is_some_and(|turn| turn.server == source) =>
                 {
                     self.handle_turn_packet(&buffer[..length])?;
+                    continue;
+                }
+                Ok((length, source)) if punch::is_punch(&buffer[..length]) => {
+                    let (local, datagram) = (self.local, buffer[..length].to_vec());
+                    self.on_punch(local, source, &datagram);
                     continue;
                 }
                 Ok((length, source)) => {
@@ -1563,6 +1654,137 @@ impl Network {
     fn clock(&mut self, at: Instant) -> Instant {
         self.clock = self.clock.max(at);
         self.clock
+    }
+
+    /// The socket a datagram from `local` leaves by: an extra socket's, else the main one.
+    fn socket_for(&self, local: SocketAddr) -> &UdpSocket {
+        self.extras
+            .iter()
+            .find(|extra| extra.local == local)
+            .map_or(&self.socket, |extra| &extra.socket)
+    }
+
+    /// Punching's turn: what is due leaves, what its new sockets received is handled; when to come back (none once it
+    /// is over: the session went direct, or its time ran out).
+    fn punch_tick(&mut self) -> Result<Option<Instant>, Error> {
+        let Some(punch) = self.punch.as_mut() else {
+            return Ok(None);
+        };
+        if punch.stopped() {
+            return Ok(None);
+        }
+        if self
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("direct"))
+        {
+            punch.stop();
+            let _ = self.events.send(PeerEvent::Note(
+                "punching stops: the session goes direct".into(),
+            ));
+            return Ok(None);
+        }
+        let mut out = Vec::new();
+        let next = punch.poll(Instant::now(), &mut out);
+        let events = punch.receive();
+        let notes = punch.take_notes();
+        for (from, to, datagram) in out {
+            let _ = self.socket_for(from).send_to(&datagram, to);
+        }
+        for note in notes {
+            let _ = self.events.send(PeerEvent::Note(note));
+        }
+        for event in events {
+            match event {
+                punch::Event::Found {
+                    local,
+                    remote,
+                    socket,
+                } => self.punch_found(local, remote, socket),
+                punch::Event::Deliver {
+                    local,
+                    source,
+                    contents,
+                    socket,
+                } => {
+                    self.adopt(local, socket);
+                    let at = self.clock(Instant::now());
+                    self.deliver(at, source, local, &contents)?;
+                }
+            }
+        }
+        Ok(next)
+    }
+
+    /// A punch packet on one of the session's sockets: answered when it is a request (also after punching ended: the
+    /// other side may still be at it); its path handed to ICE once.
+    fn on_punch(&mut self, local: SocketAddr, source: SocketAddr, datagram: &[u8]) {
+        let Some(punch) = self.punch.as_mut() else {
+            return;
+        };
+        let (answer, new) = punch.on_packet(local, source, datagram);
+        if let Some(answer) = answer {
+            let _ = self.socket_for(local).send_to(&answer, source);
+        }
+        if new {
+            self.punch_found(local, source, None);
+        }
+    }
+
+    /// A path punching found (`remote` reached `local`, or answered there): the other side's address for ICE as a
+    /// candidate (unless its SDP had it already), and a new socket as one of this side's.
+    fn punch_found(
+        &mut self,
+        local: SocketAddr,
+        remote: SocketAddr,
+        socket: Option<Arc<UdpSocket>>,
+    ) {
+        if let Some(socket) = socket {
+            self.adopt(local, socket);
+        }
+        let known = self.remote_candidates.contains(&remote);
+        let _ = self.events.send(PeerEvent::Note(format!(
+            "punching: {remote} reached {local}, a direct path{}",
+            if known {
+                " (ICE has that address already)"
+            } else {
+                ": handed to ICE"
+            }
+        )));
+        if !known {
+            self.remote_candidates.push(remote);
+            match Candidate::server_reflexive(remote, remote, "udp") {
+                Ok(candidate) => self.rtc.add_remote_candidate(candidate),
+                Err(error) => {
+                    let _ = self.events.send(PeerEvent::Note(format!(
+                        "punching: {remote} not usable: {error}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// A new socket punching found a path on becomes one of the session's: a receiving thread as the other uplinks'
+    /// sockets have, and a host candidate for ICE.
+    fn adopt(&mut self, local: SocketAddr, socket: Arc<UdpSocket>) {
+        if self.extras.iter().any(|extra| extra.local == local) {
+            return;
+        }
+        let _ = socket.set_nonblocking(false);
+        let (thread_socket, waker, arrivals, stop, wake_to) = (
+            socket.clone(),
+            self.waker.clone(),
+            self.arrivals.clone(),
+            self.stop_extras.clone(),
+            self.wake_to,
+        );
+        let _ = std::thread::Builder::new()
+            .name("queqiao-net-in".into())
+            .spawn(move || receive_extra(thread_socket, local, waker, wake_to, arrivals, stop));
+        self.extras.push(Extra { socket, local });
+        if let Ok(candidate) = Candidate::host(local, "udp") {
+            self.rtc.add_local_candidate(candidate);
+        }
     }
 
     /// Sends a datagram from `source` (our address: a socket of ours, or the TURN relay's) to `destination`;

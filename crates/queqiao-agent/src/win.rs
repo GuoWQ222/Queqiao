@@ -92,6 +92,14 @@ pub(crate) fn main() {
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    // Windows' firewall asks once whether the agent may take connections (allowed, sessions reach this PC directly
+    // from behind any NAT). Shipping builds; test builds only when asked (QUEQIAO_FORCE=firewall:ask), so tests on the
+    // developer's PC never put the dialog in front of its user.
+    if !cfg!(feature = "test-switches")
+        || queqiao_core::forced("firewall").as_deref() == Some("ask")
+    {
+        queqiao_transport::firewall::let_windows_ask();
+    }
     if options.wol_check {
         let check = wol_check::check();
         lines.extend(wol_check::report(&check));

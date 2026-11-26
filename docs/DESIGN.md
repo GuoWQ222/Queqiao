@@ -168,6 +168,35 @@ UU builds on WebRTC's standard pieces (`research\uu\STREAMER_FINDINGS.md`). We d
   `--force network:relay`) offers only the relayed candidate.
 - **Relay: TURN.** `queqiao-server` includes a TURN server (our own, see "As built in M4" above); both sides get relay candidates from it, so ICE
   falls back to the relay automatically when direct UDP fails. Later: TURN over TCP/TLS for UDP-blocked networks.
+- **Direct paths past ICE (2026-11-27, `queqiao-transport` `punch.rs`, our own design after studying what UU Remote
+  does, `research\uu\P2P_FINDINGS.md` kept outside the repository).** ICE fails directly when one side is behind a
+  symmetric NAT (a phone carrier's) and the other's firewall lets in only answers to its own sends (Windows' own, in
+  front of a public address): the PC controlling sunshine on its mobile network went through the relay, UU direct.
+  - Each IPv4 socket asks up to three servers (the relay's allocation, then a STUN Binding to the next relays, 25 ms
+    apart) and classifies its NAT: none, one mapping for every destination, a new port per destination counting by a
+    fixed step, or at random; the SDP carries it (`a=x-queqiao-nat:<socket> <kind> <public>`).
+  - For each pair of sockets a plan (`punch::plan`): always packets to the other's public address; a predictable NAT:
+    its next 50 ports; a random one: every 32nd port of its address while it sends from 150 new sockets (one of their
+    mappings is met with 99 % odds); predictable on both sides: 30 sockets each to the port the other's 30th gets; the
+    predictions get the many-sockets method after 1.5 s, the other side sweeping every 128th port (sunshine's carrier
+    counts per destination, so the ports it gave towards the PC were never the predicted ones, but the 150 sockets get
+    a block in a row there, which a 128-port stride meets for certain); one mapping on both sides and ICE still not
+    direct after 10 s: the sides take turns.
+  - Order matters: the many sockets send their first round all at once and the sweep starts 1 s later. On sunshine's
+    carrier a packet that reaches the NAT at a port before the mapping is made there breaks that port for it (its
+    packets still come out, nothing gets in): with the sweep and the sockets starting together, four sessions of four
+    found only such a one-way path; with the sweep a second later, five of five went direct.
+  - Packets: 28 bytes (`0xFA 'Q' 'P'`, request or answer, an 8-byte nonce, a 16-byte HMAC-SHA256 tag with a key from
+    both sides' ICE passwords): only the two ends make or accept them. Lists are paced (a round of the targets at most
+    every 100 ms, 1 to 5 packets per 10 ms tick), at most 300 new sockets, 30 s at most.
+  - A packet that arrives, or its answer, names a working path: the other side's address goes to str0m as a candidate,
+    and a new socket that found it becomes one of the session's (host candidate, receiving thread). The controlling
+    side nominates the best succeeded pair, so the session moves from the relay to the direct pair; punching stops
+    when the path is direct. `QUEQIAO_FORCE=punch:off` leaves it out (tests).
+  - Windows: the agent and the viewer listen on every address for a moment at start (accepting nothing) so the
+    firewall's own "Allow access" dialog asks the person once per program (UU's rules on the PC came from that dialog);
+    allowed, ICE alone goes direct to this PC from behind any NAT. Shipping builds only; test builds with
+    `QUEQIAO_FORCE=firewall:ask`.
 - **Data channels:** `control` (reliable, ordered: session control, clipboard), `input` (unordered, low latency),
   `files` (reliable, flow-controlled).
 - **Identity and encryption:** each device has its own DTLS certificate (key protected with DPAPI). The account

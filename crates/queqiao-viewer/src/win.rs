@@ -109,6 +109,12 @@ pub(crate) fn main() {
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    // Windows' firewall asks once whether the viewer may take connections (as the agent: see there).
+    if !cfg!(feature = "test-switches")
+        || queqiao_core::forced("firewall").as_deref() == Some("ask")
+    {
+        queqiao_transport::firewall::let_windows_ask();
+    }
     if !options.direct() {
         return crate::account::run_account(options, lines);
     }

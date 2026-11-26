@@ -3,10 +3,14 @@
 //! sets it up ([`Signaling`]: a direct TCP connection ([`Signal`]) or queqiao-server through queqiao-account).
 
 mod fec;
+/// Windows: lets its firewall ask, once per program, whether the program may take connections ([`firewall::let_windows_ask`]).
+#[cfg(windows)]
+pub mod firewall;
 mod flow;
 mod gather;
 mod interfaces;
 mod peer;
+mod punch;
 mod quic;
 mod resolve;
 mod shape;
