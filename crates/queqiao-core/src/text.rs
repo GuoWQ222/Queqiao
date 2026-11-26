@@ -996,6 +996,30 @@ const CHINESE: &[(&str, &str)] = &[
         "{device} stays with the device controlling it.",
         "{device} 仍由当前控制它的设备控制。",
     ),
+    // One login form for logging in and signing up (as UU Remote, 2026-11-26).
+    ("Use another server...", "使用其他服务器..."),
+    ("Server key (SHA-256)", "服务器密钥 (SHA-256)"),
+    (
+        "Log in, or sign up with a new user name",
+        "登录，或使用新用户名注册",
+    ),
+    (
+        "© 2026 GuoWQ222. All rights reserved.",
+        "© 2026 GuoWQ222 版权所有",
+    ),
+    (
+        "Please fill in the server and its key.",
+        "请填写服务器及其密钥。",
+    ),
+    (
+        "Please enter a user name and a password.",
+        "请输入用户名和密码。",
+    ),
+    (
+        "A new account \"{user}\" was made with this password, and you are logged in. If you meant an account you \
+         already have, log out and check the user name.",
+        "已使用此密码创建新账号“{user}”并登录。如果您要登录的是已有账号，请退出登录并检查用户名。",
+    ),
 ];
 
 #[cfg(test)]

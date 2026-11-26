@@ -1,7 +1,7 @@
 "Queqiao" = "鹊桥";
 "Remote control of your own devices" = "远程控制你自己的设备";
 "Log in" = "登录";
-"Log in with your Queqiao account to see your devices." = "登录鹊桥账号，查看你的设备。";
+"Log in, or sign up with a new user name." = "登录，或使用新用户名注册。";
 "Account" = "账号";
 "Password" = "密码";
 "Server" = "服务器";
@@ -52,3 +52,13 @@
 "Balanced" = "均衡";
 "Sharp" = "清晰";
 "Screen %lld" = "屏幕 %lld";
+"© 2026 GuoWQ222. All rights reserved." = "© 2026 GuoWQ222 版权所有";
+"New account" = "新账号";
+"OK" = "确定";
+"A new account \"%@\" was made with this password, and you are logged in. If you meant an account you already have, log out and check the user name." = "已使用此密码创建新账号“%@”并登录。如果您要登录的是已有账号，请退出登录并检查用户名。";
+"Being controlled" = "被控中";
+"%@ is controlling it" = "%@ 正在控制";
+"Take Control" = "接管设备";
+"Taking control will disconnect %@. Do you want to continue?" = "接管设备后将断开 %@ 的远程控制。是否继续？";
+"%@ is in a session with someone helping from another account." = "%@ 正在接受其他账号的远程协助。";
+"%@ is controlling %@ now." = "%1$@ 正在控制 %2$@。";

@@ -12,7 +12,14 @@ import org.json.JSONObject
 import kotlin.concurrent.thread
 
 /** One device of the account, as the list shows it. */
-data class Device(val id: String, val name: String, val online: Boolean, val controllable: Boolean)
+data class Device(
+    val id: String,
+    val name: String,
+    val online: Boolean,
+    val controllable: Boolean,
+    /** Another device of the account controlling it now (UU Remote's "being controlled"), empty for none. */
+    val controlledBy: String = "",
+)
 
 /** Where the app is: logging in, the device list, a session. */
 sealed class Screen {
@@ -28,6 +35,10 @@ data class SessionState(
     val path: String = "",
     val message: String = "",
     val passwordNeeded: Boolean = false,
+    /** "busy": another device controls the PC (`controller`; empty: someone of another account helping). */
+    val controller: String = "",
+    /** The person may take control from `controller` (a device of the account, not asked to already). */
+    val mayTakeOver: Boolean = false,
 )
 
 /** The session's figures, once a second (as the desktop's card). */
@@ -61,6 +72,9 @@ class Engine private constructor(context: Context) {
     private val _helping = MutableStateFlow(false)
     /** A help request is waiting for its answer. */
     val helping: StateFlow<Boolean> = _helping
+    private val _created = MutableStateFlow("")
+    /** The user name of an account the login just made (one form for logging in and signing up), else empty. */
+    val created: StateFlow<String> = _created
     private val app = context.applicationContext
     var ownDeviceId = ""
         private set
@@ -97,11 +111,20 @@ class Engine private constructor(context: Context) {
         command(JSONObject().put("log_out", JSONObject()))
     }
 
-    fun connect(device: Device) {
+    /** A session with [device]; [takeOver]: from the device of the account controlling it (the person confirmed). */
+    fun connect(device: Device, takeOver: Boolean = false) {
         _session.value = SessionState()
         _figures.value = Figures()
         _screen.value = Screen.Session(device)
-        command(JSONObject().put("connect", JSONObject().put("device", device.id)))
+        command(JSONObject().put("connect", JSONObject().put("device", device.id).put("take_over", takeOver)))
+    }
+
+    /** Ends another device's session with [device] (the being-controlled banner's Disconnect). */
+    fun endControl(device: Device) = command(JSONObject().put("end_control", device.id))
+
+    /** The account this login made, shown once (a name typed wrong makes one too), then cleared. */
+    fun createdSeen() {
+        _created.value = ""
     }
 
     fun disconnect() {
@@ -168,7 +191,9 @@ class Engine private constructor(context: Context) {
     private fun onEvent(event: JSONObject) {
         when {
             event.has("logged_in") -> {
-                ownDeviceId = event.getJSONObject("logged_in").optString("device")
+                val login = event.getJSONObject("logged_in")
+                ownDeviceId = login.optString("device")
+                if (login.optBoolean("created")) _created.value = login.optString("user")
                 _busy.value = false
                 _error.value = ""
                 if (_screen.value is Screen.Login) _screen.value = Screen.Devices
@@ -181,7 +206,10 @@ class Engine private constructor(context: Context) {
                 val list = event.getJSONArray("devices")
                 _devices.value = (0 until list.length()).map {
                     val d = list.getJSONObject(it)
-                    Device(d.getString("id"), d.getString("name"), d.optBoolean("online"), d.optBoolean("controllable"))
+                    Device(
+                        d.getString("id"), d.getString("name"), d.optBoolean("online"), d.optBoolean("controllable"),
+                        d.optString("controlled_by"),
+                    )
                 }
             }
             event.has("error") -> {
@@ -199,6 +227,12 @@ class Engine private constructor(context: Context) {
                 _session.value = when (s.optString("state")) {
                     "path" -> state.copy(relayed = s.optBoolean("relayed"), path = s.optString("path"))
                     "failed" -> state.copy(stage = "failed", message = s.optString("message"))
+                    // Another device has the PC: the session screen asks whether to take control.
+                    "busy" -> state.copy(
+                        stage = "busy",
+                        controller = s.optString("controller"),
+                        mayTakeOver = s.optBoolean("may_take_over"),
+                    )
                     "ended" -> {
                         if (_screen.value is Screen.Session) _screen.value = Screen.Devices
                         state.copy(stage = "ended", message = s.optString("why"))

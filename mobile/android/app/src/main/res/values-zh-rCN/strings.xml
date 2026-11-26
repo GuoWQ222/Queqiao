@@ -3,7 +3,7 @@
     <string name="app_name">鹊桥</string>
     <string name="login_subtitle">远程控制你自己的设备</string>
     <string name="login_title">登录</string>
-    <string name="login_hint">登录鹊桥账号，查看你的设备。</string>
+    <string name="login_hint">登录，或使用新用户名注册。</string>
     <string name="user">账号</string>
     <string name="password">密码</string>
     <string name="server">服务器</string>
@@ -55,4 +55,17 @@
     <string name="balanced">均衡</string>
     <string name="sharp">清晰</string>
     <string name="screen_n">屏幕 %1$d</string>
+    <!-- 同一时间只有一台设备控制电脑（同 UU 远程，2026-11-26）。 -->
+    <string name="being_controlled">被控中</string>
+    <string name="controlled_text">当前有本账号设备正在控制此电脑。</string>
+    <string name="controlled_by">%1$s 正在控制</string>
+    <string name="take_control">接管设备</string>
+    <string name="take_over_text">接管设备后将断开 %1$s 的远程控制。是否继续？</string>
+    <string name="busy_helper">%1$s 正在接受其他账号的远程协助。</string>
+    <string name="busy_controller">%1$s 正在控制 %2$s。</string>
+    <!-- 登录与注册同一表单。 -->
+    <string name="created_title">新账号</string>
+    <string name="created_text">已使用此密码创建新账号“%1$s”并登录。如果您要登录的是已有账号，请退出登录并检查用户名。</string>
+    <string name="ok">确定</string>
+    <string name="copyright">© 2026 GuoWQ222 版权所有</string>
 </resources>

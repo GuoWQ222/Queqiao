@@ -14,7 +14,7 @@ use queqiao_capture::{Context, Device as Gpu};
 use queqiao_core::text::{tr, trf};
 use queqiao_display::{
     DeviceList, DeviceRow, HelpAction, HelpForm, ListAction, LoginAction, LoginFields, LoginForm,
-    ask_secret, ask_text, confirm, popup_menu,
+    ask_text, confirm, popup_menu,
 };
 use queqiao_transport::{Addresses, Peer, Role, Signaling, busy_controller};
 
@@ -290,25 +290,9 @@ fn log_in(
     loop {
         match form.next(15) {
             Some(LoginAction::Cancel) => return Ok(None),
-            Some(action @ (LoginAction::Submit(_) | LoginAction::Register(_))) => {
-                let register = matches!(action, LoginAction::Register(_));
-                let (LoginAction::Submit(fields) | LoginAction::Register(fields)) = action else {
-                    continue;
-                };
-                if [&fields.server, &fields.pin, &fields.user, &fields.password]
-                    .iter()
-                    .any(|value| value.is_empty())
-                {
-                    form.set_status(tr("Please fill in all four fields."));
-                    continue;
-                }
-                // A new account: the password typed twice.
-                if register
-                    && options.ui_test.is_none()
-                    && ask_secret(tr("Queqiao"), tr("The same password again:")).as_deref()
-                        != Some(fields.password.as_str())
-                {
-                    form.set_status(tr("The two passwords are not the same."));
+            Some(LoginAction::Submit(fields)) => {
+                if let Some(missing) = queqiao_display::missing_login_field(&fields) {
+                    form.set_status(missing);
                     continue;
                 }
                 if login.server != fields.server {
@@ -316,33 +300,18 @@ fn log_in(
                 }
                 login.server = fields.server.clone();
                 login.pin = fields.pin.clone();
-                form.set_busy(
-                    true,
-                    if register {
-                        tr("Creating the account...")
-                    } else {
-                        tr("Logging in...")
-                    },
-                );
-                // In the background, so the form keeps responding.
+                form.set_busy(true, tr("Logging in..."));
+                // In the background, so the form keeps responding. One form for both (the user, 2026-11-26): a name
+                // the server does not know makes the account.
                 let (mut attempt, identity) = (login.clone(), identity.clone());
                 let worker = std::thread::spawn(move || {
-                    let result = if register {
-                        Account::register(
-                            &mut attempt,
-                            &identity,
-                            AccountRole::Viewer,
-                            &fields.user,
-                            &fields.password,
-                        )
-                    } else {
-                        Account::connect(
-                            &mut attempt,
-                            &identity,
-                            AccountRole::Viewer,
-                            Some((&fields.user, &fields.password)),
-                        )
-                    };
+                    let result = Account::log_in_or_create(
+                        &mut attempt,
+                        &identity,
+                        AccountRole::Viewer,
+                        &fields.user,
+                        &fields.password,
+                    );
                     (result, attempt)
                 });
                 while !worker.is_finished() {
@@ -356,6 +325,17 @@ fn log_in(
                 match result {
                     Ok(account) => {
                         *login = attempt;
+                        if account.created {
+                            lines.push(format!("login: a new account {} was made", account.user));
+                            // A name typed wrong makes an account too: the person is told which one this is.
+                            if options.ui_test.is_none() {
+                                form.set_busy(false, "");
+                                queqiao_display::show_info(
+                                    tr("Queqiao"),
+                                    &queqiao_display::created_text(&account.user),
+                                );
+                            }
+                        }
                         return Ok(Some(account));
                     }
                     Err(error) if options.ui_test.is_some() => return Err(error.0),

@@ -3,7 +3,7 @@
     <string name="app_name">Queqiao</string>
     <string name="login_subtitle">Remote control of your own devices</string>
     <string name="login_title">Log in</string>
-    <string name="login_hint">Log in with your Queqiao account to see your devices.</string>
+    <string name="login_hint">Log in, or sign up with a new user name.</string>
     <string name="user">Account</string>
     <string name="password">Password</string>
     <string name="server">Server</string>
@@ -55,4 +55,17 @@
     <string name="balanced">Balanced</string>
     <string name="sharp">Sharp</string>
     <string name="screen_n">Screen %1$d</string>
+    <!-- One device controls a PC at a time (as UU Remote, 2026-11-26). -->
+    <string name="being_controlled">Being controlled</string>
+    <string name="controlled_text">A device on your account is currently controlling this computer.</string>
+    <string name="controlled_by">%1$s is controlling it</string>
+    <string name="take_control">Take Control</string>
+    <string name="take_over_text">Taking control will disconnect %1$s. Do you want to continue?</string>
+    <string name="busy_helper">%1$s is in a session with someone helping from another account.</string>
+    <string name="busy_controller">%1$s is controlling %2$s now.</string>
+    <!-- One form for logging in and signing up. -->
+    <string name="created_title">New account</string>
+    <string name="created_text">A new account \"%1$s\" was made with this password, and you are logged in. If you meant an account you already have, log out and check the user name.</string>
+    <string name="ok">OK</string>
+    <string name="copyright">© 2026 GuoWQ222. All rights reserved.</string>
 </resources>

@@ -20,6 +20,8 @@ enum Q {
     static let heroBottom = Color(hex: 0x0E1330)
     static let heroMuted = Color(hex: 0xA9B1D6)
     static let danger = Color(hex: 0xC6423B)
+    /// The being-controlled banner's pale blue (as the desktop main window's).
+    static let bannerBack = Color(hex: 0xEAF2FE)
 }
 
 extension Color {
@@ -87,6 +89,20 @@ struct ToolChip: View {
                 .background(selected ? Q.nightSelected : Q.nightChip)
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Q.gold : Q.nightChip, lineWidth: 1))
                 .cornerRadius(8)
+        }
+    }
+}
+
+extension View {
+    /// "Taking control will disconnect {controller}. Do you want to continue?" with Take Control and Cancel (as UU
+    /// Remote's): one device controls a PC at a time.
+    func takeOverAlert(controller: String, isPresented: Binding<Bool>, onCancel: @escaping () -> Void,
+                       onTakeOver: @escaping () -> Void) -> some View {
+        alert("Take Control", isPresented: isPresented) {
+            Button("Take Control", action: onTakeOver)
+            Button("Cancel", role: .cancel, action: onCancel)
+        } message: {
+            Text("Taking control will disconnect \(controller). Do you want to continue?")
         }
     }
 }

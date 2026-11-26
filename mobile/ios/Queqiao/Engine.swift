@@ -7,6 +7,8 @@ struct Device: Identifiable, Equatable {
     let name: String
     let online: Bool
     let controllable: Bool
+    /// Another device of the account controlling it now (UU Remote's "being controlled"), empty for none.
+    var controlledBy = ""
 }
 
 /// Where the app is: logging in, the device list, a session.
@@ -23,6 +25,10 @@ struct SessionState: Equatable {
     var path = ""
     var message = ""
     var passwordNeeded = false
+    /// "busy": another device controls the PC (empty: someone of another account helping).
+    var controller = ""
+    /// The person may take control from `controller` (a device of the account, not asked to already).
+    var mayTakeOver = false
 }
 
 /// The session's figures, once a second (as the desktop's card).
@@ -51,6 +57,8 @@ final class Engine: ObservableObject {
     @Published var currentScreen = 0
     /// A help request waits for its answer.
     @Published var helping = false
+    /// The user name of an account the login just made (one form for logging in and signing up), else empty.
+    @Published var created = ""
     private(set) var ownDeviceId = ""
     /// Simulator tests: the device to connect to once listed, and text to type once its picture shows.
     private var testConnect = ProcessInfo.processInfo.environment["QUEQIAO_TEST_CONNECT"]
@@ -96,12 +104,16 @@ final class Engine: ObservableObject {
 
     func logOut() { command(["log_out": [String: Any]()]) }
 
-    func connect(_ device: Device) {
+    /// A session with `device`; `takeOver`: from the device of the account controlling it (the person confirmed).
+    func connect(_ device: Device, takeOver: Bool = false) {
         session = SessionState()
         figures = Figures()
         screen = .session(device)
-        command(["connect": ["device": device.id]])
+        command(["connect": ["device": device.id, "take_over": takeOver]])
     }
+
+    /// Ends another device's session with `device` (the being-controlled banner's Disconnect).
+    func endControl(_ device: Device) { command(["end_control": device.id]) }
 
     func disconnect() {
         command(["disconnect": [String: Any]()])
@@ -170,6 +182,7 @@ final class Engine: ObservableObject {
     private func onEvent(_ event: [String: Any]) {
         if let loggedIn = event["logged_in"] as? [String: Any] {
             ownDeviceId = loggedIn["device"] as? String ?? ""
+            if loggedIn["created"] as? Bool == true { created = loggedIn["user"] as? String ?? "" }
             busy = false
             error = ""
             if screen == .login { screen = .devices }
@@ -182,7 +195,8 @@ final class Engine: ObservableObject {
                     id: $0["id"] as? String ?? "",
                     name: $0["name"] as? String ?? "",
                     online: $0["online"] as? Bool ?? false,
-                    controllable: $0["controllable"] as? Bool ?? false
+                    controllable: $0["controllable"] as? Bool ?? false,
+                    controlledBy: $0["controlled_by"] as? String ?? ""
                 )
             }
             if let name = testConnect, screen == .devices, let device = devices.first(where: { $0.name == name && $0.online }) {
@@ -208,6 +222,11 @@ final class Engine: ObservableObject {
             case "failed":
                 state.stage = "failed"
                 state.message = s["message"] as? String ?? ""
+            case "busy":
+                // Another device has the PC: the session view asks whether to take control.
+                state.stage = "busy"
+                state.controller = s["controller"] as? String ?? ""
+                state.mayTakeOver = s["may_take_over"] as? Bool ?? false
             case "ended":
                 state.stage = "ended"
                 state.message = s["why"] as? String ?? ""

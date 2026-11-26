@@ -74,14 +74,14 @@ const SIDE_LINE: u32 = 0x005E_3129;
 const SIDE_CHIP: u32 = 0x0074_382D;
 const GOLD: u32 = 0x005A_B4E3;
 const ON_GOLD: u32 = 0x003F_1F1A;
-const WHITE: u32 = 0x00FF_FFFF;
+pub(crate) const WHITE: u32 = 0x00FF_FFFF;
 const PAGE_COLOR: u32 = WHITE;
-const TEXT_COLOR: u32 = 0x0040_211B;
-const SECONDARY: u32 = 0x008C_6B64;
+pub(crate) const TEXT_COLOR: u32 = 0x0040_211B;
+pub(crate) const SECONDARY: u32 = 0x008C_6B64;
 const DISABLED: u32 = 0x00CC_B9B4;
-const DIVIDER: u32 = 0x00F2_E9E6;
+pub(crate) const DIVIDER: u32 = 0x00F2_E9E6;
 const CARD: u32 = 0x00FA_F6F5;
-const ACCENT: u32 = 0x00AE_5F3D;
+pub(crate) const ACCENT: u32 = 0x00AE_5F3D;
 const ONLINE: u32 = 0x0071_BF2F;
 const OFFLINE: u32 = 0x00B8_A19A;
 const PILL_ON: (u32, u32) = (0x00EC_F6E3, 0x004A_7817);
@@ -958,11 +958,11 @@ fn refill(list: HWND, count: usize, selected: Option<usize>) {
     }
 }
 
-fn px(value: i32, scale: f64) -> i32 {
+pub(crate) fn px(value: i32, scale: f64) -> i32 {
     (f64::from(value) * scale).round() as i32
 }
 
-fn font(size: i32, weight: i32, face: PCWSTR, scale: f64) -> HFONT {
+pub(crate) fn font(size: i32, weight: i32, face: PCWSTR, scale: f64) -> HFONT {
     unsafe {
         CreateFontW(
             -px(size, scale),
@@ -983,7 +983,7 @@ fn font(size: i32, weight: i32, face: PCWSTR, scale: f64) -> HFONT {
     }
 }
 
-fn rect(x: i32, y: i32, width: i32, height: i32, scale: f64) -> RECT {
+pub(crate) fn rect(x: i32, y: i32, width: i32, height: i32, scale: f64) -> RECT {
     RECT {
         left: px(x, scale),
         top: px(y, scale),
@@ -1000,7 +1000,7 @@ fn inside(place: [i32; 4], x: i32, y: i32) -> bool {
     (place[0]..place[0] + place[2]).contains(&x) && (place[1]..place[1] + place[3]).contains(&y)
 }
 
-fn fill(dc: HDC, area: &RECT, color: u32) {
+pub(crate) fn fill(dc: HDC, area: &RECT, color: u32) {
     unsafe {
         let brush = CreateSolidBrush(COLORREF(color));
         FillRect(dc, area, brush);
@@ -1009,7 +1009,7 @@ fn fill(dc: HDC, area: &RECT, color: u32) {
 }
 
 /// A rounded rectangle (or a circle, with `round` as large as it) filled with `color`.
-fn rounded(dc: HDC, area: &RECT, round: i32, color: u32) {
+pub(crate) fn rounded(dc: HDC, area: &RECT, round: i32, color: u32) {
     unsafe {
         let brush = CreateSolidBrush(COLORREF(color));
         let old_brush = SelectObject(dc, brush.into());
@@ -1055,7 +1055,7 @@ fn dot(dc: HDC, area: &RECT, color: u32, ring: u32) {
     }
 }
 
-fn text(dc: HDC, value: &str, area: RECT, font: HFONT, color: u32, flags: u32) {
+pub(crate) fn text(dc: HDC, value: &str, area: RECT, font: HFONT, color: u32, flags: u32) {
     // DrawTextW reads the text even when told it is 0 long: an empty Vec's dangling pointer crashes it.
     if value.is_empty() {
         return;
@@ -1077,7 +1077,7 @@ fn text(dc: HDC, value: &str, area: RECT, font: HFONT, color: u32, flags: u32) {
 }
 
 /// How wide `value` is in `font`, in pixels.
-fn text_width(dc: HDC, value: &str, font: HFONT) -> i32 {
+pub(crate) fn text_width(dc: HDC, value: &str, font: HFONT) -> i32 {
     // DrawTextW reads the text even when told it is 0 long: an empty Vec's dangling pointer crashes it.
     if value.is_empty() {
         return 0;
@@ -1100,7 +1100,7 @@ fn text_width(dc: HDC, value: &str, font: HFONT) -> i32 {
 }
 
 /// How tall `value` is in `font`, wrapped to `width` pixels.
-fn wrapped_height(dc: HDC, value: &str, font: HFONT, width: i32) -> i32 {
+pub(crate) fn wrapped_height(dc: HDC, value: &str, font: HFONT, width: i32) -> i32 {
     if value.is_empty() {
         return 0;
     }
@@ -1125,8 +1125,8 @@ fn wrapped_height(dc: HDC, value: &str, font: HFONT, width: i32) -> i32 {
 }
 
 const DT_CALCRECT_FLAG: u32 = 0x400;
-const LINE: u32 = DT_LEFT.0 | DT_SINGLELINE.0 | DT_VCENTER.0 | DT_END_ELLIPSIS.0;
-const CENTRED: u32 = DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0 | DT_END_ELLIPSIS.0;
+pub(crate) const LINE: u32 = DT_LEFT.0 | DT_SINGLELINE.0 | DT_VCENTER.0 | DT_END_ELLIPSIS.0;
+pub(crate) const CENTRED: u32 = DT_CENTER.0 | DT_SINGLELINE.0 | DT_VCENTER.0 | DT_END_ELLIPSIS.0;
 
 /// The chosen device, from the state.
 fn chosen(state: &State) -> Option<&MainDevice> {

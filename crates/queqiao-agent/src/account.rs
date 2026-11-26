@@ -1003,31 +1003,9 @@ fn tray_log_in(
                 lines.push("login: the form was closed".into());
                 return None;
             }
-            Some(action @ (LoginAction::Submit(_) | LoginAction::Register(_))) => {
-                let register = matches!(action, LoginAction::Register(_));
-                let (LoginAction::Submit(fields) | LoginAction::Register(fields)) = action else {
-                    continue;
-                };
-                if [&fields.server, &fields.pin, &fields.user, &fields.password]
-                    .iter()
-                    .any(|value| value.is_empty())
-                {
-                    form.set_status(queqiao_core::text::tr("Please fill in all four fields."));
-                    continue;
-                }
-                // A new account: the password typed twice.
-                if register
-                    && !options.test_tray_login
-                    && queqiao_display::ask_secret(
-                        queqiao_core::text::tr("Queqiao"),
-                        queqiao_core::text::tr("The same password again:"),
-                    )
-                    .as_deref()
-                        != Some(fields.password.as_str())
-                {
-                    form.set_status(queqiao_core::text::tr(
-                        "The two passwords are not the same.",
-                    ));
+            Some(LoginAction::Submit(fields)) => {
+                if let Some(missing) = queqiao_display::missing_login_field(&fields) {
+                    form.set_status(missing);
                     continue;
                 }
                 let mut tried = login.clone();
@@ -1039,22 +1017,15 @@ fn tray_log_in(
                 form.set_busy(true, queqiao_core::text::tr("Logging in..."));
                 let identity = identity.clone();
                 let worker = std::thread::spawn(move || {
-                    let result = if register {
-                        Account::register(
-                            &mut tried,
-                            &identity,
-                            AccountRole::Agent,
-                            &fields.user,
-                            &fields.password,
-                        )
-                    } else {
-                        Account::connect(
-                            &mut tried,
-                            &identity,
-                            AccountRole::Agent,
-                            Some((&fields.user, &fields.password)),
-                        )
-                    };
+                    // One form for logging in and signing up (the user, 2026-11-26): a name the server does not know
+                    // makes the account.
+                    let result = Account::log_in_or_create(
+                        &mut tried,
+                        &identity,
+                        AccountRole::Agent,
+                        &fields.user,
+                        &fields.password,
+                    );
                     // One login for both: the viewer (Connect in the main window) gets its saved login as well.
                     if result.is_ok() {
                         let mut viewer = tried.clone();
@@ -1079,7 +1050,20 @@ fn tray_log_in(
                     }
                 }
                 match worker.join() {
-                    Ok((Ok(account), tried)) => return Some((account, tried)),
+                    Ok((Ok(account), tried)) => {
+                        if account.created {
+                            lines.push(format!("login: a new account {} was made", account.user));
+                            // A name typed wrong makes an account too: the person is told which one this is.
+                            if !options.test_tray_login {
+                                form.set_busy(false, "");
+                                queqiao_display::show_info(
+                                    queqiao_core::text::tr("Queqiao"),
+                                    &queqiao_display::created_text(&account.user),
+                                );
+                            }
+                        }
+                        return Some((account, tried));
+                    }
                     Ok((Err(error), _)) => {
                         lines.push(format!("login: {error}"));
                         if options.test_tray_login {

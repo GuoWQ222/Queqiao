@@ -21,6 +21,8 @@ object Q {
     val Divider = Color(0xFFE6E9F2)
     val Card = Color(0xFFF5F6FA)
     val Accent = Color(0xFF3D5FAE)
+    /** The being-controlled banner's pale blue (as the desktop main window's). */
+    val BannerBack = Color(0xFFEAF2FE)
     val Online = Color(0xFF2FBF71)
     val Offline = Color(0xFF9AA1B8)
     val Border = Color(0xFFCBCFDA)

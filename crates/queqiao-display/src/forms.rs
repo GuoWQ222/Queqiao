@@ -22,11 +22,11 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForWindow, SystemParametersInfoForDpi,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
-use crate::model::{DeviceRow, HelpAction, ListAction, LoginAction, LoginFields, normalize_code};
+use crate::model::{DeviceRow, HelpAction, ListAction, normalize_code};
 
 static REGISTER: Once = Once::new();
 const CLASS: PCWSTR = w!("QueqiaoForm");
@@ -58,7 +58,6 @@ const ID_WAKE: u16 = 103;
 const ID_MORE: u16 = 104;
 const ID_AUTOSTART: u16 = 105;
 const ID_SERVICE: u16 = 106;
-const ID_SIGNUP: u16 = 107;
 /// The window was closed (not a control id).
 pub(crate) const CLOSED: u16 = 0xFFFF;
 
@@ -702,130 +701,6 @@ impl HelpForm {
             ID_CANCEL | CLOSED => Some(HelpAction::Cancel),
             _ => None,
         }
-    }
-}
-
-pub struct LoginForm {
-    form: Form,
-    server: HWND,
-    pin: HWND,
-    user: HWND,
-    password: HWND,
-    status: HWND,
-    button: HWND,
-    signup: HWND,
-}
-
-impl LoginForm {
-    pub fn new(title: &str, fields: &LoginFields) -> Result<LoginForm> {
-        let form = Form::new(title, 380, 344)?;
-        let (left, width) = (20, 340);
-        form.label(tr("Server (host:port)"), [left, 16, width, 18])?;
-        let server = form.edit(&fields.server, false, [left, 36, width, 24])?;
-        form.label(
-            tr("Server certificate fingerprint (SHA-256)"),
-            [left, 70, width, 18],
-        )?;
-        let pin = form.edit(&fields.pin, false, [left, 90, width, 24])?;
-        form.label(tr("User name"), [left, 124, width, 18])?;
-        let user = form.edit(&fields.user, false, [left, 144, width, 24])?;
-        form.label(tr("Password"), [left, 178, width, 18])?;
-        let password = form.edit(&fields.password, true, [left, 198, width, 24])?;
-        // Three lines that wrap: an error is read whole (a label cut it off with an ellipsis, 2026-11-23).
-        let status = form.text("", [left, 232, width, 52])?;
-        let button = form.button(
-            tr("Log in"),
-            ID_OK,
-            true,
-            [left + width - 100, 294, 100, 30],
-        )?;
-        let signup = form.button(
-            tr("Create an account"),
-            ID_SIGNUP,
-            false,
-            [left, 294, 160, 30],
-        )?;
-        form.show();
-        // Start where something is missing.
-        let first_empty = [
-            (server, &fields.server),
-            (pin, &fields.pin),
-            (user, &fields.user),
-        ]
-        .into_iter()
-        .find(|(_, value)| value.is_empty())
-        .map_or(password, |(control, _)| control);
-        let _ = unsafe { SetFocus(Some(first_empty)) };
-        Ok(LoginForm {
-            form,
-            server,
-            pin,
-            user,
-            password,
-            status,
-            button,
-            signup,
-        })
-    }
-
-    pub fn hwnd(&self) -> HWND {
-        self.form.hwnd
-    }
-
-    pub fn fields(&self) -> LoginFields {
-        LoginFields {
-            server: text_of(self.server).trim().to_string(),
-            pin: text_of(self.pin).trim().to_string(),
-            user: text_of(self.user).trim().to_string(),
-            password: text_of(self.password),
-        }
-    }
-
-    /// Fills the form (for tests, which then call `submit`).
-    pub fn set_fields(&self, fields: &LoginFields) {
-        set_text(self.server, &fields.server);
-        set_text(self.pin, &fields.pin);
-        set_text(self.user, &fields.user);
-        set_text(self.password, &fields.password);
-    }
-
-    /// Presses "Log in" (for tests).
-    pub fn submit(&self) {
-        self.form.post(ID_OK);
-    }
-
-    pub fn set_status(&self, text: &str) {
-        set_text(self.status, text);
-    }
-
-    /// While a login is under way: no second press, a note in the status line.
-    pub fn set_busy(&self, busy: bool, status: &str) {
-        let _ = unsafe { EnableWindow(self.button, !busy) };
-        let _ = unsafe { EnableWindow(self.signup, !busy) };
-        self.set_status(status);
-    }
-
-    /// Presses "Create an account" as a click would (tests).
-    pub fn press_signup(&self) {
-        self.form.post(ID_SIGNUP);
-    }
-
-    /// Handles messages for up to `wait_ms` and returns what the user did, if anything.
-    pub fn next(&mut self, wait_ms: u32) -> Option<LoginAction> {
-        match self.form.next_command(wait_ms)? {
-            ID_OK if unsafe { IsWindowEnabled(self.button) }.as_bool() => {
-                Some(LoginAction::Submit(self.fields()))
-            }
-            ID_SIGNUP if unsafe { IsWindowEnabled(self.signup) }.as_bool() => {
-                Some(LoginAction::Register(self.fields()))
-            }
-            ID_CANCEL | CLOSED => Some(LoginAction::Cancel),
-            _ => None,
-        }
-    }
-
-    pub fn save_picture(&self, path: &Path) -> std::io::Result<()> {
-        save_window_picture(self.form.hwnd, path)
     }
 }
 

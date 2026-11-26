@@ -33,7 +33,8 @@ struct LoginView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Log in").font(.system(size: 22, weight: .bold)).foregroundColor(Q.text)
-                    Text("Log in with your Queqiao account to see your devices.")
+                    // One form for logging in and signing up (the user, 2026-11-26): a new name makes the account.
+                    Text("Log in, or sign up with a new user name.")
                         .font(.system(size: 14)).foregroundColor(Q.secondary)
                     field("Account", text: $user, id: "user")
                     // The keyboard's Go key logs in (the button may sit under the keyboard).
@@ -63,6 +64,10 @@ struct LoginView: View {
                 }
                 .padding(24)
             }
+            Text("© 2026 GuoWQ222. All rights reserved.")
+                .font(.system(size: 12)).foregroundColor(Q.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.bottom, 12)
         }
         .background(Color.white)
     }
@@ -87,6 +92,8 @@ struct LoginView: View {
 struct DevicesView: View {
     @EnvironmentObject var engine: Engine
     @State private var removing: Device?
+    /// Connect on a PC another device of the account controls: asked first (as UU Remote's Take Control).
+    @State private var takingOver: Device?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -111,12 +118,31 @@ struct DevicesView: View {
                             .padding(.vertical, 24)
                     }
                     ForEach(others) { device in
-                        DeviceCard(device: device, onConnect: { engine.connect(device) },
-                                   onWake: { engine.wake(device) }, onRemove: { removing = device })
+                        DeviceCard(device: device,
+                                   onConnect: {
+                                       if device.controlledBy.isEmpty { engine.connect(device) } else { takingOver = device }
+                                   },
+                                   onWake: { engine.wake(device) }, onRemove: { removing = device },
+                                   onEndControl: { engine.endControl(device) })
                     }
                     HelpCard()
                 }
                 .padding(16)
+            }
+            .takeOverAlert(
+                controller: takingOver?.controlledBy ?? "",
+                isPresented: Binding(get: { takingOver != nil }, set: { if !$0 { takingOver = nil } }),
+                onCancel: { takingOver = nil },
+                onTakeOver: {
+                    if let device = takingOver { engine.connect(device, takeOver: true) }
+                    takingOver = nil
+                })
+            // The account this login made (a name typed wrong makes one too): said once.
+            .alert("New account", isPresented: Binding(get: { !engine.created.isEmpty },
+                                                       set: { if !$0 { engine.created = "" } })) {
+                Button("OK") { engine.created = "" }
+            } message: {
+                Text("A new account \"\(engine.created)\" was made with this password, and you are logged in. If you meant an account you already have, log out and check the user name.")
             }
         }
         .background(Color.white)
@@ -135,6 +161,7 @@ struct DeviceCard: View {
     let onConnect: () -> Void
     let onWake: () -> Void
     let onRemove: () -> Void
+    let onEndControl: () -> Void
     @State private var wakeAsked = false
 
     var body: some View {
@@ -150,6 +177,24 @@ struct DeviceCard: View {
                 }
             }
             Text(device.online ? "Online" : "Offline").font(.system(size: 13)).foregroundColor(Q.heroMuted)
+            if !device.controlledBy.isEmpty {
+                // The being-controlled banner (as UU Remote's): who controls it, and Disconnect.
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Being controlled").font(.system(size: 14, weight: .bold)).foregroundColor(Q.accent)
+                        Text("\(device.controlledBy) is controlling it").font(.system(size: 13)).foregroundColor(Q.text)
+                            .lineLimit(2)
+                    }
+                    Spacer()
+                    Button("Disconnect", action: onEndControl).font(.system(size: 13)).foregroundColor(Q.accent)
+                        .accessibilityIdentifier("end_control:\(device.name)")
+                }
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Q.bannerBack)
+                .cornerRadius(8)
+                .padding(.top, 8)
+                .accessibilityIdentifier("controlled:\(device.name)")
+            }
             if device.online {
                 GoldButton(title: "Connect", enabled: device.controllable, action: onConnect)
                     .padding(.top, 10)

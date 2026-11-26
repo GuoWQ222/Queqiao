@@ -192,6 +192,12 @@ fun LoginScreen(engine: Engine) {
                 }
             }
         }
+        Spacer(Modifier.weight(1f))
+        Text(
+            stringResource(R.string.copyright), color = Q.Secondary, fontSize = 12.sp,
+            modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 12.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
     }
 }
 
@@ -199,8 +205,11 @@ fun LoginScreen(engine: Engine) {
 fun DevicesScreen(engine: Engine) {
     val devices by engine.devices.collectAsState()
     val error by engine.error.collectAsState()
+    val created by engine.created.collectAsState()
     var menu by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<Device?>(null) }
+    // Connect on a PC another device of the account controls: asked first (as UU Remote's Take Control).
+    var takingOver by remember { mutableStateOf<Device?>(null) }
     Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White)) {
         Header(stringResource(R.string.my_devices)) {
             Box {
@@ -236,9 +245,12 @@ fun DevicesScreen(engine: Engine) {
             items(others, key = { it.id }) { device ->
                 DeviceCard(
                     device,
-                    onConnect = { engine.connect(device) },
+                    onConnect = {
+                        if (device.controlledBy.isNotEmpty()) takingOver = device else engine.connect(device)
+                    },
                     onWake = { engine.wake(device) },
                     onRemove = { removing = device },
+                    onEndControl = { engine.endControl(device) },
                 )
             }
             item { HelpCard(engine) }
@@ -258,10 +270,43 @@ fun DevicesScreen(engine: Engine) {
             dismissButton = { TextButton({ removing = null }) { Text(stringResource(R.string.cancel)) } },
         )
     }
+    takingOver?.let { device -> TakeOverDialog(device.controlledBy, { takingOver = null }) { engine.connect(device, true) } }
+    if (created.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { engine.createdSeen() },
+            title = { Text(stringResource(R.string.created_title)) },
+            text = { Text(stringResource(R.string.created_text, created)) },
+            confirmButton = { TextButton({ engine.createdSeen() }) { Text(stringResource(R.string.ok)) } },
+            modifier = Modifier.testTag("created"),
+        )
+    }
+}
+
+/** "Taking control will disconnect {controller}. Do you want to continue?" with Take Control and Cancel. */
+@Composable
+fun TakeOverDialog(controller: String, onCancel: () -> Unit, onTakeOver: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(stringResource(R.string.take_control)) },
+        text = { Text(stringResource(R.string.take_over_text, controller)) },
+        confirmButton = {
+            TextButton({
+                onCancel()
+                onTakeOver()
+            }, Modifier.testTag("take_control")) { Text(stringResource(R.string.take_control), color = Q.Accent) }
+        },
+        dismissButton = { TextButton(onCancel) { Text(stringResource(R.string.cancel)) } },
+    )
 }
 
 @Composable
-fun DeviceCard(device: Device, onConnect: () -> Unit, onWake: () -> Unit, onRemove: () -> Unit) {
+fun DeviceCard(
+    device: Device,
+    onConnect: () -> Unit,
+    onWake: () -> Unit,
+    onRemove: () -> Unit,
+    onEndControl: () -> Unit,
+) {
     var more by remember { mutableStateOf(false) }
     Column(
         Modifier
@@ -299,6 +344,33 @@ fun DeviceCard(device: Device, onConnect: () -> Unit, onWake: () -> Unit, onRemo
             stringResource(if (device.online) R.string.online else R.string.offline),
             color = Q.HeroMuted, fontSize = 13.sp,
         )
+        if (device.controlledBy.isNotEmpty()) {
+            // The being-controlled banner (as UU Remote's): who controls it, and Disconnect.
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Q.BannerBack)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .testTag("controlled:${device.name}"),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.being_controlled), color = Q.Accent, fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        stringResource(R.string.controlled_by, device.controlledBy), color = Q.Text, fontSize = 13.sp,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                TextButton(onEndControl, Modifier.testTag("end_control:${device.name}")) {
+                    Text(stringResource(R.string.disconnect), color = Q.Accent, fontSize = 13.sp)
+                }
+            }
+        }
         Spacer(Modifier.height(14.dp))
         if (device.online) {
             GoldButton(
@@ -379,17 +451,27 @@ fun SessionScreen(engine: Engine, device: Device, onLeave: () -> Unit) {
                 Modifier.align(Alignment.Center).padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                if (state.stage != "failed") CircularProgressIndicator(color = Q.Gold)
+                val stopped = state.stage == "failed" || state.stage == "busy"
+                if (!stopped) CircularProgressIndicator(color = Q.Gold)
                 Spacer(Modifier.height(12.dp))
                 Text(
                     when (state.stage) {
                         "failed" -> stringResource(R.string.session_failed, state.message)
+                        "busy" -> if (state.controller.isEmpty()) {
+                            stringResource(R.string.busy_helper, device.name)
+                        } else {
+                            stringResource(R.string.busy_controller, state.controller, device.name)
+                        }
                         "connected" -> stringResource(R.string.session_waiting)
                         else -> stringResource(R.string.session_connecting, device.name)
                     },
                     color = Q.NightText, fontSize = 15.sp, modifier = Modifier.testTag("stage"),
                 )
-                if (state.stage == "failed") {
+                // Another device of the account has it: asked whether to take control (Cancel: it keeps it).
+                if (state.stage == "busy" && state.mayTakeOver) {
+                    TakeOverDialog(state.controller, { engine.disconnect() }) { engine.connect(device, true) }
+                }
+                if (stopped) {
                     Spacer(Modifier.height(12.dp))
                     GoldButton(stringResource(R.string.back)) { engine.disconnect() }
                 }

@@ -59,15 +59,22 @@ struct SessionView: View {
             .ignoresSafeArea()
             if engine.session.stage != "picture" {
                 VStack(spacing: 12) {
-                    if engine.session.stage != "failed" { ProgressView().tint(Q.gold) }
+                    if !stopped { ProgressView().tint(Q.gold) }
                     Text(stageText).font(.system(size: 15)).foregroundColor(Q.nightText)
                         .multilineTextAlignment(.center)
                         .accessibilityIdentifier("stage")
-                    if engine.session.stage == "failed" {
+                    if stopped {
                         GoldButton(title: "Back") { engine.disconnect() }.frame(width: 200)
                     }
                 }
                 .padding(24)
+                // Another device of the account has it: asked whether to take control (Cancel: it keeps it).
+                .takeOverAlert(
+                    controller: engine.session.controller,
+                    isPresented: Binding(
+                        get: { engine.session.stage == "busy" && engine.session.mayTakeOver }, set: { _ in }),
+                    onCancel: { engine.disconnect() },
+                    onTakeOver: { engine.connect(device, takeOver: true) })
             }
             // The floating ball (as UU Remote's): opens the session's tools.
             HStack {
@@ -113,10 +120,19 @@ struct SessionView: View {
         }
     }
 
+    /// The session did not start (it failed, or another device has the PC): Back instead of the spinner.
+    private var stopped: Bool { engine.session.stage == "failed" || engine.session.stage == "busy" }
+
     private var stageText: String {
         switch engine.session.stage {
         case "failed":
             return String(format: NSLocalizedString("Could not connect: %@", comment: ""), engine.session.message)
+        case "busy":
+            // Another device has the PC (the take-over question is asked over this).
+            if engine.session.controller.isEmpty {
+                return String(format: NSLocalizedString("%@ is in a session with someone helping from another account.", comment: ""), device.name)
+            }
+            return String(format: NSLocalizedString("%@ is controlling %@ now.", comment: ""), engine.session.controller, device.name)
         case "connected":
             return NSLocalizedString("Connected, waiting for the picture…", comment: "")
         default:

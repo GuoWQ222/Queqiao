@@ -76,7 +76,8 @@ Remote control with an account (M3):
    `--public-ip`; `--relay-private` also relays to private addresses, for LAN-only servers). Its data, certificate
    and key are in `queqiao-server-data`. The firewall must let those ports in.
 2. On each PC to be controlled: install it (above), then "Log in..." in the tray (server, fingerprint, user name,
-   password; or "Create an account"). Without the installer, once: `queqiao-agent --server <host:47100> --pin
+   password; one form for both: a user name the server does not know makes the account, on a server with
+   `--allow-signup`). Without the installer, once: `queqiao-agent --server <host:47100> --pin
    <fingerprint> --user <name> --password <password>`. Later starts need nothing (the login is saved, DPAPI-encrypted,
    in `%APPDATA%\Queqiao`); the agent stays in the tray while the server cannot be reached and tries again.
 3. On the controlling PC: start `queqiao-viewer`, log in once, double-click a device. The session window's menu

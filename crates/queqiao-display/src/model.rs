@@ -409,12 +409,31 @@ pub struct LoginFields {
     pub password: String,
 }
 
-/// What the person did in the login form.
+/// What the person did in the login form: one button for logging in and signing up (the user, 2026-11-26: a name the
+/// server does not know makes the account, Account::log_in_or_create).
 pub enum LoginAction {
     Submit(LoginFields),
-    /// "Create an account": a new account with these fields (on a server that takes new accounts).
-    Register(LoginFields),
     Cancel,
+}
+
+/// What the person still has to fill in before logging in, if anything (the form's status line).
+pub fn missing_login_field(fields: &LoginFields) -> Option<&'static str> {
+    if fields.server.is_empty() || fields.pin.is_empty() {
+        Some(tr("Please fill in the server and its key."))
+    } else if fields.user.is_empty() || fields.password.is_empty() {
+        Some(tr("Please enter a user name and a password."))
+    } else {
+        None
+    }
+}
+
+/// What the person is told when the login made a new account: a name typed wrong makes one too.
+pub fn created_text(user: &str) -> String {
+    trf(
+        "A new account \"{user}\" was made with this password, and you are logged in. If you meant an account you \
+         already have, log out and check the user name.",
+        &[("user", user)],
+    )
 }
 
 /// What the person did in the "help someone" form.

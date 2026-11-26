@@ -21,7 +21,7 @@ use queqiao_core::protocol::{
     CodecPreference, Command as RemoteCommand, InputEvent, Message, MouseButton, Quality,
     VideoCodec, hevc,
 };
-use queqiao_transport::{Addresses, Peer, PeerEvent, Role, Signaling};
+use queqiao_transport::{Addresses, Peer, PeerEvent, Role, Signaling, busy_controller};
 use serde_json::{Value, json};
 
 #[cfg(target_os = "android")]
@@ -100,7 +100,13 @@ enum Request {
     },
     Resume,
     LogOut,
-    Connect(String),
+    /// A device to control; `take_over`: from the device of the account controlling it now (the person confirmed).
+    Connect {
+        device: String,
+        take_over: bool,
+    },
+    /// Ends another device's session with this device of the account (the being-controlled banner's Disconnect).
+    EndControl(String),
     Disconnect,
     Input(InputEvent),
     Remote(RemoteCommand),
@@ -172,7 +178,7 @@ impl Core {
     }
 
     /// A command as JSON: {"login": {"server", "pin", "user", "password"}}, {"resume": {}}, {"log_out": {}},
-    /// {"connect": {"device": id}}, {"disconnect": {}}, {"move": {"x", "y"}} (0..1 of the picture),
+    /// {"connect": {"device": id, "take_over": bool}}, {"end_control": id}, {"disconnect": {}}, {"move": {"x", "y"}} (0..1 of the picture),
     /// {"button": {"button": "left"|"right"|"middle", "down": bool}}, {"wheel": {"delta", "horizontal"}},
     /// {"key": {"scancode", "extended", "down"}}, {"command": "ctrl_alt_del"|"lock"|...}, {"password": text},
     /// {"clipboard": text}, {"text": typed text, as characters on the PC}, {"remove_device": id},
@@ -257,7 +263,11 @@ fn parse(json: &str) -> Option<Request> {
         },
         "resume" => Request::Resume,
         "log_out" => Request::LogOut,
-        "connect" => Request::Connect(text("device")),
+        "connect" => Request::Connect {
+            device: text("device"),
+            take_over: flag("take_over"),
+        },
+        "end_control" => Request::EndControl(body.as_str().unwrap_or("").to_string()),
         "disconnect" => Request::Disconnect,
         "move" => Request::Input(InputEvent::MouseMove {
             x: (number("x").clamp(0.0, 1.0) * 65535.0) as u16,
@@ -451,7 +461,16 @@ impl Engine {
                 let _ = SavedLogin::default().save(AccountRole::Viewer);
                 self.emit(json!({"logged_out": {}}));
             }
-            Request::Connect(device) => self.connect(&device),
+            Request::Connect { device, take_over } => self.connect(&device, take_over),
+            Request::EndControl(device) => {
+                if let Some(account) = &self.account
+                    && let Err(error) = account.end_control(&device)
+                {
+                    self.emit(
+                        json!({"error": {"what": "end_control", "message": error.to_string()}}),
+                    );
+                }
+            }
             Request::Disconnect => self.end_session("ended by the person"),
             Request::Input(event) => self.send(Message::Input(event)),
             Request::Remote(command) => self.send(Message::Command(command)),
@@ -506,10 +525,23 @@ impl Engine {
                 return;
             }
         };
-        match Account::connect(login, &device, AccountRole::Viewer, password) {
+        // One form for logging in and signing up (the user, 2026-11-26): a name the server does not know makes the
+        // account ("created" then, for the app to say so: a name typed wrong makes one too).
+        let result = match password {
+            Some((user, password)) => {
+                Account::log_in_or_create(login, &device, AccountRole::Viewer, user, password)
+            }
+            None => Account::connect(login, &device, AccountRole::Viewer, None),
+        };
+        match result {
             Ok(account) => {
                 let _ = login.save(AccountRole::Viewer);
-                self.emit(json!({"logged_in": {"device": device.id, "route": account.route()}}));
+                self.emit(json!({"logged_in": {
+                    "device": device.id,
+                    "route": account.route(),
+                    "user": account.user,
+                    "created": account.created,
+                }}));
                 self.account = Some(account);
             }
             Err(error) => {
@@ -529,6 +561,8 @@ impl Engine {
                             "name": device.name,
                             "online": device.online,
                             "controllable": device.controllable,
+                            // Another device of the account controlling it (the being-controlled banner).
+                            "controlled_by": device.controlled_by,
                         })
                     })
                     .collect();
@@ -560,7 +594,7 @@ impl Engine {
         match account.request_help(&help_id, code.trim()) {
             Ok(device) => {
                 self.emit(json!({"help_granted": {"id": device.id, "name": device.name}}));
-                self.connect(&device.id);
+                self.connect(&device.id, false);
             }
             Err(error) => {
                 self.emit(json!({"error": {"what": "help", "message": error.to_string()}}));
@@ -568,7 +602,10 @@ impl Engine {
         }
     }
 
-    fn connect(&mut self, device: &str) {
+    /// A session with `device`. One device controls a PC at a time (as UU Remote, 2026-11-26): when another device of
+    /// the account has it, the session's "busy" event names that device ("controller"; empty for someone of another
+    /// account helping, who cannot be taken over); the app asks the person and connects again with `take_over`.
+    fn connect(&mut self, device: &str, take_over: bool) {
         self.end_session("another session");
         if self.account.is_none() {
             self.emit(json!({"error": {"what": "connect", "message": "not logged in"}}));
@@ -582,12 +619,23 @@ impl Engine {
         let started = Instant::now();
         let peer = {
             let mut signal = account.session(device, AccountRole::Agent, &id);
-            match signal.hello("viewer") {
+            match signal.hello_with("viewer", take_over) {
                 Ok(_) => Peer::start_with(Role::Viewer, &mut signal, Addresses::All)
                     .map_err(|e| e.to_string()),
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(error.0),
             }
         };
+        if let Err(error) = &peer
+            && let Some(controller) = busy_controller(error)
+        {
+            self.emit(json!({"session": {
+                "state": "busy",
+                "device": device,
+                "controller": controller,
+                "may_take_over": !take_over && !controller.is_empty(),
+            }}));
+            return;
+        }
         match peer {
             Ok(peer) => {
                 self.frames.clear();
@@ -709,5 +757,27 @@ impl Engine {
             self.frames.clear();
             self.emit(json!({"session": {"state": "ended", "device": session.device, "why": why, "seconds": seconds, "frames": session.frames}}));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_over_and_end_control_are_read_and_earlier_apps_still_connect() {
+        assert!(matches!(
+            parse(r#"{"connect": {"device": "pc-1", "take_over": true}}"#),
+            Some(Request::Connect { device, take_over: true }) if device == "pc-1"
+        ));
+        // An app of before 2026-11-26 sends no take_over: a plain connect.
+        assert!(matches!(
+            parse(r#"{"connect": {"device": "pc-1"}}"#),
+            Some(Request::Connect { device, take_over: false }) if device == "pc-1"
+        ));
+        assert!(matches!(
+            parse(r#"{"end_control": "pc-1"}"#),
+            Some(Request::EndControl(device)) if device == "pc-1"
+        ));
     }
 }

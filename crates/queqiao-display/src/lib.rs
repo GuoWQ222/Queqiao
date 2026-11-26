@@ -15,6 +15,8 @@ mod icon;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(windows)]
+mod login_window;
+#[cfg(windows)]
 mod main_window;
 mod model;
 #[cfg(windows)]
@@ -40,10 +42,9 @@ pub use cursor::RemoteCursor;
 pub use file_window::{FileWindow, show_in_folder};
 #[cfg(windows)]
 pub use forms::{
-    DeviceList, HelpForm, LoginForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList,
-    SetupAction, SetupForm, ask_secret, ask_text, confirm, confirm_take_over, copy_text,
-    owner_from_raw, pick_files, popup_menu, save_screen_picture, save_window_picture, show_error,
-    show_info,
+    DeviceList, HelpForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList, SetupAction,
+    SetupForm, ask_secret, ask_text, confirm, confirm_take_over, copy_text, owner_from_raw,
+    pick_files, popup_menu, save_screen_picture, save_window_picture, show_error, show_info,
 };
 #[cfg(windows)]
 pub use icon::app_icon;
@@ -55,11 +56,14 @@ pub use linux::{
     owner_from_raw, pick_files, popup_menu, save_screen_picture, save_window_picture, show_error,
     show_in_folder, show_info, show_running_main,
 };
+#[cfg(windows)]
+pub use login_window::LoginForm;
 pub use model::{
     AccountState, BAR_END, BAR_MORE, BarButton, ConnectionRow, DeviceRow, Figures, FileItem,
     FileKind, FilePane, FileWindowEvent, HelpAction, HelpMode, JobCommand, JobRow, JobRowState,
     ListAction, LoginAction, LoginFields, MainDevice, Page, PasswordCheck, PresenceEvent,
-    TransferRow, WindowEvent, controlled_banner, normalize_code, size_text, take_over_question,
+    TransferRow, WindowEvent, controlled_banner, created_text, missing_login_field, normalize_code,
+    size_text, take_over_question,
 };
 #[cfg(windows)]
 pub use overlay::SessionOverlay;
