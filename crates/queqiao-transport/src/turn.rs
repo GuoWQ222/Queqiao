@@ -20,6 +20,8 @@ pub struct TurnServer {
     pub address: SocketAddr,
     pub username: String,
     pub password: String,
+    /// The relay's name from the account server ("shanghai"), for the session window; empty when unknown.
+    pub name: String,
 }
 
 /// The STUN and TURN servers for a session: from queqiao-server, or none for a direct connection.
@@ -80,6 +82,8 @@ pub(crate) enum Incoming {
 
 pub(crate) struct TurnClient {
     pub server: SocketAddr,
+    /// The relay's name (TurnServer::name).
+    pub name: String,
     username: String,
     password: String,
     realm: String,
@@ -109,6 +113,7 @@ impl TurnClient {
     pub fn new(server: &TurnServer, now: Instant) -> TurnClient {
         let mut client = TurnClient {
             server: server.address,
+            name: server.name.clone(),
             username: server.username.clone(),
             password: server.password.clone(),
             realm: String::new(),
@@ -434,6 +439,7 @@ mod tests {
             address: "198.51.100.1:3478".parse().unwrap(),
             username: "1999999999:device".into(),
             password: "secret".into(),
+            name: String::new(),
         };
         let now = Instant::now();
         let mut client = TurnClient::new(&server, now);

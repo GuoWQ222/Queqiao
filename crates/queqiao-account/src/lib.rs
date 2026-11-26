@@ -810,6 +810,7 @@ impl Signaling for SessionSignal<'_> {
                             address: resolve(&access.address)?,
                             username: access.username,
                             password: access.password,
+                            name: access.name,
                         })
                     };
                     let turn = match turn {

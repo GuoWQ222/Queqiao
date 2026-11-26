@@ -44,6 +44,12 @@ struct SessionView: View {
         var parts = [NSLocalizedString(
             figures.relayed || engine.session.relayed ? "Through the server (relayed)" : "Direct connection",
             comment: "")]
+        // The relay's place after the way (the user, 2026-11-26: "add the relay's name"), in the phone's language.
+        if figures.relayed || engine.session.relayed {
+            let chinese = Locale.preferredLanguages.first?.hasPrefix("zh") == true
+            let place = chinese ? engine.session.relayZh : engine.session.relay
+            if !place.isEmpty { parts.append(place) }
+        }
         if let rtt = figures.rttMs { parts.append(String(format: "%.0f ms", rtt)) }
         parts.append(String(format: "%.0f fps", figures.fps))
         parts.append(String(format: "%.1f Mbit/s", figures.mbps))

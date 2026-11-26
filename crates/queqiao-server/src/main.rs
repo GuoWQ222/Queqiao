@@ -72,7 +72,9 @@ fn main() {
             println!(
                 "                            [--public-ip <IP>] [--turn-port 3478] [--relay-ports 47200-47399] [--relay-private]"
             );
-            println!("                            [--capacity-mbps 100]");
+            println!(
+                "                            [--capacity-mbps 100] [--relay-name <its relay's place>]"
+            );
             println!("       queqiao-server init [--data <folder>] [--name <host or IP>]...");
             println!(
                 "       queqiao-server add-user <name> [--data <folder>]   (the password on standard input)"
@@ -400,7 +402,12 @@ fn serve(args: &[String]) -> Result<(), String> {
         }
     );
     let capacity = capacity_mbps(args)?;
-    let relays = relays::Relays::new(turn.clone(), capacity);
+    // The name the session windows show for this server's own relay ("beijing").
+    let relay_name = values(args, "--relay-name").pop().unwrap_or_default();
+    if !relay_name.is_empty() && !store::valid_relay_name(&relay_name) {
+        return Err("--relay-name: 1 to 32 letters, digits, - or _".into());
+    }
+    let relays = relays::Relays::new(turn.clone(), capacity, &relay_name);
     let hub = hub::Hub::new(store, relays.clone(), signup);
     runtime.block_on(async move {
         tokio::spawn(relays.clone().watch_local());

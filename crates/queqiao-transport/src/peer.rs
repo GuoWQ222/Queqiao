@@ -1056,9 +1056,22 @@ impl Network {
                     if self.connected && packet.contents.first().is_some_and(|byte| *byte >= 20) {
                         self.quic_pair = Some((packet.source, packet.destination));
                         let path = match relayed {
-                            Some(server) => {
-                                format!("relayed through {server} to {}", packet.destination)
-                            }
+                            // With the relay's name when the account server gave one ("relayed through
+                            // 198.51.100.1:3478 (shanghai) to ..."; relay_name reads it back).
+                            Some(server) => match self
+                                .turn
+                                .as_ref()
+                                .map(|turn| turn.name.as_str())
+                                .filter(|name| !name.is_empty())
+                            {
+                                Some(name) => format!(
+                                    "relayed through {server} ({name}) to {}",
+                                    packet.destination
+                                ),
+                                None => {
+                                    format!("relayed through {server} to {}", packet.destination)
+                                }
+                            },
                             // Straight to the other side's relay: relayed all the same (it was shown as direct,
                             // 2026-11-25, sunshine behind a phone's hotspot).
                             None if self.remote_relays.contains(&packet.destination) => format!(

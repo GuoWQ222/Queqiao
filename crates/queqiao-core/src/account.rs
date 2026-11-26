@@ -177,6 +177,10 @@ pub struct TurnAccess {
     pub username: String,
     pub password: String,
     pub expires: u64,
+    /// The relay's name, for the session window to show where the session goes ("shanghai"); none from servers
+    /// before it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,6 +418,7 @@ mod tests {
             username: "1:2:d:agent".into(),
             password: "p".into(),
             expires: 1,
+            name: "beijing".into(),
         };
         let new = ServerMessage::IceServers {
             stun: Some("198.51.100.7:3478".into()),

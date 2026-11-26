@@ -4,7 +4,7 @@
 # (add-relay, relay-key, relay), the Linux agent on Xvfb :95 and viewers (throwaway devices of the same account,
 # --test-device) on :96, every session forced through a relay (--force network:relay):
 #   1. both relays join; a relay with a wrong key, and one with a name the server does not know, are refused;
-#   2. a session: both ends get r1 first (equally near, by name) and are relayed through it;
+#   2. a session: both ends get r1 first (equally near, by name) and are relayed through it, the window naming it;
 #   3. r1 frozen (SIGSTOP: its link stays open, so for a few seconds it is still handed out): the next session's ends
 #      ask r1, get no answer, ask r2 too and are relayed through r2;
 #   4. r1 running again but taken out (remove-relay): the server drops it at its next report, and the next session
@@ -116,12 +116,16 @@ sleep 3
 session() {
     # shellcheck disable=SC2086
     DISPLAY=:96 "$bin/queqiao-viewer" $account --test-device "viewer$1" --device "$device" --seconds 12 --width 640 \
-        --force network:relay --report "$out/viewer$1.txt" > "$out/viewer$1.out" 2>&1 < /dev/null
+        --force network:relay --report "$out/viewer$1.txt" "${@:2}" > "$out/viewer$1.out" 2>&1 < /dev/null
 }
+mkdir -p "$out/pictures"
 
 # 2. Through r1, both ends.
-session 1
+session 1 --ui-pictures "$out/pictures"
 check "$out/viewer1.txt" "relayed through 127.0.0.1:$turn1" "session 1: the viewer relayed through r1"
+# The relay's name comes with it (the session window's card and title show its place).
+check "$out/viewer1.txt" "relayed through 127.0.0.1:$turn1 (r1) to " "session 1: the relay's name in the path"
+check "$out/viewer1.txt" "| relayed (R1)" "session 1: the window title names the relay"
 
 # 3. r1 frozen: both ends fall back to r2 while gathering (the agent's report, written when it ends, is checked last).
 kill -STOP "$pid_r1"

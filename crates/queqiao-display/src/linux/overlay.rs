@@ -366,7 +366,7 @@ pub struct SessionOverlay {
 }
 
 /// The card's size, and its close button (x, y, width, height) in it.
-const CARD_SIZE: (i32, i32) = (214, 176);
+const CARD_SIZE: (i32, i32) = (214, 196);
 const CLOSE: (i32, i32, i32, i32) = (CARD_SIZE.0 - 30, 4, 24, 24);
 
 /// Whether (x, y) in the card is on its close button.
@@ -1097,6 +1097,8 @@ impl SessionOverlay {
                     elapsed % 60
                 ),
             ),
+            // Which relay the session goes through (the user, 2026-11-26).
+            (tr("Relay"), dash(&figures.relay)),
         ];
         for (index, (label, value)) in rows.iter().enumerate() {
             let middle = 42 + index as i32 * 20;
@@ -1104,7 +1106,7 @@ impl SessionOverlay {
             card.text_right(value, width - pad, middle, LABEL_SIZE, TEXT);
         }
         // The delay's recent course, as bars (taller is slower).
-        let (graph_top, graph_height) = (140, 24);
+        let (graph_top, graph_height) = (160, 24);
         let delays: Vec<f64> = figures
             .delays
             .iter()

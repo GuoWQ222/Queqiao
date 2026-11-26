@@ -717,7 +717,13 @@ impl Engine {
             }
             PeerEvent::Path(path) => {
                 session.relayed = path.starts_with("relayed");
-                self.emit(json!({"session": {"state": "path", "path": path, "relayed": path.starts_with("relayed")}}));
+                // The relay's place in both languages (the app shows the one of the phone's language).
+                let name = queqiao_transport::relay_name(&path).unwrap_or_default();
+                let (relay, relay_zh) = (
+                    queqiao_core::text::relay_place_for(name, false),
+                    queqiao_core::text::relay_place_for(name, true),
+                );
+                self.emit(json!({"session": {"state": "path", "path": path, "relayed": path.starts_with("relayed"), "relay": relay, "relay_zh": relay_zh}}));
             }
             PeerEvent::Data(bytes) => match Message::decode(&bytes) {
                 Some(Message::Pong { id, sent_us }) if id == session.ping_id => {

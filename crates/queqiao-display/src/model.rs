@@ -353,6 +353,8 @@ pub const BAR_END: u16 = 0xFFE0;
 #[derive(Clone, Debug, Default)]
 pub struct Figures {
     pub relayed: bool,
+    /// The relay's place as shown ("Shanghai", "上海"); empty for a direct session or a relay without a name.
+    pub relay: String,
     pub delay_ms: Option<f64>,
     pub fps: f64,
     /// "8.4 Mbit/s", "320 kbit/s".

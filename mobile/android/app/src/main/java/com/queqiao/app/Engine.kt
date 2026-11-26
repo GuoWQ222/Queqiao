@@ -33,6 +33,9 @@ data class SessionState(
     val stage: String = "connecting",
     val relayed: Boolean = false,
     val path: String = "",
+    /** The relay's place ("Shanghai"; `relayZh` "上海"), empty when direct or unnamed. */
+    val relay: String = "",
+    val relayZh: String = "",
     val message: String = "",
     val passwordNeeded: Boolean = false,
     /** "busy": another device controls the PC (`controller`; empty: someone of another account helping). */
@@ -225,7 +228,12 @@ class Engine private constructor(context: Context) {
                 val s = event.getJSONObject("session")
                 val state = _session.value
                 _session.value = when (s.optString("state")) {
-                    "path" -> state.copy(relayed = s.optBoolean("relayed"), path = s.optString("path"))
+                    "path" -> state.copy(
+                        relayed = s.optBoolean("relayed"),
+                        path = s.optString("path"),
+                        relay = s.optString("relay"),
+                        relayZh = s.optString("relay_zh"),
+                    )
                     "failed" -> state.copy(stage = "failed", message = s.optString("message"))
                     // Another device has the PC: the session screen asks whether to take control.
                     "busy" -> state.copy(

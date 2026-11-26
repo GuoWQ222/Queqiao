@@ -73,6 +73,8 @@ impl Relay {
 pub struct Assigned {
     #[cfg(test)]
     pub name: String,
+    /// What the session window shows of it (its name; the account server's own: `serve --relay-name`).
+    pub label: String,
     pub address: String,
     pub key: [u8; 32],
 }
@@ -109,6 +111,8 @@ type Choices = HashMap<(String, String), (Vec<String>, Instant)>;
 
 pub struct Relays {
     local: Option<Arc<TurnConfig>>,
+    /// The name the account server's own relay is shown by (`serve --relay-name`; empty: none shown).
+    main_label: String,
     relays: Mutex<HashMap<String, Relay>>,
     /// The order given to a session's devices (the pair of device ids, in order), for the other one.
     choices: Mutex<Choices>,
@@ -124,7 +128,11 @@ fn unix_now() -> u64 {
 
 impl Relays {
     /// The account server's own relay (if its TURN part is on), with `capacity_mbps` (0: unknown).
-    pub fn new(local: Option<Arc<TurnConfig>>, capacity_mbps: f64) -> Arc<Relays> {
+    pub fn new(
+        local: Option<Arc<TurnConfig>>,
+        capacity_mbps: f64,
+        main_label: &str,
+    ) -> Arc<Relays> {
         let mut relays = HashMap::new();
         if let Some(config) = &local {
             relays.insert(
@@ -143,6 +151,7 @@ impl Relays {
         }
         Arc::new(Relays {
             local,
+            main_label: main_label.to_string(),
             relays: Mutex::new(relays),
             choices: Mutex::new(HashMap::new()),
             revoked: Mutex::new(HashMap::new()),
@@ -293,6 +302,11 @@ impl Relays {
                 Some(Assigned {
                     #[cfg(test)]
                     name: name.clone(),
+                    label: if name == MAIN {
+                        self.main_label.clone()
+                    } else {
+                        name.clone()
+                    },
                     address: relay.address.clone(),
                     key: relay.key,
                 })
@@ -467,7 +481,7 @@ mod tests {
     }
 
     fn relays_with(names: &[(&str, &str)]) -> Arc<Relays> {
-        let relays = Relays::new(None, 0.0);
+        let relays = Relays::new(None, 0.0, "");
         for (index, (name, address)) in names.iter().enumerate() {
             let (sender, _) = tokio::sync::mpsc::unbounded_channel();
             relays.joined(name, [index as u8; 32], index as u64, sender);
@@ -524,7 +538,7 @@ mod tests {
             [9; 32],
             0.0,
         ));
-        let relays = Relays::new(Some(local), 100.0);
+        let relays = Relays::new(Some(local), 100.0, "beijing");
         for (index, name) in ["chengdu", "guangzhou"].iter().enumerate() {
             let (sender, _) = tokio::sync::mpsc::unbounded_channel();
             relays.joined(name, [index as u8; 32], index as u64, sender);
@@ -541,6 +555,11 @@ mod tests {
             |assigned: Vec<Assigned>| assigned.into_iter().map(|a| a.name).collect::<Vec<_>>();
         let none = HashMap::new();
         // Nothing measured (programs from before): the account server's own first ("chengdu" sorts before "main").
+        let first = relays.assign("old-v0", Some("old-a0"), &none, None, None);
+        assert_eq!(
+            (first[0].label.as_str(), first[1].label.as_str()),
+            ("beijing", "chengdu")
+        );
         assert_eq!(
             names(relays.assign("old-v", Some("old-a"), &none, None, None))[0],
             MAIN
@@ -650,7 +669,7 @@ mod tests {
 
     #[test]
     fn revocations_reach_relays_that_join_later() {
-        let relays = Relays::new(None, 0.0);
+        let relays = Relays::new(None, 0.0, "");
         relays.revoke("dev1", &["agent", "viewer"]);
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         relays.joined("late", [3; 32], 1, sender);

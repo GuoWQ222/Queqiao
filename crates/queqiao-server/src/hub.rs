@@ -1808,6 +1808,7 @@ impl Hub {
                         username,
                         password,
                         expires,
+                        name: relay.label,
                     }
                 });
                 let turn = accesses.next();

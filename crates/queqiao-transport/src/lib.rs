@@ -45,3 +45,35 @@ impl From<std::io::Error> for Error {
 pub(crate) fn err(error: impl std::fmt::Display) -> Error {
     Error(error.to_string())
 }
+
+/// The relay's name in a path as the session reports it (`PeerEvent::Path`): "relayed through 198.51.100.1:3478
+/// (shanghai) to ..." -> "shanghai"; none for a direct path or a relay without a name.
+pub fn relay_name(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("relayed through ")?;
+    let (_, after) = rest.split_once(" (")?;
+    let (name, tail) = after.split_once(')')?;
+    (tail.starts_with(" to ") && !name.is_empty() && !name.contains(' ')).then_some(name)
+}
+
+#[cfg(test)]
+mod path_tests {
+    #[test]
+    fn the_relays_name_is_read_back_from_the_path() {
+        let named = "relayed through 198.51.100.1:3478 (shanghai) to 198.51.100.1:47203";
+        assert_eq!(super::relay_name(named), Some("shanghai"));
+        assert_eq!(
+            super::relay_name("relayed through 198.51.100.1:3478 to 198.51.100.1:47203"),
+            None
+        );
+        assert_eq!(
+            super::relay_name(
+                "relayed through that PC's relay 198.51.100.1:47203 (from 10.0.0.2:5000)"
+            ),
+            None
+        );
+        assert_eq!(
+            super::relay_name("direct to 203.0.113.5:4000 (from 10.0.0.2:5000)"),
+            None
+        );
+    }
+}

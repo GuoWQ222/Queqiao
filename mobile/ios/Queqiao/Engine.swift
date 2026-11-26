@@ -23,6 +23,9 @@ struct SessionState: Equatable {
     var stage = "connecting"
     var relayed = false
     var path = ""
+    /// The relay's place ("Shanghai"; `relayZh` "上海"), empty when direct or unnamed.
+    var relay = ""
+    var relayZh = ""
     var message = ""
     var passwordNeeded = false
     /// "busy": another device controls the PC (empty: someone of another account helping).
@@ -213,6 +216,8 @@ final class Engine: ObservableObject {
             case "path":
                 state.relayed = s["relayed"] as? Bool ?? false
                 state.path = s["path"] as? String ?? ""
+                state.relay = s["relay"] as? String ?? ""
+                state.relayZh = s["relay_zh"] as? String ?? ""
             case "picture":
                 state.stage = "picture"
                 if let text = testType {

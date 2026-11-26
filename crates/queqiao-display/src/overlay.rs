@@ -745,7 +745,7 @@ impl SessionOverlay {
 
     fn draw_card_at(&mut self, area: RECT) {
         let s = self.scale;
-        let (width, height) = (px(214, s), px(176, s));
+        let (width, height) = (px(214, s), px(196, s));
         // Where the person put it (or the bottom right), inside the drawing area; the close button at the top right.
         let close = RECT {
             left: width - px(30, s),
@@ -852,6 +852,8 @@ impl SessionOverlay {
                             elapsed % 60
                         ),
                     ),
+                    // Which relay the session goes through (the user, 2026-11-26).
+                    (tr("Relay"), or_dash(&figures.relay)),
                 ];
                 for (index, (label, value)) in rows.iter().enumerate() {
                     let y = px(32, s) + index as i32 * px(20, s);
@@ -873,7 +875,7 @@ impl SessionOverlay {
                     );
                 }
                 // The delay's recent course, as bars (taller is slower).
-                let graph_top = px(140, s);
+                let graph_top = px(160, s);
                 let graph_height = px(24, s);
                 let delays: Vec<f64> = figures
                     .delays

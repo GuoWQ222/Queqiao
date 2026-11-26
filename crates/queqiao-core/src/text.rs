@@ -170,6 +170,47 @@ fn translate(english: &'static str, language: Language) -> &'static str {
     }
 }
 
+/// A relay's place as people read it (the user, 2026-11-26: "add the relay's name"): its name from the account server
+/// ("shanghai", "hong-kong") in words ("Shanghai", "Hong Kong"), in the person's language when the table has the
+/// place (上海). Empty for an empty name.
+pub fn relay_place(name: &str) -> String {
+    relay_place_in(name, language())
+}
+
+/// [`relay_place`] in English or in Chinese, for the phone apps (they pick by the phone's language).
+pub fn relay_place_for(name: &str, chinese: bool) -> String {
+    relay_place_in(
+        name,
+        if chinese {
+            Language::Chinese
+        } else {
+            Language::English
+        },
+    )
+}
+
+fn relay_place_in(name: &str, language: Language) -> String {
+    let words: Vec<String> = name
+        .split(['-', '_', ' '])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    let english = words.join(" ");
+    match language {
+        Language::English => english,
+        Language::Chinese => CHINESE
+            .iter()
+            .find(|(source, _)| *source == english)
+            .map_or(english.clone(), |(_, chinese)| (*chinese).to_string()),
+    }
+}
+
 fn fill(text: &str, values: &[(&str, &str)]) -> String {
     let mut out = text.to_string();
     for (name, value) in values {
@@ -740,6 +781,24 @@ const CHINESE: &[(&str, &str)] = &[
     ("Session figures", "会话数据"),
     ("Direct", "直连"),
     ("Relayed", "中继"),
+    // The relay a session goes through, by its place (relay_place).
+    ("Relay", "中继服务器"),
+    ("Beijing", "北京"),
+    ("Shanghai", "上海"),
+    ("Guangzhou", "广州"),
+    ("Shenzhen", "深圳"),
+    ("Chengdu", "成都"),
+    ("Chongqing", "重庆"),
+    ("Hangzhou", "杭州"),
+    ("Nanjing", "南京"),
+    ("Wuhan", "武汉"),
+    ("Xian", "西安"),
+    ("Qingdao", "青岛"),
+    ("Hong Kong", "香港"),
+    ("Taipei", "台北"),
+    ("Tokyo", "东京"),
+    ("Seoul", "首尔"),
+    ("Singapore", "新加坡"),
     ("Data", "码率"),
     ("Codec", "编码"),
     ("Picture", "画面"),
@@ -1025,6 +1084,17 @@ const CHINESE: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relays_place_reads_as_words_and_in_chinese_where_known() {
+        assert_eq!(relay_place_in("shanghai", Language::English), "Shanghai");
+        assert_eq!(relay_place_in("hong-kong", Language::English), "Hong Kong");
+        assert_eq!(relay_place_in("shanghai", Language::Chinese), "上海");
+        assert_eq!(relay_place_in("hong_kong", Language::Chinese), "香港");
+        // A place the table does not have stays as written; no name, nothing.
+        assert_eq!(relay_place_in("frankfurt", Language::Chinese), "Frankfurt");
+        assert_eq!(relay_place_in("", Language::English), "");
+    }
 
     fn placeholders(text: &str) -> Vec<&str> {
         let mut found: Vec<&str> = text

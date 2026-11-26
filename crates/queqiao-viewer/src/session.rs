@@ -262,6 +262,8 @@ pub(crate) struct Stats {
 pub(crate) struct TitleStatus {
     pub(crate) agent: String,
     pub(crate) relayed: bool,
+    /// The relay's name from the account server ("shanghai"), when relayed and it has one.
+    pub(crate) relay: String,
     pub(crate) title: String,
     pub(crate) notice: Option<(String, Instant)>,
     /// Counters at the last update, for the rates.
@@ -275,6 +277,7 @@ impl TitleStatus {
         TitleStatus {
             agent: agent.to_string(),
             relayed: false,
+            relay: String::new(),
             title: String::new(),
             notice: None,
             last: (Instant::now(), 0, 0),
@@ -309,6 +312,13 @@ impl TitleStatus {
             None => "- ms".into(),
         };
         let path = if self.relayed { "relayed" } else { "direct" };
+        // The relay's place after the word (the user, 2026-11-26: "add the relay's name").
+        let place = if self.relayed && !self.relay.is_empty() {
+            format!(" ({})", queqiao_core::text::relay_place(&self.relay))
+        } else {
+            String::new()
+        };
+        let (path, shown_path) = (format!("{path}{place}"), format!("{}{place}", tr(path)));
         // English for the report (tests read it); the window shows it in the user's language.
         let line = |name: &str, path: &str| {
             format!(
@@ -316,7 +326,7 @@ impl TitleStatus {
                 self.agent
             )
         };
-        let (mut title, mut shown) = (line("Queqiao", path), line(tr("Queqiao"), tr(path)));
+        let (mut title, mut shown) = (line("Queqiao", &path), line(tr("Queqiao"), &shown_path));
         if let Some((text, until)) = &self.notice {
             if now < *until {
                 title = format!("{title} | {text}");
@@ -941,6 +951,11 @@ pub(crate) fn run_session(
             };
             overlay.set_figures(Figures {
                 relayed: status.relayed,
+                relay: if status.relayed {
+                    queqiao_core::text::relay_place(&status.relay)
+                } else {
+                    String::new()
+                },
                 delay_ms: stats.rtt_ms.last().copied(),
                 fps,
                 rate,
@@ -1971,6 +1986,9 @@ pub(crate) fn run_session(
                 PeerEvent::KeyframeRequested => {}
                 PeerEvent::Path(path) => {
                     status.relayed = path.starts_with("relayed");
+                    status.relay = queqiao_transport::relay_name(&path)
+                        .unwrap_or_default()
+                        .to_string();
                     lines.push(format!(
                         "path after {} ms: {path}",
                         started.elapsed().as_millis()

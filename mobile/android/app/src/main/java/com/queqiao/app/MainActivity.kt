@@ -52,6 +52,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -578,7 +579,15 @@ fun Toolbar(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             // The figures, as the desktop's card: the way, the delay, frames a second, data.
-            val way = if (figures.relayed || state.relayed) stringResource(R.string.path_relayed) else stringResource(R.string.path_direct)
+            val relayed = figures.relayed || state.relayed
+            // The relay's place after the way (the user, 2026-11-26: "add the relay's name"), in the phone's language.
+            val chinese = LocalConfiguration.current.locales[0].language == "zh"
+            val place = if (chinese) state.relayZh else state.relay
+            val way = if (relayed) {
+                stringResource(R.string.path_relayed) + if (place.isNotEmpty()) " · $place" else ""
+            } else {
+                stringResource(R.string.path_direct)
+            }
             val delay = figures.rttMs?.let { " · %.0f ms".format(it) } ?: ""
             Text(
                 way + delay + " · %.0f fps · %.1f Mbit/s".format(figures.fps, figures.mbps),
