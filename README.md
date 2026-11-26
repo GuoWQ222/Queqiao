@@ -4,6 +4,8 @@
 
 <h1 align="center">Queqiao</h1>
 
+<p align="center"><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
+
 <p align="center">
   <b>Remote control for your own computers, from your computer or your phone.</b><br>
   Log in, see your devices, and control any of them from another, directly or through your own server.
