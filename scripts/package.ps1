@@ -3,12 +3,19 @@
 # Output: target\package\queqiao-setup-<version>.exe. For now the signature is the test certificate's.
 # -Ship: a shipping build first (target\ship, a plain cargo build: without the options for the tests, which the test
 # build target\release has), checked to refuse those options; anything meant for people must be made so.
-# Usage: scripts\package.ps1 [-Ship | -Bin <release folder, default target\release>] [-Subject 'CN=Queqiao Test Signing'] [-NoTimestamp]
+# -Server host:port -Pin <SHA-256 hex>: the account server the login form offers (built in; the person can still type
+# another), with its certificate's fingerprint; with -Ship only. Not secret (every program that connects shows it),
+# but given here rather than kept in the public repository.
+# Usage: scripts\package.ps1 [-Ship [-Server <host:port> -Pin <sha256>] | -Bin <release folder, default target\release>] [-Subject 'CN=Queqiao Test Signing'] [-NoTimestamp]
 # Prints PACKAGE_PASS <file> <sha256> or PACKAGE_FAIL <reason>. ASCII only.
-param([string]$Bin = '', [switch]$Ship, [string]$Subject = 'CN=Queqiao Test Signing', [switch]$NoTimestamp)
+param([string]$Bin = '', [switch]$Ship, [string]$Server = '', [string]$Pin = '', [string]$Subject = 'CN=Queqiao Test Signing', [switch]$NoTimestamp)
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 if ($Ship -and $Bin) { 'PACKAGE_FAIL -Ship builds its own programs: no -Bin with it'; return }
+if (($Server -or $Pin) -and -not $Ship) { 'PACKAGE_FAIL -Server and -Pin go with -Ship'; return }
+if (($Server -and -not $Pin) -or ($Pin -and -not $Server)) { 'PACKAGE_FAIL -Server and -Pin go together'; return }
+if ($Server -and $Server -notmatch '^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):\d{1,5}$') { "PACKAGE_FAIL -Server $Server is not host:port"; return }
+if ($Pin -and $Pin -notmatch '^[0-9a-f]{64}$') { 'PACKAGE_FAIL -Pin is not a SHA-256 fingerprint (64 lowercase hex digits)'; return }
 if ($Ship) {
     # libopus is built with CMake: Visual Studio's, as in scripts\check.ps1, when none is on the PATH.
     if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
@@ -33,8 +40,13 @@ if ($Ship) {
         $env:CFLAGS = "$cflags /d1trimfile:$cargoHome\".Trim()
         $env:CXXFLAGS = "$cxxflags /d1trimfile:$cargoHome\".Trim()
     }
+    # The built-in server (queqiao-account's DEFAULT_SERVER / DEFAULT_PIN; cargo builds again when they change). Set
+    # either way, so one from the environment never slips in unasked.
+    $env:QUEQIAO_DEFAULT_SERVER, $env:QUEQIAO_DEFAULT_PIN = $Server, $Pin
+    if (-not $Server) { Remove-Item Env:\QUEQIAO_DEFAULT_SERVER, Env:\QUEQIAO_DEFAULT_PIN -ErrorAction SilentlyContinue }
+    "server built in: $(if ($Server) { "$Server (pin $($Pin.Substring(0, 16))...)" } else { 'none (typed in the login form)' })"
     $built = @(& $cargo build --release --target-dir (Join-Path $root 'target\ship') -p queqiao-agent -p queqiao-viewer -p queqiao-service -p queqiao-setup 2>&1 | ForEach-Object { "$_" })
-    Remove-Item Env:\CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue
+    Remove-Item Env:\CARGO_ENCODED_RUSTFLAGS, Env:\QUEQIAO_DEFAULT_SERVER, Env:\QUEQIAO_DEFAULT_PIN -ErrorAction SilentlyContinue
     $env:CFLAGS, $env:CXXFLAGS = $cflags, $cxxflags
     if ($LASTEXITCODE) { $built | Select-Object -Last 15; 'PACKAGE_FAIL the shipping build'; return }
     $Bin = Join-Path $root 'target\ship\release'
@@ -62,6 +74,14 @@ if ($Ship) {
         }
     }
     'no build machine folders in the programs'
+    # The server asked for is in the programs that log in.
+    if ($Server) {
+        foreach ($exe in 'queqiao-agent.exe', 'queqiao-viewer.exe') {
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $Bin $exe)))
+            if ($text.IndexOf($Server) -lt 0 -or $text.IndexOf($Pin) -lt 0) { "PACKAGE_FAIL $exe does not have the server $Server built in"; return }
+        }
+        "server built in (agent, viewer): $Server"
+    }
 }
 $release = if ($Bin) { $Bin } else { Join-Path $root 'target\release' }
 $programs = @('queqiao-viewer.exe', 'queqiao-agent.exe', 'queqiao-service.exe') | ForEach-Object { Join-Path $release $_ }

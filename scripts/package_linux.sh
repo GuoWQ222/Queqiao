@@ -2,11 +2,14 @@
 # Queqiao's Linux packages (docs/LINUX.md): a .deb (Ubuntu, Debian) and an .rpm (Fedora, openSUSE, RHEL), from one
 # release build and packaging/linux (files.txt says what goes where). On a Linux build machine with Rust and dpkg-deb;
 # the .rpm needs rpmbuild (on Ubuntu: the rpm package).
-# Usage: scripts/package_linux.sh [--test] [--version x.y.z] [--out <folder>]
+# Usage: scripts/package_linux.sh [--test] [--version x.y.z] [--out <folder>] [--server <host:port> --pin <sha256>]
 #   --test     the tests' build (the test-switches features: the options the service's test settings pass to its
 #              agents); never published
 #   --version  the packages' and the programs' version (QUEQIAO_VERSION; default the workspace's)
 #   --out      where the packages go (default $CARGO_TARGET_DIR/packages)
+#   --server, --pin  the account server the login form offers (built in; the person can still type another) and its
+#              certificate's fingerprint. Not secret (every program that connects shows it), but given here rather
+#              than kept in the public repository.
 # Environment: CARGO_ARGS (more for cargo build, e.g. --offline).
 # Prints PACKAGE_DEB <file>, PACKAGE_RPM <file>, then PACKAGE_DONE, or PACKAGE_FAIL <step>.
 set -u
@@ -15,17 +18,35 @@ target=${CARGO_TARGET_DIR:-$ws/target}
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ws/Cargo.toml" | head -1)
 test=0
 out=$target/packages
+server=''
+pin=''
 while [ $# -gt 0 ]; do
     case "$1" in
         --test) test=1 ;;
         --version) version=$2; shift ;;
         --out) out=$2; shift ;;
+        --server) server=$2; shift ;;
+        --pin) pin=$2; shift ;;
         *) echo "PACKAGE_FAIL unknown option $1"; exit 2 ;;
     esac
     shift
 done
 fail() { echo "PACKAGE_FAIL $1"; exit 1; }
 echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "version $version is not x.y.z"
+if [ -n "$server$pin" ]; then
+    [ -n "$server" ] && [ -n "$pin" ] || fail "--server and --pin go together"
+    echo "$server" | grep -qE '^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9.-]+):[0-9]{1,5}$' || fail "--server $server is not host:port"
+    echo "$pin" | grep -qE '^[0-9a-f]{64}$' || fail "--pin is not a SHA-256 fingerprint (64 lowercase hex digits)"
+fi
+# The built-in server (queqiao-account's DEFAULT_SERVER / DEFAULT_PIN; cargo builds again when they change): set or
+# cleared either way, so one from the environment never slips in unasked.
+if [ -n "$server" ]; then
+    export QUEQIAO_DEFAULT_SERVER=$server QUEQIAO_DEFAULT_PIN=$pin
+    echo "server built in: $server (pin ${pin:0:16}...)"
+else
+    unset QUEQIAO_DEFAULT_SERVER QUEQIAO_DEFAULT_PIN
+    echo "server built in: none (typed in the login form)"
+fi
 
 features=()
 [ $test = 1 ] && features=(--features "queqiao-agent/test-switches,queqiao-viewer/test-switches,queqiao-service/test-switches")
@@ -117,6 +138,14 @@ if [ $test = 0 ]; then
         done
     done
     echo "no build machine folders in the programs"
+fi
+# The server asked for is in the programs that log in.
+if [ -n "$server" ]; then
+    for program in queqiao-agent queqiao-viewer; do
+        grep -q -a -F -- "$server" "$stage/usr/lib/queqiao/$program" && grep -q -a -F -- "$pin" "$stage/usr/lib/queqiao/$program" \
+            || fail "$program does not have the server $server built in"
+    done
+    echo "server built in (agent, viewer): $server"
 fi
 
 # The .deb.
