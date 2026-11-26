@@ -29,11 +29,7 @@
 ## Contents
 
 - [Features](#features)
-- [Installation & Usage](#installation--usage)
-  - [Install](#install)
-  - [Getting started](#getting-started)
-  - [Run your own server](#run-your-own-server)
-  - [Build from source](#build-from-source)
+- [Getting started](#getting-started)
 - [Compatibility](#compatibility)
 - [Questions & Feedback](#questions--feedback)
 - [License](#license)
@@ -46,7 +42,7 @@
   <tr>
     <td width="33%" valign="top">
       <h4>🔗 Connect anywhere</h4>
-      Direct peer-to-peer connections across networks (NAT traversal, IPv4 and IPv6), and a relay through your server when no direct path exists.
+      Direct peer-to-peer connections across networks (NAT traversal, IPv4 and IPv6). When a direct connection is unavailable, the session uses a relay server (50–100 ms latency).
     </td>
     <td width="33%" valign="top">
       <h4>🎞️ Sharp, fast picture</h4>
@@ -73,40 +69,9 @@
   </tr>
 </table>
 
-### Everything it does
-
-- **Accounts and devices:** one login form for signing in and signing up, the account's devices with online state, device names and favourites, and Wake-on-LAN through another device on the same network.
-- **Sessions:** several at once, a floating session bar, a control center for every session setting, and a card of live figures (path, delay, frame rate, data rate).
-- **Picture:** quality, frame rate, resolution and bitrate settings, several screens, full screen, and a privacy screen that darkens the controlled computer and turns off its keyboard and mouse.
-- **Sound:** the controlled computer's sound (Opus), with its speakers muted while you listen.
-- **Input:** mouse and keyboard by scancode, Windows shortcuts (Win, Alt+Tab, Ctrl+Alt+Del with the service), game mouse with relative movement, the remote pointer's shape, your own hotkeys and a boss key.
-- **Tools:** remote command lines in a terminal window (detach, show again, rename), and lock and restart.
-- **The controlled computer's person decides:** whether your devices may control it, whether to ask first, clipboard, files, command lines, starting with the system, locking after a session, and a password for these settings.
-- **Sign-in screen access:** an optional service shows the sign-in, lock, Ctrl+Alt+Del and UAC screens.
-- **Phones:** Android and iOS apps to control your computers, with touch and mouse modes, the phone's keyboard in any language, a key bar, several screens and the computer's sound.
-- **Updates:** signed updates on Windows, installed between sessions and rolled back if the new version does not start. On Linux, a new package installs over the old one.
-- **Languages:** English and Simplified Chinese, following the system or chosen in Settings.
-
-The full list, compared function by function with UU Remote: [docs/PARITY.md](docs/PARITY.md).
-
 ---
 
-## Installation & Usage
-
-### Install
-
-| Platform | Package | How to install |
-|---|---|---|
-| **Windows** | `queqiao-setup-0.1.0.exe` | Run it. It installs for you without an administrator, and the optional service needs one UAC prompt. Quiet install: `queqiao-setup-0.1.0.exe --quiet --autostart [--service]`. |
-| **Ubuntu, Debian** | `queqiao_0.1.0_amd64.deb` | `sudo apt install ./queqiao_0.1.0_amd64.deb` |
-| **Fedora, openSUSE Tumbleweed** | `queqiao-0.1.0-1.x86_64.rpm` | `sudo dnf install ./queqiao-0.1.0-1.x86_64.rpm` (openSUSE: `sudo zypper install ./queqiao-0.1.0-1.x86_64.rpm`) |
-| **Android** | `queqiao.apk` | Open it on the phone and allow installing from this source. |
-| **iOS** | `Queqiao.ipa` | Install it with [Sideloadly](https://sideloadly.io) and your Apple ID. Apple asks for it to be signed again every 7 days. |
-
-> [!NOTE]
-> Prebuilt packages are not published on the Releases page yet. Until they are, build them as described in [Build from source](#build-from-source). The Windows programs are currently signed with a test certificate, so Windows SmartScreen may warn before the first start.
-
-### Getting started
+## Getting started
 
 <table>
   <tr>
@@ -125,39 +90,6 @@ The full list, compared function by function with UU Remote: [docs/PARITY.md](do
 
 Sessions on a phone work the same way. Choose a device and tap **Connect**. Tap or drag to move the pointer, or switch to mouse mode. Use the floating ball for the keyboard, keys and tools.
 
-### Run your own server
-
-Queqiao's server holds the accounts, shows each account its devices, passes the signals that set up a session, and
-relays a session when no direct path exists. It runs well on a small cloud machine.
-
-```sh
-# Make the certificate; prints the fingerprint the clients need
-queqiao-server init --name <public address>
-
-# Optional: an account made by hand (the password on standard input)
-queqiao-server add-user <name>
-
-# Run it; --allow-signup lets a new user name make an account
-queqiao-server serve --name <public address> --public-ip <public address> --allow-signup
-```
-
-Open **TCP 47100** (accounts), **UDP 3478** (STUN/TURN) and **UDP 47200–47399** (relayed sessions). Without
-`--allow-signup`, only accounts made with `add-user` can log in. With it, a new user name in the login window makes
-an account, at most 3 an hour from one address. Clients reach the server by its address and the certificate
-fingerprint, which the packages can carry built in (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
-
-### Build from source
-
-```sh
-git clone https://github.com/GuoWQ222/Queqiao.git
-cd Queqiao
-cargo build --release --workspace
-```
-
-Windows needs Visual Studio Build Tools (C++ workload, CMake) and NASM. Linux needs clang, CMake, NASM and the X11,
-Wayland, PipeWire and PulseAudio development packages. The installers come from `scripts\package.ps1` (Windows) and
-`scripts/package_linux.sh` (Linux). The repository layout, checks and tests are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-
 ---
 
 ## Compatibility
@@ -168,8 +100,8 @@ Wayland, PipeWire and PulseAudio development packages. The installers come from 
 |---|---|:---:|:---:|
 | **Windows** | Windows 10 (1809 or later), Windows 11; x64 | ✅ | ✅ including the sign-in screen, with the service |
 | **Linux** | glibc 2.35 or later (Ubuntu 22.04+, Debian 12+, Fedora 36+); x86_64 | ✅ | ✅ on X11 and Wayland, including the sign-in screen, with the service |
-| **Android** | Android 8.0 or later | ✅ | — planned |
-| **iOS / iPadOS** | iOS 15 or later | ✅ | — (iOS allows no app to control the device) |
+| **Android** | Android 8.0 or later | Planned | Not supported |
+| **iOS / iPadOS** | iOS 15 or later | Planned | — (iOS allows no app to control the device) |
 
 ### Linux desktops
 
@@ -178,7 +110,7 @@ Wayland, PipeWire and PulseAudio development packages. The installers come from 
 | X11 (any desktop) | ✅ MIT-SHM capture, XTest input |
 | Wayland: GNOME | ✅ through the desktop portal. The person allows it once; the permission is remembered |
 | Wayland: wlroots (Sway and others) | ✅ screen through the desktop portal, input through the compositor's virtual pointer and keyboard |
-| Wayland: KDE Plasma | ⚠️ through the desktop portal: input tested, picture still being tested |
+| Wayland: KDE Plasma | ⚠️ Unstable, untested |
 
 ### Graphics and codecs
 
