@@ -3,8 +3,8 @@
 //! - `device.json`: the device's id and name, shared by its agent and viewer;
 //! - `<role>.json`: the server, the pinned certificate fingerprint and the refresh token, which is
 //!   encrypted with Windows' DPAPI for the current user (another user or PC cannot read it). On Linux with this
-//!   person's own key (`protect.key`, readable by them only) and ChaCha20-Poly1305; the Secret Service (GNOME
-//!   Keyring, KWallet) is to hold that key where there is one (docs/LINUX.md).
+//!   person's own key and ChaCha20-Poly1305; the key is kept in the desktop's keyring (the Secret Service: GNOME
+//!   Keyring, KWallet) where there is one, else in `protect.key`, readable by them only (`protect_key`).
 
 use std::path::PathBuf;
 
@@ -230,15 +230,86 @@ pub fn folder() -> Result<PathBuf, Error> {
 #[cfg(unix)]
 const SEALED: &[u8; 4] = b"QQS1";
 
-/// This person's key for `protect` on Linux: 32 random bytes in `protect.key` (0600 in the 0700 folder), made the
-/// first time. Another user cannot read it; root and a copy of the home folder can, which DPAPI's tie to the
-/// Windows password avoids: the Secret Service is to hold it where there is one (docs/LINUX.md).
+/// This person's key for `protect` on Linux: 32 random bytes, kept in the desktop's keyring (the Secret Service: GNOME
+/// Keyring, KWallet) where there is one, as DPAPI keeps Windows' tied to the person's password; else in `protect.key`
+/// (0600 in the 0700 folder: another user cannot read it, but a copy of the home folder holds it beside what it seals).
+/// A key file from before goes into the keyring once it is there (read back first, then the file is removed); from
+/// then on `protect.keyring` (no secret) says so, and a keyring that cannot be used later is an error instead of a new
+/// key in a file, which would not open what the keyring's key sealed. Test builds keep theirs in the file (and never
+/// wait on a keyring's prompt). Read once per process.
 #[cfg(unix)]
 fn protect_key() -> Result<ring::aead::LessSafeKey, Error> {
+    static KEY: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+    let mut kept = KEY.lock().map_err(|_| Error("the key's lock".into()))?;
+    let bytes = match kept.as_ref() {
+        Some(bytes) => bytes.clone(),
+        None => {
+            let bytes = protect_key_bytes()?;
+            *kept = Some(bytes.clone());
+            bytes
+        }
+    };
+    let key = ring::aead::UnboundKey::new(&ring::aead::CHACHA20_POLY1305, &bytes)
+        .map_err(|_| Error("this person's key is not a key".into()))?;
+    Ok(ring::aead::LessSafeKey::new(key))
+}
+
+#[cfg(target_os = "linux")]
+fn protect_key_bytes() -> Result<Vec<u8>, Error> {
+    let folder = folder()?;
+    let path = folder.join("protect.key");
+    let marker = folder.join("protect.keyring");
+    const NOTE: &str =
+        "This person's key for Queqiao's saved login is kept in the desktop's keyring.\n";
+    // Unit tests keep out of the developer's own keyring, unless scripts/keyring_test_linux.sh gives them one.
+    if cfg!(feature = "test-files")
+        || (cfg!(test) && std::env::var_os("QUEQIAO_TEST_KEYRING").is_none())
+    {
+        return file_key(&path);
+    }
+    match crate::keyring::load() {
+        Ok(Some(key)) if key.len() == 32 => {
+            if std::fs::read(&path).is_ok_and(|bytes| bytes == key) {
+                let _ = std::fs::remove_file(&path);
+            }
+            let _ = std::fs::write(&marker, NOTE);
+            Ok(key)
+        }
+        Ok(Some(_)) => Err(Error(
+            "the keyring holds something else than a key for Queqiao".into(),
+        )),
+        Ok(None) => {
+            // The keyring is there and holds none yet: this person's key (from the file, or new) goes into it.
+            let key = file_key(&path)?;
+            // Read back before the file goes: a keyring that did not keep it leaves the file as it is.
+            if let Ok(Some(back)) =
+                crate::keyring::store(&key).and_then(|()| crate::keyring::load())
+                && back == key
+            {
+                let _ = std::fs::write(&marker, NOTE);
+                let _ = std::fs::remove_file(&path);
+            }
+            Ok(key)
+        }
+        Err(error) if marker.exists() && !path.exists() => Err(Error(format!(
+            "this person's key is kept in the desktop's keyring, which cannot be used now: {error}"
+        ))),
+        Err(_) => file_key(&path),
+    }
+}
+
+/// Elsewhere (macOS, the BSDs): the key file.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn protect_key_bytes() -> Result<Vec<u8>, Error> {
+    file_key(&folder()?.join("protect.key"))
+}
+
+/// The key in `path` (0600), made the first time.
+#[cfg(unix)]
+fn file_key(path: &std::path::Path) -> Result<Vec<u8>, Error> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let path = folder()?.join("protect.key");
-    let bytes = match std::fs::read(&path) {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) if bytes.len() == 32 => bytes,
         Ok(_) => return Err(Error(format!("{} is not a key", path.display()))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -249,7 +320,7 @@ fn protect_key() -> Result<ring::aead::LessSafeKey, Error> {
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .open(&path)
+                .open(path)
             {
                 Ok(mut file) => {
                     file.write_all(&fresh)?;
@@ -257,16 +328,17 @@ fn protect_key() -> Result<ring::aead::LessSafeKey, Error> {
                     fresh
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    std::fs::read(&path)?
+                    std::fs::read(path)?
                 }
                 Err(error) => return Err(error.into()),
             }
         }
         Err(error) => return Err(error.into()),
     };
-    let key = ring::aead::UnboundKey::new(&ring::aead::CHACHA20_POLY1305, &bytes)
-        .map_err(|_| Error(format!("{} is not a key", path.display())))?;
-    Ok(ring::aead::LessSafeKey::new(key))
+    if bytes.len() != 32 {
+        return Err(Error(format!("{} is not a key", path.display())));
+    }
+    Ok(bytes)
 }
 
 #[cfg(unix)]
@@ -463,5 +535,26 @@ mod tests {
                 .machine()
                 .is_empty()
         );
+    }
+
+    /// Against a real keyring, in a home of its own (scripts/keyring_test_linux.sh): an earlier key file goes into the
+    /// keyring (read back, then the file is removed), what it sealed still opens, and keeping a key again replaces the
+    /// one item.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn the_key_file_moves_into_the_keyring() {
+        let folder = folder().unwrap();
+        let file = folder.join("protect.key");
+        let old: Vec<u8> = (200..232).collect();
+        std::fs::write(&file, &old).unwrap();
+        let sealed = protect(b"saved login").unwrap();
+        assert!(!file.exists(), "the key file is still there");
+        assert!(folder.join("protect.keyring").exists());
+        assert_eq!(crate::keyring::load().unwrap(), Some(old));
+        assert_eq!(unprotect(&sealed).unwrap(), b"saved login");
+        let other: Vec<u8> = (0..32).collect();
+        crate::keyring::store(&other).unwrap();
+        assert_eq!(crate::keyring::load().unwrap(), Some(other));
     }
 }

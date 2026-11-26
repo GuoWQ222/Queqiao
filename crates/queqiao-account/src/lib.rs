@@ -16,6 +16,8 @@ pub fn unprotect_secret(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 pub mod connections;
+#[cfg(target_os = "linux")]
+mod keyring;
 mod keys;
 mod local_password;
 mod notes;

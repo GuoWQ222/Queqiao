@@ -2745,6 +2745,7 @@ dependencies = [
  "sha2",
  "tungstenite",
  "windows",
+ "zbus",
 ]
 
 [[package]]
