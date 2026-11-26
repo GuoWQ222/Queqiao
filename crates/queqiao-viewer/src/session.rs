@@ -402,21 +402,31 @@ pub(crate) fn run_session(
         queqiao_core::protocol::hevc::describe(hevc_caps)
     ));
     let (mut chroma444, mut ten_bit) = (options.chroma444, options.ten_bit);
-    // A decoder for the other codec, made before it is needed: making Windows' AV1 decoder takes a while, and doing
-    // it when the first AV1 frame comes would hold this window (and its keyboard hook) just after the first picture.
-    let mut spare_decoder: Option<(queqiao_core::protocol::VideoCodec, H264Decoder)> = None;
-    let spare_codec = match codec_choice {
-        queqiao_core::protocol::CodecPreference::H265
-            if hevc_caps & queqiao_core::protocol::hevc::MAIN != 0 =>
+    // Decoders for the other codecs the picture may come in, made before they are needed: making Windows' AV1 decoder
+    // takes a while, and doing it when the first AV1 frame comes would hold this window (and its keyboard hook) just
+    // after the first picture. "Automatic" may bring AV1 or H.265 (the agent picks by its own GPU): one of each.
+    let mut spare_decoders: Vec<(queqiao_core::protocol::VideoCodec, H264Decoder)> = Vec::new();
+    let hevc_on_gpu = hevc_caps & queqiao_core::protocol::hevc::MAIN != 0;
+    let spare_codecs: Vec<queqiao_core::protocol::VideoCodec> = {
+        use queqiao_core::protocol::{CodecPreference, VideoCodec};
+        let mut codecs = Vec::new();
+        if matches!(
+            codec_choice,
+            CodecPreference::Automatic | CodecPreference::Av1
+        ) && av1_for(codec_choice)
         {
-            Some(queqiao_core::protocol::VideoCodec::H265)
+            codecs.push(VideoCodec::Av1);
         }
-        queqiao_core::protocol::CodecPreference::H264
-        | queqiao_core::protocol::CodecPreference::H265 => None,
-        choice if av1_for(choice) => Some(queqiao_core::protocol::VideoCodec::Av1),
-        _ => None,
+        if matches!(
+            codec_choice,
+            CodecPreference::Automatic | CodecPreference::H265
+        ) && hevc_on_gpu
+        {
+            codecs.push(VideoCodec::H265);
+        }
+        codecs
     };
-    if let Some(spare) = spare_codec {
+    for spare in spare_codecs {
         let making = Instant::now();
         match H264Decoder::with_codec(spare, device, context, DecoderChoice::from_env()) {
             Ok(made) => {
@@ -426,7 +436,7 @@ pub(crate) fn run_session(
                     made.name(),
                     making.elapsed().as_millis()
                 ));
-                spare_decoder = Some((spare, made));
+                spare_decoders.push((spare, made));
             }
             Err(error) => lines.push(format!("decoder for {}: {}", spare.name(), describe(error))),
         }
@@ -1746,7 +1756,10 @@ pub(crate) fn run_session(
                 } => {
                     // Another codec (the agent switched): a decoder for it.
                     if codec != decoder_codec {
-                        let ready = spare_decoder.take_if(|(spare, _)| *spare == codec);
+                        let ready = spare_decoders
+                            .iter()
+                            .position(|(spare, _)| *spare == codec)
+                            .map(|at| spare_decoders.swap_remove(at));
                         let next = match ready {
                             Some((_, made)) => made,
                             None => H264Decoder::with_codec(
@@ -1761,7 +1774,7 @@ pub(crate) fn run_session(
                         };
                         // The one in use stays ready, for a switch back.
                         let previous = std::mem::replace(&mut decoder, next);
-                        spare_decoder = Some((decoder_codec, previous));
+                        spare_decoders.push((decoder_codec, previous));
                         decoder_codec = codec;
                         lines.push(format!(
                             "decoder: {} (the picture is {} now)",

@@ -78,23 +78,45 @@ pub(crate) struct Stats {
     pub(crate) agent_ms: Vec<f64>,
 }
 
-/// Whether this PC (its primary screen's GPU) has an AV1 encoder: asked once per process.
-pub(crate) static AV1_ENCODER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+/// What this PC's GPU (its primary screen's) encodes besides H.264, as "Automatic" needs to know it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GpuEncoders {
+    pub(crate) av1: bool,
+    /// H.265 4:2:0 at 8 bits (the GPU makers' encoders or Windows' hardware one; 4:4:4 and 10-bit are tried when asked).
+    pub(crate) hevc: bool,
+}
 
-/// Asks for [`AV1_ENCODER`] in the background (a D3D11 device of its own, Windows' AV1 encoder opened and closed).
-pub(crate) fn start_av1_probe() {
-    if AV1_ENCODER.get().is_some() {
+/// The screen's GPU device on each system.
+#[cfg(windows)]
+type GpuDevice = windows::Win32::Graphics::Direct3D11::ID3D11Device;
+#[cfg(target_os = "linux")]
+type GpuDevice = queqiao_capture::Device;
+
+impl GpuEncoders {
+    /// Each encoder opened (1280x720) and closed again: a registered encoder is not enough (`queqiao_codec::can_encode`).
+    pub(crate) fn of(device: &GpuDevice) -> Self {
+        use queqiao_core::protocol::VideoCodec;
+        Self {
+            av1: queqiao_codec::can_encode(VideoCodec::Av1, device),
+            hevc: queqiao_codec::can_encode(VideoCodec::H265, device),
+        }
+    }
+}
+
+/// [`GpuEncoders`] of this PC: asked once per process.
+pub(crate) static GPU_ENCODERS: std::sync::OnceLock<GpuEncoders> = std::sync::OnceLock::new();
+
+/// Asks for [`GPU_ENCODERS`] in the background (a device of its own, each encoder opened and closed).
+pub(crate) fn start_encoder_probe() {
+    if GPU_ENCODERS.get().is_some() {
         return;
     }
     let _ = std::thread::Builder::new()
-        .name("queqiao-av1-probe".into())
+        .name("queqiao-encoder-probe".into())
         .spawn(|| {
-            AV1_ENCODER.get_or_init(|| match queqiao_capture::screen_device(None) {
-                Ok(screen) => queqiao_codec::can_encode(
-                    queqiao_core::protocol::VideoCodec::Av1,
-                    &screen.device,
-                ),
-                Err(_) => false,
+            GPU_ENCODERS.get_or_init(|| match queqiao_capture::screen_device(None) {
+                Ok(screen) => GpuEncoders::of(&screen.device),
+                Err(_) => GpuEncoders::default(),
             });
         });
 }
@@ -194,17 +216,18 @@ pub(crate) fn peer_event_name(event: &PeerEvent) -> &'static str {
     }
 }
 
-/// The codec "Automatic" picks: AV1 when this PC encodes it on its GPU and the viewer decodes it on its GPU (as
-/// fast as H.264 and fewer bits for the same picture: measured 2026-11-22, 13.8 ms median screen change -> shown
-/// against 14.9 ms), otherwise H.264.
-pub(crate) fn automatic_codec(
-    viewer_av1: bool,
-    agent_av1: bool,
-) -> queqiao_core::protocol::VideoCodec {
-    if viewer_av1 && agent_av1 {
-        queqiao_core::protocol::VideoCodec::Av1
+/// The codec "Automatic" picks, the best that both ends do on their GPUs (`av1`, `hevc`: this PC encodes it and the
+/// viewer decodes it there): AV1 (as fast as H.264 and the fewest bits for the same picture: measured 2026-11-22,
+/// 13.8 ms median screen change -> shown against 14.9 ms), else H.265 (fewer bits than H.264 for the same picture),
+/// else H.264. Only the hardware decides: 4:4:4 and 10-bit are separate switches, applied when the picture is H.265.
+pub(crate) fn automatic_codec(av1: bool, hevc: bool) -> queqiao_core::protocol::VideoCodec {
+    use queqiao_core::protocol::VideoCodec;
+    if av1 {
+        VideoCodec::Av1
+    } else if hevc {
+        VideoCodec::H265
     } else {
-        queqiao_core::protocol::VideoCodec::H264
+        VideoCodec::H264
     }
 }
 
@@ -756,7 +779,7 @@ pub(crate) fn session(
     let mut microphone_check: Option<ToneCheck> = None;
     // Whether this PC has an AV1 encoder: asked in the background from now, ready before the viewer says which codec
     // it wants (asked then, in this loop, it held input and pings for about 450 ms at each session's start).
-    start_av1_probe();
+    start_encoder_probe();
     // That PC's pointer shape as last sent, and how many were sent or left out.
     let mut last_pointer: Option<queqiao_core::protocol::PointerShape> = None;
     let (mut pointer_shapes, mut pointer_skipped) = (0u32, 0u32);
@@ -1331,21 +1354,25 @@ pub(crate) fn session(
                     })) => {
                         use queqiao_core::protocol::{CodecPreference, VideoCodec, hevc};
                         // Waits for the background probe if it is still at it.
-                        let can_encode_av1 = *AV1_ENCODER
-                            .get_or_init(|| queqiao_codec::can_encode(VideoCodec::Av1, &device));
-                        let (wanted, format) = match prefer {
+                        let encoders = *GPU_ENCODERS.get_or_init(|| GpuEncoders::of(&device));
+                        let can_encode_av1 = encoders.av1;
+                        // The viewer says it decodes H.265 only where its GPU does (Main at least).
+                        let viewer_hevc = can_decode_hevc & hevc::MAIN != 0;
+                        let wanted = match prefer {
                             CodecPreference::Av1 if can_decode_av1 && can_encode_av1 => {
-                                (VideoCodec::Av1, EncodeFormat::H264)
+                                VideoCodec::Av1
                             }
-                            CodecPreference::H265 if can_decode_hevc & hevc::MAIN != 0 => (
-                                VideoCodec::H265,
-                                hevc_format(can_decode_hevc, chroma444, ten_bit),
+                            CodecPreference::H265 if viewer_hevc => VideoCodec::H265,
+                            CodecPreference::Automatic => automatic_codec(
+                                can_decode_av1 && can_encode_av1,
+                                viewer_hevc && encoders.hevc,
                             ),
-                            CodecPreference::Automatic => (
-                                automatic_codec(can_decode_av1, can_encode_av1),
-                                EncodeFormat::H264,
-                            ),
-                            _ => (VideoCodec::H264, EncodeFormat::H264),
+                            _ => VideoCodec::H264,
+                        };
+                        let format = if wanted == VideoCodec::H265 {
+                            hevc_format(can_decode_hevc, chroma444, ten_bit)
+                        } else {
+                            EncodeFormat::H264
                         };
                         let making = Instant::now();
                         let same = wanted == encoder.codec()
@@ -2450,6 +2477,17 @@ fn tell_afterwards(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_takes_the_best_codec_both_gpus_do() {
+        use queqiao_core::protocol::VideoCodec;
+        // (both do AV1, both do H.265) -> the codec.
+        assert_eq!(automatic_codec(true, true), VideoCodec::Av1);
+        assert_eq!(automatic_codec(true, false), VideoCodec::Av1);
+        // sunshine's Iris Xe makes no AV1, but H.265: the PC controlling it gets H.265, not H.264.
+        assert_eq!(automatic_codec(false, true), VideoCodec::H265);
+        assert_eq!(automatic_codec(false, false), VideoCodec::H264);
+    }
 
     #[test]
     fn h265_falls_back_to_what_the_viewer_decodes() {

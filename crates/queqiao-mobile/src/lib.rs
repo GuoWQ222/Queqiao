@@ -100,6 +100,11 @@ enum Request {
     },
     Resume,
     LogOut,
+    /// What the phone decodes in hardware, as the app asked its system (sent once after `start`): with H.265 the PC's
+    /// "Automatic" may send it; without this request H.264 only.
+    Decoders {
+        hevc: bool,
+    },
     /// A device to control; `take_over`: from the device of the account controlling it now (the person confirmed).
     Connect {
         device: String,
@@ -157,6 +162,7 @@ impl Core {
             device_name: device_name.to_string(),
             account: None,
             session: None,
+            hevc: false,
         };
         let stop = stopped.clone();
         std::thread::Builder::new()
@@ -178,7 +184,7 @@ impl Core {
     }
 
     /// A command as JSON: {"login": {"server", "pin", "user", "password"}}, {"resume": {}}, {"log_out": {}},
-    /// {"connect": {"device": id, "take_over": bool}}, {"end_control": id}, {"disconnect": {}}, {"move": {"x", "y"}} (0..1 of the picture),
+    /// {"decoders": {"hevc": bool}}, {"connect": {"device": id, "take_over": bool}}, {"end_control": id}, {"disconnect": {}}, {"move": {"x", "y"}} (0..1 of the picture),
     /// {"button": {"button": "left"|"right"|"middle", "down": bool}}, {"wheel": {"delta", "horizontal"}},
     /// {"key": {"scancode", "extended", "down"}}, {"command": "ctrl_alt_del"|"lock"|...}, {"password": text},
     /// {"clipboard": text}, {"text": typed text, as characters on the PC}, {"remove_device": id},
@@ -263,6 +269,7 @@ fn parse(json: &str) -> Option<Request> {
         },
         "resume" => Request::Resume,
         "log_out" => Request::LogOut,
+        "decoders" => Request::Decoders { hevc: flag("hevc") },
         "connect" => Request::Connect {
             device: text("device"),
             take_over: flag("take_over"),
@@ -343,6 +350,8 @@ struct Session {
     rtt_ms: Option<f64>,
     ping_id: u32,
     relayed: bool,
+    /// The phone decodes H.265 in hardware (the app's word in "connect").
+    hevc: bool,
 }
 
 struct Engine {
@@ -353,6 +362,8 @@ struct Engine {
     device_name: String,
     account: Option<Account>,
     session: Option<Session>,
+    /// The phone decodes H.265 in hardware (the app's "decoders" request).
+    hevc: bool,
 }
 
 impl Engine {
@@ -461,6 +472,7 @@ impl Engine {
                 let _ = SavedLogin::default().save(AccountRole::Viewer);
                 self.emit(json!({"logged_out": {}}));
             }
+            Request::Decoders { hevc } => self.hevc = hevc,
             Request::Connect { device, take_over } => self.connect(&device, take_over),
             Request::EndControl(device) => {
                 if let Some(account) = &self.account
@@ -652,6 +664,7 @@ impl Engine {
                     rtt_ms: None,
                     ping_id: 0,
                     relayed: false,
+                    hevc: self.hevc,
                 });
             }
             Err(error) => {
@@ -675,12 +688,13 @@ impl Engine {
             }
             PeerEvent::ChannelOpen => {
                 session.channel_open = true;
-                // The phone decodes H.264, and H.265 Main where its hardware does (most phones since 2016).
+                // The phone decodes H.264, and H.265 Main where its hardware does (the app asked its system): the PC's
+                // "Automatic" sends H.265 then when its GPU makes it.
                 session.peer.send_data(
                     Message::Command(RemoteCommand::VideoCodec {
                         prefer: CodecPreference::Automatic,
                         can_decode_av1: false,
-                        can_decode_hevc: hevc::MAIN,
+                        can_decode_hevc: if session.hevc { hevc::MAIN } else { 0 },
                         chroma444: false,
                         ten_bit: false,
                     })
@@ -780,6 +794,15 @@ mod tests {
         assert!(matches!(
             parse(r#"{"connect": {"device": "pc-1"}}"#),
             Some(Request::Connect { device, take_over: false }) if device == "pc-1"
+        ));
+        // What the phone decodes in hardware; nothing said, H.264 only.
+        assert!(matches!(
+            parse(r#"{"decoders": {"hevc": true}}"#),
+            Some(Request::Decoders { hevc: true })
+        ));
+        assert!(matches!(
+            parse(r#"{"decoders": {}}"#),
+            Some(Request::Decoders { hevc: false })
         ));
         assert!(matches!(
             parse(r#"{"end_control": "pc-1"}"#),

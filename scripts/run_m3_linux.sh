@@ -13,7 +13,8 @@
 # its main window's pages pictured (main_devices.bmp ...). h265: the viewer asks for H.265 (NVENC on the agent, NVDEC
 # on the viewer). h265_10: H.265 10-bit (4:2:0) asked for. h265_444: 4:4:4 10-bit asked for. av1: the viewer leaves the
 # codec to the agent (Automatic, the default), which makes AV1 (NVENC API 12) as both can; av1_api11: the same with the
-# agent kept on NVENC API 11.1 (an older driver), which falls back to H.264. The H.265 and AV1 sessions
+# agent kept on NVENC API 11.1 (an older driver), which falls back to H.265 (Automatic: AV1, then H.265, then H.264);
+# h264: the viewer asks for H.264 (Automatic no longer gives it here). The H.264, H.265 and AV1 sessions
 # check colours: windows of five colours on the agent's screen must show in the viewer's picture as on the screen
 # (a channel swapped, or a wrong 10-bit packing, shows there).
 # The agent's screen is Xvfb :91 with a clock and `top` (so the picture changes); the viewer's window is on Xvfb :92.
@@ -25,7 +26,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
 seconds=${SECONDS_RUN:-20}
-sessions=${SESSIONS:-direct allowed declined ui main window h265 h265_10 h265_444 av1 av1_api11}
+sessions=${SESSIONS:-direct allowed declined ui main window h264 h265 h265_10 h265_444 av1 av1_api11}
 out=/tmp/queqiao_m3
 rm -rf "$out"; mkdir -p "$out"
 export XDG_CONFIG_HOME=$out/config XDG_STATE_HOME=$out/state XDG_RUNTIME_DIR=$out/run
@@ -104,9 +105,12 @@ for label in $sessions; do
         # The default (Automatic): AV1 where the agent makes it and the viewer's GPU decodes it.
         av1) agent_extra=''; viewer_extra="--codec automatic --ui-pictures $out/$label --picture-at 4";
               agent_expects='command from the viewer: picture: AV1 (NVIDIA NVENC AV1'; viewer_expects='the picture is AV1 now'; both_pass=yes ;;
-        # An older driver (NVENC API 11.1, forced): no AV1, so Automatic gives H.264 through NVENC as before.
+        # An older driver (NVENC API 11.1, forced): no AV1, so Automatic gives the next best both GPUs do, H.265.
         av1_api11) agent_env=QUEQIAO_NVENC_API=11; agent_extra=''; viewer_extra="--codec automatic --ui-pictures $out/$label --picture-at 4";
-              agent_expects='command from the viewer: picture: H.264 (NVIDIA NVENC H.264 4:2:0 (direct, API 11.1)'; viewer_expects=''; both_pass=yes ;;
+              agent_expects='command from the viewer: picture: H.265 4:2:0 (NVIDIA NVENC H.265 4:2:0 (direct, API 11.1)'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
+        # H.264 asked for: the path every GPU has, through NVENC.
+        h264) agent_extra=''; viewer_extra="--codec h264 --ui-pictures $out/$label --picture-at 4";
+              agent_expects='command from the viewer: picture: H.264 (NVIDIA NVENC H.264 4:2:0'; viewer_expects=''; both_pass=yes ;;
         h265_444) agent_extra=''; viewer_extra="--codec h265 --chroma444 --ten-bit --ui-pictures $out/$label --picture-at 4";
               agent_expects='command from the viewer: picture: H.265 4:4:4 10-bit'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
         ui) agent_extra=''; viewer_extra='';
@@ -181,7 +185,7 @@ for label in $sessions; do
         done
     fi
     case "$label" in
-        h265* | av1*)
+        h264 | h265* | av1*)
             # The five colours in the viewer's picture (taken 4 s after the first) against the screen itself.
             colour=$(python3 - "$out/$label/viewer_session.bmp" << 'EOF'
 import sys

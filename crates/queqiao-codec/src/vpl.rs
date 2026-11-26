@@ -496,8 +496,12 @@ impl VplEncoder {
     }
 }
 
-/// The encoder's parameters: low latency (one frame in flight, no B-frames, the fastest preset on the GPU's own
-/// low-power encoder), peak-constrained VBR as the Media Foundation path.
+/// The encoder's parameters: low latency (one frame in flight, no B-frames, the GPU's own low-power encoder),
+/// peak-constrained VBR as the Media Foundation path. H.264 on the fastest preset (7); H.265 on the balanced one (4):
+/// on 7 its motion search reaches too short for a quick drag. Measured 2026-11-26 on sunshine's Iris Xe (codec_probe,
+/// 2240x1400 at 5 Mbit/s, the page moving 7/28/56 rows a frame): H.265 on 7 47.8/37.1/30.7 dB, on 4 48.2/48.9/41.0, on 1
+/// 48.4/50.0/46.5 (H.264 on 7 38.5/40.5/39.6, on 4 under 1 dB more); screen change -> sent in a session 12.8 ms
+/// median on 7, 14.6 on 4 (H.264 on 7: 14.1), 15.8 on 1 with fewer frames.
 fn params(config: &EncoderConfig, format: EncodeFormat) -> sys::mfxVideoParam {
     let mut params: sys::mfxVideoParam = unsafe { zeroed() };
     params.AsyncDepth = 1;
@@ -515,13 +519,25 @@ fn params(config: &EncoderConfig, format: EncodeFormat) -> sys::mfxVideoParam {
             (Codec::H265, false, true) => sys::MFX_PROFILE_HEVC_MAIN10,
             (Codec::H265, false, false) => sys::MFX_PROFILE_HEVC_MAIN,
         } as u16;
-        mfx.LowPower = sys::MFX_CODINGOPTION_ON as u16;
+        // Test switches (QUEQIAO_FORCE): vpl_lowpower:off, vpl_tu:1..7 (1 best quality, 7 best speed), to compare
+        // the presets on the same content.
+        mfx.LowPower = if queqiao_core::forced("vpl_lowpower").as_deref() == Some("off") {
+            sys::MFX_CODINGOPTION_OFF
+        } else {
+            sys::MFX_CODINGOPTION_ON
+        } as u16;
         // Room for up to 200 Mbit/s at the peak in the 16-bit kbit/s fields.
         let most = (config.bitrate.max(200_000_000) as f64 * PEAK) as u32 / 1000;
         mfx.BRCParamMultiplier = most.div_ceil(u32::from(u16::MAX)).max(1) as u16;
         let multiplier = mfx.BRCParamMultiplier;
         let settings = &mut mfx.__bindgen_anon_1.__bindgen_anon_1;
-        settings.TargetUsage = sys::MFX_TARGETUSAGE_BEST_SPEED as u16;
+        settings.TargetUsage = queqiao_core::forced("vpl_tu")
+            .and_then(|tu| tu.parse::<u16>().ok())
+            .filter(|tu| (1..=7).contains(tu))
+            .unwrap_or(match format.codec {
+                Codec::H264 => sys::MFX_TARGETUSAGE_BEST_SPEED,
+                Codec::H265 => sys::MFX_TARGETUSAGE_BALANCED,
+            } as u16);
         settings.GopPicSize = (config.fps * 10).min(u32::from(u16::MAX)) as u16;
         settings.GopRefDist = 1;
         settings.IdrInterval = 0;

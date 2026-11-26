@@ -177,10 +177,14 @@ impl H264Encoder {
 }
 
 /// Whether this PC can encode `codec` (as Windows' can_encode): H.264 always (OpenH264 is built in), H.265 and AV1
-/// when NVENC opens for it (1280x720 at 60 fps, closed again; AV1 needs NVENC API 12 and a GPU that makes AV1).
+/// when NVENC opens for it (1280x720 at 60 fps, closed again; AV1 needs NVENC API 12 and a GPU that makes AV1). Not
+/// H.265 when software encoding is forced (tests: H.264 only then).
 pub fn can_encode(codec: VideoCodec, _device: &Device) -> bool {
     match codec {
         VideoCodec::H264 => true,
+        VideoCodec::H265 if crate::EncoderChoice::from_env() == crate::EncoderChoice::Software => {
+            false
+        }
         VideoCodec::H265 => {
             let format = EncodeFormat::from_name("hevc").unwrap_or(EncodeFormat::H264);
             let config = EncoderConfig {

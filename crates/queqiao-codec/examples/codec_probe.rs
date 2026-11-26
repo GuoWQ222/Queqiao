@@ -5,7 +5,10 @@
 //! coloured boxes, moved up a few rows per frame. Each frame is converted to NV12, encoded and decoded; the
 //! decoded luma (Y) is compared with the encoder's input (PSNR).
 //!
-//! Usage: codec_probe [width=1920] [height=1080] [frames=120] [fps=60] [codec=h264|av1] [force=STAGE:CHOICE,...]
+//! Usage: codec_probe [width=1920] [height=1080] [frames=120] [fps=60] [codec=h264|h265|av1] [bitrate=KBIT/S]
+//!   [step=ROWS] [force=STAGE:CHOICE,...]
+//!   bitrate: a fixed bitrate instead of the screen's default, to compare codecs at one bitrate (the PSNR is then
+//!   reported, not checked); step: rows the page moves per frame (default height/180; more is faster motion);
 //!   force: encode:software|hardware, decode:software|hardware, convert:cpu, adapter:warp
 //! Prints the report; exit code 0 = PASS.
 
@@ -13,8 +16,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use queqiao_codec::{
-    DecodedFrame, DecoderChoice, EncodedFrame, EncoderChoice, EncoderConfig, H264Decoder,
-    H264Encoder, Nv12Converter, VideoCodec, nal_types,
+    Codec, DecodedFrame, DecoderChoice, EncodeFormat, EncodedFrame, EncoderChoice, EncoderConfig,
+    H264Decoder, H264Encoder, Nv12Converter, VideoCodec, nal_types,
 };
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
@@ -62,9 +65,15 @@ fn main() {
     let mut lines = Vec::new();
     let codec = match options.get("codec").map(String::as_str) {
         Some("av1") => VideoCodec::Av1,
+        Some("h265") => VideoCodec::H265,
         _ => VideoCodec::H264,
     };
-    let passed = match run(width, height, frames, fps, codec, &mut lines) {
+    let bitrate = options
+        .get("bitrate")
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|kbit| kbit.saturating_mul(1000));
+    let step = options.get("step").and_then(|v| v.parse::<usize>().ok());
+    let passed = match run(width, height, frames, fps, codec, bitrate, step, &mut lines) {
         Ok(passed) => passed,
         Err(error) => {
             lines.push(format!("ERROR {error}"));
@@ -78,12 +87,15 @@ fn main() {
     std::process::exit(if passed { 0 } else { 1 });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     width: u32,
     height: u32,
     frames: u32,
     fps: u32,
     codec: VideoCodec,
+    bitrate: Option<u32>,
+    step: Option<usize>,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
     lines.push(format!("codec: {}", codec.name()));
@@ -106,10 +118,20 @@ fn run(
         .map(|_| converter.create_output(&device))
         .collect::<windows::core::Result<Vec<_>>>()
         .map_err(|e| format!("NV12 textures: {}", describe(e)))?;
-    let config = EncoderConfig {
+    let mut config = EncoderConfig {
         codec,
         ..EncoderConfig::for_screen(width, height, fps)
     };
+    if codec == VideoCodec::H265 {
+        config = config.with_format(EncodeFormat {
+            codec: Codec::H265,
+            chroma444: false,
+            ten_bit: false,
+        });
+    }
+    if let Some(bitrate) = bitrate {
+        config.bitrate = bitrate;
+    }
     let mut encoder = H264Encoder::new(&device, &context, &config, EncoderChoice::from_env())
         .map_err(|e| format!("encoder: {}", describe(e)))?;
     let mut decoder = H264Decoder::with_codec(codec, &device, &context, DecoderChoice::from_env())
@@ -130,7 +152,8 @@ fn run(
     let mut sources: HashMap<i64, Vec<u8>> = HashMap::new();
     let mut stats = Stats::default();
     let mut pending: Vec<EncodedFrame> = Vec::new();
-    let step = (h / 180).max(2);
+    let step = step.unwrap_or((h / 180).max(2)).max(1);
+    lines.push(format!("motion: {step} rows a frame"));
     let duration = 10_000_000 / i64::from(fps);
     let started = Instant::now();
     for i in 0..frames {
@@ -224,10 +247,16 @@ fn run(
     lines.push(format!("luma PSNR, dB: {}", summary(&mut stats.psnr)));
     let min_psnr = stats.psnr.first().copied().unwrap_or(0.0);
     let all_decoded = stats.decoded == frames as usize && stats.mismatched == 0;
-    let quality = min_psnr >= MIN_PSNR_DB;
+    // At a fixed bitrate the PSNR is what is compared, not a pass mark.
+    let quality = bitrate.is_some() || min_psnr >= MIN_PSNR_DB;
     let keeps_up = percentile(&stats.decode_ms, 0.95) < 1000.0 / f64::from(fps);
     lines.push(format!(
-        "checks: every frame decoded {all_decoded}, lowest PSNR >= {MIN_PSNR_DB} dB {quality}, p95 decode < frame time {keeps_up}"
+        "checks: every frame decoded {all_decoded}, lowest PSNR >= {MIN_PSNR_DB} dB {quality}{}, p95 decode < frame time {keeps_up}",
+        if bitrate.is_some() {
+            " (not checked at a fixed bitrate)"
+        } else {
+            ""
+        }
     ));
     // How long letting the decoder go takes (a viewer switching codecs does it on its window's thread).
     let dropping = Instant::now();

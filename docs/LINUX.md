@@ -141,7 +141,7 @@ h265_10 and h265_444 sessions have NVENC make each and NVDEC show it, and check 
 blue, grey, orange) on the agent's screen against the viewer's picture (at most 12 apart a channel; 8-bit 4:2:0 shows
 1, the 10-bit ones 0; red and blue swapped in the 4:4:4 packing fails it with 255). AV1 (docs/DESIGN.md, item 9): the
 agent makes it with NVENC API 12 where the driver has it (8-bit 4:2:0), the viewer decodes it with NVDEC where the GPU
-does, and the viewer's default (Automatic) gets AV1 when both can, else H.264; run_m3_linux.sh's av1 session checks
+does, and the viewer's default (Automatic) gets AV1 when both can, else H.265 when both can, else H.264; run_m3_linux.sh's av1 session checks
 it (colours too), av1_api11 the agent on API 11.1 (an older driver): H.264.
 
 Wayland (2026-11-25): the agent captures through the ScreenCast portal (xdg-desktop-portal, which GNOME, KDE and the

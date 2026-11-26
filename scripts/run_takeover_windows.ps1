@@ -86,7 +86,7 @@ try {
     # 3. Viewer B takes control.
     Start-InSession 'viewerB2' $viewer "--test-device viewerB $account --device pcA --take-over --seconds 60 --width 640 --report `"$out\viewer_b2.txt`""
     Wait-Report "$out\viewer_a.txt" 40
-    # The agent's words are in its PC's language (on a Chinese Windows: "...viewerB 已接管此电脑。"): the end and the name.
+    # The agent's words are in its PC's language (on a Chinese Windows the sentence is Chinese, with "viewerB" in it): the end and the name.
     Add-Check 'A is told viewerB took over' (Test-Ended "$out\viewer_a.txt" 'viewerB')
     Start-Sleep -Seconds 8
     $listed = @(Get-Listed '2')

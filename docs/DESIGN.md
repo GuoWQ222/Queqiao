@@ -76,8 +76,10 @@ Queqiao is for general release, so nothing in it may depend on the machine it wa
    **AV1 is the default where both ends can (user decision 2026-11-25: "AV1 encoding as the default, the existing
    encoding as fallback"):** with the viewer's codec on Automatic (its default) the agent makes AV1 when the viewer's
    GPU decodes it and the agent has an AV1 encoder: NVENC directly (API 12; Windows and Linux), else on Windows the
-   GPU's AV1 encoder through Media Foundation (Intel Arc, AMD, NVIDIA with an older driver); otherwise H.264 as before
-   (H.265 when asked for). NVENC's AV1 is 8-bit 4:2:0 from NV12; 4:4:4 and 10 bits stay H.265. NVENC does not apply
+   GPU's AV1 encoder through Media Foundation (Intel Arc, AMD, NVIDIA with an older driver); otherwise H.265 where
+   both GPUs do it (since 2026-11-26: on sunshine's Iris Xe about 8 dB more than H.264 at 5 Mbit/s, docs/PARITY.md),
+   then H.264. NVENC's AV1 is 8-bit 4:2:0 from NV12; 4:4:4 and 10 bits stay H.265, separate switches (off by
+   default) that never change which codec Automatic takes. NVENC does not apply
    the keyframe scale to AV1 (its first picture got one frame's bits: 41 kB, 20.5 dB on the 5080 at 12.4 Mbit/s), so
    the buffer is 8 frames for each AV1 keyframe alone (165 kB, 35.6 dB; H.264 with the scale 255 kB, 33.7 dB) and one
    frame again right after (a larger buffer for every frame let P-frames reach 2.4x their share). Tested: the PC (RTX

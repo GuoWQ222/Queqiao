@@ -154,13 +154,30 @@ pub fn av1_obu_types(data: &[u8]) -> Vec<u8> {
 /// NVENC directly where the NVIDIA driver has API 12, else through Media Foundation). A registered encoder is not
 /// enough: one is opened (1280x720 at 60 fps) and closed again. Measured 2026-11-22 on a 12th-gen Intel Iris Xe: its
 /// driver registers "Intel Hardware Accelerated AV1 Encoder MFT", which refuses every format with E_FAIL, as that GPU
-/// has no AV1 encoding hardware. Takes about 30 ms where it works.
+/// has no AV1 encoding hardware. Takes about 30 ms where it works. H.265 (4:2:0, 8 bits) through the encoders a
+/// session would use (the GPU makers' first, then Windows' hardware one), none of them in software; not when software
+/// encoding is forced (tests: H.264 only then).
 pub fn can_encode(
     codec: VideoCodec,
     device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
 ) -> bool {
     if codec == VideoCodec::H264 {
         return true;
+    }
+    if codec == VideoCodec::H265 {
+        let choice = EncoderChoice::from_env();
+        if choice == EncoderChoice::Software {
+            return false;
+        }
+        let Ok(context) = (unsafe { device.GetImmediateContext() }) else {
+            return false;
+        };
+        let config = EncoderConfig::for_screen(1280, 720, 60).with_format(EncodeFormat {
+            codec: Codec::H265,
+            chroma444: false,
+            ten_bit: false,
+        });
+        return H264Encoder::new(device, &context, &config, choice).is_ok();
     }
     let config = EncoderConfig {
         codec,

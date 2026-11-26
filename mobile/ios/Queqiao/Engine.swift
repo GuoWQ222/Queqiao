@@ -1,5 +1,7 @@
+import CoreMedia
 import Foundation
 import UIKit
+import VideoToolbox
 
 /// One device of the account, as the list shows it.
 struct Device: Identifiable, Equatable {
@@ -75,6 +77,8 @@ final class Engine: ObservableObject {
         let thread = Thread { [weak self] in self?.readEvents() }
         thread.name = "queqiao-events"
         thread.start()
+        // What this phone decodes in hardware: with H.265 the PC's "Automatic" may send it.
+        command(["decoders": ["hevc": VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)]])
         // The saved login, if there is one.
         command(["resume": [String: Any]()])
         // Tests in the Simulator (.github/workflows/ios.yml): a login given as "server|pin|user|password" (simctl passes

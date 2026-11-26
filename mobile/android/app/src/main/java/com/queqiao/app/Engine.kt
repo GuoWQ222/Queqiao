@@ -3,6 +3,8 @@ package com.queqiao.app
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import android.os.Handler
 import android.os.Looper
 import android.os.Build
@@ -92,8 +94,25 @@ class Engine private constructor(context: Context) {
                 }
             }
         }
+        // What this phone decodes in hardware: with H.265 the PC's "Automatic" may send it.
+        command(JSONObject().put("decoders", JSONObject().put("hevc", hardwareHevc())))
         // The saved login, if there is one.
         command(JSONObject().put("resume", JSONObject()))
+    }
+
+    /** Whether a hardware decoder of this phone takes H.265 (a software one is too slow for a PC's screen). */
+    private fun hardwareHevc(): Boolean = try {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any { info ->
+            !info.isEncoder &&
+                info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, ignoreCase = true) } &&
+                if (Build.VERSION.SDK_INT >= 29) {
+                    info.isHardwareAccelerated
+                } else {
+                    !info.name.startsWith("OMX.google.") && !info.name.startsWith("c2.android.")
+                }
+        }
+    } catch (_: Exception) {
+        false
     }
 
     fun command(json: JSONObject): Boolean = Core.command(handle, json.toString())
