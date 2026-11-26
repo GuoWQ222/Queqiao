@@ -100,8 +100,8 @@
 |---|---|:---:|:---:|
 | **Windows** | Windows 10（1809 或更高版本）、Windows 11，x64 | ✅ | ✅ 安装服务后也可访问登录界面 |
 | **Linux** | glibc 2.35 或更高版本（Ubuntu 22.04+、Debian 12+、Fedora 36+），x86_64 | ✅ | ✅ 支持 X11 和 Wayland，安装服务后也可访问登录界面 |
-| **Android** | Android 8.0 或更高版本 | 计划支持 | 不支持 |
-| **iOS / iPadOS** | iOS 15 或更高版本 | 计划支持 | 不支持，iOS 不允许应用远程控制本机 |
+| **Android** | Android 8.0 或更高版本 | 计划支持 | ❌ 不支持 |
+| **iOS / iPadOS** | iOS 15 或更高版本 | 计划支持 | ❌ 不支持，iOS 不允许应用远程控制本机 |
 
 ### Linux 桌面环境
 
@@ -114,17 +114,32 @@
 
 ### 显卡与编解码器
 
-Queqiao 会检测两端电脑可用的编解码器，并在需要时逐级回退。没有独立的硬件编解码能力时，也可以通过软件完成编码和解码。
+Queqiao 默认选择两端都支持的视频格式，也可在会话控制中心手动指定。可用格式取决于显卡型号和驱动。
 
-| 硬件 | 编码（被控端） | 解码（主控端） |
-|---|---|---|
-| **NVIDIA** | NVENC，支持 H.264、H.265（4:2:0 / 4:4:4，8 / 10 位）和 AV1 | NVDEC |
-| **Intel** | Quick Sync（oneVPL），支持 H.264、H.265 | oneVPL |
-| **AMD** | AMF，支持 H.264、H.265 | AMF |
-| **其他** | Media Foundation（Windows）、OpenH264（软件编码） | Media Foundation、OpenH264 |
-| **手机** | — | 系统硬件解码器（MediaCodec、VideoToolbox） |
+| 平台 | 显卡厂商 | 编码（被控端） | 解码（主控端） |
+|---|---|---|---|
+| **Windows** | NVIDIA | NVENC（H.264、H.265、AV1） | NVDEC（H.264、H.265） |
+| **Windows** | Intel | Quick Sync / oneVPL（H.264、H.265） | oneVPL（H.264、H.265） |
+| **Windows** | AMD | AMF（H.264、H.265） | AMF（H.264、H.265） |
+| **Windows** | 各厂商通用 | Media Foundation（H.264、H.265、AV1） | Media Foundation（H.264、H.265、AV1） |
+| **Linux** | NVIDIA | NVENC（H.264、H.265、AV1） | NVDEC（H.264、H.265、AV1） |
+| **Linux** | Intel、AMD 及其他 | OpenH264（H.264，软件） | OpenH264（H.264，软件） |
 
-默认自动选择两端共同支持的最佳编解码器，也可在会话控制中心手动指定。Linux 目前支持使用 NVIDIA 显卡进行硬件编解码，其他显卡使用软件编解码。
+Windows 上，AV1 解码统一使用 Media Foundation。两种桌面平台都可以用 OpenH264 在 CPU 上编解码 H.264。
+
+移动主控端计划支持 Android（MediaCodec 解码）和 iOS/iPadOS（VideoToolbox 解码）。
+
+#### 色彩
+
+| 会话编码 | 色度采样与色深 |
+|---|---|
+| H.264 | 4:2:0，8 位 |
+| H.265（NVIDIA NVENC/NVDEC、Intel oneVPL） | 4:2:0 或 4:4:4，均支持 8 位或 10 位 |
+| H.265（AMD AMF） | 4:2:0，8 位或 10 位 |
+| H.265（Windows Media Foundation） | 4:2:0，8 位 |
+| AV1 | 4:2:0，8 位 |
+
+桌面视频采用 BT.709 有限范围。两端都支持时，可在会话控制中心开启 H.265 的 4:4:4，保留彩色小字和细线的边缘细节。
 
 ### 网络
 

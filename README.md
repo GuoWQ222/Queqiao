@@ -100,8 +100,8 @@ Sessions on a phone work the same way. Choose a device and tap **Connect**. Tap 
 |---|---|:---:|:---:|
 | **Windows** | Windows 10 (1809 or later), Windows 11; x64 | ✅ | ✅ including the sign-in screen, with the service |
 | **Linux** | glibc 2.35 or later (Ubuntu 22.04+, Debian 12+, Fedora 36+); x86_64 | ✅ | ✅ on X11 and Wayland, including the sign-in screen, with the service |
-| **Android** | Android 8.0 or later | Planned | Not supported |
-| **iOS / iPadOS** | iOS 15 or later | Planned | — (iOS allows no app to control the device) |
+| **Android** | Android 8.0 or later | Planned | ❌ Not supported |
+| **iOS / iPadOS** | iOS 15 or later | Planned | ❌ Not supported (iOS does not allow apps to remotely control the device) |
 
 ### Linux desktops
 
@@ -114,18 +114,32 @@ Sessions on a phone work the same way. Choose a device and tap **Connect**. Tap 
 
 ### Graphics and codecs
 
-Queqiao finds what each computer has and falls back step by step, so every stage also works without a GPU.
+Queqiao automatically selects a video format that both ends support. You can also choose one in the session's control center. Available formats depend on the GPU model and driver.
 
-| | Encoding (controlled side) | Decoding (controlling side) |
-|---|---|---|
-| **NVIDIA** | NVENC: H.264, H.265 (4:2:0 / 4:4:4, 8 / 10-bit), AV1 | NVDEC |
-| **Intel** | Quick Sync (oneVPL): H.264, H.265 | oneVPL |
-| **AMD** | AMF: H.264, H.265 | AMF |
-| **Any other** | Media Foundation (Windows), OpenH264 (software) | Media Foundation, OpenH264 |
-| **Phones** | — | The phone's own hardware decoder (MediaCodec, VideoToolbox) |
+| Platform | GPU vendor | Encoding (controlled computer) | Decoding (controller) |
+|---|---|---|---|
+| **Windows** | NVIDIA | NVENC (H.264, H.265, AV1) | NVDEC (H.264, H.265) |
+| **Windows** | Intel | Quick Sync / oneVPL (H.264, H.265) | oneVPL (H.264, H.265) |
+| **Windows** | AMD | AMF (H.264, H.265) | AMF (H.264, H.265) |
+| **Windows** | Any vendor | Media Foundation (H.264, H.265, AV1) | Media Foundation (H.264, H.265, AV1) |
+| **Linux** | NVIDIA | NVENC (H.264, H.265, AV1) | NVDEC (H.264, H.265, AV1) |
+| **Linux** | Intel, AMD and others | OpenH264 (H.264, software) | OpenH264 (H.264, software) |
 
-The codec is chosen automatically, using the best one both ends support, or set by hand in the session's control center.
-On Linux, hardware encoding and decoding currently use NVIDIA GPUs, and other GPUs use the software path.
+On Windows, AV1 decoding uses Media Foundation across vendors. Both desktop platforms can encode and decode H.264 on the CPU with OpenH264.
+
+Planned mobile controllers use the system decoder on Android (MediaCodec) and iOS/iPadOS (VideoToolbox).
+
+#### Colour
+
+| Session codec | Chroma sampling and bit depth |
+|---|---|
+| H.264 | 4:2:0, 8-bit |
+| H.265 (NVIDIA NVENC/NVDEC, Intel oneVPL) | 4:2:0 or 4:4:4, each at 8 or 10 bits |
+| H.265 (AMD AMF) | 4:2:0, 8 or 10 bits |
+| H.265 (Windows Media Foundation) | 4:2:0, 8-bit |
+| AV1 | 4:2:0, 8-bit |
+
+Desktop video uses limited-range BT.709. When both ends support it, you can enable H.265 4:4:4 in the session's control center to preserve the edges of small coloured text and fine lines.
 
 ### Network
 
