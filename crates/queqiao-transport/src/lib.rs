@@ -8,6 +8,7 @@ mod gather;
 mod interfaces;
 mod peer;
 mod quic;
+mod resolve;
 mod shape;
 mod signal;
 mod turn;
@@ -16,6 +17,7 @@ pub use interfaces::{connect_direct, connect_direct_noted, public_address};
 pub use peer::{
     Addresses, AudioSender, Peer, PeerEvent, Role, START_BITRATE, STREAM_IN_FLIGHT, Stream, tune,
 };
+pub use resolve::resolve_server;
 pub use signal::{Hello, Signal, Signaling, check_hello, hello_body};
 pub use turn::{IceServers, TurnServer};
 

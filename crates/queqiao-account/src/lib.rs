@@ -24,7 +24,7 @@ mod notes;
 mod tls;
 
 use std::collections::VecDeque;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -168,19 +168,30 @@ impl Account {
         } else {
             KnownDevices::load()?
         };
-        let address = login
-            .server
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| Error(format!("no address for {}", login.server)))?;
-        // Straight out of this PC's network card, past a proxy's TUN adapter, for a server on the internet.
-        let (tcp, route) =
-            queqiao_transport::connect_direct_noted(address, Duration::from_secs(10));
-        let tcp = tcp.map_err(|e| {
+        // By name too past a proxy's made-up addresses (resolve_server), each address in turn.
+        let addresses = queqiao_transport::resolve_server(&login.server)?;
+        let mut failures = Vec::new();
+        let mut connected = None;
+        for address in addresses {
+            // Straight out of this PC's network card, past a proxy's TUN adapter, for a server on the internet.
+            let (tcp, tried) =
+                queqiao_transport::connect_direct_noted(address, Duration::from_secs(10));
+            match tcp {
+                Ok(tcp) => {
+                    // The way it went, after any address that did not answer first.
+                    let mut route = failures.clone();
+                    route.extend(tried);
+                    connected = Some((tcp, route));
+                    break;
+                }
+                Err(e) => failures.push(format!("{address}: {e} ({})", tried.join("; "))),
+            }
+        }
+        let (tcp, route) = connected.ok_or_else(|| {
             Error(format!(
-                "cannot reach {}: {e} ({})",
+                "cannot reach {}: {}",
                 login.server,
-                route.join("; ")
+                failures.join("; ")
             ))
         })?;
         tcp.set_nodelay(true)?;
@@ -662,8 +673,8 @@ impl Signaling for SessionSignal<'_> {
 }
 
 fn resolve(address: &str) -> Result<SocketAddr, Error> {
-    address
-        .to_socket_addrs()?
+    queqiao_transport::resolve_server(address)?
+        .into_iter()
         .find(SocketAddr::is_ipv4)
         .ok_or_else(|| Error(format!("no IPv4 address for {address}")))
 }
