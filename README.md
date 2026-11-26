@@ -8,7 +8,7 @@
 
 <p align="center">
   <b>Remote control for your own computers, from your computer or your phone.</b><br>
-  Log in, see your devices, and control any of them from another, directly or through your own server.
+  Log in, see your devices, and control any of them from another. Devices prefer a direct connection and can also connect through a relay server.
 </p>
 
 <p align="center">
@@ -152,7 +152,6 @@ computer are bypassed for the server connection.
 ## Questions & Feedback
 
 - **Questions, problems and ideas:** open an [issue](https://github.com/GuoWQ222/Queqiao/issues). For a problem, include what you did, what happened, your system and Queqiao's version (`queqiao-agent --version`).
-- **Security problems:** please don't post the details in a public issue. Open an issue asking for a private way to send them.
 
 ---
 
