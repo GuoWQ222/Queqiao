@@ -129,8 +129,13 @@ Queqiao's server holds the accounts, shows each account its devices, passes the 
 relays a session when no direct path exists. It runs well on a small cloud machine.
 
 ```sh
-queqiao-server init --name <public address>      # makes the certificate; prints its fingerprint for the clients
-queqiao-server add-user <name>                   # optional: an account (the password on standard input)
+# Make the certificate; prints the fingerprint the clients need
+queqiao-server init --name <public address>
+
+# Optional: an account made by hand (the password on standard input)
+queqiao-server add-user <name>
+
+# Run it; --allow-signup lets a new user name make an account
 queqiao-server serve --name <public address> --public-ip <public address> --allow-signup
 ```
 
