@@ -93,9 +93,12 @@ class SessionTest {
         }
         Thread.sleep(2000)
         rule.onNodeWithTag("ball").performClick()
+        rule.waitUntil(5_000) { rule.exists("disconnect") }
         picture("toolbar")
         rule.onNodeWithTag("disconnect").performClick()
-        rule.waitUntil(20_000) { rule.exists("connect:$device") }
+        // Back on the device list. The test's agent takes one session (--sessions 1) and quits: its card then shows it
+        // offline (Wake up), not Connect.
+        rule.waitUntil(20_000) { rule.exists("menu") && !rule.exists("ball") }
         picture("after")
     }
 
