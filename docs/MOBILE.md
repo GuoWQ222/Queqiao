@@ -35,24 +35,25 @@ repository).
 ## What they do (UU Remote's mobile apps, with Queqiao's own)
 
 Controlling a PC (both apps):
-- [ ] Log in, saved login, the device list (online, offline, this device), remove a device
-- [ ] Connect; remote help with a help ID and code (and an invitation link); wake a PC up (Wake-on-LAN through another
-      device of the account)
-- [ ] The PC's Windows password when it is locked or signed out (as on the desktop)
-- [ ] Touch mode (the finger is the pointer: tap = click, long press = right click, drag = drag) and mouse mode (a
+- [x] Log in, saved login, the device list (online, offline, this device), remove a device
+- [x] Connect; remote help with a help ID and code (the invitation link: not yet); wake a PC up (Wake-on-LAN through
+      another device of the account)
+- [x] The PC's Windows password when it is locked or signed out (as on the desktop)
+- [x] Touch mode (the finger is the pointer: tap = click, long press = right click, drag = drag) and mouse mode (a
       pointer moved like a touchpad, its buttons on screen); two fingers scroll, pinch zooms the picture, it pans
-- [ ] The phone's keyboard, typing any language (Unicode text to the PC); a key bar: Esc, Tab, Ctrl, Alt, Shift, Win,
+- [x] The phone's keyboard, typing any language (Unicode text to the PC); a key bar: Esc, Tab, Ctrl, Alt, Shift, Win,
       F1-F12, arrows, Home/End, Delete, Ctrl+Alt+Del, copy/paste/undo, Win+D and the like
 - [ ] Game keys: on-screen buttons and a stick mapped to keys (custom layouts, saved), and a virtual gamepad
 - [ ] Hardware keyboards, mice and gamepads attached to the phone or tablet
 - [ ] Quality (smooth, balanced, sharp, custom bitrate), frame rate (30, 60, up to what the screen shows), codec
       (H.264, H.265, AV1 where the phone decodes it), resolution
-- [ ] Several screens: switch between them
-- [ ] The PC's sound on the phone; mute the PC's speakers
-- [ ] Privacy screen, lock the PC, restart it, end the session; lock after the session
-- [ ] Clipboard both ways (text; images where the phone has them)
+- [x] Several screens: switch between them
+- [x] The PC's sound on the phone; mute the PC's speakers
+- [ ] Privacy screen, lock the PC, restart it, end the session; lock after the session (done: privacy screen, lock,
+      end; not yet: restart, lock after)
+- [ ] Clipboard both ways (text: done; images: not yet)
 - [ ] Files both ways (pick on the phone, save from the PC; the transfer list)
-- [ ] The session's figures (direct or relayed, delay, frame rate, data), as the desktop's card
+- [x] The session's figures (direct or relayed, delay, frame rate, data), as the desktop's card
 - [ ] Landscape and portrait, full screen, the picture fitted or 1:1
 - [ ] Settings: display language (as the desktop), quality defaults, haptics, keep the screen on
 
@@ -67,3 +68,11 @@ Status (this file records what is done as it lands):
   by MediaCodec, the PC's sound (Opus by MediaCodec), touch and mouse modes (tap, long press, double tap and drag,
   two-finger tap, scroll, pinch zoom and pan), the phone's keyboard (US keys; other text through the PC's clipboard
   and Ctrl+V for now), a key bar, Ctrl+Alt+Del, lock, privacy screen, the PC's password form; English and Chinese.
+- 2026-11-26: the iOS app's first version (`mobile/ios`), with the same functions; built on GitHub's Mac with an
+  unsigned `Queqiao.ipa` (branch ci-results-ios, for Sideloadly). Both apps: typing any language (Message::TypeText:
+  SendInput KEYEVENTF_UNICODE on Windows, keysyms on X11, the portal on Wayland), help someone by help ID and code,
+  wake up, picture settings (quality, frame rate, screens), the figures, the clipboard both ways (text), mute the PC.
+  Checked: the core's probe on cc4-1 (typed "typed 中文 é" in an xterm, a help session); iOS in the Simulator against
+  a stand-in PC (examples/test_agent: 867 frames shown, the typed text received); Windows typing on sunshine
+  (examples/type_text_probe, Chinese keyboard layout: TYPE_TEXT_PASS). The Android emulator test (log in, connect,
+  frames, input) runs in android.yml.
