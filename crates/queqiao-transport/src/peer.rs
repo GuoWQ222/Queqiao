@@ -130,6 +130,8 @@ enum Command {
         minimum: u64,
         desired: u64,
     },
+    /// The bandwidth estimate starts again from this (the bitrate the encoder gets, bit/s).
+    ResetBitrate(u64),
     Close,
 }
 
@@ -587,6 +589,13 @@ impl Peer {
     /// The bitrate range the sender wants: the bandwidth estimate probes up to `desired` (str0m's BWE).
     pub fn set_bitrate_range(&self, minimum: u64, desired: u64) {
         self.command(Command::BitrateRange { minimum, desired });
+    }
+
+    /// The bandwidth estimate starts again from `bitrate` (what the encoder gets, as `PeerEvent::Bitrate` gives it):
+    /// for a sender that knows the path has carried that much while the estimate sank on a still screen. A path that
+    /// no longer carries it brings the estimate down again within a second or so.
+    pub fn reset_bitrate(&self, bitrate: u64) {
+        self.command(Command::ResetBitrate(bitrate));
     }
 
     /// Asks the sender for a keyframe (the viewer does this by itself after a loss).
@@ -1363,6 +1372,13 @@ impl Network {
                 self.rtc
                     .bwe()
                     .set_bitrate(Bitrate::bps(minimum), Bitrate::bps(desired));
+            }
+            Command::ResetBitrate(bitrate) => {
+                // The estimate covers the parity too (the encoder got the rest, PeerEvent::Bitrate).
+                let share = self.fec_tx.as_ref().map_or(0.0, fec::Sender::rate);
+                self.rtc
+                    .bwe()
+                    .reset(Bitrate::bps((bitrate as f64 * (1.0 + share)) as u64));
             }
             Command::RequestKeyframe => {
                 if let Some(mid) = self.mid {

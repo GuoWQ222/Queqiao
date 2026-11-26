@@ -795,6 +795,11 @@ pub(crate) fn session(
     let mut keyframe_sizes: Vec<String> = Vec::new();
     let mut lowest_bitrate = encoder.bitrate();
     let mut last_bitrate_change: Option<Instant> = None;
+    // Sharp pictures on a narrow link (hold.rs; the user, 2026-11-26): the bitrate the link carried, held while the
+    // screen is still, and a keyframe of the still screen after motion.
+    let mut hold = crate::hold::Hold::new(START_BITRATE, Instant::now());
+    let mut refresh = crate::hold::Refresh::default();
+    let mut motion = crate::hold::Motion::default();
 
     let pointer_start = cursor_position();
     let mut interval = Duration::from_secs_f64(1.0 / f64::from(config.fps));
@@ -876,6 +881,12 @@ pub(crate) fn session(
     let mut slow_notes = 0u32;
     'session: loop {
         let mut watch = Stages::new();
+        hold.tick(
+            Instant::now(),
+            stats.bytes,
+            encoder.bitrate(),
+            last_estimate,
+        );
         // The report: once a second for the first two minutes, the bandwidth estimate, the encoder's bitrate, what
         // was sent and how many frames (K: a keyframe among them), to see how the picture's bitrate followed.
         if course.len() < 120 && course_at.0.elapsed() >= Duration::from_secs(1) {
@@ -2005,22 +2016,58 @@ pub(crate) fn session(
         }
 
         watch.mark("capture");
+        // After motion, the still screen once more as a keyframe (hold.rs).
+        if connected_after.is_some()
+            && waiting.is_none()
+            && !gate.closed()
+            && refresh.due(
+                Instant::now(),
+                motion.still(Instant::now(), encoder.bitrate()),
+            )
+        {
+            force_keyframe = true;
+            waiting = Some((0, qpc_now()));
+        }
         // Encode as soon as there is a change and the frame time has passed.
         if connected_after.is_some()
             && Instant::now() >= due
             && !gate.closed()
             && let Some((screen_time, captured_time)) = waiting.take()
         {
+            let budget_bitrate = encoder.bitrate();
             let frames = encoder
                 .encode(&latest, force_keyframe)
                 .map_err(|e| format!("encode: {}", describe(e)))?;
             force_keyframe = false;
             last_encode = Some(Instant::now());
+            // Motion (the changed frames of the last moments use most of the bitrate, not a clock's tick or an
+            // animation's; hold.rs): after a pause, the estimate starts again from what the link carried if it sank
+            // meanwhile, and once the motion stops the still screen goes once more as a keyframe.
+            let bytes: usize = frames.iter().map(|frame| frame.data.len()).sum();
+            let changed = screen_time != 0 && !frames.iter().any(|frame| frame.keyframe);
+            if changed {
+                motion.record(Instant::now(), bytes);
+            }
+            if changed && motion.moving(Instant::now(), budget_bitrate) {
+                refresh.changed(Instant::now());
+                if let Some(carried) = hold.changed(Instant::now(), last_estimate) {
+                    peer.reset_bitrate(carried);
+                    last_estimate = carried;
+                    let target = adapted_bitrate(carried, max_bitrate);
+                    if target != encoder.bitrate() && encoder.set_bitrate(target).is_ok() {
+                        bitrate_changes += 1;
+                        last_bitrate_change = Some(Instant::now());
+                    }
+                }
+            }
             for frame in frames {
                 let time_90khz = (frame.time.max(0) as u64) * 9 / 1000;
                 stats.sent += 1;
                 stats.bytes += frame.data.len();
                 stats.keyframes += u32::from(frame.keyframe);
+                if frame.keyframe {
+                    refresh.keyframe();
+                }
                 if frame_sizes.len() < 200_000 {
                     frame_sizes.push(frame.data.len() as f64 / 1e3);
                 }
@@ -2166,6 +2213,12 @@ pub(crate) fn session(
         f64::from(lowest_bitrate) / 1e6,
         f64::from(encoder.bitrate()) / 1e6,
         f64::from(max_bitrate) / 1e6
+    ));
+    lines.push(format!(
+        "sharp pictures: the estimate started again from what the link carried {} times (held {:.1} Mbit/s at the end); {} keyframes of the still screen after motion",
+        hold.resets,
+        hold.carried() as f64 / 1e6,
+        refresh.count
     ));
     lines.push(format!(
         "input: {} events, {} refused{}",
