@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.click
@@ -72,13 +73,14 @@ class SessionTest {
         if (!rule.exists("server")) rule.onNodeWithText(rule.activity.getString(R.string.other_server)).performClick()
         rule.onNodeWithTag("server").performTextInput(arg("server"))
         rule.onNodeWithTag("pin").performTextInput(arg("pin"))
-        rule.onNodeWithTag("login").performClick()
+        // The keyboard is up and the form scrolls above it: the button is out of sight until scrolled to.
+        rule.onNodeWithTag("login").performScrollTo().performClick()
         rule.waitUntil(40_000) { rule.exists("connect:$device") || rule.exists("error") }
         assertTrue("logged in and the PC listed", rule.exists("connect:$device"))
         picture("devices")
 
         val before = VideoDecoder.shownTotal
-        rule.onNodeWithTag("connect:$device").performClick()
+        rule.onNodeWithTag("connect:$device").performScrollTo().performClick()
         rule.waitUntil(60_000) { VideoDecoder.shownTotal - before >= 30 }
         picture("session")
 

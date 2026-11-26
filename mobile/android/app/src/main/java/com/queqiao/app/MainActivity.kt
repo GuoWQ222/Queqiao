@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -55,6 +56,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -133,6 +135,10 @@ fun LoginScreen(engine: Engine) {
     var user by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var showServer by rememberSaveable { mutableStateOf(BuildConfig.DEFAULT_SERVER.isEmpty()) }
+    val ready = !busy && user.isNotBlank() && password.isNotEmpty() && server.isNotBlank()
+    val logIn = { if (ready) engine.logIn(server, pin, user, password) }
+    // The keyboard's Go key on the last field logs in (the button may sit under the keyboard).
+    val go = KeyboardActions(onGo = { logIn() })
     Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White).imePadding()) {
         Header(stringResource(R.string.login_subtitle))
         Column(
@@ -152,17 +158,23 @@ fun LoginScreen(engine: Engine) {
                 password, { password = it }, Modifier.fillMaxWidth().testTag("password"),
                 label = { Text(stringResource(R.string.password)) }, singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    imeAction = if (showServer) ImeAction.Next else ImeAction.Go,
+                ),
+                keyboardActions = go,
             )
             if (showServer) {
                 OutlinedTextField(
                     server, { server = it }, Modifier.fillMaxWidth().testTag("server"),
                     label = { Text(stringResource(R.string.server)) }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
                 )
                 OutlinedTextField(
                     pin, { pin = it }, Modifier.fillMaxWidth().testTag("pin"),
                     label = { Text(stringResource(R.string.pin)) }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                    keyboardActions = go,
                 )
             } else {
                 Text(
@@ -172,9 +184,8 @@ fun LoginScreen(engine: Engine) {
             }
             if (error.isNotEmpty()) Text(error, color = Q.Danger, fontSize = 14.sp, modifier = Modifier.testTag("error"))
             GoldButton(
-                stringResource(R.string.log_in), Modifier.fillMaxWidth().testTag("login"),
-                enabled = !busy && user.isNotBlank() && password.isNotEmpty() && server.isNotBlank(),
-            ) { engine.logIn(server, pin, user, password) }
+                stringResource(R.string.log_in), Modifier.fillMaxWidth().testTag("login"), enabled = ready,
+            ) { logIn() }
             if (busy) {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = Q.Accent, modifier = Modifier.size(28.dp))
