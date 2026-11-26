@@ -462,6 +462,13 @@ impl Peer {
             socket,
             local,
             remote_relays,
+            relay_names: servers
+                .turn
+                .iter()
+                .chain(&servers.backups)
+                .filter(|server| !server.name.is_empty())
+                .map(|server| (server.address.ip(), server.name.clone()))
+                .collect(),
             wake_from,
             mid,
             audio_mid,
@@ -841,6 +848,8 @@ struct Network {
     path: Option<String>,
     /// The other side's relayed candidates: a path to one of them is relayed by that side.
     remote_relays: Vec<SocketAddr>,
+    /// The relays the account server named (address and name): the other side's relay is named by its address.
+    relay_names: Vec<(std::net::IpAddr, String)>,
     /// The latest time given to str0m: inputs never go back in time (deadlines are served up to 1 ms early).
     clock: Instant,
     /// How much the streams may have in flight, from what the path delivers ([`crate::flow`]); the cap is shared
@@ -1074,10 +1083,24 @@ impl Network {
                             },
                             // Straight to the other side's relay: relayed all the same (it was shown as direct,
                             // 2026-11-25, sunshine behind a phone's hotspot).
-                            None if self.remote_relays.contains(&packet.destination) => format!(
-                                "relayed through that PC's relay {} (from {})",
-                                packet.destination, packet.source
-                            ),
+                            // Named by its address among the relays the account server named for this session (both
+                            // ends get the same ones): "... relay 198.51.100.1:47203 (shanghai) (from ...)".
+                            None if self.remote_relays.contains(&packet.destination) => {
+                                match self
+                                    .relay_names
+                                    .iter()
+                                    .find(|(ip, _)| *ip == packet.destination.ip())
+                                {
+                                    Some((_, name)) => format!(
+                                        "relayed through that PC's relay {} ({name}) (from {})",
+                                        packet.destination, packet.source
+                                    ),
+                                    None => format!(
+                                        "relayed through that PC's relay {} (from {})",
+                                        packet.destination, packet.source
+                                    ),
+                                }
+                            }
                             None => {
                                 format!("direct to {} (from {})", packet.destination, packet.source)
                             }
