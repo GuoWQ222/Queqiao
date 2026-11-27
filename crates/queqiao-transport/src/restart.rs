@@ -210,15 +210,28 @@ impl Restarter {
         }
         let gathering = matches!(self.stage, Stage::Gathering(_));
         if self.changed && !gathering && online {
-            match (signal.local_ip(), signal.ice_servers()) {
-                (Ok(ip), Ok(_)) if !this_pc_has(ip) => {
-                    if !self.waiting_said {
-                        self.waiting_said = true;
-                        lines.push(format!(
-                            "gathering again waits: {ip} is no longer this PC's (the server connection is made again)"
-                        ));
-                    }
+            let local_ip = signal.local_ip();
+            if let Ok(ip) = &local_ip
+                && !this_pc_has(*ip)
+            {
+                if !self.waiting_said {
+                    self.waiting_said = true;
+                    lines.push(format!(
+                        "gathering again waits: {ip} is no longer this PC's (the server connection is made again)"
+                    ));
                 }
+                return;
+            }
+            // The relay credentials come from the server; the session loop waits for them.
+            let asked = Instant::now();
+            let servers = signal.ice_servers();
+            if asked.elapsed() > Duration::from_millis(100) {
+                lines.push(format!(
+                    "the relay credentials took {} ms (the session loop waited)",
+                    asked.elapsed().as_millis()
+                ));
+            }
+            match (local_ip, servers) {
                 (Ok(ip), Ok(servers)) => {
                     self.waiting_said = false;
                     self.gathered_on = Some(ip);

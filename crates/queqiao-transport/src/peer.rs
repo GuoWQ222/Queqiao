@@ -501,6 +501,8 @@ impl Peer {
             streams: [None; STREAMS],
             in_flight: in_flight.clone(),
             control_pending: VecDeque::new(),
+            control_rx: None,
+            control_unacked: None,
             stream_pending: Default::default(),
             flow,
             flow_cap: flow_cap.clone(),
@@ -704,13 +706,23 @@ impl Drop for Peer {
 /// stall: sctp-proto sends without pacing, a burst overflows a queue on the path and loses its tail, no later SACK
 /// reports the gap, and the timer is the only way out; measured 2026-11-23 between sunshine's Wi-Fi and the PC, 14
 /// pauses of about 1 s in 21 s, 4.9 MB/s where the link carries 11.3. The minimum stays above the receiver's 200 ms
-/// delayed SACK, so a lone packet's late SACK is no timeout. Test switch: QUEQIAO_FORCE=sctp_rto_min:<ms>.
-pub const SCTP_RTO_MS: (u64, u64, u64) = (1000, 250, 3000);
+/// delayed SACK, so a lone packet's late SACK is no timeout. Test switches: QUEQIAO_FORCE=sctp_rto_min:<ms>,
+/// sctp_rto_max:<ms>.
+/// The longest wait is 1 s (3 s before 2026-11-27): the control channel (mouse, keyboard, control messages) is reliable
+/// and in order, so everything after the messages lost while a network went away waited for their retransmission,
+/// whose backoff had reached 3 s by then; 4.8 s without input after a 2 s outage on sunshine (the picture, on RTP, was
+/// back after 2 s). Now input comes back within 1 s of the path. Files go over QUIC when they can, so a link slower
+/// than 1 s round trip mostly costs a few needless retransmissions of small control messages.
+pub const SCTP_RTO_MS: (u64, u64, u64) = (1000, 250, 1000);
 
 fn set_sctp_timeouts() {
-    let (initial, mut min, max) = SCTP_RTO_MS;
+    let (initial, mut min, mut max) = SCTP_RTO_MS;
     if let Some(forced) = queqiao_core::forced("sctp_rto_min").and_then(|v| v.parse::<u64>().ok()) {
         min = forced;
+    }
+    // Tests: QUEQIAO_FORCE=sctp_rto_max:<ms> (3000 was the longest wait before 2026-11-27, for a comparison).
+    if let Some(forced) = queqiao_core::forced("sctp_rto_max").and_then(|v| v.parse::<u64>().ok()) {
+        max = forced;
     }
     sctp_proto::set_default_rto_ms(initial, min, max.max(min));
 }
@@ -1173,6 +1185,11 @@ struct Network {
     in_flight: Arc<[InFlight; STREAMS]>,
     /// Messages for the control channel and each stream not yet taken by str0m.
     control_pending: VecDeque<Vec<u8>>,
+    /// The control channel, for the notes on a pause in it (2026-11-27: input waited seconds after a network change
+    /// while the video went on): when data last came on it, and since when this side's data on it is unacknowledged
+    /// (said once a pause).
+    control_rx: Option<Instant>,
+    control_unacked: Option<(Instant, bool)>,
     stream_pending: [VecDeque<Vec<u8>>; STREAMS],
     events: Sender<PeerEvent>,
     commands: Receiver<Command>,
@@ -1621,7 +1638,19 @@ impl Network {
                     .find(|stream| self.streams[stream.index()] == Some(data.id))
                 {
                     Some(stream) => Some(PeerEvent::StreamData(stream, data.data)),
-                    None => Some(PeerEvent::Data(data.data)),
+                    None => {
+                        // A pause on the control channel (the other side sends on it at least every 500 ms): noted.
+                        let now = Instant::now();
+                        if let Some(last) = self.control_rx.replace(now)
+                            && now - last > Duration::from_secs(1)
+                        {
+                            self.note(format!(
+                                "control channel: data again after {} ms",
+                                (now - last).as_millis()
+                            ));
+                        }
+                        Some(PeerEvent::Data(data.data))
+                    }
                 }
             }
             Event::PeerStats(stats) => {
@@ -1938,6 +1967,26 @@ impl Network {
             None,
             None,
         );
+        // This side's control data unacknowledged for over a second (SCTP's buffer for the channel not empty): noted
+        // once a pause (the agent sends on it all the time, so its buffer is seldom empty: no note when it is again).
+        if let Some(id) = self.channel
+            && let Some(mut channel) = self.rtc.channel(id)
+        {
+            let buffered = channel.buffered_amount();
+            let now = Instant::now();
+            match (buffered, self.control_unacked) {
+                (0, _) => self.control_unacked = None,
+                (_, None) => self.control_unacked = Some((now, false)),
+                (bytes, Some((since, false))) if now - since > Duration::from_secs(1) => {
+                    self.note(format!(
+                        "control channel: {bytes} bytes this side sent are unacknowledged for {} ms",
+                        (now - since).as_millis()
+                    ));
+                    self.control_unacked = Some((since, true));
+                }
+                _ => {}
+            }
+        }
         let mut acked = 0u64;
         for stream in Stream::ALL {
             let index = stream.index();

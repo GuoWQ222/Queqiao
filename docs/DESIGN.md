@@ -244,6 +244,12 @@ UU builds on WebRTC's standard pieces (`research\uu\STREAMER_FINDINGS.md`). We d
       and restarts. str0m ranks a side's candidates by the order they are added, and the server connection's
       address goes first, so ICE takes the new network's pairs when they work. The other uplinks' candidates stay
       in, as the way back. Gathering never runs on an address that is gone.
+    - The control channel (mouse, keyboard, control messages) is reliable and in order, so after a network went
+      away everything on it waited for the retransmission of what was lost. SCTP's longest wait between
+      retransmissions is now 1 s (3 s before; `SCTP_RTO_MS`). Measured on sunshine, the same build and test with
+      `QUEQIAO_FORCE=sctp_rto_max:3000` against the new 1 s: input reached the agent 1.76 s after the new path was up,
+      now 0.42 s; the whole gap from Wi-Fi off was 4.4 s, now 3.4 s, most of it making the new path. Both sides note
+      a pause on the control channel ("data again after ... ms"). The picture, on RTP, never waits for it.
     - The policy: use every network; prefer one not paid by the byte (Wi-Fi, a cable) when it works, as the system's
       route order does; move only after it has stayed up a while; keep the other as the fallback; react to the
       system's own sign that a network went.

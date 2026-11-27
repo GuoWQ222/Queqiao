@@ -4,9 +4,9 @@ The published crate (crates.io, MIT OR Apache-2.0: LICENSE-MIT, LICENSE-APACHE),
 
 - `src/config.rs`: `set_default_rto_ms(initial, min, max)`, which sets the retransmission timeouts that
   `TransportConfig::default()` starts from (RFC 4960's 3000/1000/60000 ms before). str0m builds its SCTP transport
-  configuration from the defaults and offers no setting of its own; Queqiao sets 1000/250/3000 ms
-  (`queqiao-transport`, `SCTP_RTO_MS`), because the 1 s minimum stalled file transfers for a second after each
-  lost burst tail.
+  configuration from the defaults and offers no setting of its own; Queqiao sets 1000/250/1000 ms
+  (`queqiao-transport`, `SCTP_RTO_MS`): the 1 s minimum stalled file transfers for a second after each lost burst
+  tail, and a 3 s maximum (until 2026-11-27) kept input waiting up to 3 s after a network change.
 - `src/lib.rs`: exports it.
 - `Cargo.toml`: the test target and dev-dependencies removed (the tests folder is not copied).
 
