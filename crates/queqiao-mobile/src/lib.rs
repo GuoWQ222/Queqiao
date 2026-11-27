@@ -21,7 +21,7 @@ use queqiao_core::protocol::{
     CodecPreference, Command as RemoteCommand, InputEvent, Message, MouseButton, Quality,
     VideoCodec, hevc,
 };
-use queqiao_transport::{Addresses, Peer, PeerEvent, Role, Signaling, busy_controller};
+use queqiao_transport::{Addresses, Peer, PeerEvent, Restarter, Role, Signaling, busy_controller};
 use serde_json::{Value, json};
 
 #[cfg(target_os = "android")]
@@ -352,6 +352,10 @@ struct Session {
     relayed: bool,
     /// The phone decodes H.265 in hardware (the app's word in "connect").
     hevc: bool,
+    /// The session's id (its signaling goes on through the account during the session) and its ICE restarts after a
+    /// network change (a phone moving between Wi-Fi and mobile data, most of all).
+    id: String,
+    restarter: Restarter,
 }
 
 struct Engine {
@@ -399,6 +403,7 @@ impl Engine {
                     break;
                 }
             }
+            self.restart_step();
             // Once a second in a session: a round trip measured (Ping), and the figures for the app (as the desktop's card).
             let mut figures = None;
             if let Some(session) = self.session.as_mut()
@@ -438,8 +443,20 @@ impl Engine {
             };
             match self.account.as_mut() {
                 Some(account) => {
-                    if let Some(event) = account.next_event(wait) {
-                        self.on_account(event);
+                    match account.next_event(wait) {
+                        // The running session's (an ICE restart's request or answer): left for its restarter.
+                        Some(event @ AccountEvent::Signal { .. })
+                            if self.session.as_ref().is_some_and(|session| {
+                                matches!(&event, AccountEvent::Signal { session: id, kind, .. }
+                                    if *id == session.id
+                                        && (kind == "restart-request" || kind == "restart-answer"))
+                            }) =>
+                        {
+                            account.put_back(event);
+                            self.restart_step();
+                        }
+                        Some(event) => self.on_account(event),
+                        None => {}
                     }
                 }
                 None => std::thread::sleep(wait),
@@ -665,6 +682,8 @@ impl Engine {
                     ping_id: 0,
                     relayed: false,
                     hevc: self.hevc,
+                    id: id.clone(),
+                    restarter: Restarter::new(Role::Viewer),
                 });
             }
             Err(error) => {
@@ -673,6 +692,18 @@ impl Engine {
                 );
             }
         }
+    }
+
+    /// The session's ICE restarts after a network change on the phone or the PC (`Restarter::step`), signaled through
+    /// the account (whose connection is made again meanwhile).
+    fn restart_step(&mut self) {
+        let (Some(session), Some(account)) = (self.session.as_mut(), self.account.as_mut()) else {
+            return;
+        };
+        let mut signal = account.session(&session.device, AccountRole::Agent, &session.id);
+        session
+            .restarter
+            .step(&session.peer, &mut signal, &mut Vec::new());
     }
 
     /// One event of the session; Some(why) when it ends.
@@ -760,6 +791,26 @@ impl Engine {
                 _ => {}
             },
             PeerEvent::Closed(reason) => return Some(reason),
+            PeerEvent::PathReport(report) => {
+                if let Some(account) = self.account.as_mut() {
+                    account
+                        .session(&session.device, AccountRole::Agent, &session.id)
+                        .report_path(&report);
+                }
+            }
+            event @ (PeerEvent::NetworkChanged
+            | PeerEvent::Disconnected
+            | PeerEvent::Reconnected
+            | PeerEvent::Regathered
+            | PeerEvent::RestartSdp(_)) => {
+                if let Some(account) = self.account.as_mut() {
+                    let mut signal =
+                        account.session(&session.device, AccountRole::Agent, &session.id);
+                    session
+                        .restarter
+                        .on_event(&event, &session.peer, &mut signal, &mut Vec::new());
+                }
+            }
             _ => {}
         }
         None

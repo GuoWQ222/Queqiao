@@ -359,10 +359,13 @@ pub(crate) fn session(
 ) -> Result<bool, String> {
     let started = Instant::now();
     let peer = Peer::start_with(Role::Viewer, signal, addresses).map_err(|e| e.to_string())?;
-    run_session(options, device, context, peer, started, agent, lines)
+    run_session(
+        options, device, context, peer, started, agent, signal, lines,
+    )
 }
 
 /// A session once its peer is set up: the window, the picture, input, sound, files, command lines.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_session(
     options: &Options,
     device: &Device,
@@ -370,9 +373,13 @@ pub(crate) fn run_session(
     peer: Peer,
     started: Instant,
     agent: &str,
+    signal: &mut dyn Signaling,
     lines: &mut Vec<String>,
 ) -> Result<bool, String> {
     lines.push(format!("agent: {agent}"));
+    // ICE started again inside the session after a network change on either side (queqiao_transport::Restarter): its
+    // signaling goes through `signal` (the account's session, or a link to the account's thread).
+    let mut restarter = queqiao_transport::Restarter::new(Role::Viewer);
     let width = options.width.unwrap_or(1280);
     let mut window = Window::new(&format!("Queqiao - {agent}"), width, width * 9 / 16)
         .map_err(|e| format!("window: {}", describe(e)))?;
@@ -1641,6 +1648,7 @@ pub(crate) fn run_session(
             peer.send_stream(Stream::Clipboard, message);
         }
         terminals.poll(&peer, lines);
+        restarter.step(&peer, signal, lines);
 
         let mut event = peer.wait_event(Duration::from_millis(2));
         while let Some(current) = event.take() {
@@ -2016,6 +2024,14 @@ pub(crate) fn run_session(
                     closed = Some(reason);
                     break 'session;
                 }
+                event @ (PeerEvent::NetworkChanged
+                | PeerEvent::Disconnected
+                | PeerEvent::Reconnected
+                | PeerEvent::Regathered
+                | PeerEvent::RestartSdp(_)) => {
+                    restarter.on_event(&event, &peer, signal, lines);
+                }
+                PeerEvent::PathReport(report) => signal.report_path(&report),
             }
             event = peer.try_event();
         }

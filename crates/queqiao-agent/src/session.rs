@@ -213,6 +213,12 @@ pub(crate) fn peer_event_name(event: &PeerEvent) -> &'static str {
         PeerEvent::Bitrate(_) => "bitrate",
         PeerEvent::Audio { .. } => "audio",
         PeerEvent::Closed(_) => "closed",
+        PeerEvent::NetworkChanged => "network changed",
+        PeerEvent::Disconnected => "disconnected",
+        PeerEvent::Reconnected => "reconnected",
+        PeerEvent::Regathered => "gathered again",
+        PeerEvent::RestartSdp(_) => "restart description",
+        PeerEvent::PathReport(_) => "path report",
     }
 }
 
@@ -893,6 +899,8 @@ pub(crate) fn session(
     // Requests of other devices and "end this session" from the account, looked at four times a second.
     let mut interruptions_checked = Instant::now();
     let mut controller_told = false;
+    // ICE started again inside the session after a network change on either side (queqiao_transport::Restarter).
+    let mut restarter = queqiao_transport::Restarter::new(queqiao_transport::Role::Agent);
     // The lock screen (as UU): the picture and input wait for this PC's Windows password; at the sign-in screen (nobody
     // signed in) for the password of the Windows user who set it up.
     let mut gate = if options.logon {
@@ -950,6 +958,7 @@ pub(crate) fn session(
         if end.is_some_and(|end| Instant::now() > end) {
             break;
         }
+        restarter.step(&peer, signal, lines);
         // Once a second: a viewer taken out of the account, or this PC's login ended (the password was changed), ends
         // the session (as UU: a device taken out of the account is logged out).
         if trust_checked.elapsed() >= Duration::from_secs(1) {
@@ -1671,6 +1680,15 @@ pub(crate) fn session(
                     closed = Some(reason);
                     break 'session;
                 }
+                event @ (PeerEvent::NetworkChanged
+                | PeerEvent::Disconnected
+                | PeerEvent::Reconnected
+                | PeerEvent::Regathered
+                | PeerEvent::RestartSdp(_)) => {
+                    restarter.on_event(&event, &peer, signal, lines);
+                }
+                // The viewer reports the path (the agent would count each session twice).
+                PeerEvent::PathReport(_) => {}
                 PeerEvent::Path(path) => lines.push(format!(
                     "path after {} ms: {path}",
                     started.elapsed().as_millis()

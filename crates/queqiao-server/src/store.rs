@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use argon2::{Algorithm, Argon2, Params, Version};
+use queqiao_core::account::{PathReport, PunchSettings};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
@@ -102,6 +103,16 @@ impl Store {
             )
             .map_err(|e| e.to_string())?;
         }
+        // The operator's settings (`queqiao-server punch`) and the sessions' anonymous path counts: by day, NAT kinds, method
+        // and how long to direct, with no device, account or address.
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS path_stats (
+                 day INTEGER NOT NULL, local_nat TEXT NOT NULL, remote_nat TEXT NOT NULL, method TEXT NOT NULL,
+                 bucket TEXT NOT NULL, count INTEGER NOT NULL,
+                 PRIMARY KEY (day, local_nat, remote_nat, method, bucket));",
+        )
+        .map_err(|e| e.to_string())?;
         let store = Store { db };
         // The change log a standby copies the accounts from (replica.rs).
         store.install_change_log()?;
@@ -165,6 +176,96 @@ impl Store {
         Ok(secret
             .and_then(|secret| unhex(&secret))
             .and_then(|key| key.try_into().ok()))
+    }
+
+    /// Punching as the operator set it (`queqiao-server punch`): on, no round limit and reports on until set.
+    pub fn punch_settings(&self) -> Result<PunchSettings, String> {
+        let value = |name: &str| -> Result<Option<String>, String> {
+            self.db
+                .query_row(
+                    "SELECT value FROM settings WHERE name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())
+        };
+        Ok(PunchSettings {
+            enabled: value("punch.enabled")?.is_none_or(|value| value != "off"),
+            rounds: value("punch.rounds")?
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            reports: value("punch.reports")?.is_none_or(|value| value != "off"),
+        })
+    }
+
+    pub fn set_punch_settings(&self, settings: &PunchSettings) -> Result<(), String> {
+        let word = |on: bool| if on { "on" } else { "off" };
+        for (name, value) in [
+            ("punch.enabled", word(settings.enabled).to_string()),
+            ("punch.rounds", settings.rounds.to_string()),
+            ("punch.reports", word(settings.reports).to_string()),
+        ] {
+            self.db
+                .execute(
+                    "INSERT INTO settings (name, value) VALUES (?1, ?2)
+                     ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                    params![name, value],
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// One session's path report counted (today, its NAT kinds, method, how long to direct in steps); counts older
+    /// than `PATH_STATS_DAYS` go.
+    pub fn record_path(&self, report: &PathReport) -> Result<(), String> {
+        let day = now() / 86_400;
+        self.db
+            .execute(
+                "INSERT INTO path_stats (day, local_nat, remote_nat, method, bucket, count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1)
+                 ON CONFLICT(day, local_nat, remote_nat, method, bucket) DO UPDATE SET count = count + 1",
+                params![
+                    day,
+                    report.local_nat,
+                    report.remote_nat,
+                    report.method,
+                    path_bucket(report)
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        self.db
+            .execute(
+                "DELETE FROM path_stats WHERE day < ?1",
+                [day - PATH_STATS_DAYS],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The counts of the last `days` days, summed over them: (viewer's NAT, agent's NAT, method, time to direct,
+    /// sessions), most sessions first.
+    pub fn path_stats(&self, days: i64) -> Result<Vec<PathRow>, String> {
+        let mut query = self
+            .db
+            .prepare(
+                "SELECT local_nat, remote_nat, method, bucket, SUM(count) FROM path_stats WHERE day > ?1
+                 GROUP BY local_nat, remote_nat, method, bucket ORDER BY SUM(count) DESC, local_nat, remote_nat",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = query
+            .query_map([now() / 86_400 - days], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
     }
 
     /// The relays that may join, by name (with when they were added, Unix seconds).
@@ -807,6 +908,25 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// One line of `path_stats`: the viewer's NAT kind, the agent's, how it went direct, the time to direct, sessions.
+pub type PathRow = (String, String, String, String, i64);
+
+/// How long the path counts are kept.
+const PATH_STATS_DAYS: i64 = 90;
+
+/// How long a session took to its first direct path, in steps (only steps are kept): "relayed" when it never was.
+fn path_bucket(report: &PathReport) -> &'static str {
+    match (report.direct, report.ms) {
+        (false, _) => "relayed",
+        (true, 0..1_000) => "under 1 s",
+        (true, 1_000..3_000) => "1-3 s",
+        (true, 3_000..5_000) => "3-5 s",
+        (true, 5_000..10_000) => "5-10 s",
+        (true, 10_000..30_000) => "10-30 s",
+        (true, _) => "30 s and more",
+    }
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -816,6 +936,73 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn punch_settings_and_anonymous_path_counts() {
+        let dir = std::env::temp_dir().join(format!("queqiao-store-punch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open(&path).unwrap();
+        // Until set: on, no limit, reports collected.
+        let settings = store.punch_settings().unwrap();
+        assert!(settings.enabled && settings.rounds == 0 && settings.reports);
+        let off = PunchSettings {
+            enabled: false,
+            rounds: 3,
+            reports: false,
+        };
+        store.set_punch_settings(&off).unwrap();
+        assert_eq!(store.punch_settings().unwrap(), off);
+        let report = |method: &str, ms: u32| PathReport {
+            local_nat: "open".into(),
+            remote_nat: "linear".into(),
+            direct: method != "relay",
+            method: method.into(),
+            ms,
+        };
+        for (method, ms) in [
+            ("punch-socket", 4_200),
+            ("punch-socket", 3_900),
+            ("relay", 0),
+            ("ice", 300),
+        ] {
+            store.record_path(&report(method, ms)).unwrap();
+        }
+        let rows = store.path_stats(30).unwrap();
+        assert_eq!(
+            rows[0],
+            (
+                "open".into(),
+                "linear".into(),
+                "punch-socket".into(),
+                "3-5 s".into(),
+                2
+            )
+        );
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .any(|row| row.2 == "relay" && row.3 == "relayed" && row.4 == 1)
+        );
+        // Only the fixed words count as a report.
+        assert!(report("ice", 1).valid());
+        assert!(
+            !PathReport {
+                local_nat: "192.0.2.1".into(),
+                ..report("ice", 1)
+            }
+            .valid()
+        );
+        assert!(
+            !PathReport {
+                direct: false,
+                ..report("ice", 1)
+            }
+            .valid()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn relays_are_added_given_a_new_key_and_removed() {

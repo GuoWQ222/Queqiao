@@ -32,6 +32,8 @@ pub struct IceServers {
     pub turn: Option<TurnServer>,
     /// Other relays in order, tried when `turn` does not answer while the candidates are gathered.
     pub backups: Vec<TurnServer>,
+    /// Punching as the server set it (punching on, no limit, no reports from a server before it).
+    pub punch: queqiao_core::account::PunchSettings,
 }
 
 /// First retransmission after 250 ms, then doubling, five tries (about 7.75 s in all).

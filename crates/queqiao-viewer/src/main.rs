@@ -22,6 +22,8 @@
 mod account;
 mod control;
 mod files_ui;
+/// A session thread's signaling through the device list's account (ICE restarts during the session).
+mod link;
 use queqiao_core::hotkeys;
 mod options;
 mod session;

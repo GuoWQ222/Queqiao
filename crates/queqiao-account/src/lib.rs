@@ -31,7 +31,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use queqiao_core::account::{ServerMessage, TurnAccess, signed_bytes};
+use queqiao_core::account::{PathReport, PunchSettings, ServerMessage, TurnAccess, signed_bytes};
 use queqiao_transport::{Error, IceServers, Interruption, SessionRequest, Signaling, TurnServer};
 use tungstenite::Message;
 
@@ -70,6 +70,7 @@ pub enum AccountEvent {
         stun: Option<String>,
         turn: Option<TurnAccess>,
         backups: Vec<TurnAccess>,
+        punch: Option<PunchSettings>,
     },
     /// Agent: help requests are open under this help ID.
     HelpOpen(String),
@@ -121,6 +122,47 @@ pub struct Account {
     features: Vec<String>,
     /// This login made the account (a new name in the one login form).
     pub created: bool,
+    /// Making the connection again when it is lost during a session (`keep_connected`): the login (its refresh token)
+    /// and this device, the attempt under way, when the connection was lost, when to try next and how often it was
+    /// tried, whether the server refused the login (then the session ends at once), when this connection was made,
+    /// and how often a new one took over.
+    login: SavedLogin,
+    identity: DeviceIdentity,
+    reconnecting: Option<Receiver<Result<Account, OpenError>>>,
+    lost_at: Option<Instant>,
+    next_attempt: Instant,
+    attempts: u32,
+    refused: bool,
+    opened_at: Instant,
+    pub reconnections: u32,
+    /// Path reports the server asked for (one per `IceServers` with `PunchSettings::reports`, at most 4 waiting).
+    report_credits: u32,
+}
+
+/// How long a session goes on without the server connection while it is made again (a network change: the old one
+/// is gone, the new network may take a few seconds). The other side stays trusted meanwhile: its key was checked when
+/// the session started, and a refused login (this device removed, its login revoked) ends the session at once.
+pub const RECONNECT_GRACE: Duration = Duration::from_secs(60);
+
+/// A login that did not work: `refused` when the server answered no (as opposed to not being reached).
+struct OpenError {
+    error: Error,
+    refused: bool,
+}
+
+impl From<Error> for OpenError {
+    fn from(error: Error) -> OpenError {
+        OpenError {
+            error,
+            refused: false,
+        }
+    }
+}
+
+impl From<std::io::Error> for OpenError {
+    fn from(error: std::io::Error) -> OpenError {
+        Error::from(error).into()
+    }
 }
 
 /// How a connection logs in.
@@ -187,6 +229,16 @@ impl Account {
         role: Role,
         credentials: Credentials<'_>,
     ) -> Result<Account, Error> {
+        Self::open_with(login, device, role, credentials).map_err(|failed| failed.error)
+    }
+
+    /// As `open`; the error says whether the server refused the login (as opposed to not being reached).
+    fn open_with(
+        login: &mut SavedLogin,
+        device: &DeviceIdentity,
+        role: Role,
+        credentials: Credentials<'_>,
+    ) -> Result<Account, OpenError> {
         let key = device
             .key
             .clone()
@@ -261,7 +313,9 @@ impl Account {
                 Message::Text(text) => {
                     break serde_json::from_str::<ServerMessage>(&text).map_err(tls::err)?;
                 }
-                Message::Close(_) => return Err(Error("the server closed the connection".into())),
+                Message::Close(_) => {
+                    return Err(Error("the server closed the connection".into()).into());
+                }
                 _ => {}
             }
         };
@@ -285,8 +339,13 @@ impl Account {
                 }
                 (user, device_id, devices, features, created, relays)
             }
-            ServerMessage::Error { message } => return Err(Error(message)),
-            other => return Err(Error(format!("unexpected answer: {other:?}"))),
+            ServerMessage::Error { message } => {
+                return Err(OpenError {
+                    error: Error(message),
+                    refused: true,
+                });
+            }
+            other => return Err(Error(format!("unexpected answer: {other:?}")).into()),
         };
 
         let (command_sender, command_receiver) = mpsc::channel();
@@ -322,6 +381,16 @@ impl Account {
             closed: false,
             features,
             created,
+            login: login.clone(),
+            identity: device.clone(),
+            reconnecting: None,
+            lost_at: None,
+            next_attempt: Instant::now(),
+            attempts: 0,
+            refused: false,
+            opened_at: Instant::now(),
+            reconnections: 0,
+            report_credits: 0,
         })
     }
 
@@ -498,9 +567,106 @@ impl Account {
                 }
             }
         }
-        !self.closed
+        self.keep_connected();
+        // Without the connection for a moment (it is being made again): the session goes on, up to RECONNECT_GRACE.
+        let connection = !self.closed
+            || (!self.refused
+                && self
+                    .lost_at
+                    .is_some_and(|lost| lost.elapsed() < RECONNECT_GRACE));
+        connection
             && (self.devices.iter().any(|d| d.id == device)
                 || self.helpers.iter().any(|(d, _)| d.id == device))
+    }
+
+    /// Whether the connection to the server is up now (during a session it may be lost and made again).
+    pub fn online(&self) -> bool {
+        !self.closed
+    }
+
+    /// During a session (called through `still_trusted`, once a second): once the server connection is lost, makes it
+    /// again in the background with the saved refresh token (1, 2, 4, then every 8 s), and takes the new one in when it
+    /// is made (its address too: after a network change the session gathers on it). A refused login is final. Tests:
+    /// QUEQIAO_FORCE=account-drop:<seconds> ends this connection that long after it was made, once.
+    fn keep_connected(&mut self) {
+        if !self.closed
+            && self.reconnections == 0
+            && queqiao_core::forced("account-drop")
+                .and_then(|seconds| seconds.parse::<u64>().ok())
+                .is_some_and(|seconds| self.opened_at.elapsed() >= Duration::from_secs(seconds))
+        {
+            // Dropping the command channel ends the connection thread, as a lost connection does.
+            let (sender, _) = mpsc::channel();
+            drop(std::mem::replace(&mut self.commands, sender));
+            self.closed = true;
+            self.pending
+                .push_back(AccountEvent::Closed("QUEQIAO_FORCE=account-drop".into()));
+        }
+        if !self.closed || self.refused {
+            return;
+        }
+        let now = Instant::now();
+        self.lost_at.get_or_insert(now);
+        if let Some(attempt) = &self.reconnecting {
+            match attempt.try_recv() {
+                Ok(Ok(fresh)) => {
+                    self.take_over(fresh);
+                    return;
+                }
+                Ok(Err(failed)) => {
+                    self.reconnecting = None;
+                    self.refused = failed.refused;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.reconnecting = None,
+            }
+        }
+        if self.refused || now < self.next_attempt {
+            return;
+        }
+        self.attempts += 1;
+        self.next_attempt = now + Duration::from_secs(1 << self.attempts.min(4).saturating_sub(1));
+        let (sender, receiver) = mpsc::channel();
+        let (mut login, identity, role) = (self.login.clone(), self.identity.clone(), self.role);
+        let spawned = std::thread::Builder::new()
+            .name("queqiao-account-again".into())
+            .spawn(move || {
+                let _ = sender.send(Account::open_with(
+                    &mut login,
+                    &identity,
+                    role,
+                    Credentials::Saved,
+                ));
+            });
+        if spawned.is_ok() {
+            self.reconnecting = Some(receiver);
+        }
+    }
+
+    /// A new connection takes the lost one's place: what was queued stays (the lost connection's Closed goes), the
+    /// devices let in by a help code stay; a new refresh token is kept as the login kept it.
+    fn take_over(&mut self, fresh: Account) {
+        let mut pending = std::mem::take(&mut self.pending);
+        pending.retain(|event| !matches!(event, AccountEvent::Closed(_)));
+        let helpers = std::mem::take(&mut self.helpers);
+        let reconnections = self.reconnections + 1;
+        // The old one goes; its thread is not waited for (after a lost connection it has ended; after the test switch
+        // it ends when its socket does).
+        let mut old = std::mem::replace(self, fresh);
+        drop(old.thread.take());
+        drop(old);
+        self.pending = pending;
+        self.helpers = helpers;
+        self.reconnections = reconnections;
+        if !self.identity.in_memory {
+            let _ = self.login.save(self.role);
+        }
+    }
+
+    /// An event `next_event` gave that is not the caller's to handle (a running session's signal, taken by its
+    /// `SessionSignal`): back at the front of the queue.
+    pub fn put_back(&mut self, event: AccountEvent) {
+        self.pending.push_front(event);
     }
 
     pub fn next_event(&mut self, timeout: Duration) -> Option<AccountEvent> {
@@ -713,6 +879,49 @@ impl Signaling for SessionSignal<'_> {
         self.account.set_control_state(controller);
     }
 
+    /// A message of `kind` from the other side of this session that came meanwhile (an ICE restart's request, offer or
+    /// answer), its signature and key checked as at the start; anything else stays queued.
+    fn take(&mut self, kind: &str) -> Option<String> {
+        // What arrived is taken in first (and the connection kept up).
+        let _ = self.account.still_trusted(&self.device);
+        let at = self.account.pending.iter().position(|event| {
+            matches!(event, AccountEvent::Signal { from, session, kind: got, .. }
+                if *from == self.device && *session == self.session && got == kind)
+        })?;
+        match self.account.pending.remove(at)? {
+            AccountEvent::Signal {
+                from,
+                from_role,
+                session,
+                kind,
+                body,
+                signature,
+                ..
+            } => self
+                .account
+                .check_signal(&from, from_role, &session, &kind, &body, &signature)
+                .ok()
+                .map(|()| body),
+            _ => None,
+        }
+    }
+
+    fn online(&mut self) -> bool {
+        let _ = self.account.still_trusted(&self.device);
+        self.account.online()
+    }
+
+    /// Only what the server asked for (one per session it gave the relays of, with reports on), and only valid words.
+    fn report_path(&mut self, report: &PathReport) {
+        if self.account.report_credits == 0 || !report.valid() {
+            return;
+        }
+        self.account.report_credits -= 1;
+        self.account.send(ClientMessage::PathReport {
+            report: report.clone(),
+        });
+    }
+
     fn send(&mut self, kind: &str, body: &str) -> Result<(), Error> {
         let signature = self
             .account
@@ -804,7 +1013,13 @@ impl Signaling for SessionSignal<'_> {
                     stun,
                     turn,
                     backups,
+                    punch,
                 }) => {
+                    // A report may go for each session the server asked one of (`report_path`).
+                    let punch = punch.unwrap_or_default();
+                    if punch.reports {
+                        self.account.report_credits = (self.account.report_credits + 1).min(4);
+                    }
                     let server = |access: TurnAccess| -> Result<TurnServer, Error> {
                         Ok(TurnServer {
                             address: resolve(&access.address)?,
@@ -827,6 +1042,7 @@ impl Signaling for SessionSignal<'_> {
                         stun,
                         turn,
                         backups,
+                        punch,
                     });
                 }
                 Some(AccountEvent::Closed(reason)) => break Err(Error(reason)),

@@ -126,6 +126,22 @@ pub trait Signaling {
         true
     }
 
+    /// During a session: a message of `kind` from the other side that came meanwhile (an ICE restart's
+    /// "restart-request", "restart-offer" or "restart-answer"), checked as at the start; none here (a direct test
+    /// connection carries no restarts).
+    fn take(&mut self, _kind: &str) -> Option<String> {
+        None
+    }
+
+    /// Whether the connection to the server is up now (during a session it may be lost and made again: an ICE
+    /// restart waits for it).
+    fn online(&mut self) -> bool {
+        true
+    }
+
+    /// The viewer: how the session's path went, anonymous, to the server when it asked for such reports.
+    fn report_path(&mut self, _report: &queqiao_core::account::PathReport) {}
+
     /// Exchanges hellos: both sides must speak the same protocol version and have different roles.
     /// Returns the other side's.
     fn hello(&mut self, role: &str) -> Result<Hello, Error> {

@@ -17,6 +17,9 @@
 # h264: the viewer asks for H.264 (Automatic no longer gives it here). The H.264, H.265 and AV1 sessions
 # check colours: windows of five colours on the agent's screen must show in the viewer's picture as on the screen
 # (a channel swapped, or a wrong 10-bit packing, shows there).
+# move_viewer, move_agent: the viewer's or the agent's network changes 6 s in (QUEQIAO_FORCE=move): the session goes on
+# through an ICE restart, both sides say so. account_drop: the viewer's server connection is lost at 4 s and made again,
+# its network changes at 9 s. After the sessions the server's anonymous path counts (path-stats) must hold them.
 # The agent's screen is Xvfb :91 with a clock and `top` (so the picture changes); the viewer's window is on Xvfb :92.
 # Everything the programs keep (the device's key, the saved logins, the single-instance lock) goes into the test's own
 # folder (XDG_CONFIG_HOME, XDG_STATE_HOME, XDG_RUNTIME_DIR), never the person's ~/.config/queqiao.
@@ -113,6 +116,15 @@ for label in $sessions; do
               agent_expects='command from the viewer: picture: H.264 (NVIDIA NVENC H.264 4:2:0'; viewer_expects=''; both_pass=yes ;;
         h265_444) agent_extra=''; viewer_extra="--codec h265 --chroma444 --ten-bit --ui-pictures $out/$label --picture-at 4";
               agent_expects='command from the viewer: picture: H.265 4:4:4 10-bit'; viewer_expects='the picture is H.265 now'; both_pass=yes ;;
+        # The session through a network change (QUEQIAO_FORCE=move: gathering again as on a new network, after 6 s): the
+        # viewer's, the agent's; then the viewer's server connection lost at 4 s and made again, its network changed at
+        # 9 s (the restart's signaling through the new connection). The ICE restart brings the other side back.
+        move_viewer) agent_extra=''; viewer_extra='--force move:6';
+                agent_expects='ICE restarted: the other side offers'; viewer_expects='again after'; both_pass=yes ;;
+        move_agent) agent_extra='--force move:6'; viewer_extra='';
+                agent_expects='again after'; viewer_expects='ICE restarted: the other side offers'; both_pass=yes ;;
+        account_drop) agent_extra=''; viewer_extra='--force account-drop:4,move:9';
+                agent_expects='ICE restarted: the other side offers'; viewer_expects='the server connection is back'; both_pass=yes ;;
         ui) agent_extra=''; viewer_extra='';
             agent_expects='RESULT PASS'; viewer_expects='sessions from the device list'; both_pass=yes ;;
         # The session window under a window manager (xfwm4 on the viewer's screen for this session): full screen on and
@@ -159,6 +171,15 @@ for label in $sessions; do
     if [ -n "$viewer_expects" ]; then
         grep -q "$viewer_expects" "$out/viewer_$label.txt" 2> /dev/null || why="$why $label-viewer"
     fi
+    # A restart that brought the other side back, on both sides, and the session's picture after it.
+    case "$label" in
+        move_* | account_drop)
+            for side in agent viewer; do
+                grep -q "ICE restarted: the other side offers" "$out/${side}_$label.txt" 2> /dev/null || why="$why $label-$side-restart"
+                grep -q "again after" "$out/${side}_$label.txt" 2> /dev/null || why="$why $label-$side-back"
+            done
+            ;;
+    esac
     # The main window's Settings: its cards, two clicks on a switch reaching the agent (on, then back as it was: later
     # sessions share these settings), English chosen and drawn.
     if [ "$label" = main ]; then
@@ -242,6 +263,10 @@ EOF
         grep -q "RESULT PASS" "$out/agent_$label.txt" 2> /dev/null || why="$why $label-agent-result"
     fi
 done
+# The viewers' anonymous path reports, counted by the server (sessions direct on 127.0.0.1, by ICE's candidates).
+"$bin/queqiao-server" path-stats --data "$data" > "$out/path_stats.txt" 2>&1
+echo "=== path-stats"; cat "$out/path_stats.txt"
+grep -qE '^[a-z]+ +[a-z]+ +ice +' "$out/path_stats.txt" || why="$why path-stats"
 kill "$server" 2> /dev/null
 echo "=== forms"
 DISPLAY=:92 timeout 60 "$bin/examples/linux_forms_probe" "$out" | tee "$out/forms.txt"

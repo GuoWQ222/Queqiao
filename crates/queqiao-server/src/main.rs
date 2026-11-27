@@ -31,6 +31,12 @@
 //!     --standby: also keeps a live copy of the accounts in its folder; `serve` on that folder makes it the account
 //!     server (stop the relay first, and the old account server if it still runs).
 //! --capacity-mbps (serve and relay): what the server may send in all; nearly full, it shares that fairly.
+//! queqiao-server punch [on|off] [--rounds <n>] [--reports on|off] [--data <folder>]
+//!     Punching for the sessions from now on (as UU Remote's server switches its own): on or off, the most rounds a
+//!     relayed session punches (0: no limit), whether the sessions' anonymous path reports are collected (on until set).
+//! queqiao-server path-stats [--days 30] [--data <folder>]
+//!     Those reports summed: per pair of NAT kinds, how many sessions went direct, how, how long it took. A report holds
+//!     only NAT kinds, the method and a duration; the server keeps counts by day (90 days), never who sent one.
 //! Without arguments it prints its version.
 
 mod cert;
@@ -64,6 +70,8 @@ fn main() {
         Some("relays") => list_relays(&args[1..]),
         Some("relay-key") => relay_key(&args[1..]),
         Some("relay") => relay(&args[1..]),
+        Some("punch") => punch(&args[1..]),
+        Some("path-stats") => path_stats(&args[1..]),
         _ => {
             println!("{banner}");
             println!(
@@ -93,6 +101,10 @@ fn main() {
             println!(
                 "                            [--turn-port 3478] [--relay-ports 47200-47399] [--capacity-mbps 100] [--standby]"
             );
+            println!(
+                "       queqiao-server punch [on|off] [--rounds <n, 0: no limit>] [--reports on|off] [--data <folder>]"
+            );
+            println!("       queqiao-server path-stats [--days 30] [--data <folder>]");
             return;
         }
     };
@@ -198,6 +210,74 @@ fn plain_argument<'a>(args: &'a [String], usage: &str) -> Result<&'a str, String
         .filter(|name| !name.starts_with("--"))
         .map(String::as_str)
         .ok_or_else(|| usage.to_string())
+}
+
+/// Punching for every session from now on (a running server reads it at each session's relays): on or off, the most
+/// rounds a relayed session punches, and whether the sessions' anonymous path reports are collected. Prints the
+/// settings.
+fn punch(args: &[String]) -> Result<(), String> {
+    let usage = "usage: queqiao-server punch [on|off] [--rounds <n, 0: no limit>] [--reports on|off] [--data <folder>]";
+    let store = Store::open(&data_folder(args)?.join("queqiao.db"))?;
+    let mut settings = store.punch_settings()?;
+    let switch = |word: &str| match word {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(usage.to_string()),
+    };
+    if let Some(word) = args.first().filter(|word| !word.starts_with("--")) {
+        settings.enabled = switch(word)?;
+    }
+    if let Some(rounds) = values(args, "--rounds").pop() {
+        settings.rounds = rounds.parse().map_err(|_| usage.to_string())?;
+    }
+    if let Some(word) = values(args, "--reports").pop() {
+        settings.reports = switch(&word)?;
+    }
+    store.set_punch_settings(&settings)?;
+    println!(
+        "punching {}, rounds {}, path reports {}",
+        if settings.enabled { "on" } else { "off" },
+        match settings.rounds {
+            0 => "without limit".to_string(),
+            rounds => format!("at most {rounds}"),
+        },
+        if settings.reports {
+            "collected"
+        } else {
+            "not collected"
+        }
+    );
+    Ok(())
+}
+
+/// The sessions' anonymous path reports of the last days, summed: per pair of NAT kinds (the viewer's, the agent's),
+/// how many went direct and how, and how long that took.
+fn path_stats(args: &[String]) -> Result<(), String> {
+    let days: i64 = match values(args, "--days").pop() {
+        Some(days) => days
+            .parse()
+            .ok()
+            .filter(|days| *days > 0)
+            .ok_or("usage: queqiao-server path-stats [--days 30] [--data <folder>]")?,
+        None => 30,
+    };
+    let store = Store::open(&data_folder(args)?.join("queqiao.db"))?;
+    let rows = store.path_stats(days)?;
+    let total: i64 = rows.iter().map(|row| row.4).sum();
+    let direct: i64 = rows
+        .iter()
+        .filter(|row| row.2 != "relay")
+        .map(|row| row.4)
+        .sum();
+    println!("sessions of the last {days} days: {total}, direct {direct}");
+    println!(
+        "{:<9} {:<9} {:<13} {:<14} {:>8}",
+        "viewer", "agent", "how", "to direct", "sessions"
+    );
+    for (local, remote, method, bucket, count) in rows {
+        println!("{local:<9} {remote:<9} {method:<13} {bucket:<14} {count:>8}");
+    }
+    Ok(())
 }
 
 /// Lets relay `name` join; its key goes to standard output only, once, as "name:key" for `relay-key`.

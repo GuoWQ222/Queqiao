@@ -224,10 +224,12 @@ pub(crate) fn run(
                         stun,
                         turn,
                         backups,
+                        punch,
                     }) => AccountEvent::IceServers {
                         stun,
                         turn,
                         backups,
+                        punch,
                     },
                     Ok(ServerMessage::HelpOpen { help_id }) => AccountEvent::HelpOpen(help_id),
                     Ok(ServerMessage::HelpClosed { reason }) => AccountEvent::HelpClosed(reason),

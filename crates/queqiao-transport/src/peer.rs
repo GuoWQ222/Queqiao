@@ -13,7 +13,7 @@
 //! What str0m sends from the relayed address goes through the TURN client, and what the TURN server
 //! forwards is handed to str0m as received on the relayed address.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 /// Control messages waiting for the channel at most (a few seconds of input and commands).
 const MAX_CONTROL_PENDING: usize = 4096;
@@ -21,13 +21,13 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use queqiao_core::protocol::VideoCodec;
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::change::{SdpAnswer, SdpOffer};
+use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::ChannelId;
 use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
@@ -36,11 +36,12 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig}
 use crate::fec;
 use crate::flow::{self, Flow};
 use crate::gather::{ExtraDeadline, gather, gather_extra};
-use crate::punch::{self, NatInfo, Puncher};
+use crate::punch::{self, Nat, NatInfo, Puncher};
 use crate::quic::{self, Quic, QuicEvent};
 use crate::signal::Signaling;
-use crate::turn::{Incoming, TurnClient};
+use crate::turn::{IceServers, Incoming, TurnClient};
 use crate::{Error, err};
+use queqiao_core::account::PathReport;
 
 /// Which of this PC's addresses a session offers: all its uplinks (the account's own devices), or only the one
 /// the server connection uses (someone helping from another account does not learn the others); when that one is a
@@ -110,6 +111,20 @@ pub enum PeerEvent {
         time_48khz: u64,
     },
     Closed(String),
+    /// This side's network changed (the main socket's address is no longer this PC's): the session gathers again
+    /// ([`Peer::regather`]) and starts ICE again.
+    NetworkChanged,
+    /// ICE lost the other side: the session waits for an ICE restart (up to [`RESTART_LIMIT`], then `Closed`).
+    Disconnected,
+    /// ICE has the other side again (after `Disconnected`).
+    Reconnected,
+    /// The gathering asked for ([`Peer::regather`]) is done: this side's new candidates are in.
+    Regathered,
+    /// An ICE restart's offer (viewer) or answer (agent), for the other side.
+    RestartSdp(String),
+    /// The viewer: how the session's path went (its first direct path, or relayed after a minute), once, anonymous:
+    /// for the server when it asks for such reports (`Signaling::report_path`).
+    PathReport(PathReport),
 }
 
 enum Command {
@@ -133,6 +148,11 @@ enum Command {
     },
     /// The bandwidth estimate starts again from this (the bitrate the encoder gets, bit/s).
     ResetBitrate(u64),
+    /// After a network change: gather on these (the server connection's address now, the session's servers).
+    Regather(IpAddr, IceServers),
+    RestartOffer,
+    RestartAnswer(String),
+    AcceptRestart(String),
     Close,
 }
 
@@ -147,8 +167,7 @@ const UNCONNECTED_WAIT: Duration = Duration::from_millis(50);
 pub struct Peer {
     commands: Sender<Command>,
     events: Receiver<PeerEvent>,
-    waker: Arc<UdpSocket>,
-    wake_to: SocketAddr,
+    wake: Wake,
     thread: Option<JoinHandle<()>>,
     notes: Vec<String>,
     in_flight: Arc<[InFlight; STREAMS]>,
@@ -236,15 +255,6 @@ impl Peer {
             };
         });
         let local_ip = signal.local_ip()?;
-        // Bound to the address the server connection leaves from: a socket on "any" would send out of whatever
-        // interface the route picks, a VPN's or proxy's tunnel included (see `interfaces`).
-        let bind_ip = match local_ip {
-            IpAddr::V4(ip) if !ip.is_unspecified() => ip,
-            _ => Ipv4Addr::UNSPECIFIED,
-        };
-        let socket = bind_socket(bind_ip.into())?;
-        let port = socket.local_addr()?.port();
-        let local = SocketAddr::new(local_ip, port);
         let servers = signal.ice_servers()?;
         let relay_only = queqiao_core::forced("network").as_deref() == Some("relay");
         // Tests (QUEQIAO_FORCE=network:route-only): as for someone of another account.
@@ -253,63 +263,18 @@ impl Peer {
         } else {
             addresses
         };
-        let uplinks = if !relay_only && !bind_ip.is_unspecified() {
-            crate::interfaces::uplinks()
-        } else {
-            Vec::new()
-        };
-        let offered = crate::interfaces::offered(bind_ip, &uplinks, addresses == Addresses::All);
-        let extra = |ip: IpAddr| {
-            let socket = bind_socket(ip).ok()?;
-            let local = socket.local_addr().ok()?;
-            Some(Extra {
-                socket: Arc::new(socket),
-                local,
-            })
-        };
-        let mut extras: Vec<Extra> = offered
-            .iter()
-            .filter_map(|ip| extra((*ip).into()))
-            .collect();
-        // Tests (QUEQIAO_FORCE=network:uplinks): this PC's uplinks first even when the server connection's address is
-        // not a tunnel (on one PC it is the loopback): the session goes through the uplinks' sockets.
-        let uplinks_forced =
-            queqiao_core::forced("network").as_deref() == Some("uplinks") && !extras.is_empty();
-        let main_is_tunnel =
-            uplinks_forced || crate::interfaces::is_tunnel(bind_ip, &uplinks, extras.len());
-        // IPv6 (2026-11-24): this PC's public IPv6 addresses, for the account's own devices only (like its other
-        // uplinks: someone of another account does not learn them). No NAT there: two PCs with IPv6 connect directly,
-        // each firewall letting in the other's checks as answers once both have sent. After the IPv4 uplinks.
-        // Tests: QUEQIAO_FORCE=ipv6:off leaves them out; ipv6:any takes private ones too (Tailscale's, for a test on
-        // one PC); network:ipv6 offers them alone, no IPv4 candidate, to prove the path.
-        let ipv6_forced = queqiao_core::forced("ipv6");
-        let ipv6_only = queqiao_core::forced("network").as_deref() == Some("ipv6");
-        if addresses == Addresses::All && !relay_only && ipv6_forced.as_deref() != Some("off") {
-            let any = ipv6_forced.as_deref() == Some("any");
-            extras.extend(
-                crate::interfaces::ipv6_uplinks(any)
-                    .into_iter()
-                    .filter_map(|ip| extra(ip.into())),
-            );
-        }
-        // The servers each socket asks: the first for its server-reflexive candidate, all of them for what its NAT does.
-        let stun = crate::gather::nat_servers(&servers);
-        let deadline = ExtraDeadline::new(Instant::now());
-        let (gathered, found) = std::thread::scope(|scope| {
-            let jobs: Vec<_> = extras
-                .iter()
-                .map(|extra| {
-                    let (deadline, stun) = (&deadline, &stun);
-                    scope.spawn(move || gather_extra(&extra.socket, extra.local, stun, deadline))
-                })
-                .collect();
-            let gathered = gather(&socket, local, &servers, relay_only);
-            deadline.main_done();
-            let found: Vec<_> = jobs.into_iter().filter_map(|job| job.join().ok()).collect();
-            (gathered, found)
-        });
-        let gathered = gathered?;
-        let mut notes = gathered.notes;
+        let Gathering {
+            socket,
+            local,
+            bind_ip,
+            extras,
+            candidates: local_candidates,
+            turn,
+            nats: local_nats,
+            notes: gathering_notes,
+        } = gather_all(local_ip, &servers, addresses, relay_only)?;
+        let port = local.port();
+        let mut notes = gathering_notes;
         // The files over QUIC when both sides offer it (each side's certificate fingerprint in its SDP). Tests:
         // QUEQIAO_FORCE=files:sctp keeps them on their data channel.
         let identity = if queqiao_core::forced("files").as_deref() == Some("sctp") {
@@ -345,37 +310,8 @@ impl Peer {
             Bitrate::bps(START_BITRATE),
         )
         .build(Instant::now());
-        // The candidates added first are preferred (str0m's local preference goes down by the order of each kind).
-        // The server connection may leave through a VPN or a proxy's tunnel holding the route (Clash Verge's
-        // Mihomo on sunshine, 2026-11-23: the session went through it): then this PC's own uplinks come first
-        // and the tunnel is the fallback, as UU Remote gives VPN networks a cost.
-        let mut uplink_candidates = Vec::new();
-        // What each IPv4 socket's NAT does, for the other side (in the SDP) and for punching.
-        let mut local_nats: Vec<NatInfo> = gathered.nat.into_iter().collect();
-        for (candidates, extra_notes, nat) in found {
-            uplink_candidates.extend(candidates);
-            notes.extend(extra_notes);
-            local_nats.extend(nat);
-        }
-        if ipv6_only {
-            local_nats.clear();
-        }
-        let (first, then) = if main_is_tunnel {
-            notes.push(format!(
-                "{bind_ip} (the server connection's) is a tunnel, a VPN or a proxy: this PC's uplinks come first, it is the fallback"
-            ));
-            (uplink_candidates, gathered.candidates)
-        } else {
-            (gathered.candidates, uplink_candidates)
-        };
-        for candidate in first.into_iter().chain(then) {
-            if ipv6_only && candidate.addr().is_ipv4() {
-                continue;
-            }
-            rtc.add_local_candidate(candidate);
-        }
-        if ipv6_only {
-            notes.push("IPv6 candidates only (QUEQIAO_FORCE=network:ipv6)".into());
+        for candidate in &local_candidates {
+            rtc.add_local_candidate(candidate.clone());
         }
 
         let (mut mid, mut audio_mid, mut channel) = (None, None, None);
@@ -448,6 +384,7 @@ impl Peer {
                 if !relay_only
                     && !local_nats.is_empty()
                     && !remote_nats.is_empty()
+                    && servers.punch.enabled
                     && queqiao_core::forced("punch").as_deref() != Some("off") =>
             {
                 let controlling = role == Role::Viewer;
@@ -457,7 +394,10 @@ impl Peer {
                         pairs.push((*local, *remote));
                     }
                 }
-                Some(Puncher::rounds(key, pairs, controlling, Instant::now()))
+                Some(
+                    Puncher::rounds(key, pairs, controlling, Instant::now())
+                        .limit_rounds(servers.punch.rounds),
+                )
             }
             _ => None,
         };
@@ -488,24 +428,17 @@ impl Peer {
         let files_on_quic = Arc::new(AtomicBool::new(false));
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
-        // The wake-up goes to the main socket, which listens on its own address only.
-        let wake_ip = if bind_ip.is_unspecified() {
-            Ipv4Addr::LOCALHOST
-        } else {
-            bind_ip
-        };
-        let waker = Arc::new(UdpSocket::bind((wake_ip, 0))?);
-        let wake_to = SocketAddr::new(wake_ip.into(), port);
-        let wake_from = waker.local_addr()?;
+        let (waker, wake_to, wake_from) = waker_for(bind_ip, port)?;
+        let wake = Wake::new(waker, wake_to);
         let (arrivals, arrived) = mpsc::channel();
         let stop_extras = Arc::new(AtomicBool::new(false));
         for extra in &extras {
             let socket = extra.socket.clone();
-            let waker = waker.clone();
+            let wake = wake.clone();
             let (local, arrivals, stop) = (extra.local, arrivals.clone(), stop_extras.clone());
             std::thread::Builder::new()
                 .name("queqiao-net-in".into())
-                .spawn(move || receive_extra(socket, local, waker, wake_to, arrivals, stop))?;
+                .spawn(move || receive_extra(socket, local, wake, arrivals, stop))?;
         }
         let in_flight: Arc<[InFlight; STREAMS]> = Arc::new(Default::default());
         let flow = Flow::new();
@@ -529,15 +462,34 @@ impl Peer {
             events: event_sender,
             commands: command_receiver,
             last_keyframe_request: None,
-            turn: gathered.turn,
+            turn,
             extras,
             arrived,
             stop_extras,
             punch: puncher,
             arrivals,
-            waker: waker.clone(),
-            wake_to,
+            wake: wake.clone(),
             remote_candidates,
+            report: PathTrack {
+                sent: false,
+                started: Instant::now(),
+                found: HashSet::new(),
+                sockets: HashSet::new(),
+                remote_nat: Nat::kind(remote_nats.first()),
+            },
+            restart: Restart {
+                role,
+                servers: servers.clone(),
+                addresses,
+                relay_only,
+                local_candidates,
+                local_nats,
+                pending: None,
+                disconnected_since: None,
+                next_check: Instant::now() + NETWORK_CHECK,
+                main_gone: false,
+                moves: 0,
+            },
             connected: false,
             dtls_notes: (0, 0),
             path: None,
@@ -576,8 +528,7 @@ impl Peer {
         Ok(Peer {
             commands: command_sender,
             events: event_receiver,
-            waker,
-            wake_to,
+            wake,
             thread: Some(thread),
             notes,
             in_flight,
@@ -659,6 +610,28 @@ impl Peer {
         self.command(Command::RequestKeyframe);
     }
 
+    /// After this side's network changed ([`PeerEvent::NetworkChanged`]): gathers again on `local_ip` (the address the
+    /// server connection leaves from now) with `servers` (this session's, asked for again): new sockets, relay
+    /// allocation and NAT classification; the old candidates leave ICE. [`PeerEvent::Regathered`] when done.
+    pub fn regather(&self, local_ip: IpAddr, servers: IceServers) {
+        self.command(Command::Regather(local_ip, servers));
+    }
+
+    /// The viewer: starts ICE again; the offer comes as [`PeerEvent::RestartSdp`], for the other side.
+    pub fn restart_offer(&self) {
+        self.command(Command::RestartOffer);
+    }
+
+    /// The viewer: the other side's answer to its restart offer.
+    pub fn restart_answer(&self, sdp: String) {
+        self.command(Command::RestartAnswer(sdp));
+    }
+
+    /// The agent: the viewer's restart offer; the answer comes as [`PeerEvent::RestartSdp`], for the viewer.
+    pub fn accept_restart(&self, sdp: String) {
+        self.command(Command::AcceptRestart(sdp));
+    }
+
     /// Sends parity for the video ([`crate::fec`]): only to a side that said in its hello it uses it. The bitrate
     /// estimate given to the encoder is then less the parity's share.
     pub fn send_fec(&self, on: bool) {
@@ -679,14 +652,13 @@ impl Peer {
     pub fn audio_sender(&self) -> Result<AudioSender, Error> {
         Ok(AudioSender {
             commands: self.commands.clone(),
-            waker: self.waker.clone(),
-            wake_to: self.wake_to,
+            wake: self.wake.clone(),
         })
     }
 
     fn command(&self, command: Command) {
         if self.commands.send(command).is_ok() {
-            let _ = self.waker.send_to(&[0], self.wake_to);
+            self.wake.wake();
         }
     }
 }
@@ -694,8 +666,7 @@ impl Peer {
 /// Sends Opus packets into the session from any thread; see [`Peer::audio_sender`].
 pub struct AudioSender {
     commands: Sender<Command>,
-    waker: Arc<UdpSocket>,
-    wake_to: SocketAddr,
+    wake: Wake,
 }
 
 impl AudioSender {
@@ -706,7 +677,7 @@ impl AudioSender {
             .send(Command::Audio { data, time_48khz })
             .is_ok()
         {
-            let _ = self.waker.send_to(&[0], self.wake_to);
+            self.wake.wake();
         }
     }
 }
@@ -820,8 +791,7 @@ fn dtls_records(bytes: &[u8]) -> String {
 fn receive_extra(
     socket: Arc<UdpSocket>,
     local: SocketAddr,
-    waker: Arc<UdpSocket>,
-    wake_to: SocketAddr,
+    wake: Wake,
     arrivals: Sender<Arriving>,
     stop: Arc<AtomicBool>,
 ) {
@@ -838,7 +808,7 @@ fn receive_extra(
                 if arrivals.send(arriving).is_err() {
                     return;
                 }
-                let _ = waker.send_to(&[0], wake_to);
+                wake.wake();
             }
             Err(error)
                 if matches!(
@@ -873,6 +843,212 @@ fn candidates_of(sdp: &str, kind: Option<&str>) -> Vec<SocketAddr> {
             Some(SocketAddr::new(ip, port))
         })
         .collect()
+}
+
+/// How other threads wake the network thread: a one-byte datagram from a socket of its own to the main socket (which
+/// listens on its own address only). Shared and replaceable: after a network change the session has a new main socket
+/// on a new address, and the wake-ups follow it.
+#[derive(Clone)]
+struct Wake(Arc<Mutex<(UdpSocket, SocketAddr)>>);
+
+impl Wake {
+    fn new(socket: UdpSocket, to: SocketAddr) -> Wake {
+        Wake(Arc::new(Mutex::new((socket, to))))
+    }
+
+    fn wake(&self) {
+        if let Ok(wake) = self.0.lock() {
+            let _ = wake.0.send_to(&[0], wake.1);
+        }
+    }
+
+    fn set(&self, socket: UdpSocket, to: SocketAddr) {
+        if let Ok(mut wake) = self.0.lock() {
+            *wake = (socket, to);
+        }
+    }
+}
+
+/// The socket that wakes the network thread, the main socket's address it sends to, and its own address (what comes
+/// from there is a wake-up): on the main socket's address, the loopback when that is "any".
+fn waker_for(bind_ip: Ipv4Addr, port: u16) -> Result<(UdpSocket, SocketAddr, SocketAddr), Error> {
+    let wake_ip = if bind_ip.is_unspecified() {
+        Ipv4Addr::LOCALHOST
+    } else {
+        bind_ip
+    };
+    let waker = UdpSocket::bind((wake_ip, 0))?;
+    let from = waker.local_addr()?;
+    Ok((waker, SocketAddr::new(wake_ip.into(), port), from))
+}
+
+/// How often the network thread checks that the main socket's address is still this PC's.
+const NETWORK_CHECK: Duration = Duration::from_secs(2);
+/// How long a session waits for ICE to come back (an ICE restart) once it lost the other side, before it ends.
+pub const RESTART_LIMIT: Duration = Duration::from_secs(40);
+
+/// What a session needs to start ICE again after a network change: its role (the viewer offers), the servers and
+/// addresses to gather with, this side's candidates and NATs now (replaced when it gathers again), a restart offer
+/// waiting for its answer, since when ICE has lost the other side, when the network is checked next, whether the main
+/// socket's address went away (told once).
+/// What the session's anonymous path report (`PeerEvent::PathReport`) is made of: when the session began, the
+/// addresses punching found and its own sockets that became the session's, the other side's NAT kind.
+struct PathTrack {
+    sent: bool,
+    started: Instant,
+    found: HashSet<SocketAddr>,
+    sockets: HashSet<SocketAddr>,
+    remote_nat: &'static str,
+}
+
+/// How long a session is relayed before its report says so.
+const REPORT_RELAYED_AFTER: Duration = Duration::from_secs(60);
+
+struct Restart {
+    role: Role,
+    servers: IceServers,
+    addresses: Addresses,
+    relay_only: bool,
+    local_candidates: Vec<Candidate>,
+    local_nats: Vec<NatInfo>,
+    pending: Option<(SdpPendingOffer, String)>,
+    disconnected_since: Option<Instant>,
+    next_check: Instant,
+    main_gone: bool,
+    /// How often it gathered again (the test switch `move` acts once).
+    moves: u32,
+}
+
+/// What a session gathered on this PC's networks (at its start, and again after a network change): the main socket and
+/// its address, the other uplinks' sockets, the candidates (the preferred first), the relay allocation, what each IPv4
+/// socket's NAT does, one line per finding.
+struct Gathering {
+    socket: UdpSocket,
+    local: SocketAddr,
+    bind_ip: Ipv4Addr,
+    extras: Vec<Extra>,
+    candidates: Vec<Candidate>,
+    turn: Option<TurnClient>,
+    nats: Vec<NatInfo>,
+    notes: Vec<String>,
+}
+
+/// Gathers on the networks this PC has now: the main socket on `local_ip` (the address the server connection leaves
+/// from), every other uplink (the account's own devices) and the public IPv6 addresses, the relay allocation and the
+/// NAT of each socket (`gather`, `gather_extra`), within 1.5 s.
+fn gather_all(
+    local_ip: IpAddr,
+    servers: &IceServers,
+    addresses: Addresses,
+    relay_only: bool,
+) -> Result<Gathering, Error> {
+    // Bound to the address the server connection leaves from: a socket on "any" would send out of whatever
+    // interface the route picks, a VPN's or proxy's tunnel included (see `interfaces`).
+    let bind_ip = match local_ip {
+        IpAddr::V4(ip) if !ip.is_unspecified() => ip,
+        _ => Ipv4Addr::UNSPECIFIED,
+    };
+    let socket = bind_socket(bind_ip.into())?;
+    let port = socket.local_addr()?.port();
+    let local = SocketAddr::new(local_ip, port);
+    let uplinks = if !relay_only && !bind_ip.is_unspecified() {
+        crate::interfaces::uplinks()
+    } else {
+        Vec::new()
+    };
+    let offered = crate::interfaces::offered(bind_ip, &uplinks, addresses == Addresses::All);
+    let extra = |ip: IpAddr| {
+        let socket = bind_socket(ip).ok()?;
+        let local = socket.local_addr().ok()?;
+        Some(Extra {
+            socket: Arc::new(socket),
+            local,
+        })
+    };
+    let mut extras: Vec<Extra> = offered
+        .iter()
+        .filter_map(|ip| extra((*ip).into()))
+        .collect();
+    // Tests (QUEQIAO_FORCE=network:uplinks): this PC's uplinks first even when the server connection's address is
+    // not a tunnel (on one PC it is the loopback): the session goes through the uplinks' sockets.
+    let uplinks_forced =
+        queqiao_core::forced("network").as_deref() == Some("uplinks") && !extras.is_empty();
+    let main_is_tunnel =
+        uplinks_forced || crate::interfaces::is_tunnel(bind_ip, &uplinks, extras.len());
+    // IPv6 (2026-11-24): this PC's public IPv6 addresses, for the account's own devices only (like its other
+    // uplinks: someone of another account does not learn them). No NAT there: two PCs with IPv6 connect directly,
+    // each firewall letting in the other's checks as answers once both have sent. After the IPv4 uplinks.
+    // Tests: QUEQIAO_FORCE=ipv6:off leaves them out; ipv6:any takes private ones too (Tailscale's, for a test on
+    // one PC); network:ipv6 offers them alone, no IPv4 candidate, to prove the path.
+    let ipv6_forced = queqiao_core::forced("ipv6");
+    let ipv6_only = queqiao_core::forced("network").as_deref() == Some("ipv6");
+    if addresses == Addresses::All && !relay_only && ipv6_forced.as_deref() != Some("off") {
+        let any = ipv6_forced.as_deref() == Some("any");
+        extras.extend(
+            crate::interfaces::ipv6_uplinks(any)
+                .into_iter()
+                .filter_map(|ip| extra(ip.into())),
+        );
+    }
+    // The servers each socket asks: the first for its server-reflexive candidate, all of them for what its NAT does.
+    let stun = crate::gather::nat_servers(servers);
+    let deadline = ExtraDeadline::new(Instant::now());
+    let (gathered, found) = std::thread::scope(|scope| {
+        let jobs: Vec<_> = extras
+            .iter()
+            .map(|extra| {
+                let (deadline, stun) = (&deadline, &stun);
+                scope.spawn(move || gather_extra(&extra.socket, extra.local, stun, deadline))
+            })
+            .collect();
+        let gathered = gather(&socket, local, servers, relay_only);
+        deadline.main_done();
+        let found: Vec<_> = jobs.into_iter().filter_map(|job| job.join().ok()).collect();
+        (gathered, found)
+    });
+    let gathered = gathered?;
+    let mut notes = gathered.notes;
+    // The candidates added first are preferred (str0m's local preference goes down by the order of each kind).
+    // The server connection may leave through a VPN or a proxy's tunnel holding the route (Clash Verge's
+    // Mihomo on sunshine, 2026-11-23: the session went through it): then this PC's own uplinks come first
+    // and the tunnel is the fallback, as UU Remote gives VPN networks a cost.
+    let mut uplink_candidates = Vec::new();
+    // What each IPv4 socket's NAT does, for the other side (in the SDP) and for punching.
+    let mut nats: Vec<NatInfo> = gathered.nat.into_iter().collect();
+    for (candidates, extra_notes, nat) in found {
+        uplink_candidates.extend(candidates);
+        notes.extend(extra_notes);
+        nats.extend(nat);
+    }
+    if ipv6_only {
+        nats.clear();
+    }
+    let (first, then) = if main_is_tunnel {
+        notes.push(format!(
+            "{bind_ip} (the server connection's) is a tunnel, a VPN or a proxy: this PC's uplinks come first, it is the fallback"
+        ));
+        (uplink_candidates, gathered.candidates)
+    } else {
+        (gathered.candidates, uplink_candidates)
+    };
+    let candidates: Vec<Candidate> = first
+        .into_iter()
+        .chain(then)
+        .filter(|candidate| !ipv6_only || !candidate.addr().is_ipv4())
+        .collect();
+    if ipv6_only {
+        notes.push("IPv6 candidates only (QUEQIAO_FORCE=network:ipv6)".into());
+    }
+    Ok(Gathering {
+        socket,
+        local,
+        bind_ip,
+        extras,
+        candidates,
+        turn: gathered.turn,
+        nats,
+        notes,
+    })
 }
 
 fn bind_socket(ip: IpAddr) -> Result<UdpSocket, Error> {
@@ -915,13 +1091,15 @@ struct Network {
     arrived: Receiver<Arriving>,
     stop_extras: Arc<AtomicBool>,
     /// Punching for a direct path (`punch`) while the other side punches too; a new socket that finds one becomes an
-    /// extra socket (its thread gets `arrivals`, `waker` and `wake_to` as the others').
+    /// extra socket (its thread gets `arrivals` and `wake` as the others').
     punch: Option<Puncher>,
     arrivals: Sender<Arriving>,
-    waker: Arc<UdpSocket>,
-    wake_to: SocketAddr,
+    wake: Wake,
     /// Every address the other side offered (its SDP's candidates) and every one punching handed to ICE since.
     remote_candidates: Vec<SocketAddr>,
+    /// Starting ICE again after a network change ([`Peer::regather`], [`Peer::restart_offer`], ...).
+    restart: Restart,
+    report: PathTrack,
     connected: bool,
     /// DTLS packets noted before connecting (out, in): where the handshake goes and how long it takes.
     dtls_notes: (u32, u32),
@@ -981,6 +1159,7 @@ impl Network {
         // counts its ports up it gets the next one, the one the other side predicts.
         self.punch_tick()?;
         let start = self.clock(Instant::now());
+        let started = Instant::now();
         self.rtc.handle_input(Input::Timeout(start)).map_err(err)?;
         let mut immediate = 0u32;
         loop {
@@ -989,6 +1168,11 @@ impl Network {
             };
             if let Some(at) = self.punch_tick()? {
                 deadline = deadline.min(at);
+            }
+            self.check_network(started)?;
+            deadline = deadline.min(self.restart.next_check);
+            if let Some(since) = self.restart.disconnected_since {
+                deadline = deadline.min(since + RESTART_LIMIT);
             }
             // Tests: what the bottleneck has carried goes out, and the loop wakes for the next.
             self.release_shaped();
@@ -1088,7 +1272,13 @@ impl Network {
             let wait = deadline
                 .saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(1));
-            self.socket.set_read_timeout(Some(wait))?;
+            if let Err(error) = self.socket.set_read_timeout(Some(wait)) {
+                self.main_socket_failed(&error.to_string());
+                std::thread::sleep(wait.min(Duration::from_millis(50)));
+                let at = self.clock(Instant::now());
+                self.rtc.handle_input(Input::Timeout(at)).map_err(err)?;
+                continue;
+            }
             let input = match self.socket.recv_from(&mut buffer) {
                 Ok((_, source)) if source == self.wake_from => continue,
                 Ok((length, source))
@@ -1120,7 +1310,13 @@ impl Network {
                 }
                 // Windows reports an earlier ICMP "port unreachable" on the next receive: not fatal.
                 Err(error) if error.kind() == ErrorKind::ConnectionReset => continue,
-                Err(error) => return Err(error.into()),
+                // The address went away (a network change): the session gathers again and starts ICE again; until
+                // then the loop goes on (str0m's time and the other sockets).
+                Err(error) => {
+                    self.main_socket_failed(&error.to_string());
+                    std::thread::sleep(wait.min(Duration::from_millis(50)));
+                    Input::Timeout(self.clock(Instant::now()))
+                }
             };
             self.rtc.handle_input(input).map_err(err)?;
         }
@@ -1201,6 +1397,11 @@ impl Network {
                             }
                         };
                         if self.path.as_ref() != Some(&path) {
+                            if relayed.is_none()
+                                && !self.remote_relays.contains(&packet.destination)
+                            {
+                                self.report_path(Some((packet.source, packet.destination)));
+                            }
                             self.path = Some(path.clone());
                             let _ = self.events.send(PeerEvent::Path(path));
                         }
@@ -1221,11 +1422,31 @@ impl Network {
                 self.connected = true;
                 Some(PeerEvent::Connected)
             }
+            // Not the end: the session waits for an ICE restart (a network change on either side), up to RESTART_LIMIT
+            // (`check_network`). A side that leaves says so first (its Leave message).
             Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
-                let _ = self
-                    .events
-                    .send(PeerEvent::Closed("ICE disconnected".into()));
-                return false;
+                if self.restart.disconnected_since.is_none() {
+                    self.restart.disconnected_since = Some(Instant::now());
+                    self.note(format!(
+                        "ICE disconnected: waiting up to {} s for a restart",
+                        RESTART_LIMIT.as_secs()
+                    ));
+                }
+                Some(PeerEvent::Disconnected)
+            }
+            Event::IceConnectionStateChange(
+                state @ (IceConnectionState::Connected | IceConnectionState::Completed),
+            ) if self.restart.disconnected_since.is_some() => {
+                let since = self
+                    .restart
+                    .disconnected_since
+                    .take()
+                    .unwrap_or_else(Instant::now);
+                self.note(format!(
+                    "ICE {state:?} again after {} ms",
+                    since.elapsed().as_millis()
+                ));
+                Some(PeerEvent::Reconnected)
             }
             Event::IceConnectionStateChange(state) => {
                 Some(PeerEvent::Note(format!("ICE {state:?}")))
@@ -1476,6 +1697,53 @@ impl Network {
                 let off = queqiao_core::forced("fec").as_deref() == Some("off");
                 self.fec_tx = (on && !off).then(fec::Sender::new);
             }
+            Command::Regather(local_ip, servers) => {
+                match self.regather(local_ip, servers) {
+                    Ok(()) => {
+                        let _ = self.events.send(PeerEvent::Regathered);
+                    }
+                    // Not this time (the new network has no route yet): the session tries again.
+                    Err(error) => self.note(format!("gathering again failed: {error}")),
+                }
+            }
+            Command::RestartOffer => {
+                let mut api = self.rtc.sdp_api();
+                // The candidates kept are this side's now (the old ones went out when it gathered again).
+                api.ice_restart(true);
+                match api.apply() {
+                    Some((offer, pending)) => {
+                        let offer =
+                            punch::add_to_sdp(&offer.to_sdp_string(), &self.restart.local_nats);
+                        self.restart.pending = Some((pending, offer.clone()));
+                        self.note("ICE restart: offer made".into());
+                        let _ = self.events.send(PeerEvent::RestartSdp(offer));
+                    }
+                    None => self.note("ICE restart: nothing to offer".into()),
+                }
+            }
+            Command::RestartAnswer(answer) => match self.restart.pending.take() {
+                Some((pending, offer)) => match SdpAnswer::from_sdp_string(&answer) {
+                    Ok(sdp) => match self.rtc.sdp_api().accept_answer(pending, sdp) {
+                        Ok(()) => {
+                            // Until ICE has the other side again (then `Reconnected`), up to RESTART_LIMIT: from the
+                            // answer on (ICE says "connected" for a moment as the offer is made).
+                            self.restart
+                                .disconnected_since
+                                .get_or_insert_with(Instant::now);
+                            self.restarted(&offer, &answer, &answer);
+                        }
+                        Err(error) => self.note(format!("ICE restart: answer refused: {error}")),
+                    },
+                    Err(error) => self.note(format!("ICE restart: answer not read: {error}")),
+                },
+                None => self.note("ICE restart: an answer without an offer, left out".into()),
+            },
+            Command::AcceptRestart(offer) => {
+                self.restart
+                    .disconnected_since
+                    .get_or_insert_with(Instant::now);
+                self.accept_restart(offer);
+            }
             Command::Close => {
                 self.rtc.disconnect();
                 if let Some(turn) = self.turn.as_mut() {
@@ -1651,6 +1919,213 @@ impl Network {
         self.clock
     }
 
+    fn note(&self, text: String) {
+        let _ = self.events.send(PeerEvent::Note(text));
+    }
+
+    /// The main socket failed (its address went away): told once as a network change.
+    fn main_socket_failed(&mut self, error: &str) {
+        if !self.restart.main_gone {
+            self.restart.main_gone = true;
+            self.note(format!(
+                "this PC's network changed: the session's socket on {} failed ({error})",
+                self.local
+            ));
+            let _ = self.events.send(PeerEvent::NetworkChanged);
+        }
+    }
+
+    /// Every `NETWORK_CHECK`: whether the main socket's address is still this PC's (a new network takes it away; a
+    /// socket bound to it then cannot be made); told once ([`PeerEvent::NetworkChanged`]). Tests:
+    /// QUEQIAO_FORCE=move:<seconds> acts as if the network changed that long after the session started. Ends the
+    /// session (an error) once ICE has been without the other side for [`RESTART_LIMIT`].
+    fn check_network(&mut self, started: Instant) -> Result<(), Error> {
+        let now = Instant::now();
+        if !self.report.sent && now >= self.report.started + REPORT_RELAYED_AFTER {
+            self.report_path(None);
+        }
+        if let Some(since) = self.restart.disconnected_since
+            && now >= since + RESTART_LIMIT
+        {
+            return Err(Error(format!(
+                "ICE disconnected: no restart brought the other side back in {} s",
+                RESTART_LIMIT.as_secs()
+            )));
+        }
+        if now < self.restart.next_check || self.restart.main_gone {
+            return Ok(());
+        }
+        self.restart.next_check = now + NETWORK_CHECK;
+        let ip = self.local.ip();
+        let gone = !ip.is_unspecified() && UdpSocket::bind((ip, 0)).is_err();
+        let moved = self.restart.moves == 0
+            && queqiao_core::forced("move")
+                .and_then(|seconds| seconds.parse::<u64>().ok())
+                .is_some_and(|seconds| now >= started + Duration::from_secs(seconds));
+        if gone || moved {
+            self.restart.main_gone = true;
+            self.note(if gone {
+                format!("this PC's network changed: {ip} is no longer one of its addresses")
+            } else {
+                "this PC's network changed (QUEQIAO_FORCE=move)".into()
+            });
+            let _ = self.events.send(PeerEvent::NetworkChanged);
+        }
+        Ok(())
+    }
+
+    /// The viewer's report of the session's path, once: its first direct path (`direct`: this side's address, the
+    /// other's), or none after `REPORT_RELAYED_AFTER`. Only kinds and a duration go in it.
+    fn report_path(&mut self, direct: Option<(SocketAddr, SocketAddr)>) {
+        if self.report.sent || self.restart.role != Role::Viewer {
+            return;
+        }
+        self.report.sent = true;
+        let method = match direct {
+            None => "relay",
+            Some((local, _)) if self.report.sockets.contains(&local) => "punch-socket",
+            Some((_, remote)) if self.report.found.contains(&remote) => "punch",
+            Some(_) => "ice",
+        };
+        let ms = match direct {
+            Some(_) => self.report.started.elapsed().as_millis().min(600_000) as u32,
+            None => 0,
+        };
+        let _ = self.events.send(PeerEvent::PathReport(PathReport {
+            local_nat: Nat::kind(self.restart.local_nats.first()).into(),
+            remote_nat: self.report.remote_nat.into(),
+            direct: direct.is_some(),
+            method: method.into(),
+            ms,
+        }));
+    }
+
+    /// Gathers again on the networks this PC has now (after a network change): the old candidates leave ICE, the old
+    /// uplinks' threads end, the old relay allocation is given back; the new sockets, candidates and NATs take their
+    /// place (the wake-ups go to the new main socket).
+    fn regather(&mut self, local_ip: IpAddr, servers: IceServers) -> Result<(), Error> {
+        let gathering = gather_all(
+            local_ip,
+            &servers,
+            self.restart.addresses,
+            self.restart.relay_only,
+        )?;
+        for candidate in self.restart.local_candidates.drain(..) {
+            self.rtc.direct_api().invalidate_candidate(&candidate);
+        }
+        self.stop_extras.store(true, Ordering::Relaxed);
+        self.stop_extras = Arc::new(AtomicBool::new(false));
+        if let Some(turn) = self.turn.as_mut() {
+            turn.close(Instant::now());
+        }
+        self.flush_turn();
+        let (waker, wake_to, wake_from) = waker_for(gathering.bind_ip, gathering.local.port())?;
+        self.wake.set(waker, wake_to);
+        self.wake_from = wake_from;
+        self.socket = gathering.socket;
+        self.local = gathering.local;
+        self.turn = gathering.turn;
+        self.extras = gathering.extras;
+        for extra in &self.extras {
+            let (socket, local, wake, arrivals, stop) = (
+                extra.socket.clone(),
+                extra.local,
+                self.wake.clone(),
+                self.arrivals.clone(),
+                self.stop_extras.clone(),
+            );
+            let _ = std::thread::Builder::new()
+                .name("queqiao-net-in".into())
+                .spawn(move || receive_extra(socket, local, wake, arrivals, stop));
+        }
+        for candidate in &gathering.candidates {
+            self.rtc.add_local_candidate(candidate.clone());
+        }
+        self.relay_names = servers
+            .turn
+            .iter()
+            .chain(&servers.backups)
+            .filter(|server| !server.name.is_empty())
+            .map(|server| (server.address.ip(), server.name.clone()))
+            .collect();
+        self.restart.local_candidates = gathering.candidates;
+        self.restart.local_nats = gathering.nats;
+        self.restart.servers = servers;
+        self.restart.main_gone = false;
+        self.restart.moves += 1;
+        // Punching keeps nothing of the old network: it starts again with the restart's answer.
+        if let Some(punch) = self.punch.as_mut() {
+            punch.stop();
+        }
+        self.note(format!("gathered again on {}", self.local));
+        for note in gathering.notes {
+            self.note(note);
+        }
+        Ok(())
+    }
+
+    /// The agent: the viewer's restart offer, answered (the answer goes to the session as `RestartSdp`, with this
+    /// side's NATs when the viewer sent its own).
+    fn accept_restart(&mut self, offer: String) {
+        let sdp = match SdpOffer::from_sdp_string(&offer) {
+            Ok(sdp) => sdp,
+            Err(error) => return self.note(format!("ICE restart: offer not read: {error}")),
+        };
+        match self.rtc.sdp_api().accept_offer(sdp) {
+            Ok(answer) => {
+                let answer = answer.to_sdp_string();
+                let answer = if punch::from_sdp(&offer).is_empty() {
+                    answer
+                } else {
+                    punch::add_to_sdp(&answer, &self.restart.local_nats)
+                };
+                let _ = self.events.send(PeerEvent::RestartSdp(answer.clone()));
+                self.restarted(&offer, &answer, &offer);
+            }
+            Err(error) => self.note(format!("ICE restart: offer refused: {error}")),
+        }
+    }
+
+    /// ICE started again (`offer` and `answer` of the restart, `remote` the other side's): what the other side offers
+    /// now (its candidates, relays and NATs), and punching anew with the new key.
+    fn restarted(&mut self, offer: &str, answer: &str, remote: &str) {
+        self.remote_relays = relayed_candidates(remote);
+        self.remote_candidates = candidates_of(remote, None);
+        let remote_nats = punch::from_sdp(remote);
+        self.report.remote_nat = Nat::kind(remote_nats.first());
+        self.path = None;
+        self.note(format!(
+            "ICE restarted: the other side offers {} candidates",
+            self.remote_candidates.len()
+        ));
+        self.punch = match punch::Key::from_sdps(offer, answer) {
+            Some(key)
+                if !self.restart.relay_only
+                    && !self.restart.local_nats.is_empty()
+                    && !remote_nats.is_empty()
+                    && self.restart.servers.punch.enabled
+                    && queqiao_core::forced("punch").as_deref() != Some("off") =>
+            {
+                let mut pairs = Vec::new();
+                for local in &self.restart.local_nats {
+                    for remote in &remote_nats {
+                        pairs.push((*local, *remote));
+                    }
+                }
+                Some(
+                    Puncher::rounds(
+                        key,
+                        pairs,
+                        self.restart.role == Role::Viewer,
+                        Instant::now(),
+                    )
+                    .limit_rounds(self.restart.servers.punch.rounds),
+                )
+            }
+            _ => None,
+        };
+    }
+
     /// The socket a datagram from `local` leaves by: an extra socket's, else the main one.
     fn socket_for(&self, local: SocketAddr) -> &UdpSocket {
         self.extras
@@ -1733,8 +2208,10 @@ impl Network {
         socket: Option<Arc<UdpSocket>>,
     ) {
         if let Some(socket) = socket {
+            self.report.sockets.insert(local);
             self.adopt(local, socket);
         }
+        self.report.found.insert(remote);
         let known = self.remote_candidates.contains(&remote);
         let _ = self.events.send(PeerEvent::Note(format!(
             "punching: {remote} reached {local}, a direct path{}",
@@ -1764,18 +2241,19 @@ impl Network {
             return;
         }
         let _ = socket.set_nonblocking(false);
-        let (thread_socket, waker, arrivals, stop, wake_to) = (
+        let (thread_socket, wake, arrivals, stop) = (
             socket.clone(),
-            self.waker.clone(),
+            self.wake.clone(),
             self.arrivals.clone(),
             self.stop_extras.clone(),
-            self.wake_to,
         );
         let _ = std::thread::Builder::new()
             .name("queqiao-net-in".into())
-            .spawn(move || receive_extra(thread_socket, local, waker, wake_to, arrivals, stop));
+            .spawn(move || receive_extra(thread_socket, local, wake, arrivals, stop));
         self.extras.push(Extra { socket, local });
         if let Ok(candidate) = Candidate::host(local, "udp") {
+            // Kept with the others: a network change takes it out of ICE too.
+            self.restart.local_candidates.push(candidate.clone());
             self.rtc.add_local_candidate(candidate);
         }
     }

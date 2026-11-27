@@ -201,6 +201,38 @@ UU builds on WebRTC's standard pieces (`research\uu\STREAMER_FINDINGS.md`). We d
     firewall's own "Allow access" dialog asks the person once per program (UU's rules on the PC came from that dialog);
     allowed, ICE alone goes direct to this PC from behind any NAT. Shipping builds only; test builds with
     `QUEQIAO_FORCE=firewall:ask`.
+- **A session through a network change (2026-11-27, `queqiao-transport` `restart.rs`, as UU Remote keeps one):** Wi-Fi
+  to a phone's mobile data, a new address, a lost uplink, or the other side's: ICE starts again inside the session and
+  the DTLS session goes on (nothing is set up again; the picture waits, then resumes).
+  - The network thread sees the change: its address is no longer one of the PC's (checked every 2 s), or the main
+    socket fails (`QUEQIAO_FORCE=move:<s>` acts one out in tests). A disconnected ICE no longer ends the session: it
+    waits up to 40 s for a restart (`RESTART_LIMIT`).
+  - The account's server connection is made again in the background during a session (saved refresh token; 1, 2, 4,
+    then every 8 s), its address taken in; trust holds for 60 s without it, a refused login ends it
+    (`QUEQIAO_FORCE=account-drop:<s>` in tests).
+  - The side whose network changed gathers on the new one once its server connection is back (new sockets, relay
+    allocation, NAT classification; the old candidates leave ICE, the old allocation is given back). The viewer always
+    makes the restart offer (signed "restart-offer" through the account, as the first offer), so both never offer at
+    once; the agent asks for one ("restart-request") and answers ("restart-answer"). The viewer also restarts when
+    ICE has been without the other side for 3 s; no answer in 8 s, or nothing back 10 s after it, tries again
+    (gathering first). Punching starts again with the new descriptions' key and NATs.
+  - Sessions on threads of their own (the device list's) signal through the list's account by a link
+    (`queqiao-viewer` `link.rs`); the phone engine keeps its session's restart messages for its restarter.
+- **Punching set by the server, and anonymous path statistics (2026-11-27, as UU Remote's server switches its
+  punching and collects its results):** a server with `features::PUNCH` sends its operator's `PunchSettings` with each
+  session's relays (`IceServers::punch`): punching on or off, the most rounds a relayed session punches, and whether
+  it collects path reports (`queqiao-server punch [on|off] [--rounds <n>] [--reports on|off]`, read by the running
+  server at each session; until set: on, no limit, reports on). A change needs no new program.
+  - The viewer reports each session's path once (`ClientMessage::PathReport`): its first direct path, or relayed after
+    a minute. A report holds only the two NAT kinds ("open", "cone", "linear", "random", "unknown", "none"), how it
+    went direct ("ice", "punch": an address punching found, "punch-socket": one of punching's own sockets, or
+    "relay") and the time to direct; no address, port, device, account or time of day. The agent sends none (each
+    session would count twice).
+  - The server takes a report only for a session it gave the relays of with reports on (a credit per `IceServers`, at
+    most 4 per connection) and only in those words; it keeps counts by day, NAT kinds, method and a step of the time
+    to direct (under 1 s, 1-3 s, 3-5 s, 5-10 s, 10-30 s, longer), never who sent one, for 90 days.
+    `queqiao-server path-stats [--days 30]` sums them. The settings are not copied to standby servers (a standby made
+    the account server punches with the defaults until set there).
 - **Data channels:** `control` (reliable, ordered: session control, clipboard), `input` (unordered, low latency),
   `files` (reliable, flow-controlled).
 - **Identity and encryption:** each device has its own DTLS certificate (key protected with DPAPI). The account

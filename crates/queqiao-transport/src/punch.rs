@@ -69,6 +69,18 @@ pub(crate) enum Nat {
 }
 
 impl Nat {
+    /// The kind alone, as an anonymous path report names it (`PathReport::NATS`; no step, no address).
+    pub(crate) fn kind(info: Option<&NatInfo>) -> &'static str {
+        match info.map(|info| info.nat) {
+            None => "none",
+            Some(Nat::Open) => "open",
+            Some(Nat::Cone) => "cone",
+            Some(Nat::Linear(_)) => "linear",
+            Some(Nat::Random) => "random",
+            Some(Nat::Unknown) => "unknown",
+        }
+    }
+
     fn word(self) -> String {
         match self {
             Nat::Open => "open".into(),
@@ -534,6 +546,8 @@ pub(crate) struct Puncher {
     round_began: Instant,
     next_round: Option<Instant>,
     paused: bool,
+    /// The most rounds (the server's `PunchSettings::rounds`; 0: no limit).
+    max_rounds: u32,
 }
 
 /// After round `round` ended without a direct path, how long until the next: a new round every minute for the first
@@ -566,7 +580,14 @@ impl Puncher {
             round_began: started,
             next_round: None,
             paused: false,
+            max_rounds: 0,
         }
+    }
+
+    /// No more than `rounds` rounds (0: no limit), as the server set it.
+    pub(crate) fn limit_rounds(mut self, rounds: u32) -> Puncher {
+        self.max_rounds = rounds;
+        self
     }
 
     /// Round after round for `pairs` (one of this side's sockets, one of the other's) until the session is direct;
@@ -676,6 +697,14 @@ impl Puncher {
                 self.notes.push(format!(
                     "punching over after {} s without a direct path",
                     elapsed.as_secs()
+                ));
+                self.stop();
+                return None;
+            }
+            if self.max_rounds > 0 && self.round + 1 >= self.max_rounds {
+                self.notes.push(format!(
+                    "punching over after {} rounds without a direct path (the server's limit)",
+                    self.round + 1
                 ));
                 self.stop();
                 return None;
@@ -1086,6 +1115,35 @@ mod tests {
         let plans = plan(&cone, &pc, false, &mut random);
         assert_eq!(plans[1].start, Duration::from_secs(20) + SWEEP_AFTER);
         assert_eq!(plans[2].start, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_servers_round_limit_ends_punching() {
+        let key = Key::from_sdps("a=ice-pwd:a\r\n", "a=ice-pwd:b\r\n").unwrap();
+        let local = NatInfo {
+            base: address("192.0.2.1:4000"),
+            nat: Nat::Open,
+            public: address("192.0.2.1:4000"),
+        };
+        let remote = NatInfo {
+            base: address("192.0.2.2:4000"),
+            nat: Nat::Cone,
+            public: address("198.51.100.2:5000"),
+        };
+        let started = Instant::now();
+        let mut puncher =
+            Puncher::rounds(key, vec![(local, remote)], true, started).limit_rounds(1);
+        let mut out = Vec::new();
+        assert!(puncher.poll(started, &mut out).is_some());
+        // One round only: over after LIMIT, no next one.
+        assert!(puncher.poll(started + LIMIT, &mut out).is_none());
+        assert!(
+            puncher.take_notes().join("\n").contains(
+                "punching over after 1 rounds without a direct path (the server's limit)"
+            )
+        );
+        assert_eq!(Nat::kind(Some(&remote)), "cone");
+        assert_eq!(Nat::kind(None), "none");
     }
 
     #[test]

@@ -380,6 +380,9 @@ struct Connection {
     controlled_by: String,
     /// How far the device is from each relay (address: milliseconds), as it measured (`RelayRtts`).
     rtts: HashMap<String, u32>,
+    /// Path reports it may still send: one per `IceServers` that asked for them, at most 4 (a connection cannot fill
+    /// the statistics by itself).
+    report_credits: u32,
 }
 
 /// What this server can do beyond the first protocol (`ServerMessage::Welcome`'s `features`).
@@ -387,6 +390,7 @@ fn features(signup: bool) -> Vec<String> {
     let mut features = vec![
         queqiao_core::account::features::CONTROL_STATE.to_string(),
         queqiao_core::account::features::RELAYS.to_string(),
+        queqiao_core::account::features::PUNCH.to_string(),
     ];
     if signup {
         features.push(queqiao_core::account::features::LOGIN_OR_CREATE.to_string());
@@ -655,6 +659,7 @@ impl Hub {
                 sender: sender.clone(),
                 controlled_by: String::new(),
                 rtts: HashMap::new(),
+                report_credits: 0,
             },
         );
         if let Some(old) = replaced {
@@ -1814,10 +1819,25 @@ impl Hub {
                 let turn = accesses.next();
                 let backups = accesses.collect();
                 let stun = turn.as_ref().map(|access| access.address.clone());
+                // Punching as the operator set it (`queqiao-server punch`); a report may come for this session.
+                let punch = self
+                    .store
+                    .lock()
+                    .ok()
+                    .and_then(|store| store.punch_settings().ok())
+                    .unwrap_or_default();
+                if punch.reports
+                    && let Ok(mut online) = self.online.lock()
+                    && let Some(connection) =
+                        online.get_mut(&(identity.device_id.clone(), identity.role))
+                {
+                    connection.report_credits = (connection.report_credits + 1).min(4);
+                }
                 let _ = sender.send(Outgoing::Message(ServerMessage::IceServers {
                     stun,
                     turn,
                     backups,
+                    punch: Some(punch),
                 }));
             }
             ClientMessage::RelayRtts { rtts } => {
@@ -1833,6 +1853,23 @@ impl Hub {
                         online.get_mut(&(identity.device_id.clone(), identity.role))
                 {
                     connection.rtts = rtts;
+                }
+            }
+            ClientMessage::PathReport { report } => {
+                // Counted only when asked for (a credit from `IceServers`) and in the fixed words: by day, NAT kinds,
+                // method and a duration bucket. Who sent it is not kept.
+                let credited = report.valid()
+                    && self.online.lock().is_ok_and(|mut online| {
+                        match online.get_mut(&(identity.device_id.clone(), identity.role)) {
+                            Some(connection) if connection.report_credits > 0 => {
+                                connection.report_credits -= 1;
+                                true
+                            }
+                            _ => false,
+                        }
+                    });
+                if credited && let Ok(store) = self.store.lock() {
+                    let _ = store.record_path(&report);
                 }
             }
             ClientMessage::RemoveDevice { device_id } => {

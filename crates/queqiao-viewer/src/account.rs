@@ -129,7 +129,7 @@ pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<
         let mut running = Vec::new();
         for key in [first, second] {
             let target = wait_for_device(&mut account, key, Duration::from_secs(30))?;
-            let (peer, started) =
+            let (peer, started, _) =
                 start_peer(&mut account, &target, options, Addresses::All, lines)?;
             running.push((
                 target.name.clone(),
@@ -139,6 +139,7 @@ pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<
                     started,
                     target.id.clone(),
                     target.name.clone(),
+                    crate::link::unlinked(),
                 ),
             ));
         }
@@ -371,10 +372,11 @@ fn device_list(
     let (mut sessions, mut passed) = (0u32, true);
     let mut reconnect_at: Option<Instant> = None;
     let mut test_picked = false;
-    // Sessions on their own threads: (the device's name, the thread).
+    // Sessions on their own threads: (the device's name, the thread, its link to the account for ICE restarts).
     type Running = (
         String,
         std::thread::JoinHandle<(Result<bool, String>, Vec<String>)>,
+        crate::link::SessionLink,
     );
     let mut running: Vec<Running> = Vec::new();
     let test_deadline = Instant::now() + Duration::from_secs(30);
@@ -469,11 +471,13 @@ fn device_list(
                     Some(target) if target.controllable && options.ui_test.is_none() => {
                         // On a thread of its own: the list stays usable, for more sessions at once.
                         match start_peer(account, &target, options, Addresses::All, lines) {
-                            Ok((peer, started)) => {
+                            Ok((peer, started, session_id)) => {
                                 list.set_status(&trf(
                                     "Connected to {name}.",
                                     &[("name", &target.name)],
                                 ));
+                                let (link, signal) =
+                                    crate::link::pair(&target.id, &session_id, account.local_ip());
                                 running.push((
                                     target.name.clone(),
                                     session_thread(
@@ -482,7 +486,9 @@ fn device_list(
                                         started,
                                         target.id.clone(),
                                         target.name.clone(),
+                                        signal,
                                     ),
+                                    link,
                                 ));
                             }
                             Err(error) => {
@@ -544,9 +550,13 @@ fn device_list(
         // Sessions that ended.
         let (ended, still): (Vec<Running>, Vec<Running>) = running
             .drain(..)
-            .partition(|(_, thread)| thread.is_finished());
+            .partition(|(_, thread, _)| thread.is_finished());
         running = still;
-        for (name, thread) in ended {
+        // The sessions still open: their signaling through the account (ICE restarts).
+        for (_, _, link) in &running {
+            link.serve(account);
+        }
+        for (name, thread, _) in ended {
             let (result, session_lines) = thread
                 .join()
                 .unwrap_or_else(|_| (Err("the session's thread failed".into()), Vec::new()));
@@ -595,8 +605,15 @@ fn device_list(
                         "{name} logged in again with a new device key. If that was not you, change your password and take it out of the account.",
                         &[("name", &name)],
                     )),
-                    AccountEvent::Signal { .. }
-                    | AccountEvent::IceServers { .. }
+                    // A running session's ICE restart message (taken here before its link saw it): handed on.
+                    event @ AccountEvent::Signal { .. } => {
+                        for (_, _, link) in &running {
+                            if link.forward(account, &event) {
+                                break;
+                            }
+                        }
+                    }
+                    AccountEvent::IceServers { .. }
                     | AccountEvent::PasswordChanged(_)
                     | AccountEvent::HelpOpen(_)
                     | AccountEvent::HelpClosed(_)
@@ -648,7 +665,7 @@ fn device_list(
     }
     lines.push(format!("{sessions} sessions from the device list"));
     // The list was closed: sessions still open end when their windows do.
-    for (name, thread) in running {
+    for (name, thread, _) in running {
         let (result, session_lines) = thread
             .join()
             .unwrap_or_else(|_| (Err("the session's thread failed".into()), Vec::new()));
@@ -896,7 +913,7 @@ fn start_peer(
     options: &Options,
     addresses: Addresses,
     lines: &mut Vec<String>,
-) -> Result<(Peer, Instant), String> {
+) -> Result<(Peer, Instant, String), String> {
     let Some(id) = hello_to(account, target, options, lines)? else {
         return Err(trf(
             "{device} stays with the device controlling it.",
@@ -906,7 +923,7 @@ fn start_peer(
     let mut signal = account.session(&target.id, AccountRole::Agent, &id);
     let started = Instant::now();
     let peer = Peer::start_with(Role::Viewer, &mut signal, addresses).map_err(|e| e.to_string())?;
-    Ok((peer, started))
+    Ok((peer, started, id))
 }
 
 /// A session on a thread of its own, with a graphics device of its own (several run at once): its outcome and
@@ -917,6 +934,7 @@ fn session_thread(
     started: Instant,
     device_id: String,
     agent: String,
+    mut signal: crate::link::LinkedSignal,
 ) -> std::thread::JoinHandle<(Result<bool, String>, Vec<String>)> {
     let options = options.clone();
     std::thread::spawn(move || {
@@ -924,7 +942,14 @@ fn session_thread(
         let began = queqiao_account::connections::local_now();
         let result = platform::create_device().and_then(|(device, context, _)| {
             run_session(
-                &options, &device, &context, peer, started, &agent, &mut lines,
+                &options,
+                &device,
+                &context,
+                peer,
+                started,
+                &agent,
+                &mut signal,
+                &mut lines,
             )
         });
         if result.is_ok() {

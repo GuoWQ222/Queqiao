@@ -13,15 +13,18 @@ mod peer;
 mod punch;
 mod quic;
 mod resolve;
+mod restart;
 mod shape;
 mod signal;
 mod turn;
 
 pub use interfaces::{connect_direct, connect_direct_noted, public_address};
 pub use peer::{
-    Addresses, AudioSender, Peer, PeerEvent, Role, START_BITRATE, STREAM_IN_FLIGHT, Stream, tune,
+    Addresses, AudioSender, Peer, PeerEvent, RESTART_LIMIT, Role, START_BITRATE, STREAM_IN_FLIGHT,
+    Stream, tune,
 };
 pub use resolve::resolve_server;
+pub use restart::Restarter;
 pub use signal::{
     BUSY, Hello, Interruption, SessionRequest, Signal, Signaling, busy_controller, check_hello,
     hello_body,

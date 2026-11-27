@@ -49,6 +49,9 @@ pub mod features {
     /// Several relays (the user, 2026-11-26: spread the relayed traffic over the servers): `Welcome` lists them for
     /// `RelayRtts`, `GetIceServers` names the session's other device, and `IceServers` carries `backups`.
     pub const RELAYS: &str = "relays";
+    /// Punching set by the server (`IceServers::punch`), and the sessions' anonymous path reports (`PathReport`) when it
+    /// asks for them.
+    pub const PUNCH: &str = "punch";
 }
 
 /// A standby account server that keeps a live copy of the accounts: where a program connects when the account server
@@ -59,6 +62,61 @@ pub struct Standby {
     /// host:port (TCP) of its accounts.
     pub server: String,
     pub pin: String,
+}
+
+/// Punching as the account server's operator set it (`ServerMessage::IceServers`), for each session: as UU Remote's
+/// server switches its punching, so a change needs no new program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PunchSettings {
+    /// Punching at all (off: ICE alone).
+    pub enabled: bool,
+    /// The most rounds a relayed session punches (0: rounds for as long as it is relayed).
+    #[serde(default)]
+    pub rounds: u32,
+    /// The server collects the sessions' anonymous path reports (`ClientMessage::PathReport`).
+    #[serde(default)]
+    pub reports: bool,
+}
+
+impl Default for PunchSettings {
+    /// A server before `features::PUNCH`: punching on, no limit, no reports.
+    fn default() -> PunchSettings {
+        PunchSettings {
+            enabled: true,
+            rounds: 0,
+            reports: false,
+        }
+    }
+}
+
+/// How one session's path went, anonymous: the NAT kinds of the two sides (`punch` classification: "open", "cone",
+/// "linear", "random", "unknown", or "none" where there was none), whether it went direct, how (which candidates), and
+/// how long that took. No address, port, device, account or time of day goes in it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathReport {
+    pub local_nat: String,
+    pub remote_nat: String,
+    pub direct: bool,
+    /// "ice" (the candidates ICE gathered), "punch" (an address punching found), "punch-socket" (one of punching's
+    /// own sockets), "relay" (never direct within the first minute).
+    pub method: String,
+    /// From the session's start to its first direct path (0 when relayed).
+    pub ms: u32,
+}
+
+impl PathReport {
+    /// The NAT kinds and methods a report may name (anything else is refused by the server).
+    pub const NATS: [&'static str; 6] = ["open", "cone", "linear", "random", "unknown", "none"];
+    pub const METHODS: [&'static str; 4] = ["ice", "punch", "punch-socket", "relay"];
+
+    /// Within the fixed words and bounds.
+    pub fn valid(&self) -> bool {
+        PathReport::NATS.contains(&self.local_nat.as_str())
+            && PathReport::NATS.contains(&self.remote_nat.as_str())
+            && PathReport::METHODS.contains(&self.method.as_str())
+            && self.direct == (self.method != "relay")
+            && self.ms <= 600_000
+    }
 }
 
 /// How long a STUN check to one relay took from this device (`ClientMessage::RelayRtts`).
@@ -135,6 +193,10 @@ pub enum ClientMessage {
     },
     /// How far each relay of `Welcome`'s list is from this device (only to a server with `features::RELAYS`).
     RelayRtts { rtts: Vec<RelayRtt> },
+    /// Viewer: how one session's path went, anonymous (no address, device or account goes in it, and the server keeps
+    /// only counts by day). Only to a server whose `IceServers` asked for them (`PunchSettings::reports`), at most
+    /// once per `IceServers` it gave.
+    PathReport { report: PathReport },
     /// Remove a device of this account: its saved logins end and it is disconnected.
     RemoveDevice { device_id: String },
     /// Change the account's password: every saved login of the account ends and the account's other
@@ -230,6 +292,10 @@ pub enum ServerMessage {
         /// Other relays in order, for when `turn` does not answer.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         backups: Vec<TurnAccess>,
+        /// Punching as the server's operator set it (`queqiao-server punch`); none from servers before
+        /// `features::PUNCH` (punching on, no reports).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        punch: Option<PunchSettings>,
     },
     /// Something the person should know.
     Notice {
@@ -410,7 +476,9 @@ mod tests {
         // An earlier server's IceServers has no backups; an earlier program reads a new one (it ignores them).
         let earlier = r#"{"type":"ice_servers","stun":"198.51.100.7:3478","turn":null}"#;
         match serde_json::from_str::<ServerMessage>(earlier).unwrap() {
-            ServerMessage::IceServers { backups, .. } => assert!(backups.is_empty()),
+            ServerMessage::IceServers { backups, punch, .. } => {
+                assert!(backups.is_empty() && punch.is_none())
+            }
             other => panic!("{other:?}"),
         }
         let access = TurnAccess {
@@ -424,6 +492,11 @@ mod tests {
             stun: Some("198.51.100.7:3478".into()),
             turn: Some(access.clone()),
             backups: vec![access],
+            punch: Some(PunchSettings {
+                enabled: false,
+                rounds: 2,
+                reports: true,
+            }),
         };
         let text = serde_json::to_string(&new).unwrap();
         assert!(text.contains("\"backups\""));
