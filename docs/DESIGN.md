@@ -188,11 +188,15 @@ UU builds on WebRTC's standard pieces (`research\uu\STREAMER_FINDINGS.md`). We d
     found only such a one-way path; with the sweep a second later, five of five went direct.
   - Packets: 28 bytes (`0xFA 'Q' 'P'`, request or answer, an 8-byte nonce, a 16-byte HMAC-SHA256 tag with a key from
     both sides' ICE passwords): only the two ends make or accept them. Lists are paced (a round of the targets at most
-    every 100 ms, 1 to 5 packets per 10 ms tick), at most 300 new sockets, 30 s at most.
+    every 100 ms, 1 to 5 packets per 10 ms tick), at most 300 new sockets a round.
   - A packet that arrives, or its answer, names a working path: the other side's address goes to str0m as a candidate,
     and a new socket that found it becomes one of the session's (host candidate, receiving thread). The controlling
-    side nominates the best succeeded pair, so the session moves from the relay to the direct pair; punching stops
+    side nominates the best succeeded pair, so the session moves from the relay to the direct pair; punching waits
     when the path is direct. `QUEQIAO_FORCE=punch:off` leaves it out (tests).
+  - Rounds, as UU Remote punches round after round until it is direct: a round lasts 30 s (its plans afresh: new
+    sockets, new sweep offsets); while the session stays relayed a new round follows every minute, after five minutes
+    every five, the roles of the last resort (both sides one mapping) swapped from one round to the next; punching waits
+    while the session is direct, and a direct path that stops (the session relayed again) brings a new round at once.
   - Windows: the agent and the viewer listen on every address for a moment at start (accepting nothing) so the
     firewall's own "Allow access" dialog asks the person once per program (UU's rules on the PC came from that dialog);
     allowed, ICE alone goes direct to this PC from behind any NAT. Shipping builds only; test builds with

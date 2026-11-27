@@ -17,7 +17,9 @@
 //! (`Key`): one from anyone else is ignored. A packet that comes, or the answer to one, names a path that works: the
 //! session hands it to ICE (str0m) as the other side's candidate, and a new socket that found it becomes one of the
 //! session's sockets. ICE checks the pair and moves the session there (a direct pair outranks the relay); punching
-//! stops when the session goes direct, or after `LIMIT`.
+//! waits while the session is direct. A round lasts `LIMIT`; while the session stays relayed, new rounds follow
+//! (`gap_after`: every minute, after five minutes every five), the roles of the last resort swapped each time, and a
+//! direct path that stops brings a new round at once.
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -36,7 +38,7 @@ const PACKET: usize = 28;
 const MAX_STEP: i32 = 16;
 /// How often the lists send.
 pub(crate) const TICK: Duration = Duration::from_millis(10);
-/// Punching ends at the latest this long after the session's network started.
+/// How long a round of punching lasts at most (its plans' times count from its start).
 pub(crate) const LIMIT: Duration = Duration::from_secs(30);
 /// New sockets one session opens at most (all plans together).
 const MAX_SOCKETS: usize = 300;
@@ -524,31 +526,120 @@ pub(crate) struct Puncher {
     /// Punch packets noted so far (the first few each way are, with where they came from and went to).
     packets_noted: u32,
     notes: Vec<String>,
+    /// Rounds (`rounds`): the pairs of sockets planned for again each round, this side's ICE role, the round under way
+    /// and when it began, when the next begins (between rounds), and whether punching waits while the path is direct.
+    pairs: Vec<(NatInfo, NatInfo)>,
+    controlling: bool,
+    round: u32,
+    round_began: Instant,
+    next_round: Option<Instant>,
+    paused: bool,
+}
+
+/// After round `round` ended without a direct path, how long until the next: a new round every minute for the first
+/// five minutes, then every five minutes, for as long as the session is relayed (as UU Remote punches again round
+/// after round until it is direct).
+fn gap_after(round: u32) -> Duration {
+    if round < 4 {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(270)
+    }
 }
 
 impl Puncher {
+    /// One round of `plans` only (tests).
     pub(crate) fn new(key: Key, plans: Vec<Plan>, started: Instant) -> Puncher {
         Puncher {
             key,
             started,
-            running: plans
-                .into_iter()
-                .map(|plan| Running {
-                    plan,
-                    next: 0,
-                    sockets: Vec::new(),
-                    opened: false,
-                    noted: false,
-                    round_started: None,
-                })
-                .collect(),
+            running: running(plans, false),
             next_tick: started,
             stopped: false,
             found: HashSet::new(),
             sockets_opened: 0,
             packets_noted: 0,
             notes: Vec::new(),
+            pairs: Vec::new(),
+            controlling: false,
+            round: 0,
+            round_began: started,
+            next_round: None,
+            paused: false,
         }
+    }
+
+    /// Round after round for `pairs` (one of this side's sockets, one of the other's) until the session is direct;
+    /// the roles of the last resort (`plan`, both sides one mapping) swap from one round to the next.
+    pub(crate) fn rounds(
+        key: Key,
+        pairs: Vec<(NatInfo, NatInfo)>,
+        controlling: bool,
+        started: Instant,
+    ) -> Puncher {
+        let mut puncher = Puncher::new(key, Vec::new(), started);
+        puncher.pairs = pairs;
+        puncher.controlling = controlling;
+        puncher.running = running(puncher.plans(), false);
+        puncher
+    }
+
+    /// The plans of the round under way.
+    fn plans(&self) -> Vec<Plan> {
+        // Odd rounds swap the roles: the side that sprayed first sends from many sockets first.
+        let controlling = self.controlling ^ (self.round % 2 == 1);
+        let mut random = random_u16;
+        self.pairs
+            .iter()
+            .flat_map(|(local, remote)| plan(local, remote, controlling, &mut random))
+            .collect()
+    }
+
+    /// The next round begins: its plans afresh (new sockets, new sweep offsets).
+    fn begin_round(&mut self, now: Instant) {
+        self.round += 1;
+        self.round_began = now;
+        self.next_round = None;
+        self.sockets_opened = 0;
+        // Its lists are noted for the first rounds only.
+        self.running = running(self.plans(), self.round >= 3);
+        self.notes.push(format!(
+            "punching: round {}{}",
+            self.round + 1,
+            if self.round % 2 == 1 {
+                " (the roles swapped)"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    /// The session went direct: punching waits (its sockets close) until the path is relayed again.
+    pub(crate) fn pause(&mut self) {
+        if self.paused || self.stopped {
+            return;
+        }
+        self.paused = true;
+        for running in &mut self.running {
+            running.sockets.clear();
+        }
+        self.notes
+            .push("punching waits: the session goes direct".into());
+    }
+
+    /// The session is relayed again after it was direct (the direct path stopped): a new round at once.
+    pub(crate) fn resume(&mut self, now: Instant) {
+        if !self.paused || self.stopped {
+            return;
+        }
+        self.paused = false;
+        self.notes
+            .push("punching again: the session is relayed again".into());
+        self.begin_round(now);
+    }
+
+    pub(crate) fn paused(&self) -> bool {
+        self.paused
     }
 
     pub(crate) fn take_notes(&mut self) -> Vec<String> {
@@ -562,22 +653,42 @@ impl Puncher {
         now: Instant,
         out: &mut Vec<(SocketAddr, SocketAddr, Vec<u8>)>,
     ) -> Option<Instant> {
-        if self.stopped {
+        if self.stopped || self.paused {
             return None;
         }
-        let elapsed = now.saturating_duration_since(self.started);
+        if let Some(at) = self.next_round {
+            if now < at {
+                return Some(at);
+            }
+            self.begin_round(now);
+        }
+        let elapsed = now.saturating_duration_since(self.round_began);
         if elapsed >= LIMIT
             || self
                 .running
                 .iter()
                 .all(|running| elapsed >= running.plan.until)
         {
+            for running in &mut self.running {
+                running.sockets.clear();
+            }
+            if self.pairs.is_empty() {
+                self.notes.push(format!(
+                    "punching over after {} s without a direct path",
+                    elapsed.as_secs()
+                ));
+                self.stop();
+                return None;
+            }
+            let gap = gap_after(self.round);
             self.notes.push(format!(
-                "punching over after {} s without a direct path",
-                elapsed.as_secs()
+                "punching: round {} over without a direct path, the next in {} s",
+                self.round + 1,
+                gap.as_secs()
             ));
-            self.stop();
-            return None;
+            let at = now + gap;
+            self.next_round = Some(at);
+            return Some(at);
         }
         if now < self.next_tick {
             return Some(self.next_tick);
@@ -773,6 +884,27 @@ fn packet_note(packet: Packet, source: SocketAddr, local: SocketAddr, started: I
     )
 }
 
+/// The state of each plan of a round (`noted`: its list not noted again).
+fn running(plans: Vec<Plan>, noted: bool) -> Vec<Running> {
+    plans
+        .into_iter()
+        .map(|plan| Running {
+            plan,
+            next: 0,
+            sockets: Vec::new(),
+            opened: false,
+            noted,
+            round_started: None,
+        })
+        .collect()
+}
+
+fn random_u16() -> u16 {
+    let mut bytes = [0u8; 2];
+    let _ = getrandom::fill(&mut bytes);
+    u16::from_le_bytes(bytes)
+}
+
 fn nonce() -> [u8; 8] {
     let mut nonce = [0u8; 8];
     let _ = getrandom::fill(&mut nonce);
@@ -954,6 +1086,56 @@ mod tests {
         let plans = plan(&cone, &pc, false, &mut random);
         assert_eq!(plans[1].start, Duration::from_secs(20) + SWEEP_AFTER);
         assert_eq!(plans[2].start, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn rounds_go_on_until_the_session_is_direct() {
+        let key = Key::from_sdps("a=ice-pwd:a\r\n", "a=ice-pwd:b\r\n").unwrap();
+        // Addresses no socket here binds (TEST-NET): the many-sockets plans open none, the lists only fill `out`.
+        let local = NatInfo {
+            base: address("192.0.2.1:4000"),
+            nat: Nat::Open,
+            public: address("192.0.2.1:4000"),
+        };
+        let remote = NatInfo {
+            base: address("192.0.2.2:4000"),
+            nat: Nat::Cone,
+            public: address("198.51.100.2:5000"),
+        };
+        let started = Instant::now();
+        let mut puncher = Puncher::rounds(key, vec![(local, remote)], true, started);
+        let mut out = Vec::new();
+        assert!(puncher.poll(started, &mut out).is_some());
+        assert!(!out.is_empty());
+        // The first round ends after LIMIT; the next comes 30 s later, its roles swapped (the controlling side, which
+        // swept first, now sends from many sockets first: its sweep from 20 s).
+        let next = puncher.poll(started + LIMIT, &mut out).unwrap();
+        assert_eq!(next, started + LIMIT + Duration::from_secs(30));
+        assert!(puncher.poll(next - TICK, &mut out).is_some());
+        puncher.poll(next, &mut out);
+        let notes = puncher.take_notes().join("\n");
+        assert!(notes.contains("round 1 over without a direct path, the next in 30 s"));
+        assert!(notes.contains("round 2 (the roles swapped)"));
+        let sweep = puncher
+            .running
+            .iter()
+            .find(|running| running.plan.what.starts_with("to every 128th"))
+            .unwrap();
+        assert_eq!(sweep.plan.start, Duration::from_secs(20) + SWEEP_AFTER);
+        // Direct: it waits; relayed again: a new round at once.
+        puncher.pause();
+        assert!(puncher.poll(next + TICK, &mut out).is_none());
+        puncher.resume(next + Duration::from_secs(60));
+        assert!(
+            puncher
+                .poll(next + Duration::from_secs(60), &mut out)
+                .is_some()
+        );
+        let notes = puncher.take_notes().join("\n");
+        assert!(notes.contains("punching waits") && notes.contains("round 3"));
+        // After the first five rounds, every five minutes.
+        assert_eq!(gap_after(3), Duration::from_secs(30));
+        assert_eq!(gap_after(4), Duration::from_secs(270));
     }
 
     #[test]

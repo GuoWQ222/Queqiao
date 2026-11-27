@@ -451,18 +451,13 @@ impl Peer {
                     && queqiao_core::forced("punch").as_deref() != Some("off") =>
             {
                 let controlling = role == Role::Viewer;
-                let mut random = || {
-                    let mut bytes = [0u8; 2];
-                    let _ = getrandom::fill(&mut bytes);
-                    u16::from_le_bytes(bytes)
-                };
-                let mut plans = Vec::new();
+                let mut pairs = Vec::new();
                 for local in &local_nats {
                     for remote in &remote_nats {
-                        plans.extend(punch::plan(local, remote, controlling, &mut random));
+                        pairs.push((*local, *remote));
                     }
                 }
-                Some(Puncher::new(key, plans, Instant::now()))
+                Some(Puncher::rounds(key, pairs, controlling, Instant::now()))
             }
             _ => None,
         };
@@ -1664,25 +1659,23 @@ impl Network {
             .map_or(&self.socket, |extra| &extra.socket)
     }
 
-    /// Punching's turn: what is due leaves, what its new sockets received is handled; when to come back (none once it
-    /// is over: the session went direct, or its time ran out).
+    /// Punching's turn: what is due leaves, what its new sockets received is handled; when to come back (none while the
+    /// session is direct: punching waits, and goes on with a new round if the path is relayed again).
     fn punch_tick(&mut self) -> Result<Option<Instant>, Error> {
+        let direct = self
+            .path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("direct"));
         let Some(punch) = self.punch.as_mut() else {
             return Ok(None);
         };
         if punch.stopped() {
             return Ok(None);
         }
-        if self
-            .path
-            .as_deref()
-            .is_some_and(|path| path.starts_with("direct"))
-        {
-            punch.stop();
-            let _ = self.events.send(PeerEvent::Note(
-                "punching stops: the session goes direct".into(),
-            ));
-            return Ok(None);
+        if direct {
+            punch.pause();
+        } else if punch.paused() {
+            punch.resume(Instant::now());
         }
         let mut out = Vec::new();
         let next = punch.poll(Instant::now(), &mut out);
