@@ -226,19 +226,26 @@ pub fn apply_through_service(
     } else if own_installed {
         write_text("UpdateTried", version)?;
         let report = folder().join("update_report.txt");
-        let status = std::process::Command::new(installer)
-            .args(["--quiet", "--update", "--report"])
-            .arg(&report)
-            .current_dir(installer.parent().unwrap_or(installer))
-            .status();
+        // At Medium integrity, as the person's own programs (this agent runs raised by the service): the installer and
+        // the agent it starts lie in folders any program of theirs may change (security review of 2026-11-27).
+        let arguments = format!(
+            "--quiet --update --report {}",
+            queqiao_core::platform::quote(&report.display().to_string())
+        );
+        let status = queqiao_core::platform::run_program_and_wait(
+            installer,
+            &arguments,
+            std::time::Duration::from_secs(300),
+        );
         lines.push(match status {
-            Ok(status) if status.success() => {
-                format!("updates: this person's installation is {version} now")
+            Ok(Some(0)) => format!("updates: this person's installation is {version} now"),
+            Ok(Some(code)) => {
+                format!("updates: this person's installation was not updated (exit code {code})")
             }
-            Ok(status) => format!(
-                "updates: this person's installation was not updated (exit code {:?})",
-                status.code()
-            ),
+            Ok(None) => {
+                "updates: this person's installation: its installer still runs after 5 minutes"
+                    .into()
+            }
             Err(error) => format!("updates: this person's installation: {error}"),
         });
     }

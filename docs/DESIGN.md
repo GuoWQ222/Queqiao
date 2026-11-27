@@ -403,6 +403,29 @@ or the Ctrl+Alt+Del screen, and cannot copy files out.
   that stops reading is closed, not fed. Connections not logged in yet: 32 per address, 2048 in all. An error from
   accepting a connection or from one UDP datagram is logged; it no longer ends the server.
 
+**Security review, 2026-11-27** (the user: "safety and security ... our first priority"): the code, the pipeline, the
+servers and the machines. Fixed in the code:
+
+- **The person's update ran raised.** With the service, the agent runs at High integrity. It started the downloaded
+  installer at High, from the person's own `%LOCALAPPDATA%\Queqiao\updates`, and that installer started the new
+  agent from the person's installation. Both folders are open to any program of theirs at Medium, which could swap a
+  file between the check and the start and gain High integrity. A High program can, for example, type into elevated
+  windows. The installer now starts through the lowered token, as the agent's other programs do
+  (`platform::run_program_and_wait`), and the agent waits for its exit code (5 minutes at most).
+- **An install folder of another user.** A folder made by another account on the PC (C:\Queqiao, say) passed the
+  install's checks. Its owner could restore its permissions after ours and swap the programs. The install now takes
+  only a folder whose owner is the person, SYSTEM or the Administrators.
+- **CI.** Every step of the Android and iOS workflows had a token that could write to the repository, and the
+  third-party actions they ran were named by tags their owners can move. Now the token is read-only, each action is
+  pinned to a commit, and checkout does not keep the token. A separate job pushes the results branch: it holds the
+  only write access and runs no third-party code, in a new git folder.
+
+Checked and sound: all 199 commits hold no keys, tokens or passwords; the pin is mandatory (an empty pin matches no
+certificate, and nothing is trusted on first use); sign-up and logins are limited per address; an update can never
+go back to an older version. Open items concern the machines and are the user's to decide: SSH by password on the
+relays and on a test PC, the test release key on an always-on PC, private keys without a passphrase, passwords in
+text files.
+
 ## Milestones
 
 | # | Result | Check |

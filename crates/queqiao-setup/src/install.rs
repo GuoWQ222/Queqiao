@@ -148,6 +148,15 @@ pub fn check_folder(text: &str, required: u64) -> Result<PathBuf, String> {
                 tr("This folder holds other files. Choose an empty folder or a new one.").into(),
             );
         }
+        // Made by someone else (another person of this PC could make C:\Queqiao first and, as its owner, change its
+        // permissions back after ours and swap the programs): only a folder of this person's, SYSTEM's or the
+        // administrators' (security review of 2026-11-27).
+        if !owned_by_this_person(&folder) {
+            return Err(tr(
+                "This folder belongs to another user of this PC. Choose a folder of your own, such as the one suggested.",
+            )
+            .into());
+        }
     }
     if !writable(&folder) {
         return Err(tr(
@@ -219,6 +228,73 @@ fn writable(folder: &Path) -> bool {
         let _ = std::fs::remove_dir(&probe);
     }
     made
+}
+
+/// Whether `folder`'s owner is this person, SYSTEM or the Administrators group (not another person of this PC).
+fn owned_by_this_person(folder: &Path) -> bool {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    };
+    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+    let Some(me) = this_person_sid() else {
+        return false;
+    };
+    let path = wide(&folder.display().to_string());
+    unsafe {
+        let mut owner = PSID::default();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let read = GetNamedSecurityInfoW(
+            PCWSTR(path.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&raw mut owner),
+            None,
+            None,
+            None,
+            &mut descriptor,
+        );
+        if read.0 != 0 {
+            return false;
+        }
+        let mut text = PWSTR::null();
+        let owner_text = ConvertSidToStringSidW(owner, &mut text)
+            .ok()
+            .and_then(|()| text.to_string().ok());
+        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        owner_text
+            .is_some_and(|owner| owner == me || owner == "S-1-5-18" || owner == "S-1-5-32-544")
+    }
+}
+
+/// This person's SID as text ("S-1-5-21-...").
+fn this_person_sid() -> Option<String> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut buffer = vec![0u8; 256];
+        let mut length = 0u32;
+        let got = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            buffer.len() as u32,
+            &mut length,
+        );
+        let _ = CloseHandle(token);
+        got.ok()?;
+        let user = &*(buffer.as_ptr().cast::<TOKEN_USER>());
+        let mut text = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut text).ok()?;
+        let sid = text.to_string().ok();
+        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+        sid
+    }
 }
 
 /// Only this person, SYSTEM and the administrators may change the programs (a folder chosen outside the person's own
@@ -1107,6 +1183,24 @@ use std::os::windows::process::CommandExt;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder this person made is theirs; C:\Windows (TrustedInstaller's) and a folder another user owns are not,
+    /// and check_folder refuses them (security review of 2026-11-27).
+    #[test]
+    fn a_folder_of_another_owner_is_refused() {
+        let mine = std::env::temp_dir().join(format!("queqiao-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&mine);
+        std::fs::create_dir_all(&mine).unwrap();
+        assert!(this_person_sid().is_some_and(|sid| sid.starts_with("S-1-5-")));
+        assert!(owned_by_this_person(&mine));
+        let _ = std::fs::remove_dir_all(&mine);
+        let windows =
+            std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or(r"C:\Windows".into()));
+        assert!(!owned_by_this_person(&windows));
+        assert!(!owned_by_this_person(&windows.join("no-such-folder-here")));
+        let refused = check_folder(&windows.display().to_string(), 1).unwrap_err();
+        assert!(!refused.is_empty());
+    }
 
     /// A folder of its own under %TEMP% with `files` (name, content) in `name`.
     fn folder(root: &Path, name: &str, files: &[(&str, &str)]) -> PathBuf {

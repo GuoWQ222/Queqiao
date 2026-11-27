@@ -542,6 +542,10 @@ const CHINESE: &[(&str, &str)] = &[
         "Windows 没有允许安装鹊桥服务（未获得管理员权限），因此没有安装任何内容。请重新运行安装程序，并在 Windows 询问时选择“是”。",
     ),
     ("Details: {error}", "详细信息：{error}"),
+    (
+        "This folder belongs to another user of this PC. Choose a folder of your own, such as the one suggested.",
+        "这个文件夹属于这台电脑的其他用户。请选择你自己的文件夹，例如建议的位置。",
+    ),
     ("Installing...", "正在安装……"),
     (
         "Queqiao is installed. Find it in the Start menu.",

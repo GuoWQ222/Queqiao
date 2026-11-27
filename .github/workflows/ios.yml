@@ -17,8 +17,11 @@ on:
       - '.github/workflows/ios.yml'
   workflow_dispatch:
 
+# Read only (security review of 2026-11-27): the build and test job runs third-party actions (each pinned to a commit),
+# which never get a token that can write to the repository; only the small `results` job below, which runs no third-
+# party code but GitHub's own download action, may push the results branch.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ios
@@ -31,12 +34,14 @@ jobs:
     env:
       CARGO_TERM_COLOR: never
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Rust targets
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Build the core
         run: |
@@ -76,7 +81,7 @@ jobs:
           bash scripts/run_ios_simulator_smoke.sh | tee /tmp/ios_results/smoke_summary.txt
           tail -1 /tmp/ios_results/smoke_summary.txt | grep -q IOS_SMOKE_PASS
 
-      - name: Results to ci-results-ios
+      - name: Results for ci-results-ios
         if: always()
         run: |
           mkdir -p /tmp/ios_results
@@ -84,6 +89,32 @@ jobs:
           rm -rf /tmp/ios_results/smoke/server /tmp/ios_results/smoke/agent
           echo "run ${{ github.run_number }} of ${{ github.sha }}" > /tmp/ios_results/RUN.txt
           cd /tmp/ios_results
+          echo collected
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: results
+          path: /tmp/ios_results
+          if-no-files-found: ignore
+
+  results:
+    # Pushes the results branch: write access only here, and no third-party code.
+    needs: ios
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: results
+          path: results
+      - name: Results to ci-results-ios
+        run: |
+          cd results
+          # A fresh repository: nothing from the build job's files configures git here (no .git, hooks or config).
+          rm -rf .git
           git init -q
           git checkout -q -b results
           git add -A

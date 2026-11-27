@@ -312,6 +312,57 @@ pub fn start_program(
     Ok((information.dwProcessId, level))
 }
 
+/// As [`start_program`] (at Medium integrity when this process runs raised), then waits up to `limit` for it to end:
+/// its exit code (None when it is still running at the limit). The raised agent runs the person's update this way
+/// (2026-11-27 security review: started plainly, the installer from the person's own, writable updates folder ran at
+/// High integrity, and so did the agent it starts from their own installation: a program of theirs at Medium could
+/// have swapped either and been raised).
+pub fn run_program_and_wait(
+    program: &std::path::Path,
+    arguments: &str,
+    limit: std::time::Duration,
+) -> Result<Option<u32>, String> {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
+        WaitForSingleObject,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+    let mut command: Vec<u16> = format!("{} {arguments}", quote(&program.to_string_lossy()))
+        .trim_end()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let startup = STARTUPINFOW {
+        cb: size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut information = PROCESS_INFORMATION::default();
+    unsafe {
+        create_process(
+            PWSTR(command.as_mut_ptr()),
+            false,
+            PROCESS_CREATION_FLAGS(0x0800_0000), // CREATE_NO_WINDOW
+            PCWSTR::null(),
+            &startup,
+            &mut information,
+        )
+    }
+    .map_err(|e| format!("starting {}: {}", program.display(), e.message()))?;
+    let waited = unsafe {
+        WaitForSingleObject(
+            information.hProcess,
+            limit.as_millis().min(u128::from(u32::MAX - 1)) as u32,
+        )
+    };
+    let mut code = 0u32;
+    let ended = waited == WAIT_OBJECT_0
+        && unsafe { GetExitCodeProcess(information.hProcess, &mut code) }.is_ok();
+    let _ = unsafe { CloseHandle(information.hThread) };
+    let _ = unsafe { CloseHandle(information.hProcess) };
+    Ok(ended.then_some(code))
+}
+
 /// A command line's part as a program reads it back (CommandLineToArgvW's rules): quoted when it has spaces or quotes.
 pub fn quote(argument: &str) -> String {
     if !argument.is_empty() && !argument.contains([' ', '\t', '\n', '"']) {
@@ -611,6 +662,37 @@ mod integrity_tests {
         assert_eq!(quote(r"C:\a b\"), r#""C:\a b\\""#);
         assert_eq!(quote(r#"say "hi""#), r#""say \"hi\"""#);
         assert_eq!(quote(r#"x\"y z"#), r#""x\\\"y z""#);
+    }
+
+    #[test]
+    fn a_program_run_and_waited_for_gives_its_exit_code() {
+        use std::time::{Duration, Instant};
+        let cmd = std::path::PathBuf::from(
+            std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into()),
+        );
+        assert_eq!(
+            run_program_and_wait(&cmd, "/c exit 7", Duration::from_secs(30)),
+            Ok(Some(7))
+        );
+        // Still running at the limit: None, at the limit (ping waits about a second between its tries).
+        let started = Instant::now();
+        assert_eq!(
+            run_program_and_wait(
+                &cmd,
+                "/c ping -n 4 127.0.0.1 > nul",
+                Duration::from_millis(300)
+            ),
+            Ok(None)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            run_program_and_wait(
+                std::path::Path::new(r"C:\no\such\folder\program.exe"),
+                "",
+                Duration::from_secs(5)
+            )
+            .is_err()
+        );
     }
 
     #[test]
