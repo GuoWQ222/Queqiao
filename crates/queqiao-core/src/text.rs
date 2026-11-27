@@ -476,8 +476,19 @@ const CHINESE: &[(&str, &str)] = &[
         "Space needed: {needed}  ·  available: {free}",
         "所需空间：{needed}  ·  可用空间：{free}",
     ),
+    (
+        "Queqiao runs for the person at this PC's screen, not in Remote Desktop sessions.",
+        "鹊桥只为这台电脑屏幕前的人运行，不在远程桌面会话中运行。",
+    ),
+    (
+        "Queqiao did not start in this session. Try again in a moment; if it still does not start, restart this PC.",
+        "鹊桥没有在这个会话中启动。请稍后再试；如果仍然无法启动，请重启这台电脑。",
+    ),
+    (
+        "Queqiao runs as a service on this PC, and it could not be started in this session: {error}",
+        "鹊桥在这台电脑上以服务方式运行，但无法在这个会话中启动：{error}",
+    ),
     ("Create a desktop shortcut", "创建桌面快捷方式"),
-    ("Add Queqiao to the Start menu", "添加到开始菜单"),
     (
         "The Queqiao service is installed too (sign-in, lock and UAC screens in a session). Windows asks once for an administrator's permission.",
         "同时安装鹊桥服务，让会话中能看到登录、锁屏和 UAC 界面；Windows 会请求一次管理员权限。",
@@ -1205,12 +1216,21 @@ const CHINESE: &[(&str, &str)] = &[
         "{device} stays with the device controlling it.",
         "{device} 仍由当前控制它的设备控制。",
     ),
-    // One login form for logging in and signing up (as UU Remote, 2026-11-26).
-    ("Use another server...", "使用其他服务器..."),
+    // The login form (as UU Remote, 2026-11-26), and its sign-up page (2026-11-27).
     ("Server key (SHA-256)", "服务器密钥 (SHA-256)"),
+    ("Log in to your account", "登录你的账号"),
+    ("Create a new account", "注册新账号"),
+    ("Repeat the password", "再次输入密码"),
+    ("Create account", "注册"),
+    ("No account yet? Create one", "还没有账号？注册一个"),
+    ("Already have an account? Log in", "已有账号？去登录"),
     (
-        "Log in, or sign up with a new user name",
-        "登录，或使用新用户名注册",
+        "A user name has 3 to 32 letters, digits, dots, dashes or underscores, and starts with a letter or digit.",
+        "用户名由 3 到 32 个字母、数字、点、短横线或下划线组成，并以字母或数字开头。",
+    ),
+    (
+        "A password has 8 to 128 characters and is not the user name.",
+        "密码为 8 到 128 个字符，且不能与用户名相同。",
     ),
     (
         "© 2026 GuoWQ222. All rights reserved.",
@@ -1223,11 +1243,6 @@ const CHINESE: &[(&str, &str)] = &[
     (
         "Please enter a user name and a password.",
         "请输入用户名和密码。",
-    ),
-    (
-        "A new account \"{user}\" was made with this password, and you are logged in. If you meant an account you \
-         already have, log out and check the user name.",
-        "已使用此密码创建新账号“{user}”并登录。如果您要登录的是已有账号，请退出登录并检查用户名。",
     ),
 ];
 

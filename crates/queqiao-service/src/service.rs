@@ -59,6 +59,9 @@ unsafe impl Sync for Shared {}
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
 
+/// A Queqiao started by hand asked for the service's ([`queqiao_local::CONTROL_START`]): taken by `supervise`.
+static START_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Runs as the service; `Ok(false)` when Windows did not start this program as one (started by hand).
 pub fn dispatch() -> Result<bool, String> {
     let mut name = wide(crate::NAME);
@@ -125,6 +128,11 @@ unsafe extern "system" fn handler(
             NO_ERROR.0
         }
         SERVICE_CONTROL_SESSIONCHANGE => {
+            signal(|shared| shared.wake.0);
+            NO_ERROR.0
+        }
+        queqiao_local::CONTROL_START => {
+            START_ASKED.store(true, std::sync::atomic::Ordering::Relaxed);
             signal(|shared| shared.wake.0);
             NO_ERROR.0
         }
@@ -464,6 +472,13 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
     let mut last_error = String::new();
     loop {
         let console = unsafe { WTSGetActiveConsoleSessionId() };
+        // A Queqiao started by hand asked for this one (its shortcut, after Quit too): started now.
+        if START_ASKED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            log::line("asked to start Queqiao now (a Queqiao started by hand)");
+            done_in = None;
+            failures = 0;
+            next_start = Instant::now();
+        }
         // Set when the agent left the service's replies unread (Outbox).
         let mut stalled = false;
         while let Ok((id, request)) = incoming.try_recv() {

@@ -65,6 +65,16 @@ impl DeviceKey {
         }
     }
 
+    /// A new key for this PC, in place of its file (a new device: [`crate::DeviceIdentity::renew`]).
+    pub fn replace() -> Result<DeviceKey, Error> {
+        let pkcs8 = generate_pkcs8()?;
+        let key = DeviceKey::from_pkcs8(&pkcs8)?;
+        let sealed = hex(&protect(&pkcs8)?);
+        let path = folder()?.join("device_key.json");
+        std::fs::write(path, serde_json::to_string(&sealed).map_err(err)?)?;
+        Ok(key)
+    }
+
     /// A key that lives only in memory (tests, probes).
     pub fn generate() -> Result<DeviceKey, Error> {
         DeviceKey::from_pkcs8(&generate_pkcs8()?)

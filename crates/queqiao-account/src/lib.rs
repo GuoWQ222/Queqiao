@@ -36,6 +36,12 @@ use queqiao_transport::{Error, IceServers, Interruption, SessionRequest, Signali
 use tungstenite::Message;
 
 pub use config::{DeviceIdentity, SavedLogin, folder as data_folder};
+
+/// The server's answer when this PC's device is another account's (it logged out of that one, which keeps it there):
+/// logging in to this account takes a new device ([`DeviceIdentity::renew`]).
+pub fn belongs_elsewhere(error: &str) -> bool {
+    error.contains("this device belongs to another account")
+}
 pub use keys::{DeviceKey, KnownDevices, Pin, verify};
 pub use local_password::{check_local_password, hash_local_password};
 pub use notes::{DeviceNote, DeviceNotes};
@@ -1229,4 +1235,19 @@ fn resolve(address: &str) -> Result<SocketAddr, Error> {
         .into_iter()
         .find(SocketAddr::is_ipv4)
         .ok_or_else(|| Error(format!("no IPv4 address for {address}")))
+}
+
+#[cfg(test)]
+mod belongs_elsewhere_tests {
+    #[test]
+    fn both_of_the_servers_answers_are_known() {
+        // A login (store.rs), and a new account on this device (hub.rs).
+        assert!(super::belongs_elsewhere(
+            "this device belongs to another account"
+        ));
+        assert!(super::belongs_elsewhere(
+            "this device belongs to another account: remove it there first (More... in that account's device list)"
+        ));
+        assert!(!super::belongs_elsewhere("wrong user name or password"));
+    }
 }

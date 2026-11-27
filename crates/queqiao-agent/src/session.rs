@@ -669,9 +669,43 @@ impl Drop for BannerGuard<'_> {
 
 /// One session with one viewer: capture, encode and send the screen, inject the viewer's input. The banner
 /// shows it on this PC the whole time; tray and banner actions that are not about the session are put in
-/// `deferred`.
+/// `deferred`. What the session's lines said is kept afterwards (ui::record_session_details).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn session(
+    options: &Options,
+    signal: &mut dyn Signaling,
+    viewer: &str,
+    viewer_id: &str,
+    end: Option<Instant>,
+    ui: &ui::Ui,
+    permissions: Permissions,
+    links: &mut Links,
+    deferred: &mut Vec<PresenceEvent>,
+    lines: &mut Vec<String>,
+) -> Result<SessionOutcome, String> {
+    let first = lines.len();
+    let local_time = queqiao_core::local_time_minutes();
+    let outcome = session_with(
+        options,
+        signal,
+        viewer,
+        viewer_id,
+        end,
+        ui,
+        permissions,
+        links,
+        deferred,
+        lines,
+    );
+    if let Err(error) = &outcome {
+        lines.push(format!("the session ended: {error}"));
+    }
+    ui::record_session_details(viewer, &local_time, &lines[first.min(lines.len())..]);
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+fn session_with(
     options: &Options,
     signal: &mut dyn Signaling,
     viewer: &str,

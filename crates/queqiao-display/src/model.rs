@@ -414,10 +414,14 @@ pub struct LoginFields {
     pub password: String,
 }
 
-/// What the person did in the login form: one button for logging in and signing up (the user, 2026-11-26: a name the
-/// server does not know makes the account, Account::log_in_or_create).
+/// What the person did in the login form. Logging in and signing up are pages of their own (the user, 2026-11-27,
+/// after a name typed wrong in the one form of 11-26 made an account and took the PC for it: "separate the login and
+/// signup page").
 pub enum LoginAction {
+    /// "Log in": an account that exists (Account::connect with the password).
     Submit(LoginFields),
+    /// "Create account" on the sign-up page, the password typed twice and the rules met (`sign_up_problem`).
+    SignUp(LoginFields),
     Cancel,
 }
 
@@ -432,13 +436,36 @@ pub fn missing_login_field(fields: &LoginFields) -> Option<&'static str> {
     }
 }
 
-/// What the person is told when the login made a new account: a name typed wrong makes one too.
-pub fn created_text(user: &str) -> String {
-    trf(
-        "A new account \"{user}\" was made with this password, and you are logged in. If you meant an account you \
-         already have, log out and check the user name.",
-        &[("user", user)],
-    )
+/// Why the sign-up page cannot send this yet, if anything: something missing, the server's rules for a new account
+/// (queqiao-server's check_new_account, which checks again), or the two passwords differing.
+pub fn sign_up_problem(fields: &LoginFields, repeat: &str) -> Option<&'static str> {
+    if let Some(missing) = missing_login_field(fields) {
+        return Some(missing);
+    }
+    let user = &fields.user;
+    let name_ok = (3..=32).contains(&user.len())
+        && user
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !name_ok {
+        return Some(tr(
+            "A user name has 3 to 32 letters, digits, dots, dashes or underscores, and starts with a letter or digit.",
+        ));
+    }
+    let length = fields.password.chars().count();
+    if !(8..=128).contains(&length) || fields.password.eq_ignore_ascii_case(user) {
+        return Some(tr(
+            "A password has 8 to 128 characters and is not the user name.",
+        ));
+    }
+    if fields.password != repeat {
+        return Some(tr("The two passwords are not the same."));
+    }
+    None
 }
 
 /// What the person did in the "help someone" form.
@@ -485,5 +512,37 @@ pub fn size_text(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod sign_up_tests {
+    use super::*;
+
+    fn fields(user: &str, password: &str) -> LoginFields {
+        LoginFields {
+            server: "example.org:47100".into(),
+            pin: "ab".repeat(32),
+            user: user.into(),
+            password: password.into(),
+        }
+    }
+
+    #[test]
+    fn the_sign_up_page_checks_what_the_server_would_refuse() {
+        assert_eq!(
+            sign_up_problem(&fields("wen22", "a-long-password"), "a-long-password"),
+            None
+        );
+        // Typed twice, differently.
+        assert!(sign_up_problem(&fields("wen22", "a-long-password"), "a-long-passwrod").is_some());
+        // The server's rules: the name, the password's length, not the name.
+        assert!(sign_up_problem(&fields("w", "a-long-password"), "a-long-password").is_some());
+        assert!(sign_up_problem(&fields("-wen", "a-long-password"), "a-long-password").is_some());
+        assert!(sign_up_problem(&fields("wen 22", "a-long-password"), "a-long-password").is_some());
+        assert!(sign_up_problem(&fields("wen22", "short"), "short").is_some());
+        assert!(sign_up_problem(&fields("Password1", "password1"), "password1").is_some());
+        // Nothing typed.
+        assert!(sign_up_problem(&fields("", ""), "").is_some());
     }
 }

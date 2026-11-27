@@ -598,6 +598,35 @@ impl Settings {
     }
 }
 
+/// What a session's lines said (the picture's size and rate, the encoder, the path, the time each frame took), kept in
+/// `session_details.log` with the newest sessions (at most DETAILS_KEPT bytes): an agent started by the service prints
+/// its lines nowhere, and "why was it slow" had no answer (2026-11-27, a session at 3-6 frames a second).
+pub fn record_session_details(viewer: &str, local_time: &str, lines: &[String]) {
+    const DETAILS_KEPT: usize = 256 * 1024;
+    let Ok(folder) = queqiao_account::data_folder() else {
+        return;
+    };
+    let path = folder.join(if cfg!(feature = "test-switches") {
+        "session_details.test.log"
+    } else {
+        "session_details.log"
+    });
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    text.push_str(&format!("=== {local_time} {viewer}\r\n"));
+    for line in lines {
+        text.push_str(line);
+        text.push_str("\r\n");
+    }
+    // The newest sessions: whole sessions dropped from the front.
+    while text.len() > DETAILS_KEPT {
+        match text.get(3..).and_then(|rest| rest.find("=== ")) {
+            Some(next) => text.drain(..next + 3),
+            None => break,
+        };
+    }
+    let _ = std::fs::write(&path, text);
+}
+
 /// One line per session in `sessions.log`: start (Unix seconds), seconds, viewer name, viewer device id,
 /// how it ended.
 pub fn record_session(viewer: &str, viewer_id: &str, started: SystemTime, ended: &str) {

@@ -268,17 +268,15 @@ fn run_wizard(
     let installed = install::installed().is_some();
     let current = install::current_choices();
     let folder = install::target().display().to_string();
-    // A new installation gets both shortcuts; an update keeps what there is.
-    let (desktop, start_menu) = (
-        !installed || current.desktop,
-        !installed || current.start_menu,
-    );
+    // A new installation gets a desktop shortcut; an update keeps what there is. The Start menu's entry (in All apps)
+    // is always made: the choice went (2026-11-27, the user: "remove item 'Add to start menu'"; an installer cannot pin
+    // a program to Start, Windows keeps that to the person).
+    let desktop = !installed || current.desktop;
     let wizard = SetupWizard::new(&WizardSetup {
         version: queqiao_core::VERSION,
         folder: &folder,
         installed,
         desktop,
-        start_menu,
     })
     .map_err(|e| e.message())?;
     let space = |folder: &str| {
@@ -317,7 +315,6 @@ fn run_wizard(
             Some(WizardAction::Install {
                 folder: wizard.folder(),
                 desktop,
-                start_menu,
             })
         } else if options.ui_auto && outcome.is_some() {
             auto_picture(&wizard, "finished", lines);
@@ -326,11 +323,9 @@ fn run_wizard(
             wizard.next(30)
         };
         match action {
-            Some(WizardAction::Install {
-                folder,
-                desktop,
-                start_menu,
-            }) if running.is_none() && outcome.is_none() => {
+            Some(WizardAction::Install { folder, desktop })
+                if running.is_none() && outcome.is_none() =>
+            {
                 match install::check_folder(&folder, required) {
                     Err(error) => wizard.set_error(&error),
                     Ok(folder) => {
@@ -344,7 +339,7 @@ fn run_wizard(
                             autostart: false,
                             service: true,
                             desktop,
-                            start_menu,
+                            start_menu: true,
                         };
                         let entries = entries.take().unwrap_or_default();
                         let (sender, receiver) = std::sync::mpsc::channel();

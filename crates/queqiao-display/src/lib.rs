@@ -64,8 +64,8 @@ pub use model::{
     AccountState, BAR_END, BAR_MORE, BarButton, ConnectionRow, DeviceRow, Figures, FileItem,
     FileKind, FilePane, FileWindowEvent, HelpAction, HelpMode, JobCommand, JobRow, JobRowState,
     ListAction, LoginAction, LoginFields, MainDevice, Page, PasswordCheck, PresenceEvent,
-    TransferRow, WindowEvent, controlled_banner, created_text, missing_login_field, normalize_code,
-    size_text, take_over_question,
+    TransferRow, WindowEvent, controlled_banner, missing_login_field, normalize_code,
+    sign_up_problem, size_text, take_over_question,
 };
 #[cfg(windows)]
 pub use overlay::SessionOverlay;

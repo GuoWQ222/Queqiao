@@ -109,6 +109,31 @@ fn delete(key: &str, value: &str) -> Result<(), String> {
 }
 
 /// Whether the Queqiao service runs on this PC (it then starts Queqiao for the person signed in).
+/// Asks the Queqiao service to start its Queqiao at the screen now ([`queqiao_local::CONTROL_START`]): what a Queqiao
+/// started by hand does when the service runs but no Queqiao runs here (after Quit).
+pub fn ask_service_to_start() -> Result<(), String> {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, SC_MANAGER_CONNECT,
+        SERVICE_STATUS, SERVICE_USER_DEFINED_CONTROL,
+    };
+    unsafe {
+        let manager = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+            .map_err(|e| format!("the service manager: {}", e.message()))?;
+        let result = match OpenServiceW(manager, w!("Queqiao"), SERVICE_USER_DEFINED_CONTROL) {
+            Ok(service) => {
+                let mut status = SERVICE_STATUS::default();
+                let sent = ControlService(service, queqiao_local::CONTROL_START, &mut status)
+                    .map_err(|e| format!("the Queqiao service: {}", e.message()));
+                let _ = CloseServiceHandle(service);
+                sent
+            }
+            Err(e) => Err(format!("the Queqiao service: {}", e.message())),
+        };
+        let _ = CloseServiceHandle(manager);
+        result
+    }
+}
+
 pub fn service_runs() -> bool {
     use windows::Win32::System::Services::{
         CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,

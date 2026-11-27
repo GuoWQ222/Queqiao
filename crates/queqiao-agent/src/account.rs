@@ -33,7 +33,7 @@ pub(crate) fn run_account(
 ) -> Result<bool, String> {
     // Tests run two accounts on one PC: a throwaway device (own key, pins in memory) for the second. At the sign-in
     // screen the device and its login are the person's, handed over by the service (in memory only).
-    let identity = match (&handed, &options.test_device) {
+    let mut identity = match (&handed, &options.test_device) {
         (Some(handed), _) => DeviceIdentity::handed_over(
             &handed.device_id,
             &handed.device_name,
@@ -75,7 +75,14 @@ pub(crate) fn run_account(
     // A login is kept for this PC's own device only (not for a throwaway test device, nor the sign-in screen's).
     let keeps_login = handed.is_none() && options.test_device.is_none();
     let mut state = AccountState::Online;
-    let mut account = if options.test_tray_login || login.server.is_empty() {
+    // No login kept (a fresh install: only the server Queqiao was built for) and none given: logged out, without
+    // asking the server. It was asked before, and its "no saved login" counted as being offline, so a first start
+    // showed an account that "cannot reach the server" with Log out (the user, 2026-11-27).
+    let nothing_to_log_in_with = login.refresh_token.is_none() && options.password.is_none();
+    let mut account = if options.test_tray_login
+        || login.server.is_empty()
+        || nothing_to_log_in_with
+    {
         if !tolerant {
             return Err("not logged in: start once with --server <host:port> --pin <fingerprint> --user <name> --password <password>".into());
         }
@@ -299,8 +306,13 @@ pub(crate) fn run_account(
                     }
                 }
                 PresenceEvent::LogIn if account.is_none() && tolerant => {
-                    if let Some((mut new, tried)) = tray_log_in(options, &login, &identity, lines) {
+                    if let Some((mut new, tried, renewed)) =
+                        tray_log_in(options, &login, &identity, lines)
+                    {
                         login = tried;
+                        if let Some(renewed) = renewed {
+                            identity = renewed;
+                        }
                         went_online(ui, &mut new, &login, &identity, keeps_login, trust_new_key.take(), &macs, help_code.as_deref(), lines)?;
                         lines.push("logged in from the tray".into());
                         account = Some(new);
@@ -392,6 +404,8 @@ pub(crate) fn run_account(
                     }
                 }
                 PresenceEvent::LogOut => {
+                    // Logged out only: the PC stays on the account's devices, shown offline (the user, 2026-11-27).
+                    // Another account logs in on it with a new device (tray_log_in).
                     if let Some(online) = account.take() {
                         online.send(ClientMessage::Logout);
                         // A moment for it to go out before the connection closes.
@@ -400,6 +414,10 @@ pub(crate) fn run_account(
                     login.refresh_token = None;
                     let _ = login.save(AccountRole::Agent);
                     log_out_viewer(&identity);
+                    // The service's agent for the sign-in screen was this device: no more.
+                    if let Some(service) = links.service.as_mut() {
+                        let _ = service.offer_logon(None);
+                    }
                     state = AccountState::LoggedOut;
                     ui.set_account_state(state);
                     ui.set_user("");
@@ -907,9 +925,10 @@ fn notify(error: bool, text: String) {
     });
 }
 
-/// Whether the server wants the password again (the saved login expired, was revoked, or the password changed).
+/// Whether the server wants the password again (the saved login expired, was revoked, or the password changed), or
+/// there is no saved login at all.
 fn needs_new_login(error: &str) -> bool {
-    error.contains("log in again")
+    error.contains("log in again") || error.contains("no saved login")
 }
 
 /// Just online: the login kept (for this PC's own device), a new key pinned if asked, this PC's network cards sent
@@ -956,15 +975,15 @@ fn went_online(
     Ok(())
 }
 
-/// "Log in..." in the tray: the login form (the server, its certificate fingerprint, the user name and the
-/// password), the login itself in the background so the form keeps responding. The account and the login as it
-/// now is, or None when the person closed the form.
+/// "Log in..." in the tray: the login form (logging in, or the sign-up page), the login itself in the background so
+/// the form keeps responding. The account, the login as it now is, and this PC's new device when its earlier one is
+/// another account's (DeviceIdentity::renew); None when the person closed the form.
 fn tray_log_in(
     options: &Options,
     login: &SavedLogin,
     identity: &DeviceIdentity,
     lines: &mut Vec<String>,
-) -> Option<(Account, SavedLogin)> {
+) -> Option<(Account, SavedLogin, Option<DeviceIdentity>)> {
     let defaults = LoginFields {
         server: login.server.clone(),
         pin: login.pin.clone(),
@@ -1003,7 +1022,13 @@ fn tray_log_in(
                 lines.push("login: the form was closed".into());
                 return None;
             }
-            Some(LoginAction::Submit(fields)) => {
+            Some(action @ (LoginAction::Submit(_) | LoginAction::SignUp(_))) => {
+                // Two pages (the user, 2026-11-27): "Log in" logs in only; "Create account" makes one.
+                let (fields, sign_up) = match action {
+                    LoginAction::SignUp(fields) => (fields, true),
+                    LoginAction::Submit(fields) => (fields, false),
+                    LoginAction::Cancel => continue,
+                };
                 if let Some(missing) = queqiao_display::missing_login_field(&fields) {
                     form.set_status(missing);
                     continue;
@@ -1014,18 +1039,46 @@ fn tray_log_in(
                 }
                 tried.server = fields.server.clone();
                 tried.pin = fields.pin.clone();
-                form.set_busy(true, queqiao_core::text::tr("Logging in..."));
-                let identity = identity.clone();
+                form.set_busy(
+                    true,
+                    queqiao_core::text::tr(if sign_up {
+                        "Creating the account..."
+                    } else {
+                        "Logging in..."
+                    }),
+                );
+                let mut identity = identity.clone();
                 let worker = std::thread::spawn(move || {
-                    // One form for logging in and signing up (the user, 2026-11-26): a name the server does not know
-                    // makes the account.
-                    let result = Account::log_in_or_create(
-                        &mut tried,
-                        &identity,
-                        AccountRole::Agent,
-                        &fields.user,
-                        &fields.password,
-                    );
+                    let attempt = |tried: &mut SavedLogin, identity: &DeviceIdentity| {
+                        if sign_up {
+                            Account::register(
+                                tried,
+                                identity,
+                                AccountRole::Agent,
+                                &fields.user,
+                                &fields.password,
+                            )
+                        } else {
+                            Account::connect(
+                                tried,
+                                identity,
+                                AccountRole::Agent,
+                                Some((&fields.user, &fields.password)),
+                            )
+                        }
+                    };
+                    let mut result = attempt(&mut tried, &identity);
+                    // This PC's device is another account's (logged out of it, it stays there, offline): a new
+                    // device for this account.
+                    let mut renewed = None;
+                    if let Err(error) = &result
+                        && queqiao_account::belongs_elsewhere(&error.0)
+                        && let Ok(new) = identity.renew()
+                    {
+                        identity = new.clone();
+                        renewed = Some(new);
+                        result = attempt(&mut tried, &identity);
+                    }
                     // One login for both: the viewer (Connect in the main window) gets its saved login as well.
                     if result.is_ok() {
                         let mut viewer = tried.clone();
@@ -1041,7 +1094,7 @@ fn tray_log_in(
                             let _ = viewer.save(AccountRole::Viewer);
                         }
                     }
-                    (result.map_err(|error| error.0), tried)
+                    (result.map_err(|error| error.0), tried, renewed)
                 });
                 while !worker.is_finished() {
                     if let Some(LoginAction::Cancel) = form.next(15) {
@@ -1050,21 +1103,19 @@ fn tray_log_in(
                     }
                 }
                 match worker.join() {
-                    Ok((Ok(account), tried)) => {
-                        if account.created {
-                            lines.push(format!("login: a new account {} was made", account.user));
-                            // A name typed wrong makes an account too: the person is told which one this is.
-                            if !options.test_tray_login {
-                                form.set_busy(false, "");
-                                queqiao_display::show_info(
-                                    queqiao_core::text::tr("Queqiao"),
-                                    &queqiao_display::created_text(&account.user),
-                                );
-                            }
+                    Ok((Ok(account), tried, renewed)) => {
+                        if sign_up {
+                            lines.push(format!("login: the account {} was made", account.user));
                         }
-                        return Some((account, tried));
+                        if let Some(renewed) = &renewed {
+                            lines.push(format!(
+                                "login: this PC's earlier device is another account's: a new device {}",
+                                renewed.id
+                            ));
+                        }
+                        return Some((account, tried, renewed));
                     }
-                    Ok((Err(error), _)) => {
+                    Ok((Err(error), _, _)) => {
                         lines.push(format!("login: {error}"));
                         if options.test_tray_login {
                             return None;

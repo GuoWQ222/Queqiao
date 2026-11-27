@@ -1,8 +1,9 @@
 //! The login form on Linux, drawn as Windows' (login_window.rs) after UU Remote's (the user, 2026-11-26): a pale blue
-//! sky fading to white, the magpie and Queqiao's name, the user name and password on underlines, one button for
-//! logging in and signing up (a name nobody has yet makes the account), the server behind "Use another server..." when
-//! one is built in, a status line that wraps (an error is read whole), the copyright at the foot. Polled with `next`, as
-//! on Windows.
+//! sky fading to white, the magpie and Queqiao's name, the user name and password on underlines, one button, the
+//! server's fields only when none is built in or saved, a status line that wraps (an error is read whole), the
+//! copyright at the foot. Logging in and signing up are two pages, as on Windows (the user, 2026-11-27): "Log in" for
+//! an account that exists, "Create account" with the password typed twice, a link under the button between them.
+//! Polled with `next`, as on Windows.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -15,7 +16,7 @@ use super::Result;
 use super::gui::{self, Opened, View};
 use super::theme;
 use super::window::Hwnd;
-use crate::model::{LoginAction, LoginFields};
+use crate::model::{LoginAction, LoginFields, sign_up_problem};
 
 /// The window's size, the fields' column, the sky's height (as Windows').
 const WIDTH: f32 = 420.0;
@@ -32,13 +33,34 @@ struct State {
     fields: LoginFields,
     status: String,
     busy: bool,
-    /// The server's fields shown (none built in, or "Use another server..." pressed).
+    /// The server's fields shown: none built in or saved (a developer's build). With one, no way to another from here
+    /// (the user, 2026-11-27: "Use another server..." was a way for a scammer to talk someone onto theirs).
     show_server: bool,
+    /// The sign-up page (else the login page), and its password typed again.
+    sign_up: bool,
+    repeat: String,
     actions: Vec<LoginAction>,
+}
+
+/// Where each part goes, as Windows' layout: the rows of the fields shown, the button, the link, the status.
+fn layout(show_server: bool, sign_up: bool) -> (Vec<f32>, f32, f32, f32) {
+    let mut rows = vec![124.0, 182.0];
+    let extra = usize::from(sign_up) + 2 * usize::from(show_server);
+    for _ in 0..extra {
+        rows.push(rows[rows.len() - 1] + 58.0);
+    }
+    let button = rows[rows.len() - 1] + 72.0;
+    (rows, button, button + 50.0, button + 80.0)
+}
+
+/// The window's height for both pages: room for the status and the copyright below the taller one.
+fn height(show_server: bool) -> f32 {
+    HEIGHT.max(layout(show_server, true).3 + 48.0 + 40.0)
 }
 
 struct LoginView {
     title: String,
+    height: f32,
     state: Arc<Mutex<State>>,
     focused: bool,
     logo: Option<egui::TextureHandle>,
@@ -48,7 +70,7 @@ impl View for LoginView {
     fn builder(&self) -> egui::ViewportBuilder {
         let mut builder = egui::ViewportBuilder::default()
             .with_title(&self.title)
-            .with_inner_size([WIDTH, HEIGHT])
+            .with_inner_size([WIDTH, self.height])
             .with_resizable(false);
         if let Some((width, height, rgba)) = super::icon::icon(64) {
             builder = builder.with_icon(egui::IconData {
@@ -75,6 +97,8 @@ impl View for LoginView {
         };
         let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
         let mut pressed = false;
+        let mut switched = false;
+        let height = self.height;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::WHITE))
             .show(ctx, |ui| {
@@ -117,7 +141,11 @@ impl View for LoginView {
                     &painter,
                     at(0.0, 84.0, page.width(), 20.0),
                     Align2::CENTER_CENTER,
-                    tr("Log in, or sign up with a new user name"),
+                    if state.sign_up {
+                        tr("Create a new account")
+                    } else {
+                        tr("Log in to your account")
+                    },
                     theme::regular(12.0),
                     theme::SECONDARY,
                 );
@@ -126,18 +154,19 @@ impl View for LoginView {
                     status,
                     busy,
                     show_server,
+                    sign_up,
+                    repeat,
                     ..
                 } = &mut *state;
-                let (rows, link, button, status_y) = if *show_server {
-                    (vec![124.0, 182.0, 240.0, 298.0], None, 356.0, 404.0)
-                } else {
-                    (vec![124.0, 182.0], Some(240.0), 278.0, 326.0)
-                };
+                let (rows, button, link_y, status_y) = layout(*show_server, *sign_up);
                 let mut first_empty = None;
                 let mut entries = vec![
                     (tr("User name"), &mut fields.user, false),
                     (tr("Password"), &mut fields.password, true),
                 ];
+                if *sign_up {
+                    entries.push((tr("Repeat the password"), repeat, true));
+                }
                 if *show_server {
                     entries.push((tr("Server (host:port)"), &mut fields.server, false));
                     entries.push((tr("Server key (SHA-256)"), &mut fields.pin, false));
@@ -184,21 +213,6 @@ impl View for LoginView {
                     }
                     self.focused = true;
                 }
-                if let Some(y) = link {
-                    let area = at(LEFT, y, FIELD, 22.0);
-                    let response = theme::hit(ui, area, "other-server");
-                    theme::text_in(
-                        &painter,
-                        area,
-                        Align2::LEFT_CENTER,
-                        tr("Use another server..."),
-                        theme::regular(12.0),
-                        theme::ACCENT,
-                    );
-                    if response.clicked() {
-                        *show_server = true;
-                    }
-                }
                 // The one button: rounded, in the accent colour (grey while a login is under way).
                 let area = at(LEFT, button, FIELD, 40.0);
                 let response = theme::hit(ui, area, "log-in");
@@ -211,12 +225,34 @@ impl View for LoginView {
                     &painter,
                     area,
                     Align2::CENTER_CENTER,
-                    tr("Log in"),
+                    if *sign_up {
+                        tr("Create account")
+                    } else {
+                        tr("Log in")
+                    },
                     theme::bold(15.0),
                     theme::WHITE,
                 );
                 if (response.clicked() || enter) && !*busy {
                     pressed = true;
+                }
+                // The link to the other page.
+                let area = at(LEFT, link_y, FIELD, 22.0);
+                let response = theme::hit(ui, area, "other-page");
+                theme::text_in(
+                    &painter,
+                    area,
+                    Align2::CENTER_CENTER,
+                    if *sign_up {
+                        tr("Already have an account? Log in")
+                    } else {
+                        tr("No account yet? Create one")
+                    },
+                    theme::regular(12.0),
+                    if *busy { BUTTON_OFF } else { theme::ACCENT },
+                );
+                if response.clicked() && !*busy {
+                    switched = true;
                 }
                 // The status, each line centred (an error is read whole).
                 if !status.is_empty() {
@@ -238,16 +274,33 @@ impl View for LoginView {
                 }
                 theme::text_in(
                     &painter,
-                    at(0.0, HEIGHT - 32.0, page.width(), 20.0),
+                    at(0.0, height - 32.0, page.width(), 20.0),
                     Align2::CENTER_CENTER,
                     tr("© 2026 GuoWQ222. All rights reserved."),
                     theme::regular(12.0),
                     FOOT,
                 );
             });
-        if pressed {
+        if switched {
+            state.sign_up = !state.sign_up;
+            state.repeat.clear();
+            state.status = if state.sign_up {
+                tr("A user name has 3 to 32 letters, digits, dots, dashes or underscores, and starts with a letter or digit.")
+                    .to_string()
+            } else {
+                String::new()
+            };
+            self.focused = false;
+        } else if pressed {
             let fields = trimmed(&state.fields);
-            state.actions.push(LoginAction::Submit(fields));
+            if !state.sign_up {
+                state.actions.push(LoginAction::Submit(fields));
+            } else {
+                match sign_up_problem(&fields, &state.repeat) {
+                    Some(problem) => state.status = problem.to_string(),
+                    None => state.actions.push(LoginAction::SignUp(fields)),
+                }
+            }
         }
         true
     }
@@ -275,14 +328,16 @@ pub struct LoginForm {
 
 impl LoginForm {
     pub fn new(title: &str, fields: &LoginFields) -> Result<LoginForm> {
+        // The server's fields only without one built in or saved (a developer's build).
+        let show_server = fields.server.is_empty() || fields.pin.is_empty();
         let state = Arc::new(Mutex::new(State {
             fields: fields.clone(),
-            // Without a server built in (or one not filled in yet), its fields show at once.
-            show_server: fields.server.is_empty() || fields.pin.is_empty(),
+            show_server,
             ..State::default()
         }));
         let view = LoginView {
             title: title.to_string(),
+            height: height(show_server),
             state: state.clone(),
             focused: false,
             logo: None,
@@ -309,15 +364,29 @@ impl LoginForm {
     pub fn set_fields(&self, fields: &LoginFields) {
         if let Ok(mut state) = self.state.lock() {
             state.fields = fields.clone();
+            state.repeat = fields.password.clone();
         }
         gui::repaint();
     }
 
-    /// Presses "Log in" (for tests).
+    /// Goes to the sign-up page or back to the login page (for tests; the person uses the link).
+    pub fn show_sign_up(&self, sign_up: bool) {
+        if let Ok(mut state) = self.state.lock() {
+            state.sign_up = sign_up;
+        }
+        gui::repaint();
+    }
+
+    /// Presses the button: "Log in", or "Create account" on the sign-up page (for tests).
     pub fn submit(&self) {
         if let Ok(mut state) = self.state.lock() {
             let fields = trimmed(&state.fields);
-            state.actions.push(LoginAction::Submit(fields));
+            let action = if state.sign_up {
+                LoginAction::SignUp(fields)
+            } else {
+                LoginAction::Submit(fields)
+            };
+            state.actions.push(action);
         }
     }
 

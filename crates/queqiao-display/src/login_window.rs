@@ -1,9 +1,11 @@
 //! The login window on Windows, drawn as UU Remote's (the user, 2026-11-26: "redesign the login screen, using UU Remote
 //! as a visual reference. Omit the QR code and add a copyright notice at the bottom. Use a single username and password
 //! form for both sign-in and registration"): a pale blue sky fading to white, the magpie and Queqiao's name, the user
-//! name and password on underlines, one button (a name nobody has yet makes the account: Account::log_in_or_create),
-//! the server behind "Use another server..." when one is built in, the copyright at the foot. The same API as the plain
-//! form before it, polled with `next`; Tab, Enter and Esc as in a dialog.
+//! name and password on underlines, one button, the server's fields only when none is built in or saved, the copyright
+//! at the foot. Logging in and signing up are two pages (the user, 2026-11-27: "separate the login and signup page"):
+//! "Log in" for an account that exists; "Create account" with the password typed twice; a link under the button goes
+//! from one to the other. The same API as the plain form before it, polled with `next`; Tab, Enter and Esc as in a
+//! dialog.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -32,12 +34,12 @@ use crate::main_window::{
     ACCENT, CENTRED, DIVIDER, SECONDARY, TEXT_COLOR, WHITE, fill, font, px, rect, rounded, text,
     text_width,
 };
-use crate::model::{LoginAction, LoginFields};
+use crate::model::{LoginAction, LoginFields, sign_up_problem};
 
 const CLASS: PCWSTR = w!("QueqiaoLogin");
 static REGISTER: Once = Once::new();
 
-/// The drawing area at 96 DPI and the fields' column.
+/// The drawing area at 96 DPI (its least height: taller when the server's fields show) and the fields' column.
 const WIDTH: i32 = 420;
 const HEIGHT: i32 = 490;
 const LEFT: i32 = 60;
@@ -46,14 +48,15 @@ const FIELD: i32 = 300;
 /// on the sky they showed as white boxes, 2026-11-26).
 const SKY_HEIGHT: i32 = 118;
 
-/// Command ids: IDOK is what Enter sends.
+/// Command ids: IDOK is what Enter sends; the link between the two pages; the edits (ID_USER..=ID_PIN), the status.
 const ID_OK: u16 = 1;
-const ID_OTHER_SERVER: u16 = 3;
+const ID_SWITCH: u16 = 3;
 const ID_USER: u16 = 10;
 const ID_PASSWORD: u16 = 11;
-const ID_SERVER: u16 = 12;
-const ID_PIN: u16 = 13;
-const ID_STATUS: u16 = 14;
+const ID_REPEAT: u16 = 12;
+const ID_SERVER: u16 = 13;
+const ID_PIN: u16 = 14;
+const ID_STATUS: u16 = 15;
 
 /// The sky's colour (0x00BBGGRR), the button's when it cannot be pressed, the copyright's.
 const SKY: u32 = 0x00FE_EFE3;
@@ -82,6 +85,10 @@ struct Fonts {
 struct State {
     scale: f64,
     show_server: bool,
+    /// The sign-up page (else the login page).
+    sign_up: bool,
+    /// The drawing area's height (96 DPI).
+    height: i32,
     /// The edit with the keyboard (its underline in the accent colour), 0 for none.
     focus: u16,
     fonts: Fonts,
@@ -91,49 +98,60 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
-/// Where each part goes (96-DPI units): each field's row (its label; the edit 20 below; the underline 46 below), the
-/// link or the server's two rows, the button, the status.
+/// Where each part goes (96-DPI units): each field's row (its label; the edit 20 below; the underline 46 below; -100
+/// when not shown), the button, the link to the other page, the status.
 struct Layout {
     user: i32,
     password: i32,
+    repeat: i32,
     server: i32,
     pin: i32,
-    link: i32,
     button: i32,
+    switch: i32,
     status: i32,
 }
 
-fn layout(show_server: bool) -> Layout {
-    if show_server {
-        Layout {
-            user: 124,
-            password: 182,
-            server: 240,
-            pin: 298,
-            link: -100,
-            button: 356,
-            status: 404,
+fn layout(show_server: bool, sign_up: bool) -> Layout {
+    let mut next = 240;
+    let mut row = |shown: bool| {
+        if shown {
+            next += 58;
+            next - 58
+        } else {
+            -100
         }
-    } else {
-        Layout {
-            user: 124,
-            password: 182,
-            server: -100,
-            pin: -100,
-            link: 240,
-            button: 278,
-            status: 326,
-        }
+    };
+    let repeat = row(sign_up);
+    let server = row(show_server);
+    let pin = row(show_server);
+    let button = next + 14;
+    Layout {
+        user: 124,
+        password: 182,
+        repeat,
+        server,
+        pin,
+        button,
+        switch: button + 50,
+        status: button + 80,
     }
 }
 
+/// The drawing area's height for both pages: room for the status (48) and the copyright below the taller one.
+fn height(show_server: bool) -> i32 {
+    HEIGHT.max(layout(show_server, true).status + 48 + 40)
+}
+
 /// The fields drawn: (label, row, the edit's id).
-fn rows(show_server: bool) -> Vec<(&'static str, i32, u16)> {
-    let at = layout(show_server);
+fn rows(show_server: bool, sign_up: bool) -> Vec<(&'static str, i32, u16)> {
+    let at = layout(show_server, sign_up);
     let mut rows = vec![
         (tr("User name"), at.user, ID_USER),
         (tr("Password"), at.password, ID_PASSWORD),
     ];
+    if sign_up {
+        rows.push((tr("Repeat the password"), at.repeat, ID_REPEAT));
+    }
     if show_server {
         rows.push((tr("Server (host:port)"), at.server, ID_SERVER));
         rows.push((tr("Server key (SHA-256)"), at.pin, ID_PIN));
@@ -147,9 +165,10 @@ pub struct LoginForm {
     pin: HWND,
     user: HWND,
     password: HWND,
+    repeat: HWND,
     status: HWND,
     button: HWND,
-    link: HWND,
+    switch: HWND,
 }
 
 impl LoginForm {
@@ -190,8 +209,13 @@ impl LoginForm {
         }?;
         let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
         let scale = f64::from(dpi) / 96.0;
+        // The server's fields only without one built in or saved (a developer's build). With one, no way to another
+        // from here (the user, 2026-11-27: "Use another server..." was a way for a scammer to talk someone onto theirs;
+        // tests give theirs with --server and --pin).
+        let show_server = fields.server.is_empty() || fields.pin.is_empty();
+        let height = height(show_server);
         // The drawing area at this DPI, the frame around it, centred on the monitor's work area.
-        let mut frame = rect(0, 0, WIDTH, HEIGHT, scale);
+        let mut frame = rect(0, 0, WIDTH, height, scale);
         unsafe { AdjustWindowRectExForDpi(&mut frame, style, false, ex_style, dpi) }?;
         let (outer_w, outer_h) = (frame.right - frame.left, frame.bottom - frame.top);
         let mut monitor = MONITORINFO {
@@ -214,14 +238,14 @@ impl LoginForm {
             bold: font(15, 600, w!("Segoe UI"), scale),
             small: font(12, 400, w!("Segoe UI"), scale),
         };
-        // Without a server built in (or one not filled in yet), its fields show at once.
-        let show_server = fields.server.is_empty() || fields.pin.is_empty();
         let body = fonts.body;
         let small = fonts.small;
         STATE.with_borrow_mut(|state| {
             *state = Some(State {
                 scale,
                 show_server,
+                sign_up: false,
+                height,
                 focus: 0,
                 fonts,
             })
@@ -263,21 +287,22 @@ impl LoginForm {
             ID_PASSWORD,
             body,
         )?;
+        let repeat = child(w!("EDIT"), "", edit | ES_PASSWORD, ID_REPEAT, body)?;
         let server = child(w!("EDIT"), &fields.server, edit, ID_SERVER, body)?;
         let pin = child(w!("EDIT"), &fields.pin, edit, ID_PIN, body)?;
-        let link = child(
-            w!("BUTTON"),
-            tr("Use another server..."),
-            WS_TABSTOP.0 | BS_OWNERDRAW,
-            ID_OTHER_SERVER,
-            small,
-        )?;
         let button = child(
             w!("BUTTON"),
             tr("Log in"),
             WS_TABSTOP.0 | BS_OWNERDRAW,
             ID_OK,
             body,
+        )?;
+        let switch = child(
+            w!("BUTTON"),
+            tr("No account yet? Create one"),
+            WS_TABSTOP.0 | BS_OWNERDRAW,
+            ID_SWITCH,
+            small,
         )?;
         let status = child(w!("STATIC"), "", SS_NOPREFIX | SS_CENTER, ID_STATUS, small)?;
         let form = LoginForm {
@@ -286,9 +311,10 @@ impl LoginForm {
             pin,
             user,
             password,
+            repeat,
             status,
             button,
-            link,
+            switch,
         };
         form.place();
         unsafe {
@@ -310,14 +336,14 @@ impl LoginForm {
         Ok(form)
     }
 
-    /// Puts the controls where the layout says (the server's fields shown or not).
+    /// Puts the controls where the layout says (the page, the server's fields shown or not).
     fn place(&self) {
-        let (scale, show_server) = STATE.with_borrow(|state| {
-            state
-                .as_ref()
-                .map_or((1.0, true), |state| (state.scale, state.show_server))
+        let (scale, show_server, sign_up) = STATE.with_borrow(|state| {
+            state.as_ref().map_or((1.0, true, false), |state| {
+                (state.scale, state.show_server, state.sign_up)
+            })
         });
-        let at = layout(show_server);
+        let at = layout(show_server, sign_up);
         let put = |control: HWND, place: [i32; 4], visible: bool| {
             let area = rect(place[0], place[1], place[2], place[3], scale);
             unsafe {
@@ -335,22 +361,49 @@ impl LoginForm {
         };
         put(self.user, [LEFT, at.user + 20, FIELD, 24], true);
         put(self.password, [LEFT, at.password + 20, FIELD, 24], true);
+        put(self.repeat, [LEFT, at.repeat + 20, FIELD, 24], sign_up);
         put(self.server, [LEFT, at.server + 20, FIELD, 24], show_server);
         put(self.pin, [LEFT, at.pin + 20, FIELD, 24], show_server);
-        put(self.link, [LEFT, at.link, FIELD, 22], !show_server);
         put(self.button, [LEFT, at.button, FIELD, 40], true);
+        put(self.switch, [LEFT, at.switch, FIELD, 22], true);
         put(self.status, [LEFT - 20, at.status, FIELD + 40, 48], true);
         let _ = unsafe { InvalidateRect(Some(self.hwnd), None, true) };
     }
 
-    fn show_server(&self) {
+    /// Goes to the sign-up page or back to the login page: the button and the link say which, the password typed again
+    /// is cleared, and the sign-up page says the rules for a new account.
+    pub fn show_sign_up(&self, sign_up: bool) {
         STATE.with_borrow_mut(|state| {
             if let Some(state) = state {
-                state.show_server = true;
+                state.sign_up = sign_up;
             }
         });
+        set_text(self.repeat, "");
+        if sign_up {
+            set_text(self.button, tr("Create account"));
+            set_text(self.switch, tr("Already have an account? Log in"));
+            self.set_status(tr(
+                "A user name has 3 to 32 letters, digits, dots, dashes or underscores, and starts with a letter or digit.",
+            ));
+        } else {
+            set_text(self.button, tr("Log in"));
+            set_text(self.switch, tr("No account yet? Create one"));
+            self.set_status("");
+        }
         self.place();
-        let _ = unsafe { SetFocus(Some(self.server)) };
+        for drawn in [self.button, self.switch] {
+            let _ = unsafe { InvalidateRect(Some(drawn), None, true) };
+        }
+        let first = if text_of(self.user).trim().is_empty() {
+            self.user
+        } else {
+            self.password
+        };
+        let _ = unsafe { SetFocus(Some(first)) };
+    }
+
+    fn signing_up(&self) -> bool {
+        STATE.with_borrow(|state| state.as_ref().is_some_and(|state| state.sign_up))
     }
 
     pub fn hwnd(&self) -> HWND {
@@ -372,9 +425,10 @@ impl LoginForm {
         set_text(self.pin, &fields.pin);
         set_text(self.user, &fields.user);
         set_text(self.password, &fields.password);
+        set_text(self.repeat, &fields.password);
     }
 
-    /// Presses "Log in" (for tests).
+    /// Presses the button: "Log in", or "Create account" on the sign-up page (for tests).
     pub fn submit(&self) {
         push_action(self.hwnd, ID_OK);
     }
@@ -383,9 +437,10 @@ impl LoginForm {
         set_text(self.status, text);
     }
 
-    /// While a login is under way: no second press, a note in the status line.
+    /// While a login is under way: no second press, no going to the other page, a note in the status line.
     pub fn set_busy(&self, busy: bool, status: &str) {
         let _ = unsafe { EnableWindow(self.button, !busy) };
+        let _ = unsafe { EnableWindow(self.switch, !busy) };
         let _ = unsafe { InvalidateRect(Some(self.button), None, true) };
         self.set_status(status);
     }
@@ -394,10 +449,20 @@ impl LoginForm {
     pub fn next(&mut self, wait_ms: u32) -> Option<LoginAction> {
         match next_command(self.hwnd, wait_ms)? {
             ID_OK if unsafe { IsWindowEnabled(self.button) }.as_bool() => {
-                Some(LoginAction::Submit(self.fields()))
+                let fields = self.fields();
+                if !self.signing_up() {
+                    return Some(LoginAction::Submit(fields));
+                }
+                match sign_up_problem(&fields, &text_of(self.repeat)) {
+                    Some(problem) => {
+                        self.set_status(problem);
+                        None
+                    }
+                    None => Some(LoginAction::SignUp(fields)),
+                }
             }
-            ID_OTHER_SERVER => {
-                self.show_server();
+            ID_SWITCH if unsafe { IsWindowEnabled(self.switch) }.as_bool() => {
+                self.show_sign_up(!self.signing_up());
                 None
             }
             ID_CANCEL | CLOSED => Some(LoginAction::Cancel),
@@ -594,14 +659,18 @@ fn paint_window(hwnd: HWND, dc: HDC, state: &State) {
     );
     text(
         dc,
-        tr("Log in, or sign up with a new user name"),
+        if state.sign_up {
+            tr("Create a new account")
+        } else {
+            tr("Log in to your account")
+        },
         rect(0, 84, WIDTH, 20, s),
         f.small,
         SECONDARY,
         CENTRED,
     );
     // Each field: its label, its underline (thicker in the accent colour while it has the keyboard).
-    for (label, row, id) in rows(state.show_server) {
+    for (label, row, id) in rows(state.show_server, state.sign_up) {
         text(
             dc,
             label,
@@ -631,15 +700,15 @@ fn paint_window(hwnd: HWND, dc: HDC, state: &State) {
     text(
         dc,
         tr("© 2026 GuoWQ222. All rights reserved."),
-        rect(0, HEIGHT - 32, WIDTH, 20, s),
+        rect(0, state.height - 32, WIDTH, 20, s),
         f.small,
         FOOT,
         CENTRED,
     );
 }
 
-/// The two drawn buttons: "Log in" (a wide rounded button in the accent colour, grey while it cannot be pressed) and
-/// the link to the server's fields (accent text).
+/// The two drawn buttons: "Log in" or "Create account" (a wide rounded button in the accent colour, grey while it
+/// cannot be pressed), and the link to the other page (accent text, centred).
 fn draw_button(item: &DRAWITEMSTRUCT, state: &State) {
     let s = state.scale;
     let f = &state.fonts;
@@ -647,31 +716,39 @@ fn draw_button(item: &DRAWITEMSTRUCT, state: &State) {
     let area = item.rcItem;
     let label = crate::forms::text_of(item.hwndItem);
     fill(dc, &area, WHITE);
-    match item.CtlID as u16 {
-        ID_OK => {
-            let enabled = item.itemState.0 & ODS_DISABLED == 0;
-            rounded(
-                dc,
-                &area,
-                px(8, s),
-                if enabled { ACCENT } else { BUTTON_OFF },
-            );
-            text(dc, &label, area, f.bold, WHITE, CENTRED);
-            if item.itemState.0 & ODS_FOCUS != 0 {
-                let inner = RECT {
-                    left: area.left + px(3, s),
-                    top: area.top + px(3, s),
-                    right: area.right - px(3, s),
-                    bottom: area.bottom - px(3, s),
-                };
-                let _ = unsafe { DrawFocusRect(dc, &inner) };
-            }
+    if item.CtlID as u16 == ID_SWITCH {
+        let enabled = item.itemState.0 & ODS_DISABLED == 0;
+        text(
+            dc,
+            &label,
+            area,
+            f.small,
+            if enabled { ACCENT } else { BUTTON_OFF },
+            CENTRED,
+        );
+        if item.itemState.0 & ODS_FOCUS != 0 {
+            let _ = unsafe { DrawFocusRect(dc, &area) };
         }
-        _ => {
-            text(dc, &label, area, f.small, ACCENT, crate::main_window::LINE);
-            if item.itemState.0 & ODS_FOCUS != 0 {
-                let _ = unsafe { DrawFocusRect(dc, &area) };
-            }
-        }
+        return;
+    }
+    if item.CtlID as u16 != ID_OK {
+        return;
+    }
+    let enabled = item.itemState.0 & ODS_DISABLED == 0;
+    rounded(
+        dc,
+        &area,
+        px(8, s),
+        if enabled { ACCENT } else { BUTTON_OFF },
+    );
+    text(dc, &label, area, f.bold, WHITE, CENTRED);
+    if item.itemState.0 & ODS_FOCUS != 0 {
+        let inner = RECT {
+            left: area.left + px(3, s),
+            top: area.top + px(3, s),
+            right: area.right - px(3, s),
+            bottom: area.bottom - px(3, s),
+        };
+        let _ = unsafe { DrawFocusRect(dc, &inner) };
     }
 }

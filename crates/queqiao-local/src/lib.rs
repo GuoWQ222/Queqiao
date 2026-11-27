@@ -23,6 +23,12 @@ pub use messages::{
 };
 pub use pipe::{Ends, channel};
 
+/// The service's own control code (Windows: a user-defined service control, 128-255): "start Queqiao at the screen
+/// now". A Queqiao started by hand sends it (its shortcut, also after Quit), and the service's permissions let
+/// signed-in users send it (Interactive users have SERVICE_USER_DEFINED_CONTROL by default); it only starts the
+/// service's own Queqiao where the service would start it anyway. 2026-11-27: a click on the shortcut did nothing.
+pub const CONTROL_START: u32 = 200;
+
 use pipe::Pipe;
 
 /// The pipes' buffer size.

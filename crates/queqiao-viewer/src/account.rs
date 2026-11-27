@@ -22,7 +22,7 @@ use crate::options::*;
 use crate::platform;
 use crate::session::*;
 pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
-    let identity = match &options.test_device {
+    let mut identity = match &options.test_device {
         Some(label) => DeviceIdentity::in_memory(label),
         None => DeviceIdentity::load_or_create(),
     }
@@ -44,7 +44,13 @@ pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<
             .and_then(|report| report.parent())
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
-    let Some(mut account) = log_in(options, &mut login, &identity, pictures.as_deref(), lines)?
+    let Some(mut account) = log_in(
+        options,
+        &mut login,
+        &mut identity,
+        pictures.as_deref(),
+        lines,
+    )?
     else {
         lines.push("the login form was closed".into());
         return Ok(true);
@@ -239,7 +245,7 @@ pub(crate) fn run_account(options: &Options, lines: &mut Vec<String>) -> Result<
 fn log_in(
     options: &Options,
     login: &mut SavedLogin,
-    identity: &DeviceIdentity,
+    identity: &mut DeviceIdentity,
     pictures: Option<&Path>,
     lines: &mut Vec<String>,
 ) -> Result<Option<Account>, String> {
@@ -277,6 +283,8 @@ fn log_in(
     let mut form = LoginForm::new(tr("Queqiao - log in"), &defaults)
         .map_err(|e| format!("login form: {}", platform::describe(e)))?;
     if options.ui_test.is_some() {
+        // --signup: through the sign-up page.
+        form.show_sign_up(options.signup);
         form.set_fields(&LoginFields {
             password: options.password.clone().unwrap_or_default(),
             ..defaults.clone()
@@ -291,7 +299,13 @@ fn log_in(
     loop {
         match form.next(15) {
             Some(LoginAction::Cancel) => return Ok(None),
-            Some(LoginAction::Submit(fields)) => {
+            Some(action @ (LoginAction::Submit(_) | LoginAction::SignUp(_))) => {
+                // Two pages (the user, 2026-11-27): "Log in" logs in only; "Create account" makes one.
+                let (fields, sign_up) = match action {
+                    LoginAction::SignUp(fields) => (fields, true),
+                    LoginAction::Submit(fields) => (fields, false),
+                    LoginAction::Cancel => continue,
+                };
                 if let Some(missing) = queqiao_display::missing_login_field(&fields) {
                     form.set_status(missing);
                     continue;
@@ -301,41 +315,69 @@ fn log_in(
                 }
                 login.server = fields.server.clone();
                 login.pin = fields.pin.clone();
-                form.set_busy(true, tr("Logging in..."));
-                // In the background, so the form keeps responding. One form for both (the user, 2026-11-26): a name
-                // the server does not know makes the account.
-                let (mut attempt, identity) = (login.clone(), identity.clone());
+                form.set_busy(
+                    true,
+                    tr(if sign_up {
+                        "Creating the account..."
+                    } else {
+                        "Logging in..."
+                    }),
+                );
+                // In the background, so the form keeps responding.
+                let (mut attempt, mut device) = (login.clone(), identity.clone());
                 let worker = std::thread::spawn(move || {
-                    let result = Account::log_in_or_create(
-                        &mut attempt,
-                        &identity,
-                        AccountRole::Viewer,
-                        &fields.user,
-                        &fields.password,
-                    );
-                    (result, attempt)
+                    let try_once = |attempt: &mut SavedLogin, device: &DeviceIdentity| {
+                        if sign_up {
+                            Account::register(
+                                attempt,
+                                device,
+                                AccountRole::Viewer,
+                                &fields.user,
+                                &fields.password,
+                            )
+                        } else {
+                            Account::connect(
+                                attempt,
+                                device,
+                                AccountRole::Viewer,
+                                Some((&fields.user, &fields.password)),
+                            )
+                        }
+                    };
+                    let mut result = try_once(&mut attempt, &device);
+                    // This PC's device is another account's (logged out of it, it stays there, offline): a new device
+                    // for this account (DeviceIdentity::renew).
+                    let mut renewed = None;
+                    if let Err(error) = &result
+                        && queqiao_account::belongs_elsewhere(&error.0)
+                        && let Ok(new) = device.renew()
+                    {
+                        device = new.clone();
+                        renewed = Some(new);
+                        result = try_once(&mut attempt, &device);
+                    }
+                    (result, attempt, renewed)
                 });
                 while !worker.is_finished() {
                     if let Some(LoginAction::Cancel) = form.next(15) {
                         return Ok(None);
                     }
                 }
-                let (result, attempt) = worker
+                let (result, attempt, renewed) = worker
                     .join()
                     .map_err(|_| "the login thread failed".to_string())?;
+                if let Some(renewed) = renewed {
+                    lines.push(format!(
+                        "login: this PC's earlier device is another account's: a new device {}",
+                        renewed.id
+                    ));
+                    *identity = renewed;
+                }
                 match result {
                     Ok(account) => {
                         *login = attempt;
-                        if account.created {
-                            lines.push(format!("login: a new account {} was made", account.user));
-                            // A name typed wrong makes an account too: the person is told which one this is.
-                            if options.ui_test.is_none() {
-                                form.set_busy(false, "");
-                                queqiao_display::show_info(
-                                    tr("Queqiao"),
-                                    &queqiao_display::created_text(&account.user),
-                                );
-                            }
+                        if sign_up {
+                            lines.push(format!("login: the account {} was made", account.user));
                         }
                         return Ok(Some(account));
                     }

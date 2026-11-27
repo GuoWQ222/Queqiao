@@ -179,8 +179,59 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         // With the Queqiao service running, Queqiao for the person signed in is the one it starts (the Run key's
         // copy, started at sign-in as well, leaves).
         if options.service_channel.is_none() && autostart::service_runs() {
-            if options.show {
-                queqiao_display::show_running_main();
+            // Opened by the person (the shortcut, the Start menu: --show): never without a window. The Queqiao of this
+            // session shows its window; none here (after Quit): the service is asked to start it, and its window shown
+            // once it runs. A Remote Desktop session is told that Queqiao runs at the screen only (2026-11-27: a click
+            // there did nothing at all).
+            if options.show && !queqiao_display::show_running_main() {
+                if !at_screen() {
+                    lines.push(
+                        "a Remote Desktop session: the service runs Queqiao at the screen only"
+                            .into(),
+                    );
+                    queqiao_display::show_info(
+                        queqiao_core::text::tr("Queqiao"),
+                        queqiao_core::text::tr(
+                            "Queqiao runs for the person at this PC's screen, not in Remote Desktop sessions.",
+                        ),
+                    );
+                    return Ok(true);
+                }
+                let asked = autostart::ask_service_to_start();
+                let shown = asked.is_ok()
+                    && (0..60).any(|_| {
+                        std::thread::sleep(Duration::from_millis(250));
+                        queqiao_display::show_running_main()
+                    });
+                match (&asked, shown) {
+                    (_, true) => {
+                        lines.push("the service started Queqiao here: its window is shown".into())
+                    }
+                    (Ok(()), false) => {
+                        lines.push(
+                            "the service was asked to start Queqiao here: no window in 15 s".into(),
+                        );
+                        queqiao_display::show_error(
+                            queqiao_core::text::tr("Queqiao"),
+                            queqiao_core::text::tr(
+                                "Queqiao did not start in this session. Try again in a moment; if it still does not start, restart this PC.",
+                            ),
+                        );
+                    }
+                    (Err(error), false) => {
+                        lines.push(format!(
+                            "the service could not be asked to start Queqiao: {error}"
+                        ));
+                        queqiao_display::show_error(
+                            queqiao_core::text::tr("Queqiao"),
+                            &queqiao_core::text::trf(
+                                "Queqiao runs as a service on this PC, and it could not be started in this session: {error}",
+                                &[("error", error)],
+                            ),
+                        );
+                    }
+                }
+                return Ok(true);
             }
             lines.push("the Queqiao service runs Queqiao on this PC: this copy leaves".into());
             return Ok(true);
@@ -472,4 +523,14 @@ pub(crate) fn keep_frame(
     frame: &queqiao_capture::Frame,
 ) {
     unsafe { context.CopyResource(&*latest, &frame.texture) };
+}
+
+/// This program runs in the session at the PC's screen (not a Remote Desktop session); true when Windows does not say.
+fn at_screen() -> bool {
+    use windows::Win32::System::RemoteDesktop::{
+        ProcessIdToSessionId, WTSGetActiveConsoleSessionId,
+    };
+    let mut session = 0;
+    unsafe { ProcessIdToSessionId(std::process::id(), &mut session) }.is_err()
+        || unsafe { WTSGetActiveConsoleSessionId() } == session
 }

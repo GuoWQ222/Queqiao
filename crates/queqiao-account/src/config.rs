@@ -84,6 +84,31 @@ impl DeviceIdentity {
         Ok(identity)
     }
 
+    /// A new device for this PC: a new id and key (its name kept), in place of its files. For a PC whose device belongs
+    /// to another account: logging out leaves it there, shown offline on that account's devices (the user,
+    /// 2026-11-27: "Logging out doesnt mean removal from the device list on other computers, but only offline"), so
+    /// logging in to a different account takes a new device. Logging in to the earlier account again later, the server
+    /// puts it in the old one's place (the same PC: Store::same_machine).
+    pub fn renew(&self) -> Result<DeviceIdentity, Error> {
+        if self.in_memory {
+            return Err(Error("a device in memory is not renewed".into()));
+        }
+        let key = DeviceKey::replace()?;
+        let identity = DeviceIdentity {
+            id: random_hex(16),
+            name: self.name.clone(),
+            key: None,
+            in_memory: false,
+            preset_pins: None,
+        };
+        let path = folder()?.join("device.json");
+        std::fs::write(path, serde_json::to_string_pretty(&identity).map_err(err)?)?;
+        Ok(DeviceIdentity {
+            key: Some(key),
+            ..identity
+        })
+    }
+
     fn load_or_create_file() -> Result<DeviceIdentity, Error> {
         let path = folder()?.join("device.json");
         if let Ok(text) = std::fs::read_to_string(&path)

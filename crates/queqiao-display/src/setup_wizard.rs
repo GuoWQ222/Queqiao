@@ -52,7 +52,6 @@ const ID_BACK: u16 = 20;
 const ID_BROWSE: u16 = 21;
 const ID_FOLDER: u16 = 22;
 const ID_DESKTOP: u16 = 23;
-const ID_START_MENU: u16 = 24;
 const ID_OPEN: u16 = 25;
 /// Pushed when the folder's text changed (typed, or chosen with Browse).
 const FOLDER_CHANGED: u16 = 26;
@@ -96,11 +95,7 @@ pub enum WizardPage {
 #[derive(Debug, PartialEq, Eq)]
 pub enum WizardAction {
     /// "Install" on the location page: the folder as typed (to be checked) and the shortcuts wanted.
-    Install {
-        folder: String,
-        desktop: bool,
-        start_menu: bool,
-    },
+    Install { folder: String, desktop: bool },
     /// The folder's text changed (its free room may differ).
     FolderChanged,
     /// "Finish" (or "Close" after a failure); `open`: open Queqiao now.
@@ -117,7 +112,6 @@ pub struct WizardSetup<'a> {
     /// Queqiao is installed already: its folder, which an update keeps (as UU Remote's installer does).
     pub installed: bool,
     pub desktop: bool,
-    pub start_menu: bool,
 }
 
 struct Fonts {
@@ -143,7 +137,6 @@ struct State {
     /// How the install ended (the finish page).
     result: Option<std::result::Result<(), String>>,
     desktop: bool,
-    start_menu: bool,
     open: bool,
     folder_focus: bool,
     fonts: Fonts,
@@ -165,7 +158,6 @@ pub struct SetupWizard {
     next: HWND,
     cancel: HWND,
     desktop: HWND,
-    start_menu: HWND,
     open: HWND,
 }
 
@@ -246,7 +238,6 @@ impl SetupWizard {
                 log: Vec::new(),
                 result: None,
                 desktop: setup.desktop,
-                start_menu: setup.start_menu,
                 open: true,
                 folder_focus: false,
                 fonts,
@@ -298,12 +289,6 @@ impl SetupWizard {
                 tr("Create a desktop shortcut"),
                 button,
                 ID_DESKTOP,
-            )?,
-            start_menu: child(
-                w!("BUTTON"),
-                tr("Add Queqiao to the Start menu"),
-                button,
-                ID_START_MENU,
             )?,
             open: child(w!("BUTTON"), tr("Open Queqiao now"), button, ID_OPEN)?,
         };
@@ -420,7 +405,6 @@ impl SetupWizard {
             (ID_NEXT, WizardPage::Location) => Some(WizardAction::Install {
                 folder: self.folder(),
                 desktop: with_state(true, |state| state.desktop),
-                start_menu: with_state(true, |state| state.start_menu),
             }),
             (ID_NEXT, WizardPage::Finished) => Some(WizardAction::Finish {
                 open: with_state(false, |state| {
@@ -438,13 +422,12 @@ impl SetupWizard {
                 Some(WizardAction::FolderChanged)
             }
             (FOLDER_CHANGED, _) => Some(WizardAction::FolderChanged),
-            (ID_DESKTOP | ID_START_MENU | ID_OPEN, _) => {
+            (ID_DESKTOP | ID_OPEN, _) => {
                 with_state((), |state| match command {
                     ID_DESKTOP => state.desktop = !state.desktop,
-                    ID_START_MENU => state.start_menu = !state.start_menu,
                     _ => state.open = !state.open,
                 });
-                for control in [self.desktop, self.start_menu, self.open] {
+                for control in [self.desktop, self.open] {
                     let _ = unsafe { InvalidateRect(Some(control), None, false) };
                 }
                 None
@@ -487,7 +470,6 @@ impl SetupWizard {
         put(self.folder, [LEFT + 10, 143, COLUMN - 116, 20], location);
         put(self.browse, [LEFT + COLUMN - 92, 136, 92, 34], location);
         put(self.desktop, [LEFT, 224, COLUMN, 26], location);
-        put(self.start_menu, [LEFT, 252, COLUMN, 26], location);
         put(self.open, [LEFT, 212, COLUMN, 26], finished && ok);
         put(self.back, [LEFT + COLUMN - 286, BUTTONS, 90, 34], !finished);
         put(self.next, [LEFT + COLUMN - 188, BUTTONS, 92, 34], !finished);
@@ -835,8 +817,7 @@ fn paint_window(dc: HDC, client: &RECT, state: &State) {
     );
 }
 
-/// The blue panel: the magpie and Queqiao's name, the steps (done, this one, to come), the magpie with its wings spread,
-/// the version.
+/// The blue panel: the icon and Queqiao's name, the steps (done, this one, to come), the icon large, the version.
 fn paint_panel(dc: HDC, client: &RECT, state: &State) {
     let s = state.scale;
     let f = &state.fonts;
@@ -920,22 +901,21 @@ fn paint_panel(dc: HDC, client: &RECT, state: &State) {
             fill(dc, &rect(38, top + 24, 2, 12, s), PANEL_DIM);
         }
     }
-    if let Some(magpie) = crate::icon::spread_magpie(96) {
-        let size = px(88, s);
-        let _ = unsafe {
-            DrawIconEx(
-                dc,
-                (px(PANEL, s) - size) / 2,
-                px(270, s),
-                magpie,
-                size,
-                size,
-                0,
-                None,
-                DI_NORMAL,
-            )
-        };
-    }
+    // Queqiao's own icon, large (the user, 2026-11-27: the bird icon instead of the magpie with its wings spread).
+    let size = px(88, s);
+    let _ = unsafe {
+        DrawIconEx(
+            dc,
+            (px(PANEL, s) - size) / 2,
+            px(270, s),
+            crate::icon::app_icon(size),
+            size,
+            size,
+            0,
+            None,
+            DI_NORMAL,
+        )
+    };
     text(
         dc,
         &trf("Version {version}", &[("version", &state.version)]),
@@ -1159,10 +1139,9 @@ fn draw_button(item: &DRAWITEMSTRUCT, state: &State) {
             );
             text(dc, &label, area, f.bold, WHITE, CENTRED);
         }
-        id @ (ID_DESKTOP | ID_START_MENU | ID_OPEN) => {
+        id @ (ID_DESKTOP | ID_OPEN) => {
             let checked = match id {
                 ID_DESKTOP => state.desktop,
-                ID_START_MENU => state.start_menu,
                 _ => state.open,
             };
             let size = px(18, s);
