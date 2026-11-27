@@ -136,8 +136,12 @@ pub fn install(
     ));
 
     // The service comes first: the agent started next leaves for the service's own. This installer itself runs as an
-    // administrator for it (install_service), never a program in the person's own folder.
-    if choices.service {
+    // administrator for it (install_service), never a program in the person's own folder. Not again when the service
+    // already runs this installer's programs (the same installer run twice; or the service put in by an
+    // administrator first, as on a test PC with nobody at the screen to answer Windows' prompt).
+    if choices.service && service_is_current(entries) {
+        lines.push("the Queqiao service has this version already".into());
+    } else if choices.service {
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
         let failed = match run_elevated(&me, "--install-service") {
             Ok(0) => {
@@ -352,6 +356,20 @@ fn same_file(a: &Path, b: &Path) -> bool {
         .ok()
         .zip(std::fs::canonicalize(b).ok())
         .is_some_and(|(a, b)| a == b)
+}
+
+/// Whether the Queqiao service is installed with exactly this installer's service and agent (SHA-256 of the files in
+/// Program Files, which only administrators may change).
+fn service_is_current(entries: &[Entry]) -> bool {
+    use sha2::{Digest, Sha256};
+    service_installed()
+        && [PROGRAMS[2], PROGRAMS[1]].iter().all(|program| {
+            let Some(entry) = entries.iter().find(|entry| entry.name == *program) else {
+                return false;
+            };
+            std::fs::read(program_files().join(program))
+                .is_ok_and(|installed| Sha256::digest(&installed) == Sha256::digest(&entry.bytes))
+        })
 }
 
 /// Whether the Queqiao service is installed (its key is readable by everyone).
