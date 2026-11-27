@@ -30,6 +30,8 @@ mod present;
 mod privacy;
 mod settings;
 #[cfg(windows)]
+mod setup_wizard;
+#[cfg(windows)]
 mod shortcuts;
 mod tray;
 #[cfg(windows)]
@@ -42,9 +44,9 @@ pub use cursor::RemoteCursor;
 pub use file_window::{FileWindow, show_in_folder};
 #[cfg(windows)]
 pub use forms::{
-    DeviceList, HelpForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList, SetupAction,
-    SetupForm, ask_secret, ask_text, confirm, confirm_take_over, copy_text, owner_from_raw,
-    pick_files, popup_menu, save_screen_picture, save_window_picture, show_error, show_info,
+    DeviceList, HelpForm, PICK_CLOSED, PasswordAction, PasswordForm, PickList, ask_secret,
+    ask_text, confirm, confirm_take_over, copy_text, owner_from_raw, pick_files, popup_menu,
+    save_screen_picture, save_window_picture, show_error, show_info,
 };
 #[cfg(windows)]
 pub use icon::app_icon;
@@ -74,6 +76,8 @@ pub use presence::{Presence, SessionBanner, show_running_main};
 pub use present::{Presenter, fit};
 #[cfg(windows)]
 pub use privacy::PrivacyScreen;
+#[cfg(windows)]
+pub use setup_wizard::{SetupWizard, WizardAction, WizardPage, WizardSetup};
 pub use tray::{MIN_FIXED_CODE, TEST_MENU_LOGIN, TEST_MENU_TERMINAL, TEST_MENU_UPDATE_CHECK};
 #[cfg(windows)]
 pub use window::Window;

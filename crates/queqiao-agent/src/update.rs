@@ -1,5 +1,5 @@
-//! Updates of an installed Queqiao: the agent that runs from `%LOCALAPPDATA%\Programs\Queqiao` (put there by
-//! queqiao-setup) looks at the update feed two minutes after it starts and then once a day (or when the person asks),
+//! Updates of an installed Queqiao: the agent that runs from the folder queqiao-setup put it in (the person's choice,
+//! `%LOCALAPPDATA%\Programs\Queqiao` by default) looks at the update feed two minutes after it starts and then once a day (or when the person asks),
 //! on a thread of its own. A later version, signed by the release key, is downloaded into
 //! `%LOCALAPPDATA%\Queqiao\updates` and checked (queqiao_update); the main loop then starts its installer with
 //! `--quiet --update` between sessions and leaves. The installer puts the earlier version back if the new agent does
@@ -155,10 +155,11 @@ fn folder() -> PathBuf {
 
 /// Whether this agent runs from an installation by queqiao-setup (only those update themselves).
 pub fn installed_here() -> bool {
-    let (Some(local), Ok(me)) = (std::env::var_os("LOCALAPPDATA"), std::env::current_exe()) else {
+    let Ok(me) = std::env::current_exe() else {
         return false;
     };
-    let folder = PathBuf::from(local).join("Programs").join("Queqiao");
+    // Where the person chose to install it (queqiao-setup records it), the default folder otherwise.
+    let folder = queqiao_core::platform::installation_folder();
     let prefix = folder.display().to_string().to_ascii_lowercase() + "\\";
     me.display()
         .to_string()
@@ -215,10 +216,9 @@ pub fn apply_through_service(
     signature: &str,
     lines: &mut Vec<String>,
 ) -> Result<(), String> {
-    let own = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|local| local.join("Programs").join("Queqiao"));
-    let own_installed = own.is_some_and(|folder| folder.join("queqiao-setup.exe").is_file());
+    let own_installed = queqiao_core::platform::installation_folder()
+        .join("queqiao-setup.exe")
+        .is_file();
     if own_installed && failed_before(version) {
         lines.push(format!(
             "updates: this person's installation: {version} did not keep running here before: skipped"

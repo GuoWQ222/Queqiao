@@ -2,7 +2,8 @@
 //!
 //! queqiao-setup: installs Queqiao for the person using this PC (no administrator needed), and removes it again.
 //!
-//! - `queqiao-setup` (as downloaded): a window saying what is installed, then Install. The Queqiao service always comes
+//! - `queqiao-setup` (as downloaded): a wizard (welcome, where to install, installing, done) as UU Remote's installer
+//!   (queqiao_display::SetupWizard), then Install. The Queqiao service always comes
 //!   with it (the user, 2026-11-27: "Mandatory install service", as UU Remote's installer does): it is what shows the
 //!   sign-in, lock and UAC screens to a viewer, so Windows asks for an administrator once; refused, nothing is
 //!   installed (or the earlier version stays).
@@ -17,7 +18,9 @@
 //! - `--install-service`: run as an administrator (UAC) by the install: the service and its agent from this
 //!   installer's own files, through a folder in Program Files (install::install_service).
 //! - `--remove-service`: run as an administrator by `--uninstall` when the service is installed.
-//! - `--ui-picture <file>`: shows the window, saves a picture of it and leaves without installing (tests).
+//! - `--ui-picture <file>`: shows the window, saves a picture of each page and leaves without installing (tests).
+//! - `--ui-auto [--report <file>]`: the window goes through its pages by itself (Install, then Finish) with what it
+//!   suggests: an install through the window as a person's clicks would make it (tests; pictures beside the report).
 //! - `pack --output <installer> <file>...`: this program with those files as its resource (they are installed; see
 //!   payload); sign the result afterwards (scripts\package.ps1).
 //! - `release-key --output <file>`: a new release key, DPAPI-encrypted for the person running this; prints its
@@ -32,7 +35,7 @@ use crate::{install, payload, service_update};
 use std::path::PathBuf;
 
 use queqiao_core::text::{tr, trf};
-use queqiao_display::{SetupAction, SetupForm, show_error};
+use queqiao_display::show_error;
 
 struct Options {
     quiet: bool,
@@ -47,6 +50,9 @@ struct Options {
     service_update: bool,
     report: Option<PathBuf>,
     ui_picture: Option<PathBuf>,
+    /// `--ui-auto`: the window goes through its pages by itself (Install with what it suggests, then Finish), as a
+    /// person pressing the buttons would: for tests (it installs as `--quiet` does, through the window).
+    ui_auto: bool,
 }
 
 pub(crate) fn main() {
@@ -126,7 +132,11 @@ pub(crate) fn main() {
         Ok(()) => true,
         Err(error) => {
             lines.push(format!("ERROR {error}"));
-            if !options.quiet && !options.remove_service && !options.install_service {
+            if !options.quiet
+                && !options.remove_service
+                && !options.install_service
+                && !failure_shown()
+            {
                 show_error(tr("Queqiao"), &error);
             }
             false
@@ -165,6 +175,7 @@ fn parse(args: &[String]) -> Option<Options> {
         service_update: false,
         report: None,
         ui_picture: None,
+        ui_auto: false,
     };
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -188,6 +199,7 @@ fn parse(args: &[String]) -> Option<Options> {
             }
             "--report" => options.report = Some(PathBuf::from(rest.next()?)),
             "--ui-picture" => options.ui_picture = Some(PathBuf::from(rest.next()?)),
+            "--ui-auto" => options.ui_auto = true,
             _ => return None,
         }
     }
@@ -195,61 +207,306 @@ fn parse(args: &[String]) -> Option<Options> {
 }
 
 fn run_install(options: &Options, lines: &mut Vec<String>) -> Result<(), String> {
-    let entries = payload::own()?;
+    // Pictures of the window need nothing to install (a build before packing carries no programs).
+    let entries = match payload::own() {
+        Err(_) if options.ui_picture.is_some() => Vec::new(),
+        entries => entries?,
+    };
+    let mut ignore = |_: u32, _: String| {};
     if options.update {
-        if !install::target().exists() {
+        if install::installed().is_none() {
             return Err("Queqiao is not installed for this person: nothing to update".into());
         }
         let choices = install::current_choices();
         lines.push(format!(
-            "update to {} (start with Windows: {})",
+            "update to {} in {} (start with Windows: {})",
             queqiao_core::VERSION,
+            choices.folder.display(),
             choices.autostart
         ));
-        return install::install(&entries, &choices, lines);
+        return install::install(&entries, &choices, lines, &mut ignore);
     }
-    // The service, which starts Queqiao at each sign-in by itself (no Run entry), unless a test build said not to.
-    let choices = install::Choices {
-        autostart: options.no_service && options.autostart,
-        service: !options.no_service,
-    };
     if options.quiet {
-        return install::install(&entries, &choices, lines);
+        // The service, which starts Queqiao at each sign-in by itself (no Run entry), unless a test build said not to;
+        // where Queqiao is already, or the suggested folder; the Start menu's shortcut (an update keeps a desktop one).
+        let current = install::current_choices();
+        let choices = install::Choices {
+            folder: install::target(),
+            autostart: options.no_service && options.autostart,
+            service: !options.no_service,
+            desktop: install::installed().is_some() && current.desktop,
+            start_menu: true,
+        };
+        return install::install(&entries, &choices, lines, &mut ignore);
     }
-    let text = trf(
-        "Queqiao will be installed on this PC: its programs in {folder}, and the Queqiao service, which starts Queqiao with Windows and lets a session show the sign-in, lock and UAC screens. Windows will ask once for an administrator to allow the service.",
-        &[("folder", &install::target().display().to_string())],
+    run_wizard(options, entries, lines)
+}
+
+/// What the install's thread tells the window.
+enum Step {
+    Progress(u32, String),
+    Done(Result<(), String>, Vec<String>),
+}
+
+/// Set once the window has shown how the install failed (main shows no second message for it).
+static FAILURE_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn failure_shown() -> bool {
+    FAILURE_SHOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The wizard (queqiao_display::SetupWizard): welcome, where to install (the folder checked with
+/// install::check_folder, the room it needs and has), the install on a thread of its own with each step shown, done.
+fn run_wizard(
+    options: &Options,
+    entries: Vec<payload::Entry>,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    use queqiao_display::{SetupWizard, WizardAction, WizardPage, WizardSetup};
+    let required = install::required_bytes(&entries);
+    let installed = install::installed().is_some();
+    let current = install::current_choices();
+    let folder = install::target().display().to_string();
+    // A new installation gets both shortcuts; an update keeps what there is.
+    let (desktop, start_menu) = (
+        !installed || current.desktop,
+        !installed || current.start_menu,
     );
-    let mut form = SetupForm::new(&text).map_err(|e| e.message())?;
+    let wizard = SetupWizard::new(&WizardSetup {
+        version: queqiao_core::VERSION,
+        folder: &folder,
+        installed,
+        desktop,
+        start_menu,
+    })
+    .map_err(|e| e.message())?;
+    let space = |folder: &str| {
+        let free = install::free_bytes(std::path::Path::new(folder))
+            .map_or_else(|| tr("unknown").to_string(), install::size_text);
+        trf(
+            "Space needed: {needed}  ·  available: {free}",
+            &[("needed", &install::size_text(required)), ("free", &free)],
+        )
+    };
+    wizard.set_space(&space(&folder));
     if let Some(path) = &options.ui_picture {
-        let drawn = std::time::Instant::now() + std::time::Duration::from_millis(600);
-        while std::time::Instant::now() < drawn {
-            let _ = form.next(20);
-        }
-        queqiao_display::save_window_picture(form.hwnd(), path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        lines.push(format!("window picture: {}", path.display()));
-        return Ok(());
+        return wizard_pictures(&wizard, path, lines);
     }
+    let mut wizard = wizard;
+    let mut entries = Some(entries);
+    let mut running: Option<std::sync::mpsc::Receiver<Step>> = None;
+    let mut outcome: Option<Result<(), String>> = None;
+    // --ui-auto: its pictures beside the report.
+    let auto_picture = |wizard: &SetupWizard, name: &str, lines: &mut Vec<String>| {
+        if let Some(report) = &options.report {
+            let file = report.with_file_name(format!("setup-auto-{name}.bmp"));
+            wizard.pump(300);
+            if wizard.save_picture(&file).is_ok() {
+                lines.push(format!("window picture: {}", file.display()));
+            }
+        }
+    };
+    let mut auto_pressed = false;
     loop {
-        match form.next(50) {
-            Some(SetupAction::Install) => {
-                form.set_busy(true);
-                form.set_status(tr("Installing..."));
-                let result = install::install(&entries, &choices, lines);
-                form.set_busy(false);
-                match result {
-                    Ok(()) => {
-                        form.set_status(tr("Queqiao is installed. Find it in the Start menu."));
-                        lines.push("installed from the window".into());
+        let action = if options.ui_auto && !auto_pressed {
+            auto_pressed = true;
+            wizard.pump(300);
+            wizard.show_page(WizardPage::Location);
+            wizard.pump(300);
+            Some(WizardAction::Install {
+                folder: wizard.folder(),
+                desktop,
+                start_menu,
+            })
+        } else if options.ui_auto && outcome.is_some() {
+            auto_picture(&wizard, "finished", lines);
+            Some(WizardAction::Finish { open: false })
+        } else {
+            wizard.next(30)
+        };
+        match action {
+            Some(WizardAction::Install {
+                folder,
+                desktop,
+                start_menu,
+            }) if running.is_none() && outcome.is_none() => {
+                match install::check_folder(&folder, required) {
+                    Err(error) => wizard.set_error(&error),
+                    Ok(folder) => {
+                        wizard.set_error("");
+                        lines.push(format!(
+                            "installing from the window into {}",
+                            folder.display()
+                        ));
+                        let choices = install::Choices {
+                            folder,
+                            autostart: false,
+                            service: true,
+                            desktop,
+                            start_menu,
+                        };
+                        let entries = entries.take().unwrap_or_default();
+                        let (sender, receiver) = std::sync::mpsc::channel();
+                        std::thread::Builder::new()
+                            .name("queqiao-install".into())
+                            .spawn(move || {
+                                let mut lines = Vec::new();
+                                let progress = sender.clone();
+                                let result = install::install(
+                                    &entries,
+                                    &choices,
+                                    &mut lines,
+                                    &mut |percent, step| {
+                                        let _ = progress.send(Step::Progress(percent, step));
+                                    },
+                                );
+                                let _ = sender.send(Step::Done(result, lines));
+                            })
+                            .map_err(|e| e.to_string())?;
+                        running = Some(receiver);
+                        wizard.start_installing();
+                        if options.ui_auto {
+                            auto_picture(&wizard, "installing", lines);
+                        }
                     }
-                    Err(error) => form.set_status(&error),
                 }
             }
-            Some(SetupAction::Cancel) => return Ok(()),
-            None => {}
+            Some(WizardAction::FolderChanged) if wizard.page() == WizardPage::Location => {
+                wizard.set_error("");
+                wizard.set_space(&space(&wizard.folder()));
+            }
+            Some(WizardAction::Finish { open }) => {
+                if open {
+                    open_queqiao(lines);
+                }
+                return match outcome {
+                    Some(Err(error)) => {
+                        FAILURE_SHOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+                        Err(error)
+                    }
+                    _ => Ok(()),
+                };
+            }
+            Some(WizardAction::Cancel) => {
+                lines.push("not installed (cancelled)".into());
+                return Ok(());
+            }
+            _ => {}
+        }
+        if let Some(receiver) = &running {
+            while let Ok(step) = receiver.try_recv() {
+                match step {
+                    Step::Progress(percent, text) => wizard.progress(percent, &text),
+                    Step::Done(result, install_lines) => {
+                        lines.extend(install_lines);
+                        if result.is_ok() {
+                            lines.push("installed from the window".into());
+                        }
+                        wizard.finished(result.clone().map_err(|error| shown_error(&error)));
+                        outcome = Some(result);
+                    }
+                }
+            }
+            if outcome.is_some() {
+                running = None;
+            }
         }
     }
+}
+
+/// How a failed install reads in the window: Windows' permission for the service not given (its prompt declined,
+/// the commonest) in the person's words with what to do; the installer's own text below as the details.
+fn shown_error(error: &str) -> String {
+    let details = trf("Details: {error}", &[("error", error)]);
+    if error.starts_with("the service was not installed") {
+        format!(
+            "{}\n\n{details}",
+            tr(
+                "Windows did not allow the Queqiao service (the administrator's permission was not given), so nothing was installed. Run the installer again and choose Yes when Windows asks."
+            )
+        )
+    } else {
+        details
+    }
+}
+
+/// `--ui-picture <file>`: each page drawn as it would be (nothing installed): the welcome page in `file`, the others
+/// beside it as <name>-location, -installing, -finished and -failed.
+fn wizard_pictures(
+    wizard: &queqiao_display::SetupWizard,
+    path: &std::path::Path,
+    lines: &mut Vec<String>,
+) -> Result<(), String> {
+    use queqiao_display::WizardPage;
+    let settle = |ms: u64| {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < until {
+            wizard.pump(20);
+        }
+    };
+    let mut save = |suffix: &str| -> Result<(), String> {
+        let file = if suffix.is_empty() {
+            path.to_path_buf()
+        } else {
+            let stem = path.file_stem().map_or_else(
+                || "setup".into(),
+                |stem| stem.to_string_lossy().into_owned(),
+            );
+            path.with_file_name(format!("{stem}-{suffix}.bmp"))
+        };
+        settle(500);
+        wizard
+            .save_picture(&file)
+            .map_err(|e| format!("{}: {e}", file.display()))?;
+        lines.push(format!("window picture: {}", file.display()));
+        Ok(())
+    };
+    save("")?;
+    wizard.show_page(WizardPage::Location);
+    save("location")?;
+    wizard.start_installing();
+    for (percent, step) in [
+        (2, tr("Closing Queqiao...").to_string()),
+        (
+            12,
+            trf("Copying {file}...", &[("file", "queqiao-viewer.exe")]),
+        ),
+        (
+            30,
+            trf("Copying {file}...", &[("file", "queqiao-agent.exe")]),
+        ),
+        (
+            46,
+            trf("Copying {file}...", &[("file", "queqiao-service.exe")]),
+        ),
+        (64, tr("Installing the Queqiao service...").to_string()),
+    ] {
+        wizard.progress(percent, &step);
+    }
+    save("installing")?;
+    wizard.finished(Ok(()));
+    save("finished")?;
+    wizard.finished(Err(shown_error(
+        "the service was not installed: The operation was canceled by the user: nothing was installed",
+    )));
+    save("failed")?;
+    Ok(())
+}
+
+/// Queqiao's main window: the agent's own (`--show`), from the person's installation (the running agent, the
+/// service's, shows itself when asked).
+fn open_queqiao(lines: &mut Vec<String>) {
+    use std::os::windows::process::CommandExt;
+    let agent = install::target().join(install::PROGRAMS[1]);
+    let started = std::process::Command::new(&agent)
+        .arg("--show")
+        .current_dir(agent.parent().unwrap_or(&agent))
+        .creation_flags(0x0000_0008) // DETACHED_PROCESS
+        .spawn();
+    lines.push(match started {
+        Ok(_) => "Queqiao opened".into(),
+        Err(error) => format!("Queqiao not opened: {error}"),
+    });
 }
 
 fn uninstall(options: &Options, lines: &mut Vec<String>) -> Result<(), String> {

@@ -419,8 +419,8 @@ fn viewer_program() -> Option<PathBuf> {
     if here.is_file() {
         return Some(here);
     }
-    let theirs = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
-        .join(r"Programs\Queqiao\queqiao-viewer.exe");
+    // The person's own installation, wherever they chose to put it.
+    let theirs = queqiao_core::platform::installation_folder().join("queqiao-viewer.exe");
     theirs.is_file().then_some(theirs)
 }
 

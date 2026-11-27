@@ -10,7 +10,9 @@
 //! - `--install-service`: run as an administrator (UAC) by the install when the service is chosen: the service and
 //!   its agent from this installer's own files, through a folder in Program Files (install::install_service).
 //! - `--remove-service`: run as an administrator by `--uninstall` when the service is installed.
-//! - `--ui-picture <file>`: shows the window, saves a picture of it and leaves without installing (tests).
+//! - `--ui-picture <file>`: shows the window, saves a picture of each page and leaves without installing (tests).
+//! - `--ui-auto [--report <file>]`: the window goes through its pages by itself (Install, then Finish) with what it
+//!   suggests: an install through the window as a person's clicks would make it (tests; pictures beside the report).
 //! - `pack --output <installer> <file>...`: this program with those files as its resource (they are installed; see
 //!   payload); sign the result afterwards (scripts\package.ps1).
 //! - `release-key --output <file>`: a new release key, DPAPI-encrypted for the person running this; prints its

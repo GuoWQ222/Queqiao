@@ -1030,7 +1030,7 @@ pub(crate) fn rounded(dc: HDC, area: &RECT, round: i32, color: u32) {
 }
 
 /// A rounded rectangle with a 1-pixel border.
-fn outlined(dc: HDC, area: &RECT, round: i32, color: u32, border: u32) {
+pub(crate) fn outlined(dc: HDC, area: &RECT, round: i32, color: u32, border: u32) {
     rounded(dc, area, round, border);
     let inner = RECT {
         left: area.left + 1,

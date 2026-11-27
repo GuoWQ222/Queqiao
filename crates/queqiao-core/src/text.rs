@@ -428,6 +428,120 @@ const CHINESE: &[(&str, &str)] = &[
         "Queqiao will be installed on this PC: its programs in {folder}, and the Queqiao service, which starts Queqiao with Windows and lets a session show the sign-in, lock and UAC screens. Windows will ask once for an administrator to allow the service.",
         "鹊桥将安装在这台电脑上：程序位于 {folder}，并安装鹊桥服务。鹊桥服务会随 Windows 启动鹊桥，并让远程会话能看到登录、锁屏和 UAC 界面。Windows 会请求一次管理员权限以允许安装该服务。",
     ),
+    // The installer's wizard (2026-11-27).
+    ("< Back", "< 上一步"),
+    ("Next >", "下一步 >"),
+    ("Browse...", "浏览……"),
+    ("Finish", "完成"),
+    ("Welcome", "欢迎"),
+    ("Location", "安装位置"),
+    ("Setup", "安装程序"),
+    ("Queqiao Setup", "鹊桥 安装"),
+    ("Welcome to Queqiao", "欢迎使用 鹊桥"),
+    (
+        "This wizard installs Queqiao on this PC.",
+        "本向导将在这台电脑上安装鹊桥。",
+    ),
+    (
+        "Queqiao lets you use your own computers from anywhere, and lets someone you trust help you.",
+        "鹊桥让你随时随地使用自己的电脑，也能让你信任的人远程帮助你。",
+    ),
+    (
+        "It installs the Queqiao service too, so that the sign-in, lock and UAC screens can be shown in a session. Windows will ask once for an administrator's permission.",
+        "同时会安装鹊桥服务，使远程会话能显示登录、锁屏和 UAC 界面。Windows 会请求一次管理员权限。",
+    ),
+    ("Click Next to continue.", "点击“下一步”继续。"),
+    ("Choose where to install", "选择安装位置"),
+    (
+        "Queqiao's programs go into this folder.",
+        "鹊桥的程序将安装到这个文件夹。",
+    ),
+    ("Install to", "安装到"),
+    (
+        "Queqiao is installed here already: an update keeps its folder.",
+        "鹊桥已安装在这里：更新时保持原安装目录。",
+    ),
+    (
+        "Space needed: {needed}  ·  available: {free}",
+        "所需空间：{needed}  ·  可用空间：{free}",
+    ),
+    ("Create a desktop shortcut", "创建桌面快捷方式"),
+    ("Add Queqiao to the Start menu", "添加到开始菜单"),
+    (
+        "The Queqiao service is installed too (sign-in, lock and UAC screens in a session). Windows asks once for an administrator's permission.",
+        "同时安装鹊桥服务，让会话中能看到登录、锁屏和 UAC 界面；Windows 会请求一次管理员权限。",
+    ),
+    ("Choose a folder for Queqiao", "为鹊桥选择文件夹"),
+    ("Installing", "正在安装"),
+    (
+        "Please wait while Queqiao is installed.",
+        "正在安装鹊桥，请稍候。",
+    ),
+    ("Preparing...", "正在准备……"),
+    ("Closing Queqiao...", "正在关闭鹊桥……"),
+    ("Copying {file}...", "正在复制 {file}……"),
+    ("Installing the Queqiao service...", "正在安装鹊桥服务……"),
+    ("Starting Queqiao...", "正在启动鹊桥……"),
+    ("Adding Queqiao to Windows...", "正在将鹊桥添加到 Windows……"),
+    ("Making shortcuts...", "正在创建快捷方式……"),
+    ("Done.", "完成。"),
+    ("Queqiao is installed", "鹊桥已安装"),
+    (
+        "Find it in the Start menu or on the desktop.",
+        "可在开始菜单或桌面上找到它。",
+    ),
+    (
+        "Queqiao and its service are running, and start with Windows.",
+        "鹊桥及其服务已在运行，并会随 Windows 启动。",
+    ),
+    ("Open Queqiao now", "立即打开鹊桥"),
+    ("Queqiao was not installed", "鹊桥未能安装"),
+    (
+        "Nothing of it was left half done.",
+        "没有留下安装了一半的文件。",
+    ),
+    ("Choose a folder for Queqiao.", "请为鹊桥选择一个文件夹。"),
+    (
+        "Choose a folder on a drive of this PC, such as C:\\Queqiao.",
+        "请选择这台电脑磁盘上的文件夹，例如 C:\\Queqiao。",
+    ),
+    (
+        "Choose a folder, not a whole drive.",
+        "请选择一个文件夹，而不是整个磁盘。",
+    ),
+    (
+        "That is not a folder name Windows can use.",
+        "Windows 不能使用这个文件夹名称。",
+    ),
+    (
+        "Queqiao must go on a fixed drive of this PC, not a network or removable one.",
+        "鹊桥必须安装在这台电脑的本地磁盘上，不能是网络或移动磁盘。",
+    ),
+    (
+        "Queqiao is installed in {folder}. To install it elsewhere, uninstall it first.",
+        "鹊桥已安装在 {folder}。如需安装到别处，请先卸载。",
+    ),
+    (
+        "A file has that name. Choose a folder.",
+        "这里有一个同名文件，请选择一个文件夹。",
+    ),
+    (
+        "This folder holds other files. Choose an empty folder or a new one.",
+        "这个文件夹中有其他文件。请选择一个空文件夹或新文件夹。",
+    ),
+    (
+        "You cannot write to this folder without an administrator. Choose a folder of your own, such as the one suggested.",
+        "没有管理员权限无法写入这个文件夹。请选择你自己的文件夹，例如建议的位置。",
+    ),
+    (
+        "There is not enough room on {drive}: {needed} needed, {free} free.",
+        "{drive} 空间不足：需要 {needed}，可用 {free}。",
+    ),
+    (
+        "Windows did not allow the Queqiao service (the administrator's permission was not given), so nothing was installed. Run the installer again and choose Yes when Windows asks.",
+        "Windows 没有允许安装鹊桥服务（未获得管理员权限），因此没有安装任何内容。请重新运行安装程序，并在 Windows 询问时选择“是”。",
+    ),
+    ("Details: {error}", "详细信息：{error}"),
     ("Installing...", "正在安装……"),
     (
         "Queqiao is installed. Find it in the Start menu.",

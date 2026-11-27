@@ -508,6 +508,45 @@ fn machine_folder(key: &str, value: &str) -> Option<std::path::PathBuf> {
     (!text.contains('%') && text.len() > 3).then(|| std::path::PathBuf::from(text))
 }
 
+/// Where queqiao-setup puts Queqiao when the person keeps its suggestion: `%LOCALAPPDATA%\Programs\Queqiao`.
+pub fn default_installation_folder() -> std::path::PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Users\Public\AppData\Local"))
+        .join("Programs")
+        .join("Queqiao")
+}
+
+/// Where this person's Queqiao is installed (the folder chosen in queqiao-setup, 2026-11-27): the Apps entry's
+/// InstallLocation (HKCU ...\Uninstall\Queqiao) when it holds queqiao-setup.exe, else the default folder. The agent's
+/// updates and its viewer are found there.
+pub fn installation_folder() -> std::path::PathBuf {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    use windows::core::w;
+    let mut buffer = [0u16; 1024];
+    let mut size = (buffer.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Queqiao"),
+            w!("InstallLocation"),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status.is_ok() {
+        let length = (size as usize / 2).min(buffer.len());
+        let text = String::from_utf16_lossy(&buffer[..length]);
+        let folder = std::path::PathBuf::from(text.trim_end_matches('\0'));
+        if folder.is_absolute() && folder.join("queqiao-setup.exe").is_file() {
+            return folder;
+        }
+    }
+    default_installation_folder()
+}
+
 /// Where crash reports go: %APPDATA%\Queqiao\crashes.
 pub fn crash_folder() -> Option<std::path::PathBuf> {
     std::env::var_os("APPDATA").map(|folder| {

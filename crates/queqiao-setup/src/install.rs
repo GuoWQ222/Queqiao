@@ -49,13 +49,20 @@ const SERVICE_KEY: &str = r"SYSTEM\CurrentControlSet\Services\Queqiao";
 const LINK_KEY: &str = r"Software\Classes\queqiao";
 
 pub struct Choices {
+    /// Where the programs go (the person's choice in the window; [`target`] for an update).
+    pub folder: PathBuf,
     pub autostart: bool,
     pub service: bool,
+    /// A shortcut on the desktop, and one in the Start menu.
+    pub desktop: bool,
+    pub start_menu: bool,
 }
 
-/// What an update keeps: start with Windows if the Run key starts this installation's agent; the service as it is.
+/// What an update keeps: its folder, start with Windows if the Run key starts this installation's agent, the
+/// shortcuts there are; the service as it is.
 pub fn current_choices() -> Choices {
-    let agent = target()
+    let folder = target();
+    let agent = folder
         .join(PROGRAMS[1])
         .display()
         .to_string()
@@ -64,8 +71,262 @@ pub fn current_choices() -> Choices {
         autostart: read_value(RUN_KEY, RUN_VALUE)
             .is_some_and(|command| command.to_ascii_lowercase().contains(&agent)),
         service: false,
+        desktop: desktop_shortcut().is_some_and(|link| link.is_file()),
+        // An installation from before the choice always had it.
+        start_menu: shortcut().is_file() || !folder.join(SETUP).is_file(),
+        folder,
     }
 }
+
+/// Whether Queqiao is installed for this person (where [`target`] says), and its version.
+pub fn installed() -> Option<String> {
+    target()
+        .join(SETUP)
+        .is_file()
+        .then(|| read_value(UNINSTALL_KEY, "DisplayVersion").unwrap_or_else(|| "?".into()))
+}
+
+/// How much room the programs take (the files this installer carries, and itself).
+pub fn required_bytes(entries: &[Entry]) -> u64 {
+    let me = std::env::current_exe()
+        .ok()
+        .and_then(|me| std::fs::metadata(me).ok())
+        .map_or(0, |meta| meta.len());
+    entries
+        .iter()
+        .map(|entry| entry.bytes.len() as u64)
+        .sum::<u64>()
+        + me
+}
+
+/// The folder typed or chosen in the window, checked: a folder on a fixed drive of this PC (not a whole drive, not a
+/// network or removable one), that this person may write to without an administrator, with room for `required`
+/// bytes, and empty or an earlier installation (an uninstall removes what it put there; a folder holding other files
+/// is refused so nothing of the person's could be mixed in). Queqiao already installed elsewhere stays there. The
+/// folder as it will be used, or why not (in the person's language).
+pub fn check_folder(text: &str, required: u64) -> Result<PathBuf, String> {
+    use queqiao_core::text::{tr, trf};
+    let text = text.trim().trim_matches('"').trim().replace('/', "\\");
+    let text = text.trim_end_matches('\\');
+    if text.is_empty() {
+        return Err(tr("Choose a folder for Queqiao.").into());
+    }
+    let bytes = text.as_bytes();
+    let has_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if !has_drive || bytes.get(2).is_some_and(|byte| *byte != b'\\') {
+        return Err(tr("Choose a folder on a drive of this PC, such as C:\\Queqiao.").into());
+    }
+    if text.len() <= 2 {
+        return Err(tr("Choose a folder, not a whole drive.").into());
+    }
+    if text.contains("\\..") || text.contains("\\.\\") || text.contains(['*', '?', '<', '>', '|']) {
+        return Err(tr("That is not a folder name Windows can use.").into());
+    }
+    let folder = PathBuf::from(text);
+    let root = format!("{}\\", &text[..2]);
+    if drive_type(&root) != Some(DRIVE_FIXED) {
+        return Err(tr(
+            "Queqiao must go on a fixed drive of this PC, not a network or removable one.",
+        )
+        .into());
+    }
+    let current = target();
+    if current.join(SETUP).is_file() && !same_folder(&current, &folder) {
+        return Err(trf(
+            "Queqiao is installed in {folder}. To install it elsewhere, uninstall it first.",
+            &[("folder", &current.display().to_string())],
+        ));
+    }
+    if folder.exists() {
+        if !folder.is_dir() {
+            return Err(tr("A file has that name. Choose a folder.").into());
+        }
+        let ours = folder.join(SETUP).is_file();
+        let empty = std::fs::read_dir(&folder).is_ok_and(|mut files| files.next().is_none());
+        if !ours && !empty {
+            return Err(
+                tr("This folder holds other files. Choose an empty folder or a new one.").into(),
+            );
+        }
+    }
+    if !writable(&folder) {
+        return Err(tr(
+            "You cannot write to this folder without an administrator. Choose a folder of your own, such as the one suggested.",
+        )
+        .into());
+    }
+    if let Some(free) = free_bytes(&folder)
+        && free < required + required / 4
+    {
+        return Err(trf(
+            "There is not enough room on {drive}: {needed} needed, {free} free.",
+            &[
+                ("drive", &text[..2]),
+                ("needed", &size_text(required)),
+                ("free", &size_text(free)),
+            ],
+        ));
+    }
+    Ok(folder)
+}
+
+/// "26 MB", "1.4 GB".
+pub fn size_text(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{} MB", mb.ceil() as u64)
+    }
+}
+
+/// The free room for `folder` (on its drive), if Windows says.
+pub fn free_bytes(folder: &Path) -> Option<u64> {
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let existing = folder.ancestors().find(|path| path.exists())?;
+    let path = wide(&existing.display().to_string());
+    let mut free = 0u64;
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(path.as_ptr()), Some(&mut free), None, None) }.ok()?;
+    Some(free)
+}
+
+const DRIVE_FIXED: u32 = 3;
+
+fn drive_type(root: &str) -> Option<u32> {
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    let root = wide(root);
+    Some(unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) })
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let name = |path: &Path| {
+        path.display()
+            .to_string()
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    name(a) == name(b)
+}
+
+/// Whether this person may make `folder` (or write in it): a folder of a test made and removed where it would go.
+fn writable(folder: &Path) -> bool {
+    let Some(existing) = folder.ancestors().find(|path| path.is_dir()) else {
+        return false;
+    };
+    let probe = existing.join(format!("queqiao-setup-check-{}", std::process::id()));
+    let made = std::fs::create_dir(&probe).is_ok();
+    if made {
+        let _ = std::fs::remove_dir(&probe);
+    }
+    made
+}
+
+/// Only this person, SYSTEM and the administrators may change the programs (a folder chosen outside the person's own
+/// would otherwise take the place's permissions: under C:\ every signed-in user may change new files, and another user
+/// of this PC could replace the agent that starts at this person's sign-in).
+fn protect_folder(folder: &Path) -> Result<(), String> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    };
+    use windows::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+        TokenUser,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| format!("permissions: {}", e.message()))?;
+        let mut buffer = vec![0u8; 256];
+        let mut length = 0u32;
+        let got = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            buffer.len() as u32,
+            &mut length,
+        );
+        let _ = CloseHandle(token);
+        got.map_err(|e| format!("permissions: {}", e.message()))?;
+        let user = &*(buffer.as_ptr().cast::<TOKEN_USER>());
+        let mut sid_text = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut sid_text)
+            .map_err(|e| format!("permissions: {}", e.message()))?;
+        let sid = sid_text.to_string().unwrap_or_default();
+        let _ = LocalFree(Some(HLOCAL(sid_text.0.cast())));
+        // Full control for SYSTEM, the administrators and this person, inherited by everything inside; nothing else.
+        let sddl = wide(&format!(
+            "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
+        ));
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(|e| format!("permissions: {}", e.message()))?;
+        let (mut present, mut defaulted) = (false.into(), false.into());
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let read = GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted);
+        let path = wide(&folder.display().to_string());
+        let set = read.map_err(|e| e.message()).and_then(|()| {
+            SetNamedSecurityInfoW(
+                PCWSTR(path.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(dacl),
+                None,
+            )
+            .ok()
+            .map_err(|e| e.message())
+        });
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        set.map_err(|e| format!("permissions of {}: {e}", folder.display()))
+    }
+}
+
+/// The desktop's Queqiao shortcut (the person's desktop folder, wherever Windows keeps it).
+fn desktop_shortcut() -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Desktop, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_Desktop, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let folder = path.to_string().ok();
+        CoTaskMemFree(Some(path.0.cast()));
+        folder.map(|folder| PathBuf::from(folder).join("Queqiao.lnk"))
+    }
+}
+
+/// The earlier installation's place while the new one goes in ("Queqiao" -> "Queqiao.old").
+fn old_folder(target: &Path) -> PathBuf {
+    let name = target.file_name().map_or_else(
+        || "Queqiao".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    target.with_file_name(format!("{name}.old"))
+}
+
+/// What an installation puts in its folder (removed again by an uninstall, nothing else).
+fn installed_files(entries: &[Entry]) -> Vec<String> {
+    let mut names: Vec<String> = PROGRAMS.iter().map(|name| name.to_string()).collect();
+    names.push(SETUP.into());
+    names.extend(["LICENSE".to_string(), "THIRD_PARTY_NOTICES.md".to_string()]);
+    for entry in entries {
+        if !names.contains(&entry.name) {
+            names.push(entry.name.clone());
+        }
+    }
+    names
+}
+
+/// A step of the install for the window: how far (0 to 100) and what it does now (in the person's language).
+pub type Progress<'a> = &'a mut dyn FnMut(u32, String);
 
 /// How long a new agent must keep running to count as started.
 const START_WATCH: Duration = Duration::from_secs(8);
@@ -83,11 +344,10 @@ fn known(variable: &str, fallback: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(fallback))
 }
 
-/// Where the programs go: `%LOCALAPPDATA%\Programs\Queqiao`.
+/// Where this person's Queqiao is (the folder chosen when it was installed), or goes by default:
+/// `%LOCALAPPDATA%\Programs\Queqiao`.
 pub fn target() -> PathBuf {
-    known("LOCALAPPDATA", r"C:\Users\Public\AppData\Local")
-        .join("Programs")
-        .join("Queqiao")
+    queqiao_core::platform::installation_folder()
 }
 
 fn shortcut() -> PathBuf {
@@ -105,24 +365,44 @@ pub fn install(
     entries: &[Entry],
     choices: &Choices,
     lines: &mut Vec<String>,
+    progress: Progress,
 ) -> Result<(), String> {
+    use queqiao_core::text::tr;
     for program in PROGRAMS {
         if !entries.iter().any(|entry| entry.name == program) {
             return Err(format!("this installer does not carry {program}"));
         }
     }
-    let target = target();
+    let target = choices.folder.clone();
+    let installed_at = self::target();
+    if installed_at.join(SETUP).is_file() && !same_folder(&installed_at, &target) {
+        return Err(format!(
+            "Queqiao is installed in {}: uninstall it first to install it elsewhere",
+            installed_at.display()
+        ));
+    }
+    progress(2, tr("Closing Queqiao...").into());
     stop_running(&target, lines);
-    let old = target.with_file_name("Queqiao.old");
+    let old = old_folder(&target);
     if old.exists() {
+        // Only what an earlier install left there (never a folder of the person's that has the name).
+        if !old.join(SETUP).is_file() {
+            return Err(format!(
+                "{} is in the way (it is not an earlier Queqiao): move or remove it",
+                old.display()
+            ));
+        }
         std::fs::remove_dir_all(&old).map_err(|e| format!("{}: {e}", old.display()))?;
     }
-    let had_earlier = target.exists();
+    let had_earlier = target.join(SETUP).is_file();
     if had_earlier {
         std::fs::rename(&target, &old)
             .map_err(|e| format!("keeping the earlier installation: {e}"))?;
+    } else if target.exists() {
+        // An empty folder the person chose (check_folder): Queqiao's own one replaces it.
+        std::fs::remove_dir(&target).map_err(|e| format!("{}: {e}", target.display()))?;
     }
-    if let Err(error) = place(entries, &target) {
+    if let Err(error) = place(entries, &target, progress) {
         let _ = std::fs::remove_dir_all(&target);
         if had_earlier {
             let _ = std::fs::rename(&old, &target);
@@ -142,6 +422,7 @@ pub fn install(
     if choices.service && service_is_current(entries) {
         lines.push("the Queqiao service has this version already".into());
     } else if choices.service {
+        progress(64, tr("Installing the Queqiao service...").into());
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
         let failed = match run_elevated(&me, "--install-service") {
             Ok(0) => {
@@ -163,7 +444,9 @@ pub fn install(
     // Queqiao for this person now. The new agent must keep running: an update goes back to the earlier version if
     // it does not.
     let agent = target.join(PROGRAMS[1]);
-    let started = start_and_watch(&agent);
+    let started = start_and_watch(&agent, &mut |part| {
+        progress(70 + (part * 20.0) as u32, tr("Starting Queqiao...").into())
+    });
     match &started {
         Ok(note) => lines.push(note.clone()),
         Err(error) if had_earlier => {
@@ -177,6 +460,7 @@ pub fn install(
         lines.push("the earlier installation was replaced".into());
     }
 
+    progress(92, tr("Adding Queqiao to Windows...").into());
     let setup = target.join(SETUP);
     let size_kb = entries
         .iter()
@@ -210,9 +494,22 @@ pub fn install(
     set_value(UNINSTALL_KEY, "NoRepair", Value::Number(1))?;
     lines.push("listed under Settings > Apps (uninstall there)".into());
 
-    // The Start menu opens Queqiao's main window: the agent's (the one running already shows its own).
-    make_shortcut(&shortcut(), &target.join(PROGRAMS[1]), "--show")?;
-    lines.push(format!("Start menu: {}", shortcut().display()));
+    // The shortcuts open Queqiao's main window: the agent's (the one running already shows its own).
+    progress(96, tr("Making shortcuts...").into());
+    if choices.start_menu {
+        make_shortcut(&shortcut(), &target.join(PROGRAMS[1]), "--show")?;
+        lines.push(format!("Start menu: {}", shortcut().display()));
+    } else {
+        let _ = std::fs::remove_file(shortcut());
+    }
+    if let Some(link) = desktop_shortcut() {
+        if choices.desktop {
+            make_shortcut(&link, &target.join(PROGRAMS[1]), "--show")?;
+            lines.push(format!("desktop: {}", link.display()));
+        } else {
+            let _ = std::fs::remove_file(&link);
+        }
+    }
 
     // Help invitation links: only fill in the help form (connecting is the person's click).
     let viewer = target.join(PROGRAMS[0]).display().to_string();
@@ -243,11 +540,13 @@ pub fn install(
     }
 
     // Installed, but Queqiao is not running: said, so it is not taken for a success.
+    progress(100, tr("Done.").into());
     started.map(|_| ())
 }
 
 /// Starts the agent and watches it for [`START_WATCH`]: still running then, or ended on purpose, is a start.
-fn start_and_watch(agent: &Path) -> Result<String, String> {
+/// `watched` hears how much of the watch has gone (0 to 1).
+fn start_and_watch(agent: &Path, watched: &mut dyn FnMut(f64)) -> Result<String, String> {
     let mut child = std::process::Command::new(agent)
         .current_dir(agent.parent().unwrap_or(agent))
         .creation_flags(DETACHED_PROCESS.0)
@@ -271,7 +570,11 @@ fn start_and_watch(agent: &Path) -> Result<String, String> {
                     )),
                 };
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Ok(None) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                watched(1.0 - left.as_secs_f64() / START_WATCH.as_secs_f64());
+                std::thread::sleep(Duration::from_millis(200))
+            }
             Err(error) => return Err(error.to_string()),
         }
     }
@@ -319,7 +622,7 @@ fn put_back(target: &Path, old: &Path, lines: &mut Vec<String>) -> Result<(), St
     remove_folder(target);
     std::fs::rename(old, target).map_err(|problem| problem.to_string())?;
     lines.push("the earlier version is back".into());
-    match start_and_watch(&target.join(PROGRAMS[1])) {
+    match start_and_watch(&target.join(PROGRAMS[1]), &mut |_| {}) {
         Ok(note) => lines.push(format!("earlier version: {note}")),
         Err(problem) => lines.push(format!(
             "the earlier agent did not keep running either: {problem}"
@@ -336,13 +639,28 @@ fn remove_folder(folder: &Path) {
     }
 }
 
-fn place(entries: &[Entry], target: &Path) -> Result<(), String> {
+fn place(entries: &[Entry], target: &Path, progress: Progress) -> Result<(), String> {
+    use queqiao_core::text::trf;
     std::fs::create_dir_all(target).map_err(|e| format!("{}: {e}", target.display()))?;
+    // Before anything goes in: the programs inherit the folder's permissions.
+    protect_folder(target)?;
+    let total = entries
+        .iter()
+        .map(|entry| entry.bytes.len() as u64)
+        .sum::<u64>()
+        .max(1);
+    let mut done = 0u64;
     for entry in entries {
+        progress(
+            5 + (done * 55 / total) as u32,
+            trf("Copying {file}...", &[("file", &entry.name)]),
+        );
         let path = target.join(&entry.name);
         std::fs::write(&path, &entry.bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        done += entry.bytes.len() as u64;
     }
     // This installer stays with the programs (to uninstall); not when it already runs from there.
+    progress(60, trf("Copying {file}...", &[("file", SETUP)]));
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let setup = target.join(SETUP);
     if !same_file(&me, &setup) {
@@ -413,6 +731,9 @@ pub fn uninstall(lines: &mut Vec<String>) -> Result<(), String> {
         delete_value(RUN_KEY, RUN_VALUE)?;
     }
     let _ = std::fs::remove_file(shortcut());
+    if let Some(link) = desktop_shortcut() {
+        let _ = std::fs::remove_file(link);
+    }
     delete_tree(UNINSTALL_KEY)?;
     delete_tree(LINK_KEY)?;
     // Downloaded updates.
@@ -422,19 +743,19 @@ pub fn uninstall(lines: &mut Vec<String>) -> Result<(), String> {
     }
     lines.push("the Start menu shortcut and the Apps entry are removed".into());
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Only what the install put there (the folder may be one the person chose; anything else of theirs stays).
+    let names = installed_files(&crate::payload::own().unwrap_or_default());
     // A program that just ended may hold its file a moment longer.
     let deadline = Instant::now() + Duration::from_secs(5);
     let left = loop {
         let mut left = Vec::new();
-        if let Ok(files) = std::fs::read_dir(&target) {
-            for file in files.flatten() {
-                let path = file.path();
-                if same_file(&path, &me) {
-                    continue;
-                }
-                if std::fs::remove_file(&path).is_err() {
-                    left.push(path.display().to_string());
-                }
+        for name in &names {
+            let path = target.join(name);
+            if !path.exists() || same_file(&path, &me) {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_err() {
+                left.push(path.display().to_string());
             }
         }
         if left.is_empty() || Instant::now() >= deadline {
@@ -445,10 +766,12 @@ pub fn uninstall(lines: &mut Vec<String>) -> Result<(), String> {
     if !left.is_empty() {
         return Err(format!("still in use: {}", left.join(", ")));
     }
-    // This installer may run from the folder itself: the folder goes once it has ended.
+    // This installer may run from the folder itself: it goes, then the folder if nothing else is in it, once it has
+    // ended.
     if me.starts_with(&target) {
         let command = format!(
-            "/c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{}\"",
+            "/c ping -n 3 127.0.0.1 >nul & del /f /q \"{}\" & rmdir \"{}\"",
+            me.display(),
             target.display()
         );
         let _ = std::process::Command::new("cmd.exe")
