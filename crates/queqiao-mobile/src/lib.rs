@@ -801,6 +801,7 @@ impl Engine {
             event @ (PeerEvent::NetworkChanged
             | PeerEvent::Disconnected
             | PeerEvent::Reconnected
+            | PeerEvent::Stalled
             | PeerEvent::Regathered
             | PeerEvent::RestartSdp(_)) => {
                 if let Some(account) = self.account.as_mut() {

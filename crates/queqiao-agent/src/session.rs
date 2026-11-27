@@ -3,6 +3,7 @@
 //! differs per system comes through `crate::platform` (Windows: win.rs; Linux: linux.rs) and the platform layers
 //! of the crates; moved from win.rs.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,71 @@ pub(crate) const BANDWIDTH_SHARE: f64 = 0.85;
 pub(crate) fn adapted_bitrate(estimate: u64, max: u32) -> u32 {
     ((estimate as f64 * BANDWIDTH_SHARE) as u64)
         .clamp(u64::from(MIN_BITRATE), u64::from(max.max(MIN_BITRATE))) as u32
+}
+
+/// The encoders give each frame its share of their bitrate at the frame rate they were made for (oneVPL's
+/// FrameRateExtN, NVENC's frameRateNum): a screen changes fewer times a second (30 to 40 while a window is dragged,
+/// measured 2026-11-27 on sunshine), so they sent about 60 % of their target, and the bandwidth estimate, which stays
+/// near what is sent, followed it down to 0.5 Mbit/s: a picture too blurred to read over a link that carried 4 and more
+/// (0 lost, round trip steady; with the encoder made for 40 fps the same drag kept 2 to 5 Mbit/s). The target given to
+/// the encoder is raised by the rate it was made for over the frames it really encoded in the last second (at most
+/// RATE_FIT_MOST times), so what it sends is what the estimate allows.
+pub(crate) struct RateFit {
+    frames: VecDeque<Instant>,
+    factor: f64,
+    /// The highest factor used (the report).
+    pub(crate) highest: f64,
+}
+
+const RATE_FIT_MOST: f64 = 3.0;
+const RATE_FIT_WINDOW: Duration = Duration::from_secs(1);
+
+impl RateFit {
+    pub(crate) fn new() -> RateFit {
+        RateFit {
+            frames: VecDeque::new(),
+            factor: 1.0,
+            highest: 1.0,
+        }
+    }
+
+    /// A frame the encoder made.
+    pub(crate) fn frame(&mut self, now: Instant) {
+        self.frames.push_back(now);
+        if self.frames.len() > 1000 {
+            self.frames.pop_front();
+        }
+    }
+
+    /// The factor now, for an encoder made for `fps`: from the frames of the last second (a still screen, two frames
+    /// or fewer: 1).
+    pub(crate) fn update(&mut self, now: Instant, fps: u32) -> f64 {
+        while self
+            .frames
+            .front()
+            .is_some_and(|at| now.saturating_duration_since(*at) > RATE_FIT_WINDOW)
+        {
+            self.frames.pop_front();
+        }
+        let count = self.frames.len() as f64;
+        self.factor = if count <= 2.0 {
+            1.0
+        } else {
+            (f64::from(fps.max(1)) / count).clamp(1.0, RATE_FIT_MOST)
+        };
+        self.highest = self.highest.max(self.factor);
+        self.factor
+    }
+
+    /// The encoder's bitrate for `estimate`: the share of it the picture may use, raised by the factor.
+    pub(crate) fn target(&self, estimate: u64, max: u32) -> u32 {
+        (f64::from(adapted_bitrate(estimate, max)) * self.factor).min(f64::from(u32::MAX)) as u32
+    }
+
+    /// What an encoder set to `bitrate` really sends now.
+    pub(crate) fn effective(&self, bitrate: u32) -> u32 {
+        (f64::from(bitrate) / self.factor) as u32
+    }
 }
 
 /// A session that is not connected after this long is given up.
@@ -216,6 +282,7 @@ pub(crate) fn peer_event_name(event: &PeerEvent) -> &'static str {
         PeerEvent::NetworkChanged => "network changed",
         PeerEvent::Disconnected => "disconnected",
         PeerEvent::Reconnected => "reconnected",
+        PeerEvent::Stalled => "path stalled",
         PeerEvent::Regathered => "gathered again",
         PeerEvent::RestartSdp(_) => "restart description",
         PeerEvent::PathReport(_) => "path report",
@@ -805,6 +872,8 @@ pub(crate) fn session(
     let mut custom_bitrate: Option<u32> = None;
     let mut max_bitrate = size_bitrate;
     let mut last_estimate = START_BITRATE;
+    // The encoder's target follows the frames it really makes (RateFit).
+    let mut rate_fit = RateFit::new();
     peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
     let start_bitrate = adapted_bitrate(START_BITRATE, max_bitrate);
     if start_bitrate != encoder.bitrate()
@@ -852,6 +921,8 @@ pub(crate) fn session(
     };
     let mut clipboard_stats = ClipboardStats::default();
     let mut channel_open_at: Option<Instant> = None;
+    // What the viewer's session card was told of the encoder (Message::Encoder).
+    let mut announced_encoder: Option<(String, bool)> = None;
     // Files both ways while the person at this PC allows them; then also the viewer's file transfer window: it may
     // list this PC's folders, fetch from them and send into them (never at the sign-in screen, nor for someone of
     // another account unless files are allowed for helpers too).
@@ -890,7 +961,7 @@ pub(crate) fn session(
             max_bitrate = custom_bitrate
                 .unwrap_or(((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE));
             peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
-            let _ = encoder.set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
+            let _ = encoder.set_bitrate(rate_fit.target(last_estimate, max_bitrate));
             force_keyframe = true;
             waiting = Some((0, qpc_now()));
         }};
@@ -915,7 +986,7 @@ pub(crate) fn session(
         hold.tick(
             Instant::now(),
             stats.bytes,
-            encoder.bitrate(),
+            rate_fit.effective(encoder.bitrate()),
             last_estimate,
         );
         // The report: once a second for the first two minutes, the bandwidth estimate, the encoder's bitrate, what
@@ -925,7 +996,7 @@ pub(crate) fn session(
             course.push(format!(
                 "{:.1}/{:.1}/{:.1}@{:.0}{}",
                 last_estimate as f64 / 1e6,
-                f64::from(encoder.bitrate()) / 1e6,
+                f64::from(rate_fit.effective(encoder.bitrate())) / 1e6,
                 (stats.bytes - course_at.1) as f64 * 8.0 / seconds / 1e6,
                 f64::from(stats.sent - course_at.2) / seconds,
                 if stats.keyframes > course_at.3 {
@@ -959,6 +1030,23 @@ pub(crate) fn session(
             break;
         }
         restarter.step(&peer, signal, lines);
+        // The session card's encoding line (the user, 2026-11-27): once the channel is open, and when the encoder changes.
+        if channel_open_at.is_some() {
+            let current = (
+                picture_name(encoder.codec(), encoder.format()),
+                encoder.encoder().is_hardware(),
+            );
+            if announced_encoder.as_ref() != Some(&current) {
+                peer.send_data(
+                    Message::Encoder {
+                        picture: current.0.clone(),
+                        gpu: current.1,
+                    }
+                    .encode(),
+                );
+                announced_encoder = Some(current);
+            }
+        }
         // Once a second: a viewer taken out of the account, or this PC's login ended (the password was changed), ends
         // the session (as UU: a device taken out of the account is logged out).
         if trust_checked.elapsed() >= Duration::from_secs(1) {
@@ -1280,7 +1368,7 @@ pub(crate) fn session(
                             ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE),
                         );
                         peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
-                        let target = adapted_bitrate(last_estimate, max_bitrate);
+                        let target = rate_fit.target(last_estimate, max_bitrate);
                         let changed = encoder.set_bitrate(target).is_ok();
                         let notice = format!(
                             "picture: up to {frames} fps, quality {quality:?}: up to {:.1} Mbit/s{}",
@@ -1342,7 +1430,7 @@ pub(crate) fn session(
                                     u64::from(max_bitrate),
                                 );
                                 let _ = encoder
-                                    .set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
+                                    .set_bitrate(rate_fit.target(last_estimate, max_bitrate));
                                 format!(
                                     "picture size {}x{}",
                                     encoder.config().width,
@@ -1432,7 +1520,7 @@ pub(crate) fn session(
                                         u64::from(max_bitrate),
                                     );
                                     let _ = encoder
-                                        .set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
+                                        .set_bitrate(rate_fit.target(last_estimate, max_bitrate));
                                     lines.push(format!(
                                         "{} ms: the encoder for {} took {} ms to make",
                                         started.elapsed().as_millis(),
@@ -1561,7 +1649,7 @@ pub(crate) fn session(
                             ((f64::from(size_bitrate) * quality_factor) as u32).max(MIN_BITRATE),
                         );
                         peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
-                        let _ = encoder.set_bitrate(adapted_bitrate(last_estimate, max_bitrate));
+                        let _ = encoder.set_bitrate(rate_fit.target(last_estimate, max_bitrate));
                         // The screen's first picture goes at once.
                         force_keyframe = true;
                         waiting = Some((0, qpc_now()));
@@ -1592,7 +1680,7 @@ pub(crate) fn session(
                         );
                         peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
                         let changed = encoder
-                            .set_bitrate(adapted_bitrate(last_estimate, max_bitrate))
+                            .set_bitrate(rate_fit.target(last_estimate, max_bitrate))
                             .is_ok();
                         let notice = format!(
                             "bitrate: up to {:.1} Mbit/s{}",
@@ -1683,6 +1771,7 @@ pub(crate) fn session(
                 event @ (PeerEvent::NetworkChanged
                 | PeerEvent::Disconnected
                 | PeerEvent::Reconnected
+                | PeerEvent::Stalled
                 | PeerEvent::Regathered
                 | PeerEvent::RestartSdp(_)) => {
                     restarter.on_event(&event, &peer, signal, lines);
@@ -1698,7 +1787,7 @@ pub(crate) fn session(
                 }
                 PeerEvent::Bitrate(estimate) => {
                     last_estimate = estimate;
-                    let target = adapted_bitrate(estimate, max_bitrate);
+                    let target = rate_fit.target(estimate, max_bitrate);
                     let current = encoder.bitrate();
                     let big_enough = target.abs_diff(current) > current / 20;
                     let spaced =
@@ -2067,7 +2156,7 @@ pub(crate) fn session(
             && !gate.closed()
             && refresh.due(
                 Instant::now(),
-                motion.still(Instant::now(), encoder.bitrate()),
+                motion.still(Instant::now(), rate_fit.effective(encoder.bitrate())),
             )
         {
             force_keyframe = true;
@@ -2079,7 +2168,7 @@ pub(crate) fn session(
             && !gate.closed()
             && let Some((screen_time, captured_time)) = waiting.take()
         {
-            let budget_bitrate = encoder.bitrate();
+            let budget_bitrate = rate_fit.effective(encoder.bitrate());
             let frames = encoder
                 .encode(&latest, force_keyframe)
                 .map_err(|e| format!("encode: {}", describe(e)))?;
@@ -2098,7 +2187,7 @@ pub(crate) fn session(
                 if let Some(carried) = hold.changed(Instant::now(), last_estimate) {
                     peer.reset_bitrate(carried);
                     last_estimate = carried;
-                    let target = adapted_bitrate(carried, max_bitrate);
+                    let target = rate_fit.target(carried, max_bitrate);
                     if target != encoder.bitrate() && encoder.set_bitrate(target).is_ok() {
                         bitrate_changes += 1;
                         last_bitrate_change = Some(Instant::now());
@@ -2108,6 +2197,7 @@ pub(crate) fn session(
             for frame in frames {
                 let time_90khz = (frame.time.max(0) as u64) * 9 / 1000;
                 stats.sent += 1;
+                rate_fit.frame(Instant::now());
                 stats.bytes += frame.data.len();
                 stats.keyframes += u32::from(frame.keyframe);
                 if frame.keyframe {
@@ -2136,6 +2226,17 @@ pub(crate) fn session(
                     agent_ms: agent_ms as f32,
                 };
                 peer.send_data(info.encode());
+            }
+            // The encoder's target for the frames it really makes now (RateFit), changed when it is 10 % off.
+            rate_fit.update(Instant::now(), encoder.config().fps);
+            let target = rate_fit.target(last_estimate, max_bitrate);
+            let current = encoder.bitrate();
+            if target.abs_diff(current) > current / 10
+                && last_bitrate_change.is_none_or(|at| at.elapsed() >= BITRATE_CHANGE_GAP)
+                && encoder.set_bitrate(target).is_ok()
+            {
+                bitrate_changes += 1;
+                last_bitrate_change = Some(Instant::now());
             }
         }
         watch.mark("encode");
@@ -2258,6 +2359,11 @@ pub(crate) fn session(
         f64::from(lowest_bitrate) / 1e6,
         f64::from(encoder.bitrate()) / 1e6,
         f64::from(max_bitrate) / 1e6
+    ));
+    lines.push(format!(
+        "frame-rate fit: the encoder (made for {} fps) given up to {:.2} times its share, for the frames it really made",
+        encoder.config().fps,
+        rate_fit.highest
     ));
     lines.push(format!(
         "sharp pictures: the estimate started again from what the link carried {} times (held {:.1} Mbit/s at the end); {} keyframes of the still screen after motion",
@@ -2495,6 +2601,40 @@ fn tell_afterwards(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_encoder_target_follows_the_frames_really_made() {
+        let start = Instant::now();
+        let mut fit = RateFit::new();
+        // A still screen: the share alone.
+        assert_eq!(fit.update(start, 60), 1.0);
+        assert_eq!(
+            fit.target(4_000_000, 20_000_000),
+            adapted_bitrate(4_000_000, 20_000_000)
+        );
+        // A window dragged: 30 frames in the last second for an encoder made for 60 fps: twice the share, so it
+        // sends what the estimate allows.
+        for n in 0..30u64 {
+            fit.frame(start + Duration::from_millis(n * 33));
+        }
+        let now = start + Duration::from_millis(1000);
+        assert_eq!(fit.update(now, 60), 2.0);
+        let target = fit.target(4_000_000, 20_000_000);
+        assert_eq!(target, adapted_bitrate(4_000_000, 20_000_000) * 2);
+        assert_eq!(
+            fit.effective(target),
+            adapted_bitrate(4_000_000, 20_000_000)
+        );
+        // Few frames: at most three times.
+        let mut few = RateFit::new();
+        for n in 0..5u64 {
+            few.frame(start + Duration::from_millis(n * 200));
+        }
+        assert_eq!(few.update(start + Duration::from_millis(900), 60), 3.0);
+        // The frames age out: still again.
+        assert_eq!(fit.update(now + Duration::from_secs(2), 60), 1.0);
+        assert_eq!(fit.highest, 2.0);
+    }
 
     #[test]
     fn automatic_takes_the_best_codec_both_gpus_do() {

@@ -425,12 +425,8 @@ const CHINESE: &[(&str, &str)] = &[
     ("Install Queqiao", "安装鹊桥"),
     ("Install", "安装"),
     (
-        "Also at the sign-in, lock and UAC screens (installs the Queqiao service; needs an administrator)",
-        "在登录、锁屏和 UAC 界面也可控制（安装鹊桥服务，需要管理员）",
-    ),
-    (
-        "Queqiao will be installed for you on this PC, in {folder}. No administrator is needed for that.",
-        "鹊桥将为你安装在这台电脑的 {folder}，这一步不需要管理员。",
+        "Queqiao will be installed on this PC: its programs in {folder}, and the Queqiao service, which starts Queqiao with Windows and lets a session show the sign-in, lock and UAC screens. Windows will ask once for an administrator to allow the service.",
+        "鹊桥将安装在这台电脑上：程序位于 {folder}，并安装鹊桥服务。鹊桥服务会随 Windows 启动鹊桥，并让远程会话能看到登录、锁屏和 UAC 界面。Windows 会请求一次管理员权限以允许安装该服务。",
     ),
     ("Installing...", "正在安装……"),
     (
@@ -801,6 +797,8 @@ const CHINESE: &[(&str, &str)] = &[
     ("Singapore", "新加坡"),
     ("Data", "码率"),
     ("Codec", "编码"),
+    ("Encoding", "编码"),
+    ("Decoding", "解码"),
     ("Picture", "画面"),
     ("Time", "时长"),
     // The session bar and its control center (2026-11-25).

@@ -1,8 +1,9 @@
-//! Installing Queqiao for the person using this PC, without an administrator: the programs in
-//! `%LOCALAPPDATA%\Programs\Queqiao`, a Start menu shortcut to the device list (the viewer), an entry under Settings >
-//! Apps (to uninstall), the agent at sign-in if chosen (the Run key), and if chosen the Queqiao service for the
-//! sign-in, lock and UAC screens (Windows asks for an administrator once; the service copies its programs to
-//! `%ProgramFiles%\Queqiao`). An earlier installation is kept as `Queqiao.old` until the new one is in place, and put
+//! Installing Queqiao for the person using this PC: the programs in `%LOCALAPPDATA%\Programs\Queqiao`, a Start menu
+//! shortcut to the device list (the viewer), an entry under Settings > Apps (to uninstall), and the Queqiao service
+//! for the sign-in, lock and UAC screens, which also starts the agent at each sign-in (Windows asks for an
+//! administrator once; the service copies its programs to `%ProgramFiles%\Queqiao`). The service is not a choice
+//! (the user, 2026-11-27); only test builds install without it (`--no-service`, the agent at sign-in through the Run
+//! key if asked). An earlier installation is kept as `Queqiao.old` until the new one is in place, and put
 //! back if anything fails. Uninstalling takes all of it away again.
 
 use std::path::{Path, PathBuf};
@@ -134,8 +135,8 @@ pub fn install(
         entries.len()
     ));
 
-    // With the service chosen, it comes first: the agent started next leaves for the service's own. This installer
-    // itself runs as an administrator for it (install_service), never a program in the person's own folder.
+    // The service comes first: the agent started next leaves for the service's own. This installer itself runs as an
+    // administrator for it (install_service), never a program in the person's own folder.
     if choices.service {
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
         let failed = match run_elevated(&me, "--install-service") {

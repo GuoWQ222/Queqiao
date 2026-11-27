@@ -468,8 +468,10 @@ fn device_list(
             }
             Some(ListAction::Connect(id)) => {
                 match account.devices.iter().find(|d| d.id == id).cloned() {
-                    Some(target) if target.controllable && options.ui_test.is_none() => {
-                        // On a thread of its own: the list stays usable, for more sessions at once.
+                    // On a thread of its own: the list stays usable, for more sessions at once. The UI test takes this
+                    // path too, as a person's click does (2026-11-27: it took a session on the list's own thread
+                    // instead, so no test ever ran a session through its link, which carries the ICE restarts).
+                    Some(target) if target.controllable => {
                         match start_peer(account, &target, options, Addresses::All, lines) {
                             Ok((peer, started, session_id)) => {
                                 list.set_status(&trf(
@@ -499,41 +501,6 @@ fn device_list(
                                     &[("name", &target.name), ("error", &error)],
                                 ));
                             }
-                        }
-                    }
-                    Some(target) if target.controllable => {
-                        list.set_enabled(false);
-                        list.set_status(&trf("Connected to {name}.", &[("name", &target.name)]));
-                        let result = connect_to(
-                            account,
-                            &target,
-                            options,
-                            device,
-                            context,
-                            Addresses::All,
-                            lines,
-                        );
-                        list.set_enabled(true);
-                        sessions += 1;
-                        match result {
-                            Ok(ok) => {
-                                passed &= ok;
-                                list.set_status(&trf(
-                                    "The session with {name} has ended.",
-                                    &[("name", &target.name)],
-                                ));
-                            }
-                            Err(error) => {
-                                passed = false;
-                                lines.push(format!("session failed: {error}"));
-                                list.set_status(&trf(
-                                    "Could not connect to {name}: {error}",
-                                    &[("name", &target.name), ("error", &error)],
-                                ));
-                            }
-                        }
-                        if options.ui_test.is_some() {
-                            break;
                         }
                     }
                     Some(target) => {
@@ -579,6 +546,10 @@ fn device_list(
                     ));
                 }
             }
+        }
+        // The UI test ends with its one session.
+        if options.ui_test.is_some() && test_picked && running.is_empty() && sessions > 0 {
+            break;
         }
         if reconnect_at.is_none() {
             while let Some(event) = account.next_event(Duration::ZERO) {

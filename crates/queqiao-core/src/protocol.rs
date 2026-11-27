@@ -106,6 +106,13 @@ pub enum Message {
         ok: bool,
         tries_left: u8,
     },
+    /// Agent -> viewer: the picture's encoder now, for the session card (the user, 2026-11-27: encoding and decoding
+    /// on lines of their own): what it makes ("H.265 4:2:0") and whether that PC's GPU makes it. Sent when the encoder
+    /// starts and whenever it changes; a viewer before it leaves it out.
+    Encoder {
+        picture: String,
+        gpu: bool,
+    },
 }
 
 /// The longest password sent (UTF-8 bytes).
@@ -317,6 +324,7 @@ const POINTER_VISIBLE: u8 = 64;
 const PASSWORD_NEEDED: u8 = 65;
 const PASSWORD: u8 = 66;
 const PASSWORD_RESULT: u8 = 67;
+const ENCODER: u8 = 68;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -467,6 +475,15 @@ impl Message {
             }
             Message::PasswordResult { ok, tries_left } => {
                 out.extend([PASSWORD_RESULT, u8::from(ok), tries_left])
+            }
+            Message::Encoder { ref picture, gpu } => {
+                out.extend([ENCODER, u8::from(gpu)]);
+                // At most 64 bytes, cut between characters.
+                let mut end = picture.len().min(64);
+                while !picture.is_char_boundary(end) {
+                    end -= 1;
+                }
+                out.extend_from_slice(&picture.as_bytes()[..end]);
             }
         }
         out
@@ -661,6 +678,13 @@ impl Message {
                 },
                 _ => return None,
             },
+            ENCODER => match rest {
+                [gpu @ (0 | 1), picture @ ..] if picture.len() <= 64 => Message::Encoder {
+                    picture: String::from_utf8(picture.to_vec()).ok()?,
+                    gpu: *gpu == 1,
+                },
+                _ => return None,
+            },
             _ => return None,
         })
     }
@@ -685,6 +709,10 @@ mod tests {
             Message::PasswordResult {
                 ok: false,
                 tries_left: 3,
+            },
+            Message::Encoder {
+                picture: "H.265 4:2:0".into(),
+                gpu: true,
             },
         ] {
             assert_eq!(Message::decode(&message.encode()), Some(message));

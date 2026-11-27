@@ -9,6 +9,10 @@
 //!   for `QUIET` with no request (the other side's network changed and its request has not come, or a relay stopped).
 //! - A restart that brought nothing back in `ANSWER_WAIT` + `ICE_WAIT` is tried again, gathering again first; the
 //!   network thread ends the session after [`crate::RESTART_LIMIT`] without the other side.
+//! - The selected path went quiet while ICE still counts it alive ([`PeerEvent::Stalled`], after
+//!   [`crate::STALL_AFTER`]: a direct path that died, which ICE gives up only after about 20 s): the viewer starts a
+//!   restart at once, the agent asks for one ("restart-request" with the body "stalled", which a viewer already
+//!   restarting leaves out). The restart checks every pair afresh, and the first that works (a relay) carries on.
 //!
 //! The session loops hand it the events it uses ([`Restarter::on_event`]) and call [`Restarter::step`] on each pass.
 
@@ -51,6 +55,8 @@ pub struct Restarter {
     waiting_offer: Option<String>,
     /// The viewer: the agent asked for a restart (its network changed) and none has started since.
     requested: bool,
+    /// The selected path went quiet (this side saw it, or the agent said so): a restart if none is under way.
+    stalled: bool,
     /// The server connection was up at the last pass (it is made again in the background when lost).
     online: bool,
     /// How many restarts brought the other side back.
@@ -66,6 +72,7 @@ impl Restarter {
             disconnected_since: None,
             waiting_offer: None,
             requested: false,
+            stalled: false,
             online: true,
             restarts: 0,
         }
@@ -128,6 +135,18 @@ impl Restarter {
                     }
                 }
             }
+            PeerEvent::Stalled => match self.role {
+                Role::Viewer => self.stalled = true,
+                Role::Agent => {
+                    // The viewer offers; asked unless a restart is under way here already.
+                    if self.stage == Stage::Idle && !self.changed {
+                        let _ = signal.send("restart-request", "stalled");
+                        lines.push(
+                            "the path carries nothing from the viewer: restart asked of it".into(),
+                        );
+                    }
+                }
+            },
             PeerEvent::RestartSdp(sdp) => match self.role {
                 Role::Viewer => {
                     let _ = signal.send("restart-offer", sdp);
@@ -186,7 +205,19 @@ impl Restarter {
             Role::Viewer => {
                 // Every restart message for the viewer is taken on each pass (one left would hold up the queue it
                 // waits in): a request is kept until a restart can start, an answer that is not awaited is left out.
-                self.requested |= signal.take("restart-request").is_some();
+                while let Some(body) = signal.take("restart-request") {
+                    // "stalled": the agent's path went quiet (a restart under way already covers it); otherwise its
+                    // network changed (it gathered anew: a restart even after one under way).
+                    if body == "stalled" {
+                        self.stalled = true;
+                    } else {
+                        self.requested = true;
+                    }
+                }
+                // A restart under way covers a quiet path (it checks every pair afresh).
+                if self.stage != Stage::Idle {
+                    self.stalled = false;
+                }
                 let answer = signal.take("restart-answer");
                 let quiet = self
                     .disconnected_since
@@ -195,14 +226,18 @@ impl Restarter {
                     // A request during the ICE checks of a restart: the other side gathered again since its answer.
                     Stage::Idle | Stage::AwaitIce(_)
                         if !self.changed
-                            && (self.requested || (self.stage == Stage::Idle && quiet)) =>
+                            && (self.requested
+                                || (self.stage == Stage::Idle && (quiet || self.stalled))) =>
                     {
                         lines.push(if self.requested {
                             "the other side's network changed: restarting ICE".into()
+                        } else if self.stalled {
+                            "the path carries nothing: restarting ICE".into()
                         } else {
                             "the other side is gone: restarting ICE".into()
                         });
                         self.requested = false;
+                        self.stalled = false;
                         peer.restart_offer();
                         self.stage = Stage::Offering;
                     }

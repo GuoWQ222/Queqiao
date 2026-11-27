@@ -2,15 +2,20 @@
 //!
 //! queqiao-setup: installs Queqiao for the person using this PC (no administrator needed), and removes it again.
 //!
-//! - `queqiao-setup` (as downloaded): a window with the choices, then Install.
-//! - `--quiet [--autostart] [--service] [--report <file>]`: the same without a window (tests, updates).
+//! - `queqiao-setup` (as downloaded): a window saying what is installed, then Install. The Queqiao service always comes
+//!   with it (the user, 2026-11-27: "Mandatory install service", as UU Remote's installer does): it is what shows the
+//!   sign-in, lock and UAC screens to a viewer, so Windows asks for an administrator once; refused, nothing is
+//!   installed (or the earlier version stays).
+//! - `--quiet [--report <file>]`: the same without a window. (`--service` is still taken and changes nothing.) Test
+//!   builds (`test-switches`) also take `--no-service [--autostart]`: the person's own installation alone, as before
+//!   the service was mandatory, for the update tests.
 //! - `--update [--report <file>]`: what an installed agent runs for an update it downloaded and checked: quiet, the
 //!   person's choices kept, the earlier version put back if the new agent does not keep running.
 //! - `--service-update [--report <file>]`: run as SYSTEM by the Queqiao service for an update it checked: its
 //!   programs in %ProgramFiles%\Queqiao replaced, put back if its new agent does not keep running.
 //! - `--uninstall [--quiet] [--report <file>]`: removes everything it put on this PC (Settings > Apps runs this).
-//! - `--install-service`: run as an administrator (UAC) by the install when the service is chosen: the service and
-//!   its agent from this installer's own files, through a folder in Program Files (install::install_service).
+//! - `--install-service`: run as an administrator (UAC) by the install: the service and its agent from this
+//!   installer's own files, through a folder in Program Files (install::install_service).
 //! - `--remove-service`: run as an administrator by `--uninstall` when the service is installed.
 //! - `--ui-picture <file>`: shows the window, saves a picture of it and leaves without installing (tests).
 //! - `pack --output <installer> <file>...`: this program with those files as its resource (they are installed; see
@@ -31,8 +36,10 @@ use queqiao_display::{SetupAction, SetupForm, show_error};
 
 struct Options {
     quiet: bool,
+    /// Test builds only (`--no-service`): the person's own installation without the service, starting with Windows
+    /// if `autostart` (`--autostart`).
+    no_service: bool,
     autostart: bool,
-    service: bool,
     uninstall: bool,
     remove_service: bool,
     install_service: bool,
@@ -75,7 +82,7 @@ pub(crate) fn main() {
     let Some(options) = parse(&args) else {
         show_error(
             "Queqiao",
-            "usage: queqiao-setup [--quiet [--autostart] [--service]] | --uninstall [--quiet] [--report <file>]",
+            "usage: queqiao-setup [--quiet] | --uninstall [--quiet] [--report <file>]",
         );
         std::process::exit(2);
     };
@@ -149,8 +156,8 @@ fn one_at_a_time() -> Result<windows::Win32::Foundation::HANDLE, String> {
 fn parse(args: &[String]) -> Option<Options> {
     let mut options = Options {
         quiet: false,
+        no_service: false,
         autostart: false,
-        service: false,
         uninstall: false,
         remove_service: false,
         install_service: false,
@@ -163,8 +170,11 @@ fn parse(args: &[String]) -> Option<Options> {
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--quiet" => options.quiet = true,
+            // Always: the service comes with every installation (taken for the scripts that still pass it).
+            "--service" => {}
+            "--no-service" if cfg!(feature = "test-switches") => options.no_service = true,
+            // With the service it starts Queqiao itself: only for `--no-service` (taken for the scripts' sake).
             "--autostart" => options.autostart = true,
-            "--service" => options.service = true,
             "--uninstall" => options.uninstall = true,
             "--remove-service" => options.remove_service = true,
             "--install-service" => options.install_service = true,
@@ -198,19 +208,19 @@ fn run_install(options: &Options, lines: &mut Vec<String>) -> Result<(), String>
         ));
         return install::install(&entries, &choices, lines);
     }
+    // The service, which starts Queqiao at each sign-in by itself (no Run entry), unless a test build said not to.
+    let choices = install::Choices {
+        autostart: options.no_service && options.autostart,
+        service: !options.no_service,
+    };
     if options.quiet {
-        let choices = install::Choices {
-            autostart: options.autostart,
-            service: options.service,
-        };
         return install::install(&entries, &choices, lines);
     }
     let text = trf(
-        "Queqiao will be installed for you on this PC, in {folder}. No administrator is needed for that.",
+        "Queqiao will be installed on this PC: its programs in {folder}, and the Queqiao service, which starts Queqiao with Windows and lets a session show the sign-in, lock and UAC screens. Windows will ask once for an administrator to allow the service.",
         &[("folder", &install::target().display().to_string())],
     );
-    let mut form =
-        SetupForm::new(&text, true, install::service_installed()).map_err(|e| e.message())?;
+    let mut form = SetupForm::new(&text).map_err(|e| e.message())?;
     if let Some(path) = &options.ui_picture {
         let drawn = std::time::Instant::now() + std::time::Duration::from_millis(600);
         while std::time::Instant::now() < drawn {
@@ -223,10 +233,9 @@ fn run_install(options: &Options, lines: &mut Vec<String>) -> Result<(), String>
     }
     loop {
         match form.next(50) {
-            Some(SetupAction::Install { autostart, service }) => {
+            Some(SetupAction::Install) => {
                 form.set_busy(true);
                 form.set_status(tr("Installing..."));
-                let choices = install::Choices { autostart, service };
                 let result = install::install(&entries, &choices, lines);
                 form.set_busy(false);
                 match result {

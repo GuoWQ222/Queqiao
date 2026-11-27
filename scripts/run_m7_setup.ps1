@@ -1,10 +1,12 @@
 # M7 check of the installer on one PC (run as an administrator; the installer itself runs in the signed-in person's
 # session, as they would run it): scripts\package.ps1 makes it, then
-# 1. a quiet install with "start with Windows": the programs in %LOCALAPPDATA%\Programs\Queqiao, signed as the
-#    package was, the Settings > Apps entry, the Start menu shortcut, the Run entry, the agent running from there;
-# 2. the same again (an update): the earlier installation replaced, its running agent ended first;
-# 3. a quiet uninstall: all of it gone;
-# 4. an install with the service, then an uninstall: the service and %ProgramFiles%\Queqiao there and gone again.
+# 1. a quiet install (the service is not a choice since 2026-11-27): the programs in %LOCALAPPDATA%\Programs\Queqiao,
+#    signed as the package was, the Settings > Apps entry, the Start menu shortcut, no Run entry, the service running
+#    with its programs in %ProgramFiles%\Queqiao and its agent running from there;
+# 2. the same again (an update): the earlier installation replaced, the service and its agent running;
+# 3. the administrator's step with other programs planted in the person's folder: the installer's own still go in;
+# 4. a quiet uninstall: all of it gone, the service and %ProgramFiles%\Queqiao too.
+# Changes what is installed on this PC: not on a PC whose own Queqiao is in use.
 # Prints M7_SETUP_PASS or M7_SETUP_FAIL. ASCII only.
 param([string]$Installer = '', [int]$TimeoutSec = 120)
 $ErrorActionPreference = 'Continue'
@@ -64,8 +66,10 @@ $text = @(Invoke-Setup 'window' "--ui-picture `"$out\setup_window.bmp`"")
 Add-Check 'the installer window was drawn' (($text -contains 'RESULT PASS') -and (Test-Path -LiteralPath "$out\setup_window.bmp"))
 Add-Check 'the window installed nothing' (-not (Test-Path -LiteralPath $target))
 
-'=== 1. a quiet install, starting with Windows'
-$text = @(Invoke-Setup 'install' '--quiet --autostart')
+'=== 1. a quiet install (the service always comes with it: the user, 2026-11-27)'
+$programFiles = Join-Path $env:ProgramFiles 'Queqiao'
+function Get-AgentsOfService { @(Get-Process queqiao-agent -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$programFiles\*" }) }
+$text = @(Invoke-Setup 'install' '--quiet')
 "--- install"; $text
 Add-Check 'installer: RESULT PASS' ($text -contains 'RESULT PASS')
 foreach ($program in 'queqiao-viewer.exe', 'queqiao-agent.exe', 'queqiao-service.exe', 'queqiao-setup.exe') {
@@ -77,48 +81,30 @@ $installed = Get-Installed
 Add-Check 'Settings > Apps entry with an uninstall command' ($installed.Entry -and $installed.Entry.UninstallString -like "*queqiao-setup.exe*--uninstall*")
 $link = if (Test-Path -LiteralPath $shortcut) { (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut) } else { $null }
 Add-Check 'Start menu shortcut to the main window' ($link -and $link.TargetPath -like '*queqiao-agent.exe' -and $link.Arguments -eq '--show')
-Add-Check 'starts with Windows (Run entry to the agent)' ($installed.Run -like "*$target\queqiao-agent.exe*")
+Add-Check 'no Run entry (the service starts the agent)' (-not $installed.Run)
 $linkCommand = (Get-ItemProperty -LiteralPath "$userKey\Software\Classes\queqiao\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
 Add-Check 'queqiao: links open the viewer with --invite' ($linkCommand -eq ('"' + $target + '\queqiao-viewer.exe" --invite "%1"'))
-# It stays (in the tray) even when it cannot go online: give it 5 s.
-Start-Sleep -Seconds 5
-$first = Get-AgentsThere
-Add-Check 'the agent runs from the installation (after 5 s)' ($first.Count -ge 1)
-
-'=== 2. the same again: an update'
-$text = @(Invoke-Setup 'update' '--quiet --autostart')
-"--- update"; $text
-Add-Check 'update: RESULT PASS' ($text -contains 'RESULT PASS')
-Add-Check 'update: the earlier installation replaced' (@($text | Where-Object { $_ -eq 'the earlier installation was replaced' }).Count -eq 1)
-Add-Check 'update: the running agent was ended first' ($first.Count -ge 1 -and @($text | Where-Object { $_ -like 'ended *queqiao-agent.exe*' }).Count -ge 1)
-Start-Sleep -Seconds 3
-Add-Check 'update: the new agent runs' ((Get-AgentsThere).Count -ge 1)
-Add-Check 'update: no copy of the earlier installation left' (-not (Test-Path -LiteralPath ($target + '.old')))
-
-'=== 3. a quiet uninstall'
-$text = @(Invoke-Setup 'uninstall' '--uninstall --quiet')
-"--- uninstall"; $text
-Add-Check 'uninstall: the running agent was ended' (@($text | Where-Object { $_ -like 'ended *queqiao-agent.exe*' }).Count -ge 1)
-Add-Check 'uninstall: RESULT PASS' ($text -contains 'RESULT PASS')
-Start-Sleep -Seconds 5
-$installed = Get-Installed
-Add-Check 'uninstall: the programs folder is gone' (-not (Test-Path -LiteralPath $target))
-Add-Check 'uninstall: the Apps entry is gone' (-not $installed.Entry)
-Add-Check 'uninstall: the shortcut is gone' (-not (Test-Path -LiteralPath $shortcut))
-Add-Check 'uninstall: the Run entry is gone' (-not $installed.Run)
-Add-Check 'uninstall: the queqiao: link handler is gone' (-not (Test-Path -LiteralPath "$userKey\Software\Classes\queqiao"))
-Add-Check 'uninstall: no agent runs from there' ((Get-AgentsThere).Count -eq 0)
-
-'=== 4. with the service, then uninstall'
-$programFiles = Join-Path $env:ProgramFiles 'Queqiao'
-$text = @(Invoke-Setup 'service' '--quiet --service')
-"--- service"; $text
-Add-Check 'install with the service: RESULT PASS' ($text -contains 'RESULT PASS')
 $service = Get-Service Queqiao -ErrorAction SilentlyContinue
 Add-Check 'the Queqiao service runs' ($service -and $service.Status -eq 'Running')
 Add-Check 'its programs are in Program Files' (Test-Path -LiteralPath (Join-Path $programFiles 'queqiao-service.exe'))
-# The administrator's step takes nothing from the person's own folder, which any program of theirs may change: with
-# other programs put there, installing the service again still gives the installer's own.
+Start-Sleep -Seconds 5
+Add-Check "the service's agent runs from Program Files (after 5 s)" ((Get-AgentsOfService).Count -ge 1)
+Add-Check 'no agent of its own runs from the person''s folder' ((Get-AgentsThere).Count -eq 0)
+
+'=== 2. the same again: an update'
+$text = @(Invoke-Setup 'update' '--quiet')
+"--- update"; $text
+Add-Check 'update: RESULT PASS' ($text -contains 'RESULT PASS')
+Add-Check 'update: the earlier installation replaced' (@($text | Where-Object { $_ -eq 'the earlier installation was replaced' }).Count -eq 1)
+Add-Check 'update: no copy of the earlier installation left' (-not (Test-Path -LiteralPath ($target + '.old')))
+$service = Get-Service Queqiao -ErrorAction SilentlyContinue
+Add-Check 'update: the Queqiao service runs' ($service -and $service.Status -eq 'Running')
+Start-Sleep -Seconds 5
+Add-Check "update: the service's agent runs" ((Get-AgentsOfService).Count -ge 1)
+
+'=== 3. the administrator''s step takes the installer''s own programs'
+# It takes nothing from the person's own folder, which any program of theirs may change: with other programs put
+# there, installing the service again still gives the installer's own.
 $genuine = (Get-FileHash -LiteralPath (Join-Path $programFiles 'queqiao-agent.exe')).Hash
 $stranger = Join-Path $env:SystemRoot 'System32\whoami.exe'
 foreach ($replaced in 'queqiao-agent.exe', 'queqiao-service.exe') { Copy-Item -LiteralPath $stranger -Destination (Join-Path $target $replaced) -Force }
@@ -130,12 +116,20 @@ Add-Check "not the person's folder: Program Files has the real agent" ((Get-File
 Add-Check 'its folder in Program Files is gone again' (-not (Test-Path -LiteralPath "$programFiles.install"))
 $service = Get-Service Queqiao -ErrorAction SilentlyContinue
 Add-Check 'the Queqiao service runs again' ($service -and $service.Status -eq 'Running')
-$text = @(Invoke-Setup 'service-uninstall' '--uninstall --quiet')
-"--- service-uninstall"; $text
-Add-Check 'uninstall with the service: RESULT PASS' ($text -contains 'RESULT PASS')
+
+'=== 4. a quiet uninstall'
+$text = @(Invoke-Setup 'uninstall' '--uninstall --quiet')
+"--- uninstall"; $text
+Add-Check 'uninstall: RESULT PASS' ($text -contains 'RESULT PASS')
 Start-Sleep -Seconds 5
-Add-Check 'the service is gone' (-not (Get-Service Queqiao -ErrorAction SilentlyContinue))
-Add-Check 'Program Files\Queqiao is gone' (-not (Test-Path -LiteralPath $programFiles))
-Add-Check 'the programs folder is gone again' (-not (Test-Path -LiteralPath $target))
+$installed = Get-Installed
+Add-Check 'uninstall: the service is gone' (-not (Get-Service Queqiao -ErrorAction SilentlyContinue))
+Add-Check 'uninstall: Program Files\Queqiao is gone' (-not (Test-Path -LiteralPath $programFiles))
+Add-Check 'uninstall: the programs folder is gone' (-not (Test-Path -LiteralPath $target))
+Add-Check 'uninstall: the Apps entry is gone' (-not $installed.Entry)
+Add-Check 'uninstall: the shortcut is gone' (-not (Test-Path -LiteralPath $shortcut))
+Add-Check 'uninstall: the Run entry is gone' (-not $installed.Run)
+Add-Check 'uninstall: the queqiao: link handler is gone' (-not (Test-Path -LiteralPath "$userKey\Software\Classes\queqiao"))
+Add-Check 'uninstall: no agent runs from either folder' (((Get-AgentsThere).Count + (Get-AgentsOfService).Count) -eq 0)
 
 if ($failed.Count) { "M7_SETUP_FAIL $($failed -join ', ')" } else { 'M7_SETUP_PASS' }

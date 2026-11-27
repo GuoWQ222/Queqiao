@@ -20,8 +20,8 @@ mod turn;
 
 pub use interfaces::{connect_direct, connect_direct_noted, public_address};
 pub use peer::{
-    Addresses, AudioSender, Peer, PeerEvent, RESTART_LIMIT, Role, START_BITRATE, STREAM_IN_FLIGHT,
-    Stream, tune,
+    Addresses, AudioSender, Peer, PeerEvent, RESTART_LIMIT, Role, STALL_AFTER, START_BITRATE,
+    STREAM_IN_FLIGHT, Stream, tune,
 };
 pub use resolve::resolve_server;
 pub use restart::Restarter;

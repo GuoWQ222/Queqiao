@@ -394,6 +394,8 @@ pub(crate) fn run_session(
     // The codec the frames come in (the decoder is made anew when it changes), what to ask for, what this PC can
     // decode, and the frames of each.
     let mut decoder_codec = queqiao_core::protocol::VideoCodec::H264;
+    // That PC's encoder as it said (Message::Encoder): the session card's encoding line.
+    let mut remote_encoder: Option<(String, bool)> = None;
     let mut codec_choice = options.codec.unwrap_or_default();
     // AV1 at all (asked for by hand), and on the GPU (what "Automatic" needs: the CPU is too slow for a big screen).
     let can_decode_av1 = queqiao_codec::can_decode(queqiao_core::protocol::VideoCodec::Av1);
@@ -961,11 +963,8 @@ pub(crate) fn run_session(
                 queqiao_core::protocol::VideoCodec::H265 => "H.265",
                 queqiao_core::protocol::VideoCodec::H264 => "H.264",
             };
-            let place = if decoder.name().contains("D3D11") {
-                "GPU"
-            } else {
-                "CPU"
-            };
+            // The decoder's own word (NVDEC's name has no "D3D11" in it: the card said "CPU" for it, 2026-11-27).
+            let place = if decoder.is_hardware() { "GPU" } else { "CPU" };
             overlay.set_figures(Figures {
                 relayed: status.relayed,
                 relay: if status.relayed {
@@ -976,7 +975,13 @@ pub(crate) fn run_session(
                 delay_ms: stats.rtt_ms.last().copied(),
                 fps,
                 rate,
-                codec: format!("{codec} · {place}"),
+                encoding: match &remote_encoder {
+                    Some((picture, gpu)) => {
+                        format!("{picture} · {}", if *gpu { "GPU" } else { "CPU" })
+                    }
+                    None => codec.to_string(),
+                },
+                decoding: format!("{codec} · {place}"),
                 picture: picture_size,
                 elapsed: started.elapsed(),
                 delays: stats.rtt_ms.iter().rev().take(40).rev().copied().collect(),
@@ -1934,6 +1939,13 @@ pub(crate) fn run_session(
                             .collect();
                         lines.push(format!("screens of that PC: {}", english.join(", ")));
                     }
+                    Some(Message::Encoder { picture, gpu }) => {
+                        lines.push(format!(
+                            "encoder of that PC: {picture} on its {}",
+                            if gpu { "GPU" } else { "CPU" }
+                        ));
+                        remote_encoder = Some((picture, gpu));
+                    }
                     Some(Message::Notice(text)) => {
                         lines.push(format!("notice from that PC: {text}"));
                         status.notice(&text);
@@ -2027,6 +2039,7 @@ pub(crate) fn run_session(
                 event @ (PeerEvent::NetworkChanged
                 | PeerEvent::Disconnected
                 | PeerEvent::Reconnected
+                | PeerEvent::Stalled
                 | PeerEvent::Regathered
                 | PeerEvent::RestartSdp(_)) => {
                     restarter.on_event(&event, &peer, signal, lines);

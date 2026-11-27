@@ -118,6 +118,10 @@ pub enum PeerEvent {
     Disconnected,
     /// ICE has the other side again (after `Disconnected`).
     Reconnected,
+    /// The selected path has carried nothing from the other side for [`STALL_AFTER`] while ICE still counts it alive
+    /// (a direct path that died: ICE keeps it for about 20 s, 15 of them for the other side's last check): the session
+    /// starts ICE again at once, which moves it to a path that works (a relay) within a second or so.
+    Stalled,
     /// The gathering asked for ([`Peer::regather`]) is done: this side's new candidates are in.
     Regathered,
     /// An ICE restart's offer (viewer) or answer (agent), for the other side.
@@ -510,8 +514,13 @@ impl Peer {
             shaper: queqiao_core::forced("shape")
                 .as_deref()
                 .and_then(crate::shape::Shaper::from_spec),
+            cut: queqiao_core::forced("cut")
+                .as_deref()
+                .and_then(cut_window)
+                .map(|(from, to)| (Instant::now() + from, Instant::now() + to)),
             quic,
             quic_pair: None,
+            stall: Stall::new(),
             files_on_quic: files_on_quic.clone(),
             deadlines: (None, None),
             runaway_notes: 0,
@@ -882,6 +891,78 @@ fn waker_for(bind_ip: Ipv4Addr, port: u16) -> Result<(UdpSocket, SocketAddr, Soc
     Ok((waker, SocketAddr::new(wake_ip.into(), port), from))
 }
 
+/// How long the selected path may carry nothing from the other side before the session starts ICE again: str0m checks
+/// every pair at least every 3 s and the other side answers, so a path that works is never this quiet, whatever the
+/// screen does (2026-11-27: a direct path that died took ICE about 20 s to give up, and the picture stood still).
+pub const STALL_AFTER: Duration = Duration::from_secs(5);
+
+/// The selected pair (this side's address, the other side's) and when anything last came on it from the other side.
+struct Stall {
+    selected: Option<(SocketAddr, SocketAddr)>,
+    /// Since when it is selected (or ICE started again), and when the other side was last heard on it.
+    since: Instant,
+    last_heard: Option<Instant>,
+    /// Told once per selected pair (and restart).
+    told: bool,
+}
+
+impl Stall {
+    fn new() -> Stall {
+        Stall {
+            selected: None,
+            since: Instant::now(),
+            last_heard: None,
+            told: false,
+        }
+    }
+
+    /// The pair media leaves by now (a new one starts afresh).
+    fn select(&mut self, local: SocketAddr, remote: SocketAddr, now: Instant) {
+        if self.selected != Some((local, remote)) {
+            self.selected = Some((local, remote));
+            self.since = now;
+            self.last_heard = None;
+            self.told = false;
+        }
+    }
+
+    /// A datagram for ICE (STUN, DTLS, media) from `remote` to `local`.
+    fn heard(&mut self, local: SocketAddr, remote: SocketAddr, now: Instant) {
+        if self.selected == Some((local, remote)) {
+            self.last_heard = Some(now);
+        }
+    }
+
+    /// ICE started again: the pair is given its time anew.
+    fn restarted(&mut self, now: Instant) {
+        self.since = now;
+        self.last_heard = None;
+        self.told = false;
+    }
+
+    fn quiet_since(&self) -> Instant {
+        self.last_heard
+            .map_or(self.since, |heard| heard.max(self.since))
+    }
+
+    /// How long the selected pair has been quiet, once it passes [`STALL_AFTER`] (told once).
+    fn due(&mut self, now: Instant) -> Option<Duration> {
+        if self.told || self.selected.is_none() {
+            return None;
+        }
+        let silent = now.saturating_duration_since(self.quiet_since());
+        (silent >= STALL_AFTER).then(|| {
+            self.told = true;
+            silent
+        })
+    }
+
+    /// When to look again.
+    fn next(&self) -> Option<Instant> {
+        (!self.told && self.selected.is_some()).then(|| self.quiet_since() + STALL_AFTER)
+    }
+}
+
 /// How often the network thread checks that the main socket's address is still this PC's.
 const NETWORK_CHECK: Duration = Duration::from_secs(2);
 /// How long a session waits for ICE to come back (an ICE restart) once it lost the other side, before it ends.
@@ -1051,6 +1132,17 @@ fn gather_all(
     })
 }
 
+/// `QUEQIAO_FORCE=cut:<from>-<to>` (seconds of the session, whole or decimal): when the direct paths are cut.
+fn cut_window(spec: &str) -> Option<(Duration, Duration)> {
+    let (from, to) = spec.split_once('-')?;
+    let (from, to) = (
+        from.trim().parse::<f64>().ok()?,
+        to.trim().parse::<f64>().ok()?,
+    );
+    (from >= 0.0 && to > from && to < 86_400.0)
+        .then(|| (Duration::from_secs_f64(from), Duration::from_secs_f64(to)))
+}
+
 fn bind_socket(ip: IpAddr) -> Result<UdpSocket, Error> {
     use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
     let socket = Socket::new(
@@ -1130,10 +1222,16 @@ struct Network {
     fec_rx: fec::Receiver,
     /// Tests: a bottleneck for what this side sends (QUEQIAO_FORCE=shape:<kbit/s>/<queue ms>/<loss per mille>).
     shaper: Option<crate::shape::Shaper>,
+    /// Tests: the direct paths cut from one time to another of the session (QUEQIAO_FORCE=cut:<from s>-<to s>):
+    /// every datagram to or from an address that is not a relay's left out both ways, as when a carrier's NAT drops a
+    /// mapping mid-session; the relays (this side's TURN server, the other side's relay addresses) still carry.
+    cut: Option<(Instant, Instant)>,
     /// The file channel over QUIC while it is negotiated and has not failed; its datagrams go over the selected
     /// pair (source, destination), the one DTLS and SRTP use.
     quic: Option<Quic>,
     quic_pair: Option<(SocketAddr, SocketAddr)>,
+    /// The selected path's liveness ([`PeerEvent::Stalled`]).
+    stall: Stall,
     files_on_quic: Arc<AtomicBool>,
     /// The last deadlines asked for (str0m's, QUIC's), and notes on runaway loops so far.
     deadlines: (Option<Instant>, Option<Instant>),
@@ -1171,6 +1269,19 @@ impl Network {
             }
             self.check_network(started)?;
             deadline = deadline.min(self.restart.next_check);
+            if self.connected && self.restart.disconnected_since.is_none() {
+                if let Some(silent) = self.stall.due(Instant::now()) {
+                    self.note(format!(
+                        "the path {} has carried nothing from the other side for {} ms (ICE still counts it alive): starting ICE again",
+                        self.path.as_deref().unwrap_or("selected"),
+                        silent.as_millis()
+                    ));
+                    let _ = self.events.send(PeerEvent::Stalled);
+                }
+                if let Some(at) = self.stall.next() {
+                    deadline = deadline.min(at);
+                }
+            }
             if let Some(since) = self.restart.disconnected_since {
                 deadline = deadline.min(since + RESTART_LIMIT);
             }
@@ -1241,6 +1352,9 @@ impl Network {
             // layer's queue (30 packets) and ended the session: "DTLS error: receive queue full" (M4, 2026-11-23,
             // once uplinks came before a tunnel).
             if let Ok(arriving) = self.arrived.try_recv() {
+                if self.cut_off(arriving.source) {
+                    continue;
+                }
                 if punch::is_punch(&arriving.contents) {
                     self.on_punch(arriving.destination, arriving.source, &arriving.contents);
                     continue;
@@ -1287,6 +1401,7 @@ impl Network {
                     self.handle_turn_packet(&buffer[..length])?;
                     continue;
                 }
+                Ok((_, source)) if self.cut_off(source) => continue,
                 Ok((length, source)) if punch::is_punch(&buffer[..length]) => {
                     let (local, datagram) = (self.local, buffer[..length].to_vec());
                     self.on_punch(local, source, &datagram);
@@ -1355,6 +1470,8 @@ impl Network {
                     // selected pair, so they show which way the session goes.
                     if self.connected && packet.contents.first().is_some_and(|byte| *byte >= 20) {
                         self.quic_pair = Some((packet.source, packet.destination));
+                        self.stall
+                            .select(packet.source, packet.destination, Instant::now());
                         let path = match relayed {
                             // With the relay's name when the account server gave one ("relayed through
                             // 198.51.100.1:3478 (shanghai) to ..."; relay_name reads it back).
@@ -2089,6 +2206,7 @@ impl Network {
     /// ICE started again (`offer` and `answer` of the restart, `remote` the other side's): what the other side offers
     /// now (its candidates, relays and NATs), and punching anew with the new key.
     fn restarted(&mut self, offer: &str, answer: &str, remote: &str) {
+        self.stall.restarted(Instant::now());
         self.remote_relays = relayed_candidates(remote);
         self.remote_candidates = candidates_of(remote, None);
         let remote_nats = punch::from_sdp(remote);
@@ -2157,7 +2275,9 @@ impl Network {
         let events = punch.receive();
         let notes = punch.take_notes();
         for (from, to, datagram) in out {
-            let _ = self.socket_for(from).send_to(&datagram, to);
+            if !self.cut_off(to) {
+                let _ = self.socket_for(from).send_to(&datagram, to);
+            }
         }
         for note in notes {
             let _ = self.events.send(PeerEvent::Note(note));
@@ -2191,7 +2311,9 @@ impl Network {
             return;
         };
         let (answer, new) = punch.on_packet(local, source, datagram);
-        if let Some(answer) = answer {
+        if let Some(answer) = answer
+            && !self.cut_off(source)
+        {
             let _ = self.socket_for(local).send_to(&answer, source);
         }
         if new {
@@ -2258,6 +2380,15 @@ impl Network {
         }
     }
 
+    /// Tests (QUEQIAO_FORCE=cut): whether a datagram to or from `remote` is left out now: a direct path (not one of
+    /// the other side's relay addresses; this side's TURN server never comes here) within the cut's window.
+    fn cut_off(&self, remote: SocketAddr) -> bool {
+        self.cut.is_some_and(|(from, to)| {
+            let now = Instant::now();
+            now >= from && now < to && !self.remote_relays.contains(&remote)
+        })
+    }
+
     /// Sends a datagram from `source` (our address: a socket of ours, or the TURN relay's) to `destination`;
     /// the TURN server's address when it went through it.
     fn send_datagram(
@@ -2300,6 +2431,9 @@ impl Network {
                 Some(turn.server)
             }
             _ => {
+                if self.cut_off(destination) {
+                    return None;
+                }
                 let socket = self
                     .extras
                     .iter()
@@ -2378,6 +2512,7 @@ impl Network {
         let Ok(contents) = str0m::net::DatagramRecv::try_from(datagram) else {
             return Ok(());
         };
+        self.stall.heard(destination, source, Instant::now());
         let input = Input::Receive(
             at,
             Receive {
@@ -2423,6 +2558,74 @@ impl Network {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_selected_path_that_carries_nothing_is_told_once() {
+        use std::time::{Duration, Instant};
+        let (local, remote, other): (
+            std::net::SocketAddr,
+            std::net::SocketAddr,
+            std::net::SocketAddr,
+        ) = (
+            "192.0.2.1:4000".parse().unwrap(),
+            "198.51.100.2:5000".parse().unwrap(),
+            "203.0.113.3:3478".parse().unwrap(),
+        );
+        let start = Instant::now();
+        let mut stall = super::Stall::new();
+        assert_eq!(
+            stall.due(start + Duration::from_secs(60)),
+            None,
+            "nothing selected"
+        );
+        stall.select(local, remote, start);
+        // Heard every second: never due.
+        for second in 1..10 {
+            stall.heard(local, remote, start + Duration::from_secs(second));
+            assert_eq!(stall.due(start + Duration::from_secs(second)), None);
+        }
+        // Then only another pair carries (a relay's checks): 5 s after the last datagram on this one, once.
+        stall.heard(local, other, start + Duration::from_secs(12));
+        assert_eq!(
+            stall.next(),
+            Some(start + Duration::from_secs(9) + super::STALL_AFTER)
+        );
+        assert_eq!(stall.due(start + Duration::from_millis(13_900)), None);
+        assert_eq!(
+            stall.due(start + Duration::from_secs(14)),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            stall.due(start + Duration::from_secs(20)),
+            None,
+            "told once"
+        );
+        // ICE started again, or another pair selected: watched afresh.
+        stall.restarted(start + Duration::from_secs(20));
+        assert_eq!(
+            stall.due(start + Duration::from_secs(25)),
+            Some(Duration::from_secs(5))
+        );
+        stall.select(local, other, start + Duration::from_secs(26));
+        assert_eq!(stall.due(start + Duration::from_secs(30)), None);
+        assert!(stall.due(start + Duration::from_secs(31)).is_some());
+    }
+
+    #[test]
+    fn the_cut_of_the_direct_paths_is_read_from_its_switch() {
+        use std::time::Duration;
+        assert_eq!(
+            super::cut_window("25-55"),
+            Some((Duration::from_secs(25), Duration::from_secs(55)))
+        );
+        assert_eq!(
+            super::cut_window("0.5-1.5"),
+            Some((Duration::from_millis(500), Duration::from_millis(1500)))
+        );
+        for nonsense in ["55-25", "10-10", "-5-10", "x-10", "10", ""] {
+            assert_eq!(super::cut_window(nonsense), None, "{nonsense}");
+        }
+    }
+
     #[test]
     fn the_other_sides_relays_are_read_from_its_sdp() {
         let sdp = "v=0\r\n\

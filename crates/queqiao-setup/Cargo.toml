@@ -1,9 +1,13 @@
 [package]
 name = "queqiao-setup"
-description = "Installs Queqiao for the person using this PC (and the service if chosen), and removes it again"
+description = "Installs Queqiao for the person using this PC, with the Queqiao service, and removes it again"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[features]
+# Test builds: `--no-service` (the person's own installation alone, for the update tests). Never in a shipping build.
+test-switches = []
 
 [dependencies]
 queqiao-core.workspace = true

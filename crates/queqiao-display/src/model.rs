@@ -359,8 +359,11 @@ pub struct Figures {
     pub fps: f64,
     /// "8.4 Mbit/s", "320 kbit/s".
     pub rate: String,
-    /// "H.264 · GPU".
-    pub codec: String,
+    /// That PC's encoder: "H.265 4:2:0 · GPU" (from its word, `Message::Encoder`; the codec alone from an agent before
+    /// it). The user, 2026-11-27: encoding and decoding on lines of their own.
+    pub encoding: String,
+    /// This PC's decoder: "H.265 · GPU".
+    pub decoding: String,
     pub picture: (u32, u32),
     pub elapsed: Duration,
     /// The latest delays, oldest first.

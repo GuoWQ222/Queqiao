@@ -135,7 +135,7 @@ try {
     '=== 1. 0.1.0 installed, 0.1.1 on the feed'
     $installReport = Join-Path $out 'install.txt'
     $started = Get-Date
-    Invoke-AsUser 'install' $installers['0.1.0'] "--quiet --autostart --report `"$installReport`"" $installReport
+    Invoke-AsUser 'install' $installers['0.1.0'] "--quiet --no-service --autostart --report `"$installReport`"" $installReport
     Get-Content -LiteralPath $installReport -ErrorAction SilentlyContinue | Where-Object { $_ -match 'RESULT|ERROR|agent|sign in' }
     # Its agent looks at the feed 20 s after it started.
     Add-Check 'installed 0.1.0, its agent running' (((Get-Version (Join-Path $target 'queqiao-agent.exe')) -eq '0.1.0') -and (Get-AgentsThere).Count -ge 1)
