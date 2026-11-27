@@ -135,6 +135,8 @@ pub struct Account {
     refused: bool,
     opened_at: Instant,
     pub reconnections: u32,
+    /// The connection follows this PC's best network ([`Account::watch_network`]).
+    network: NetworkWatch,
     /// Path reports the server asked for (one per `IceServers` with `PunchSettings::reports`, at most 4 waiting).
     report_credits: u32,
 }
@@ -143,6 +145,34 @@ pub struct Account {
 /// is gone, the new network may take a few seconds). The other side stays trusted meanwhile: its key was checked when
 /// the session started, and a refused login (this device removed, its login revoked) ends the session at once.
 pub const RECONNECT_GRACE: Duration = Duration::from_secs(60);
+
+/// How often the connection's network is looked at ([`Account::watch_network`]).
+const WATCH_EVERY: Duration = Duration::from_secs(1);
+/// How long a better network must have been there before the connection moves to it (a Wi-Fi just joined may not reach
+/// the internet yet).
+const MOVE_AFTER: Duration = Duration::from_secs(3);
+/// The least time between two moves (a Wi-Fi coming and going does not toss the connection back and forth).
+const MOVE_GAP: Duration = Duration::from_secs(30);
+
+/// What [`Account::watch_network`] keeps: when it last looked, the better network seen and since when, a move to it
+/// under way (a new connection made there), and when the last move began.
+struct NetworkWatch {
+    checked: Instant,
+    better: Option<(std::net::Ipv4Addr, Instant)>,
+    moving: Option<Receiver<Result<Account, OpenError>>>,
+    moved_at: Option<Instant>,
+}
+
+impl NetworkWatch {
+    fn new() -> NetworkWatch {
+        NetworkWatch {
+            checked: Instant::now(),
+            better: None,
+            moving: None,
+            moved_at: None,
+        }
+    }
+}
 
 /// A login that did not work: `refused` when the server answered no (as opposed to not being reached).
 struct OpenError {
@@ -391,6 +421,7 @@ impl Account {
             opened_at: Instant::now(),
             reconnections: 0,
             report_credits: 0,
+            network: NetworkWatch::new(),
         })
     }
 
@@ -589,6 +620,7 @@ impl Account {
     /// is made (its address too: after a network change the session gathers on it). A refused login is final. Tests:
     /// QUEQIAO_FORCE=account-drop:<seconds> ends this connection that long after it was made, once.
     fn keep_connected(&mut self) {
+        self.watch_network();
         if !self.closed
             && self.reconnections == 0
             && queqiao_core::forced("account-drop")
@@ -602,7 +634,8 @@ impl Account {
             self.pending
                 .push_back(AccountEvent::Closed("QUEQIAO_FORCE=account-drop".into()));
         }
-        if !self.closed || self.refused {
+        // The server closes the older connection as a move's new one logs in: that one takes over (watch_network).
+        if !self.closed || self.refused || self.network.moving.is_some() {
             return;
         }
         let now = Instant::now();
@@ -643,6 +676,96 @@ impl Account {
         }
     }
 
+    /// Once a second ([`Account::keep_connected`] in a session, [`Account::next_event`] between sessions): the
+    /// connection follows this PC's best network (the user, 2026-11-27, "Do as you suggest": Wi-Fi or a cable before
+    /// mobile data, the other kept as the way back).
+    /// - Its address is gone (that network went away): the connection is closed at once and made again on the network
+    ///   left. Before, a connection on a vanished network was noticed only after 60 s of silence; a session's restart,
+    ///   which needs the server, ran out of time meanwhile (sunshine's mobile data switched off while on Wi-Fi too:
+    ///   frozen, then ended after 40 s, 2026-11-27).
+    /// - A network the system routes before this one (Windows puts Wi-Fi and Ethernet before mobile data) has been up
+    ///   for [`MOVE_AFTER`]: a new connection is made there and takes this one's place (the server closes the older
+    ///   one), at most once in [`MOVE_GAP`]. A session follows the connection's address (restart.rs): it gathers on the
+    ///   new network, whose candidates then come first.
+    fn watch_network(&mut self) {
+        let now = Instant::now();
+        if let Some(moving) = &self.network.moving {
+            match moving.try_recv() {
+                Ok(Ok(fresh)) => {
+                    self.network.moving = None;
+                    self.take_over(fresh);
+                    return;
+                }
+                Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.network.moving = None
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if self.closed || now < self.network.checked + WATCH_EVERY {
+            return;
+        }
+        self.network.checked = now;
+        let IpAddr::V4(ip) = self.local_ip else {
+            return;
+        };
+        if ip.is_loopback() || ip.is_unspecified() {
+            return;
+        }
+        if std::net::UdpSocket::bind((ip, 0)).is_err() {
+            // Dropping the command channel ends the connection thread, as a lost connection does; made again at once.
+            let (sender, _) = mpsc::channel();
+            drop(std::mem::replace(&mut self.commands, sender));
+            self.closed = true;
+            self.attempts = 0;
+            self.next_attempt = now;
+            self.pending.push_back(AccountEvent::Closed(format!(
+                "this PC's network changed: {ip} is no longer one of its addresses"
+            )));
+            return;
+        }
+        if self.network.moving.is_some() || self.refused {
+            return;
+        }
+        let uplinks = queqiao_transport::uplinks();
+        let Some(first) = uplinks
+            .first()
+            .copied()
+            .filter(|first| *first != ip && uplinks.contains(&ip))
+        else {
+            self.network.better = None;
+            return;
+        };
+        let since = match self.network.better {
+            Some((same, since)) if same == first => since,
+            _ => {
+                self.network.better = Some((first, now));
+                now
+            }
+        };
+        let rested = self.network.moved_at.is_none_or(|at| now >= at + MOVE_GAP);
+        if now < since + MOVE_AFTER || !rested {
+            return;
+        }
+        // The new connection goes out of the first uplink (reach tries them in route order).
+        self.network.moved_at = Some(now);
+        let (sender, receiver) = mpsc::channel();
+        let (mut login, identity, role) = (self.login.clone(), self.identity.clone(), self.role);
+        let spawned = std::thread::Builder::new()
+            .name("queqiao-account-move".into())
+            .spawn(move || {
+                let _ = sender.send(Account::open_with(
+                    &mut login,
+                    &identity,
+                    role,
+                    Credentials::Saved,
+                ));
+            });
+        if spawned.is_ok() {
+            self.network.moving = Some(receiver);
+        }
+    }
+
     /// A new connection takes the lost one's place: what was queued stays (the lost connection's Closed goes), the
     /// devices let in by a help code stay; a new refresh token is kept as the login kept it.
     fn take_over(&mut self, fresh: Account) {
@@ -650,6 +773,7 @@ impl Account {
         pending.retain(|event| !matches!(event, AccountEvent::Closed(_)));
         let helpers = std::mem::take(&mut self.helpers);
         let reconnections = self.reconnections + 1;
+        let old_moved_at = self.network.moved_at;
         // The old one goes; its thread is not waited for (after a lost connection it has ended; after the test switch
         // it ends when its socket does).
         let mut old = std::mem::replace(self, fresh);
@@ -658,6 +782,7 @@ impl Account {
         self.pending = pending;
         self.helpers = helpers;
         self.reconnections = reconnections;
+        self.network.moved_at = old_moved_at;
         if !self.identity.in_memory {
             let _ = self.login.save(self.role);
         }
@@ -670,6 +795,9 @@ impl Account {
     }
 
     pub fn next_event(&mut self, timeout: Duration) -> Option<AccountEvent> {
+        // Between sessions too: a connection whose network went away is noticed in a second, not after 60 s of
+        // silence, and the program makes it again on the network left; a better network is moved to.
+        self.watch_network();
         let event = match self.pending.pop_front() {
             Some(event) => Some(event),
             None => match self.events.recv_timeout(timeout) {
@@ -680,6 +808,15 @@ impl Account {
                 }
             },
         };
+        // A move to a better network under way when this connection closes (the server closes the older connection
+        // as the new one logs in): the new one takes over, and nothing is lost.
+        if matches!(event, Some(AccountEvent::Closed(_)))
+            && let Some(moving) = self.network.moving.take()
+            && let Ok(Ok(fresh)) = moving.recv_timeout(Duration::from_secs(15))
+        {
+            self.take_over(fresh);
+            return None;
+        }
         match &event {
             Some(AccountEvent::Devices(devices)) => self.devices = devices.clone(),
             Some(AccountEvent::HelpRequested { device, user }) => self.add_helper(device, user),

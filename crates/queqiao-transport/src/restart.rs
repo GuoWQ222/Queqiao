@@ -14,6 +14,15 @@
 //!   restart at once, the agent asks for one ("restart-request" with the body "stalled", which a viewer already
 //!   restarting leaves out). The restart checks every pair afresh, and the first that works (a relay) carries on.
 //!
+//! - The server connection moved to another network (the account follows this PC's best one: Wi-Fi or a cable before
+//!   mobile data, or makes the connection again on the network left when its own went away): its address is not the
+//!   one this side gathered on, so it gathers there again and restarts as after a network change. The new network's
+//!   candidates come first (str0m ranks a side's candidates by the order they are added), so ICE takes its pairs when
+//!   they work and keeps the others as the way back (the user, 2026-11-27: "Do as you suggest").
+//! - Never on an address that is gone: gathering waits until the server connection is on one of this PC's addresses
+//!   (sunshine's mobile data switched off, 2026-11-27: each attempt gathered on the vanished address, through a server
+//!   connection that was dead but not yet noticed, until the session ended after 40 s).
+//!
 //! The session loops hand it the events it uses ([`Restarter::on_event`]) and call [`Restarter::step`] on each pass.
 
 use std::time::{Duration, Instant};
@@ -59,6 +68,10 @@ pub struct Restarter {
     stalled: bool,
     /// The server connection was up at the last pass (it is made again in the background when lost).
     online: bool,
+    /// The server connection's address this side last gathered on (the session's start, then each gathering).
+    gathered_on: Option<std::net::IpAddr>,
+    /// Gathering waits: the server connection's address is gone (said once).
+    waiting_said: bool,
     /// How many restarts brought the other side back.
     pub restarts: u32,
 }
@@ -74,6 +87,8 @@ impl Restarter {
             requested: false,
             stalled: false,
             online: true,
+            gathered_on: None,
+            waiting_said: false,
             restarts: 0,
         }
     }
@@ -180,10 +195,33 @@ impl Restarter {
                 "the server connection is lost: it is being made again".into()
             });
         }
+        // The server connection moved to another network: this side gathers there (module notes).
+        if online && let Ok(ip) = signal.local_ip() {
+            match self.gathered_on {
+                None => self.gathered_on = Some(ip),
+                Some(before) if before != ip && self.stage == Stage::Idle && !self.changed => {
+                    self.changed = true;
+                    lines.push(format!(
+                        "the server connection moved to another network ({before} -> {ip}): gathering again there"
+                    ));
+                }
+                _ => {}
+            }
+        }
         let gathering = matches!(self.stage, Stage::Gathering(_));
         if self.changed && !gathering && online {
             match (signal.local_ip(), signal.ice_servers()) {
+                (Ok(ip), Ok(_)) if !this_pc_has(ip) => {
+                    if !self.waiting_said {
+                        self.waiting_said = true;
+                        lines.push(format!(
+                            "gathering again waits: {ip} is no longer this PC's (the server connection is made again)"
+                        ));
+                    }
+                }
                 (Ok(ip), Ok(servers)) => {
+                    self.waiting_said = false;
+                    self.gathered_on = Some(ip);
                     peer.regather(ip, servers);
                     self.stage = Stage::Gathering(now);
                 }
@@ -274,5 +312,28 @@ impl Restarter {
     fn retry(&mut self) {
         self.stage = Stage::Idle;
         self.changed = true;
+    }
+}
+
+/// Whether `ip` is still one of this PC's addresses (a socket can be bound to it). The unspecified address and other
+/// addresses no socket is bound to (a test's loopback) count as this PC's.
+fn this_pc_has(ip: std::net::IpAddr) -> bool {
+    if ip.is_unspecified() || ip.is_loopback() {
+        return true;
+    }
+    std::net::UdpSocket::bind((ip, 0)).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::this_pc_has;
+
+    /// Gathering waits only for an address that is gone: a documentation address (192.0.2.1, never a PC's) is not this
+    /// PC's; the loopback and the unspecified address (tests, a connection as the routes say) count as its own.
+    #[test]
+    fn an_address_that_is_gone_is_not_gathered_on() {
+        assert!(!this_pc_has("192.0.2.1".parse().unwrap()));
+        assert!(this_pc_has("127.0.0.1".parse().unwrap()));
+        assert!(this_pc_has("0.0.0.0".parse().unwrap()));
     }
 }

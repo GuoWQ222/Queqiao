@@ -230,6 +230,23 @@ UU builds on WebRTC's standard pieces (`research\uu\STREAMER_FINDINGS.md`). We d
     once, the agent asks ("restart-request" with the body "stalled"; a viewer already restarting leaves it out). The
     restart checks every pair afresh and the first that works carries on. `QUEQIAO_FORCE=cut:<from>-<to>` cuts the
     direct paths (both ways, the relays stay) for that window of the session in tests.
+  - **Two networks at once (2026-11-27, the user: "Do as you suggest"):** sunshine on its mobile data, then Wi-Fi
+    switched on (the session stayed on mobile data at 100 ms), then mobile data off: frozen, ended after 40 s.
+    - The cause: the agent's server connection was still on the mobile data, which had gone away. A dead connection
+      was noticed only after 60 s of silence, so each restart gathered on the vanished address and signalled through
+      a connection that reached no one, until `RESTART_LIMIT`.
+    - Now the account's server connection follows the PC's best network (`Account::watch_network`, once a second,
+      in sessions and between them). Its address gone: closed at once, and made again on the network left. A network
+      the system routes before it has been up for 3 s (Windows puts Wi-Fi and Ethernet before mobile data, Linux's
+      NetworkManager too): a new connection is made there, and the server closes the older one when it logs in. At
+      most one move in 30 s, so a Wi-Fi coming and going does not toss it back and forth.
+    - A session follows the server connection's address (`Restarter`): when it changes, the side gathers there again
+      and restarts. str0m ranks a side's candidates by the order they are added, and the server connection's
+      address goes first, so ICE takes the new network's pairs when they work. The other uplinks' candidates stay
+      in, as the way back. Gathering never runs on an address that is gone.
+    - The policy: use every network; prefer one not paid by the byte (Wi-Fi, a cable) when it works, as the system's
+      route order does; move only after it has stayed up a while; keep the other as the fallback; react to the
+      system's own sign that a network went.
   - Sessions on threads of their own (the device list's) signal through the list's account by a link
     (`queqiao-viewer` `link.rs`); the phone engine keeps its session's restart messages for its restarter. The
     viewer's UI test (`--ui-test`) runs its session the same way since 2026-11-27 (before, on the list's own thread,
