@@ -25,9 +25,24 @@ use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// The release key's public half (Ed25519, hex). Its private half stays with whoever publishes releases, never in
-/// this repository. For now a test key, made on the build PC with `queqiao-setup release-key` (2026-11-22).
-pub const RELEASE_KEY: &str = "bdc28c264efc9010627d737039537d129f763dd85f5339abb232bd9fadd742aa";
+/// The release key's public half (Ed25519, hex): the only key a shipping build trusts. Its private half is kept by
+/// whoever publishes releases, sealed with their passphrase (`queqiao-setup release-key`), away from the build PC and
+/// never in this repository (the security review of 2026-11-27: the key the shipping builds trusted lay on the build
+/// PC, encrypted only for its Windows user, so any program running there could have signed an update). Made by the
+/// user on 2026-11-27.
+pub const RELEASE_KEY: &str = "816a700b5eb3be714124368e8748ad214749628f330d43b2e64ad6130b98f0aa";
+
+/// The test builds' key (feature `test-key`, which the programs' `test-switches` turn on): its private half stays on
+/// the build PC for the update tests (`scripts\run_m7_update.ps1` and the like). Shipping builds never trust it, and
+/// `scripts\package.ps1` checks that their programs do not hold it.
+pub const TEST_KEY: &str = "bdc28c264efc9010627d737039537d129f763dd85f5339abb232bd9fadd742aa";
+
+/// The key this build trusts: [`RELEASE_KEY`], or [`TEST_KEY`] in a test build.
+pub const TRUSTED_KEY: &str = if cfg!(feature = "test-key") {
+    TEST_KEY
+} else {
+    RELEASE_KEY
+};
 
 /// Where the newest release's files are: GitHub serves `releases/latest/download/<file>` from the latest release.
 pub const FEED: &str = "https://github.com/GuoWQ222/Queqiao/releases/latest/download/";
@@ -154,9 +169,9 @@ pub fn verify_manifest_with(
     Ok(manifest)
 }
 
-/// [`verify_manifest_with`] the release key this build carries.
+/// [`verify_manifest_with`] the key this build trusts ([`TRUSTED_KEY`]).
 pub fn verify_manifest(manifest: &[u8], signature: &str) -> Result<Manifest, String> {
-    verify_manifest_with(RELEASE_KEY, manifest, signature)
+    verify_manifest_with(TRUSTED_KEY, manifest, signature)
 }
 
 /// Whether `installer` is the one `manifest` names (size and SHA-256).
@@ -301,6 +316,25 @@ pub fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shipping build trusts the release key alone; a test build the test key alone (security review 2026-11-27).
+    #[test]
+    fn a_build_trusts_one_key() {
+        if cfg!(feature = "test-key") {
+            assert_eq!(TRUSTED_KEY, TEST_KEY);
+        } else {
+            assert_eq!(TRUSTED_KEY, RELEASE_KEY);
+        }
+        assert_ne!(RELEASE_KEY, TEST_KEY);
+        for key in [RELEASE_KEY, TEST_KEY] {
+            assert!(
+                key.len() == 64
+                    && key
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
+        }
+    }
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
 
@@ -384,7 +418,7 @@ mod tests {
         assert!(verify_manifest_with(&public, &bytes, &signature[..64]).is_err());
         assert!(verify_manifest_with(&public, &bytes, "zz").is_err());
         // The build's own key is a placeholder until a release key exists: nothing verifies against it.
-        if RELEASE_KEY.bytes().all(|b| b == b'0') {
+        if TRUSTED_KEY.bytes().all(|b| b == b'0') {
             assert!(verify_manifest(&bytes, &signature).is_err());
         }
         // A different installer: refused.

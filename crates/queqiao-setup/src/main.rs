@@ -15,8 +15,9 @@
 //!   suggests: an install through the window as a person's clicks would make it (tests; pictures beside the report).
 //! - `pack --output <installer> <file>...`: this program with those files as its resource (they are installed; see
 //!   payload); sign the result afterwards (scripts\package.ps1).
-//! - `release-key --output <file>`: a new release key, DPAPI-encrypted for the person running this; prints its
-//!   public half (for queqiao_update::RELEASE_KEY).
+//! - `release-key --output <file> [--dpapi]`: a new release key sealed with a passphrase (asked twice in Windows'
+//!   password dialog); prints its public half (for queqiao_update::RELEASE_KEY) and saves it as <file>.pub.
+//!   `--dpapi`: a test key, encrypted for this Windows user only (queqiao_update::TEST_KEY).
 //! - `release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]`: the update feed
 //!   for that installer: the installer as queqiao-setup-<x.y.z>.exe, queqiao-update.json and its signature.
 //! - `release-package --key <file> --package <name> --size <bytes> --sha256 <hex> --version <x.y.z> --output <folder>`:

@@ -74,6 +74,17 @@ if ($Ship) {
         }
     }
     'no build machine folders in the programs'
+    # The test key is never trusted by what ships (security review 2026-11-27): its private half lies on the build PC.
+    $libText = Get-Content -Raw -LiteralPath (Join-Path $root 'crates\queqiao-update\src\lib.rs')
+    $testKey = [regex]::Match($libText, 'pub const TEST_KEY: &str = "([0-9a-f]{64})"').Groups[1].Value
+    $releaseKey = [regex]::Match($libText, 'pub const RELEASE_KEY: &str = "([0-9a-f]{64})"').Groups[1].Value
+    if (-not $testKey -or -not $releaseKey) { 'PACKAGE_FAIL TEST_KEY or RELEASE_KEY not found in queqiao-update'; return }
+    foreach ($exe in 'queqiao-agent.exe', 'queqiao-service.exe', 'queqiao-setup.exe') {
+        $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $Bin $exe)))
+        if ($text.IndexOf($testKey) -ge 0) { "PACKAGE_FAIL $exe holds the test key"; return }
+        if ($text.IndexOf($releaseKey) -lt 0) { "PACKAGE_FAIL $exe does not hold the release key"; return }
+    }
+    if ($releaseKey -match '^0+$') { 'release key: none yet (placeholder): these programs take no update' } else { "release key: $($releaseKey.Substring(0, 16))... (not the test key)" }
     # The server asked for is in the programs that log in.
     if ($Server) {
         foreach ($exe in 'queqiao-agent.exe', 'queqiao-viewer.exe') {

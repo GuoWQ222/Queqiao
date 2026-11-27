@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# Test builds (the agent's, service's and setup's test-switches): they trust TEST_KEY, whose private half stays on the
+# build PC for the update tests; shipping builds trust only RELEASE_KEY (security review of 2026-11-27).
+test-key = []
+
 [dependencies]
 # Ed25519 (ring is already in the build through rustls).
 ring = "0.17"

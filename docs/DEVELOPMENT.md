@@ -67,9 +67,13 @@ pushed to the branches `ci-results-android` and `ci-results-ios`.
   running it into `%LOCALAPPDATA%\Programs\Queqiao` (Start menu, Settings > Apps, start with Windows), and the service
   if chosen (one UAC prompt): `--quiet [--autostart] [--service]`, `--uninstall [--quiet]`.
 - **Linux:** `scripts/package_linux.sh [--server <host:port> --pin <sha256>]` makes a .deb and an .rpm.
-- **Updates (Windows):** `queqiao-setup release-key --output <file>` makes the release key once (encrypted, never in
-  this repository; its public half goes into `crates/queqiao-update`); `queqiao-setup release --key <file> --installer
-  <file> --version <x.y.z> --output <folder>` writes the signed feed. On Linux, updates come with the system's packages.
+- **Updates (Windows):** `queqiao-setup release-key --output <file>` makes the release key once, sealed with a
+  passphrase asked twice in Windows' password dialog (PBKDF2-SHA256, AES-256-GCM; keep the file away from the build
+  PC, never in this repository); its public half, printed and saved as `<file>.pub`, goes into
+  `queqiao_update::RELEASE_KEY`, the only key shipping builds trust. `queqiao-setup release --key <file> --installer
+  <file> --version <x.y.z> --output <folder>` asks for the passphrase and writes the signed feed. Test builds trust
+  `TEST_KEY` instead (`release-key --dpapi`, kept on the build PC for the update tests); `scripts\package.ps1` and
+  `package_linux.sh` fail if a shipping program holds it. On Linux, updates come with the system's packages.
 
 ## The server
 

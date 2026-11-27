@@ -2,12 +2,12 @@
 # session). Version 0.1.0 is target\release; this script builds the same code as 0.1.1 (QUEQIAO_VERSION) into
 # target\v011, packages both (scripts\package.ps1), and serves an update feed on 127.0.0.1 (the person's registry
 # points the agent at it: UpdateFeed, UpdateFirstCheckSeconds). Then
-# 1. 0.1.0 installed: the agent finds 0.1.1 (signed with the release key), downloads it, starts its installer with
+# 1. 0.1.0 installed: the agent finds 0.1.1 (signed with the test key), downloads it, starts its installer with
 #    --update and leaves; 0.1.1 is installed and its agent runs;
 # 2. the feed offers 0.1.2 whose agent cannot start (a text file): the installer puts 0.1.1 back and starts it, and
 #    0.1.1 does not try 0.1.2 again;
 # 3. uninstalled, the test registry values removed.
-# Needs the release key (queqiao-setup release-key) in -Key. Prints M7_UPDATE_PASS or M7_UPDATE_FAIL. ASCII only.
+# Needs the test key (queqiao-setup release-key --dpapi; test builds trust queqiao_update::TEST_KEY) in -Key. Prints M7_UPDATE_PASS or M7_UPDATE_FAIL. ASCII only.
 param(
     [string]$Key = (Join-Path $env:USERPROFILE '.queqiao-release\release_key.bin'),
     [int]$Port = 47140,
@@ -72,7 +72,7 @@ function Publish([string]$Installer, [string]$Version, [string]$Notes) {
 }
 $published = Publish $installers['0.1.1'] '0.1.1' 'Test update'
 $published
-Add-Check 'the feed is signed with the build key' ([bool]($published -match ": this build's release key"))
+Add-Check 'the feed is signed with the build key' ([bool]($published -match ": the key this build trusts"))
 
 # The feed on 127.0.0.1 (a job of this script: it ends with it).
 $requests = Join-Path $out 'requests.txt'

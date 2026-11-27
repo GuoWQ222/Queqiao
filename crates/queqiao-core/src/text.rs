@@ -201,13 +201,24 @@ fn relay_place_in(name: &str, language: Language) -> String {
             }
         })
         .collect();
-    let english = words.join(" ");
-    match language {
-        Language::English => english,
+    // A number after the place ("los-angeles-2": a second server there, the user's two in Los Angeles of 2026-11-27)
+    // stays a number after the place's name, in either language.
+    let (place, number) = match words.split_last() {
+        Some((last, rest)) if !rest.is_empty() && last.chars().all(|c| c.is_ascii_digit()) => {
+            (rest.join(" "), Some(last.clone()))
+        }
+        _ => (words.join(" "), None),
+    };
+    let shown = match language {
+        Language::English => place,
         Language::Chinese => CHINESE
             .iter()
-            .find(|(source, _)| *source == english)
-            .map_or(english.clone(), |(_, chinese)| (*chinese).to_string()),
+            .find(|(source, _)| *source == place)
+            .map_or(place.clone(), |(_, chinese)| (*chinese).to_string()),
+    };
+    match number {
+        Some(number) => format!("{shown} {number}"),
+        None => shown,
     }
 }
 
@@ -545,6 +556,28 @@ const CHINESE: &[(&str, &str)] = &[
     (
         "This folder belongs to another user of this PC. Choose a folder of your own, such as the one suggested.",
         "这个文件夹属于这台电脑的其他用户。请选择你自己的文件夹，例如建议的位置。",
+    ),
+    ("Queqiao release key", "鹊桥发布密钥"),
+    (
+        "The release key is in {file}, sealed with your passphrase. Its public half is in {file}.pub.\n\nKeep the key file and the passphrase safe, best on a USB stick away from this PC: with both, anyone can publish updates to every Queqiao, and neither can be recovered.",
+        "发布密钥已保存在 {file}，并用你的口令加密。它的公钥在 {file}.pub。\n\n请妥善保管密钥文件和口令，最好放在远离这台电脑的 U 盘里：同时拿到两者的人就能向所有鹊桥发布更新，而且两者都无法找回。",
+    ),
+    (
+        "The passphrase of the release key {file}:",
+        "发布密钥 {file} 的口令：",
+    ),
+    (
+        "Choose a passphrase for the new release key (at least 12 characters). Anyone who has the key file and this passphrase can publish updates to every Queqiao. It cannot be recovered: keep it safe.",
+        "为新的发布密钥设置口令（至少 12 个字符）。同时拥有密钥文件和这个口令的人就能向所有鹊桥发布更新。口令无法找回，请妥善保管。",
+    ),
+    (
+        "The passphrase needs at least 12 characters.",
+        "口令至少需要 12 个字符。",
+    ),
+    ("Type the passphrase again.", "请再输入一次口令。"),
+    (
+        "The two passphrases differ: no release key was made.",
+        "两次输入的口令不一致：没有生成发布密钥。",
     ),
     ("Installing...", "正在安装……"),
     (
@@ -909,6 +942,7 @@ const CHINESE: &[(&str, &str)] = &[
     ("Xian", "西安"),
     ("Qingdao", "青岛"),
     ("Hong Kong", "香港"),
+    ("Los Angeles", "洛杉矶"),
     ("Taipei", "台北"),
     ("Tokyo", "东京"),
     ("Seoul", "首尔"),
@@ -1210,6 +1244,18 @@ mod tests {
         // A place the table does not have stays as written; no name, nothing.
         assert_eq!(relay_place_in("frankfurt", Language::Chinese), "Frankfurt");
         assert_eq!(relay_place_in("", Language::English), "");
+        // A numbered server keeps its place's name: "los-angeles-2" is Los Angeles 2, 洛杉矶 2.
+        assert_eq!(
+            relay_place_in("los-angeles-2", Language::English),
+            "Los Angeles 2"
+        );
+        assert_eq!(
+            relay_place_in("los-angeles-1", Language::Chinese),
+            "洛杉矶 1"
+        );
+        assert_eq!(relay_place_in("los-angeles", Language::Chinese), "洛杉矶");
+        assert_eq!(relay_place_in("shanghai-2", Language::Chinese), "上海 2");
+        assert_eq!(relay_place_in("2", Language::Chinese), "2");
     }
 
     fn placeholders(text: &str) -> Vec<&str> {

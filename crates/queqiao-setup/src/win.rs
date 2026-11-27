@@ -23,8 +23,9 @@
 //!   suggests: an install through the window as a person's clicks would make it (tests; pictures beside the report).
 //! - `pack --output <installer> <file>...`: this program with those files as its resource (they are installed; see
 //!   payload); sign the result afterwards (scripts\package.ps1).
-//! - `release-key --output <file>`: a new release key, DPAPI-encrypted for the person running this; prints its
-//!   public half (for queqiao_update::RELEASE_KEY).
+//! - `release-key --output <file> [--dpapi]`: a new release key sealed with a passphrase the person chooses in Windows'
+//!   password dialog (twice); its public half (for queqiao_update::RELEASE_KEY) is printed and saved as <file>.pub.
+//!   `--dpapi`: the test key instead, encrypted for this Windows user only (for queqiao_update::TEST_KEY).
 //! - `release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]`: the update feed
 //!   for that installer: the installer as queqiao-setup-<x.y.z>.exe, queqiao-update.json and its signature.
 //! - `release-package --key <file> --package <name> --size <bytes> --sha256 <hex> --version <x.y.z> --output <folder>`:
@@ -545,23 +546,152 @@ fn named(args: &[String], names: &[&str]) -> Result<Vec<Option<String>>, String>
     Ok(values)
 }
 
-/// `release-key --output <file>`
+/// `release-key --output <file> [--dpapi]`: the release key sealed with a passphrase (security review of 2026-11-27:
+/// encrypted only for its Windows user, any program running as that user could have signed an update with it), or
+/// with `--dpapi` a test key for the update tests on the build PC.
 fn release_key(args: &[String]) -> Result<String, String> {
-    let [output] = &named(args, &["--output"])?[..] else {
+    let dpapi = args.iter().any(|arg| arg == "--dpapi");
+    let rest: Vec<String> = args
+        .iter()
+        .filter(|arg| *arg != "--dpapi")
+        .cloned()
+        .collect();
+    let [output] = &named(&rest, &["--output"])?[..] else {
         unreachable!()
     };
     let output = output
         .as_ref()
-        .ok_or("usage: queqiao-setup release-key --output <file>")?;
+        .ok_or("usage: queqiao-setup release-key --output <file> [--dpapi]")?;
     if std::path::Path::new(output).exists() {
         return Err(format!("{output} exists: a release key is not replaced"));
     }
     let (key, public) = queqiao_update::release::generate_key()?;
-    let sealed = queqiao_update::release::protect(&key)?;
-    std::fs::write(output, sealed).map_err(|e| format!("{output}: {e}"))?;
+    let (sealed, how) = if dpapi {
+        (
+            queqiao_update::release::protect(&key)?,
+            "DPAPI, this Windows user only: a test key",
+        )
+    } else {
+        let passphrase = new_passphrase()?;
+        (
+            queqiao_update::release::seal(&key, &passphrase)?,
+            "sealed with your passphrase",
+        )
+    };
+    let write = |path: &str, data: &[u8]| {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(data))
+            .map_err(|e| format!("{path}: {e}"))
+    };
+    write(output, &sealed)?;
+    let public_file = format!("{output}.pub");
+    let _ = std::fs::remove_file(&public_file);
+    write(&public_file, format!("{public}\n").as_bytes())?;
+    if !dpapi {
+        queqiao_display::show_info(
+            tr("Queqiao release key"),
+            &trf(
+                "The release key is in {file}, sealed with your passphrase. Its public half is in {file}.pub.\n\nKeep the key file and the passphrase safe, best on a USB stick away from this PC: with both, anyone can publish updates to every Queqiao, and neither can be recovered.",
+                &[("file", output.as_str())],
+            ),
+        );
+    }
     Ok(format!(
-        "release key in {output} (DPAPI, this Windows user only); public key: {public}"
+        "release key in {output} ({how}); public key: {public} (also in {public_file})"
     ))
+}
+
+/// The release key in `path`: opened with its passphrase (asked in Windows' password dialog) when sealed, else the
+/// test key (DPAPI).
+fn read_release_key(path: &str) -> Result<Vec<u8>, String> {
+    let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    if !queqiao_update::release::is_sealed(&data) {
+        return queqiao_update::release::unprotect(&data);
+    }
+    let passphrase = ask_passphrase(&trf(
+        "The passphrase of the release key {file}:",
+        &[("file", path)],
+    ))?;
+    queqiao_update::release::open(&data, &passphrase)
+}
+
+/// A new passphrase for the release key: asked twice, at least MIN_PASSPHRASE characters.
+fn new_passphrase() -> Result<String, String> {
+    let first = ask_passphrase(tr(
+        "Choose a passphrase for the new release key (at least 12 characters). Anyone who has the key file and this passphrase can publish updates to every Queqiao. It cannot be recovered: keep it safe.",
+    ))?;
+    if first.chars().count() < queqiao_update::release::MIN_PASSPHRASE {
+        return Err(tr("The passphrase needs at least 12 characters.").into());
+    }
+    let second = ask_passphrase(tr("Type the passphrase again."))?;
+    if first != second {
+        return Err(tr("The two passphrases differ: no release key was made.").into());
+    }
+    Ok(first)
+}
+
+/// A passphrase typed into Windows' own password dialog (CredUI; nothing is kept).
+fn ask_passphrase(message: &str) -> Result<String, String> {
+    use windows::Win32::Foundation::{ERROR_CANCELLED, ERROR_INVALID_FLAGS, NO_ERROR};
+    use windows::Win32::Security::Credentials::{
+        CREDUI_FLAGS_ALWAYS_SHOW_UI, CREDUI_FLAGS_DO_NOT_PERSIST, CREDUI_FLAGS_GENERIC_CREDENTIALS,
+        CREDUI_FLAGS_KEEP_USERNAME, CREDUI_INFOW, CredUIPromptForCredentialsW,
+    };
+    use windows::core::PCWSTR;
+    let caption: Vec<u16> = tr("Queqiao release key")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+    let target: Vec<u16> = "Queqiao release key"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let info = CREDUI_INFOW {
+        cbSize: size_of::<CREDUI_INFOW>() as u32,
+        pszMessageText: PCWSTR(text.as_ptr()),
+        pszCaptionText: PCWSTR(caption.as_ptr()),
+        ..Default::default()
+    };
+    let base = CREDUI_FLAGS_GENERIC_CREDENTIALS
+        | CREDUI_FLAGS_ALWAYS_SHOW_UI
+        | CREDUI_FLAGS_DO_NOT_PERSIST;
+    for flags in [base | CREDUI_FLAGS_KEEP_USERNAME, base] {
+        let mut user = [0u16; 514];
+        for (at, unit) in "release key".encode_utf16().enumerate() {
+            user[at] = unit;
+        }
+        let mut password = [0u16; 257];
+        let result = unsafe {
+            CredUIPromptForCredentialsW(
+                Some(&info),
+                PCWSTR(target.as_ptr()),
+                None,
+                0,
+                &mut user,
+                &mut password,
+                None,
+                flags,
+            )
+        };
+        let length = password
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(password.len());
+        let typed = String::from_utf16(&password[..length]);
+        password.fill(0);
+        match result {
+            NO_ERROR => return typed.map_err(|_| "the passphrase is not valid text".to_string()),
+            ERROR_CANCELLED => return Err("cancelled".into()),
+            ERROR_INVALID_FLAGS => continue,
+            other => return Err(format!("the password dialog failed ({})", other.0)),
+        }
+    }
+    Err("the password dialog failed".into())
 }
 
 /// `release --key <file> --installer <file> --version <x.y.z> --output <folder> [--notes <text>]`
@@ -581,8 +711,7 @@ fn release(args: &[String]) -> Result<String, String> {
     else {
         return Err(usage.into());
     };
-    let sealed = std::fs::read(key).map_err(|e| format!("{key}: {e}"))?;
-    let key = queqiao_update::release::unprotect(&sealed)?;
+    let key = read_release_key(key)?;
     let public = queqiao_update::release::public_key(&key)?;
     let bytes = std::fs::read(installer).map_err(|e| format!("{installer}: {e}"))?;
     let (manifest, signature) =
@@ -597,10 +726,10 @@ fn release(args: &[String]) -> Result<String, String> {
     ] {
         std::fs::write(folder.join(file), data).map_err(|e| format!("{file}: {e}"))?;
     }
-    let matches = if public == queqiao_update::RELEASE_KEY {
-        "this build's release key"
+    let matches = if public == queqiao_update::TRUSTED_KEY {
+        "the key this build trusts"
     } else {
-        "NOT this build's release key"
+        "NOT the key this build trusts"
     };
     Ok(format!(
         "feed for {version} in {output} (signed by {public}: {matches})"
@@ -639,8 +768,7 @@ fn release_package(args: &[String]) -> Result<String, String> {
     let size: u64 = size
         .parse()
         .map_err(|_| format!("{size}: not a size in bytes"))?;
-    let sealed = std::fs::read(key).map_err(|e| format!("{key}: {e}"))?;
-    let key = queqiao_update::release::unprotect(&sealed)?;
+    let key = read_release_key(key)?;
     let public = queqiao_update::release::public_key(&key)?;
     let (name, manifest, signature) = queqiao_update::release::sign_package(
         &key,
@@ -655,10 +783,10 @@ fn release_package(args: &[String]) -> Result<String, String> {
     std::fs::write(folder.join(name), &manifest).map_err(|e| format!("{name}: {e}"))?;
     std::fs::write(folder.join(format!("{name}.sig")), signature.as_bytes())
         .map_err(|e| format!("{name}.sig: {e}"))?;
-    let matches = if public == queqiao_update::RELEASE_KEY {
-        "this build's release key"
+    let matches = if public == queqiao_update::TRUSTED_KEY {
+        "the key this build trusts"
     } else {
-        "NOT this build's release key"
+        "NOT the key this build trusts"
     };
     Ok(format!(
         "{name} for {package} {version} in {output} (signed by {public}: {matches})"

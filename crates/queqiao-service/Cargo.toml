@@ -7,7 +7,7 @@ publish.workspace = true
 
 [features]
 # Extra agent options stored by the tests (install --agent-arguments / --logon-arguments). Never in a shipping build.
-test-switches = []
+test-switches = ["queqiao-update/test-key"]
 
 [dependencies]
 queqiao-capture.workspace = true

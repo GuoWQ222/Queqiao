@@ -138,6 +138,15 @@ if [ $test = 0 ]; then
         done
     done
     echo "no build machine folders in the programs"
+    # The test key is never trusted by what ships (security review 2026-11-27): its private half lies on the build PC.
+    test_key=$(sed -n 's/^pub const TEST_KEY: &str = "\([0-9a-f]\{64\}\)";/\1/p' "$ws/crates/queqiao-update/src/lib.rs")
+    release_key=$(sed -n 's/^pub const RELEASE_KEY: &str = "\([0-9a-f]\{64\}\)";/\1/p' "$ws/crates/queqiao-update/src/lib.rs")
+    [ -n "$test_key" ] && [ -n "$release_key" ] || fail "TEST_KEY or RELEASE_KEY not found in queqiao-update"
+    for program in queqiao-agent queqiao-service; do
+        ! grep -q -a -F -- "$test_key" "$stage/usr/lib/queqiao/$program" || fail "$program holds the test key"
+        grep -q -a -F -- "$release_key" "$stage/usr/lib/queqiao/$program" || fail "$program does not hold the release key"
+    done
+    echo "release key: ${release_key:0:16}... (not the test key)"
 fi
 # The server asked for is in the programs that log in.
 if [ -n "$server" ]; then

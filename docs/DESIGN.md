@@ -420,6 +420,14 @@ servers and the machines. Fixed in the code:
   pinned to a commit, and checkout does not keep the token. A separate job pushes the results branch: it holds the
   only write access and runs no third-party code, in a new git folder.
 
+- **The update key.** The key every shipping build trusted lay on the build PC, encrypted only for its Windows user
+  (DPAPI), so any program running as that user could have signed an update that every Queqiao's service installs as
+  SYSTEM. Now a shipping build trusts `RELEASE_KEY` alone, made with `queqiao-setup release-key` and sealed with its
+  publisher's passphrase (PBKDF2-HMAC-SHA256, 1,000,000 rounds; AES-256-GCM over the PKCS#8 document, the header
+  authenticated), entered in Windows' password dialog and kept away from the build PC. Test builds (`test-switches`
+  -> `queqiao-update/test-key`) trust `TEST_KEY`, whose DPAPI-encrypted private half stays on the build PC for the
+  update tests; the packaging scripts fail if a shipping program holds it.
+
 Checked and sound: all 199 commits hold no keys, tokens or passwords; the pin is mandatory (an empty pin matches no
 certificate, and nothing is trusted on first use); sign-up and logins are limited per address; an update can never
 go back to an older version. Open items concern the machines and are the user's to decide: SSH by password on the
