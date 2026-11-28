@@ -1,0 +1,6 @@
+queqiao-server 0.1.0 (protocol 1)
+listening on 127.0.0.1:47810, data in /tmp/android_e2e/e2e/server
+certificate fingerprint (clients: --pin): aaae2c1f466f4d775cd5b396a2cbdffedbd40c0952c79386b95a5b4b7a8a841c
+STUN/TURN off
+new accounts from the login form: no (queqiao-server add-user)
+127.0.0.1:35846: TLS: tls handshake eof

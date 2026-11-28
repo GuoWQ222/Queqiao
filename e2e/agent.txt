@@ -1,0 +1,2 @@
+Queqiao: A new device, Google sdk_gphone64_x86_64, logged in to your account. If that was not you, change your password and take it out of the account.
+[OpenH264] this = 0x0x5f6b74407a00, Warning:bEnableFrameSkip = 0,bitrate can't be controlled for RC_QUALITY_MODE,RC_BITRATE_MODE and RC_TIMESTAMP_MODE without enabling skip frame.

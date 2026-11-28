@@ -1,0 +1,1 @@
+APK_BUILT mobile/android/app/build/outputs/apk/debug/app-debug.apk

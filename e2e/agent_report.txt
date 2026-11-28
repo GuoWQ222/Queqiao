@@ -1,0 +1,52 @@
+queqiao-agent 0.1.0 (protocol 1)
+tray icon not shown (no StatusNotifierItem tray on this desktop: the main window is open instead); this account's devices may control this PC: yes; ask first: no
+clipboard shared, files accepted, command lines allowed
+logged in as tester at 127.0.0.1:47810 (route: not a public address: as the routes say; as the routes say: from 127.0.0.1); this device: runnervm3lb7s (108ec26160d1b8a3177fed000563ffa9); 1 devices on the account
+notification: a new device, Google sdk_gphone64_x86_64
+session 1: viewer Google sdk_gphone64_x86_64 (53881c2ff2b56dc88f6248aeec375ec9)
+screen 1280x720 at 60 Hz on X11
+encoder: OpenH264 (software, 4 threads) (software) at 1280x720, 30 fps, 2.8 Mbit/s; convert: CPU (BT.709, bilinear, 4 threads)
+input through XTEST
+viewer: Google sdk_gphone64_x86_64
+candidate host 127.0.0.1:60600
+gathered in 0 ms
+candidate host 10.1.0.151:48612
+files: over QUIC (both sides offer it)
+video parity (FEC): on, the viewer rebuilds lost packets from it
+89 ms: ICE Checking
+89 ms: sound: not captured (no PulseAudio library (libpulse-simple.so.0)); trying again
+155 ms: DTLS in 201 bytes [hs1], 10.1.0.151:58356 -> 10.1.0.151:48612
+156 ms: ICE Connected
+156 ms: DTLS out 719 bytes [hs2 hs11 hs12 hs13 hs14], 10.1.0.151:48612 -> 10.1.0.151:58356
+158 ms: DTLS in 623 bytes [hs11 hs16 hs15 ccs enc22], 10.1.0.151:58356 -> 10.1.0.151:48612
+158 ms: DTLS out 634 bytes [hs4 ccs enc22], 10.1.0.151:48612 -> 10.1.0.151:58356
+path after 207 ms: direct to 10.1.0.151:58356 (from 10.1.0.151:48612)
+command from the viewer: picture: H.264 (OpenH264 (software, 4 threads))
+209 ms: files: QUIC connected
+1089 ms: path round trip (STUN), shortest so far: 23.7 ms
+1089 ms: video out: 30 packets, 0 NACKs and 0 PLIs received; parity 5 %: 9 for 30 packets
+2091 ms: path round trip (STUN), shortest so far: 1.4 ms
+2103 ms: sound: not captured (no PulseAudio library (libpulse-simple.so.0)); trying again
+2133 ms: control channel: data again after 1000 ms
+3130 ms: control channel: data again after 1001 ms
+4106 ms: sound: not captured (no PulseAudio library (libpulse-simple.so.0)); trying again
+4131 ms: control channel: data again after 1000 ms
+6100 ms: video out: 70 packets, 0 NACKs and 0 PLIs received, 0 lost by the other side's count; parity 5 %: 49 for 70 packets
+6105 ms: sound: not captured (no PulseAudio library (libpulse-simple.so.0)); trying again
+6136 ms: control channel: data again after 1001 ms
+connected after 158 ms
+7.1 s: 66 screen changes, 57 frames sent (1 keyframes, 0.03 MB, 0.0 Mbit/s), 0 keyframe requests
+screen change -> sent, ms: median 21.13, p95 35.66, max 112.97 (n=57)
+clipboard: 0 received, 0 sent; test text from the other side received: no
+clipboard images: 0 received, 0 sent; test image from the other side received: no
+sound: from no device: 0 packets (0 kB) sent, 0 silent frames left out
+pointer: 1 shapes sent
+bitrate course, every second (estimate/encoder/sent Mbit/s@frames, K a keyframe): 5.5/0.9/0.2@9K 5.5/0.9/0.0@9 3.5/0.9/0.0@8 3.5/0.9/0.0@8 3.5/0.9/0.0@7 1.8/0.9/0.0@8 1.8/0.9/0.0@8
+frame size, kB: median 0.03, p95 0.41, max 19.92 (n=57); keyframes, kB: 20
+bitrate: started at 2.8, lowest 2.8, last 2.8, highest allowed 2.8 Mbit/s; 0 changes
+frame-rate fit: the encoder (made for 30 fps) given up to 3.00 times its share, for the frames it really made
+sharp pictures: the estimate started again from what the link carried 0 times (held 8.0 Mbit/s at the end); 0 keyframes of the still screen after motion (each only once the link carried it within 250 ms)
+input: 21 events, 0 refused
+ended: the viewer left
+1 sessions
+RESULT PASS

@@ -1,0 +1,8 @@
+    Updating crates.io index
+   Compiling sctp-proto v0.10.8 (/home/runner/work/Queqiao/Queqiao/third_party/sctp-proto)
+   Compiling queqiao-core v0.1.0 (/home/runner/work/Queqiao/Queqiao/crates/queqiao-core)
+   Compiling str0m v0.25.0
+   Compiling queqiao-transport v0.1.0 (/home/runner/work/Queqiao/Queqiao/crates/queqiao-transport)
+   Compiling queqiao-account v0.1.0 (/home/runner/work/Queqiao/Queqiao/crates/queqiao-account)
+   Compiling queqiao-mobile v0.1.0 (/home/runner/work/Queqiao/Queqiao/crates/queqiao-mobile)
+    Finished `release` profile [optimized] target(s) in 41.58s
