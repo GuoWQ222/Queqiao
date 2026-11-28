@@ -193,8 +193,33 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
         // With the Queqiao service running, Queqiao for the person signed in is the one it starts (the copy started
         // at sign-in leaves).
         if options.service_channel.is_none() && autostart::service_runs() {
-            if options.show {
-                queqiao_display::show_running_main();
+            // Opened by the person (the menu, a desktop icon: --show): never without a word (2026-11-27: a click in a
+            // remote desktop did nothing at all). The Queqiao of this session shows its window (one just starting gets
+            // 3 s). The service runs Queqiao for the session at this PC's screen only (seat0): another session (xrdp
+            // and other remote desktops, which have no seat) is told so; at the screen none running means it was
+            // quit, and the service starts it again at the next sign-in.
+            if options.show && !queqiao_display::show_running_main() {
+                let at_screen = std::env::var("XDG_SEAT").is_ok_and(|seat| seat == "seat0");
+                let shown = at_screen
+                    && (0..12).any(|_| {
+                        std::thread::sleep(Duration::from_millis(250));
+                        queqiao_display::show_running_main()
+                    });
+                if !shown {
+                    let text = if at_screen {
+                        "Queqiao was quit in this session. It starts again the next time you sign in."
+                    } else {
+                        "Queqiao runs for the person at this PC's screen, not in Remote Desktop sessions."
+                    };
+                    lines.push(format!(
+                        "no Queqiao in this session: told the person: {text}"
+                    ));
+                    queqiao_display::show_info(
+                        queqiao_core::text::tr("Queqiao"),
+                        queqiao_core::text::tr(text),
+                    );
+                    return Ok(true);
+                }
             }
             lines.push("the Queqiao service runs Queqiao on this PC: this copy leaves".into());
             return Ok(true);

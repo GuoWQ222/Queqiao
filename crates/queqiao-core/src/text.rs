@@ -477,6 +477,10 @@ const CHINESE: &[(&str, &str)] = &[
         "所需空间：{needed}  ·  可用空间：{free}",
     ),
     (
+        "Queqiao was quit in this session. It starts again the next time you sign in.",
+        "鹊桥已在这个会话中退出，下次登录时会重新启动。",
+    ),
+    (
         "Queqiao runs for the person at this PC's screen, not in Remote Desktop sessions.",
         "鹊桥只为这台电脑屏幕前的人运行，不在远程桌面会话中运行。",
     ),
