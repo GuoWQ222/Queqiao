@@ -42,15 +42,15 @@
   <tr>
     <td width="33%" valign="top">
       <h4>🔗 Connect anywhere</h4>
-      Direct peer-to-peer connections across networks (NAT traversal, IPv4 and IPv6). When a direct connection is unavailable, the session uses a relay server (50–100 ms latency).
+      Direct peer-to-peer connections across networks (NAT traversal, IPv4 and IPv6). When a direct connection is unavailable, the session uses a relay server.
     </td>
     <td width="33%" valign="top">
       <h4>🎞️ Sharp, fast picture</h4>
       Hardware encoding on NVIDIA, Intel and AMD GPUs: H.264, H.265 (with 4:4:4 colour and 10-bit) and AV1, with adaptive bitrate. A software fallback runs on any PC.
     </td>
     <td width="33%" valign="top">
-      <h4>👥 One controller at a time</h4>
-      When another of your devices is in control, Queqiao says so. You can disconnect it, or take control after confirming.
+      <h4>🌐 Relay Servers</h4>
+      Six relay servers are available. Beijing, Shanghai, Guangzhou and Chengdu each host one, with about 5–20 ms of latency within mainland China. The two in Los Angeles, USA, provide about 150 ms of latency when one device is in mainland China and the other is abroad.
     </td>
   </tr>
   <tr>
@@ -103,7 +103,7 @@ Sessions on a phone work the same way. Choose a device and tap **Connect**. Tap 
 | **Android** | Android 8.0 or later | Coming soon | ❌ Not supported |
 | **iOS / iPadOS** | iOS 15 or later | Coming soon | ❌ Not supported (iOS does not allow apps to remotely control the device) |
 
-### Linux desktops
+### Linux desktops (Beta)
 
 | Session | Screen and input |
 |---|---|
