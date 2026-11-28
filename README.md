@@ -50,7 +50,8 @@
     </td>
     <td width="33%" valign="top">
       <h4>🌐 Relay Servers</h4>
-      Six relay servers are available. Beijing, Shanghai, Guangzhou and Chengdu each host one, with about 5–20 ms of latency within mainland China. The two in Los Angeles, USA, provide about 150 ms of latency when one device is in mainland China and the other is abroad.
+      Six relay servers are available. Beijing, Shanghai, Guangzhou and Chengdu each host one, with about 5–20 ms of latency within mainland China.<br>
+      The two in Los Angeles, USA, provide about 150 ms of latency when one device is in mainland China and the other is abroad.
     </td>
   </tr>
   <tr>
