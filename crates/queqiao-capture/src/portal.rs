@@ -54,8 +54,17 @@ impl PortalDuplicator {
     pub(crate) fn new() -> Result<Self> {
         let portal = queqiao_portal::session().map_err(Error::new)?;
         let fd = portal.pipewire().map_err(Error::new)?;
+        // A virtual monitor (Super Screen) is made at the size the stream agrees on: asked for exactly.
+        let asked = match portal.virtual_refresh() {
+            Some(refresh) => pipewire::Asked::Exact {
+                width: portal.size.0,
+                height: portal.size.1,
+                refresh,
+            },
+            None => pipewire::Asked::Default(portal.size.0, portal.size.1),
+        };
         let stream =
-            Stream::open(fd, portal.node, portal.size, portal.pointer_apart).map_err(Error::new)?;
+            Stream::open(fd, portal.node, asked, portal.pointer_apart).map_err(Error::new)?;
         let mut duplicator = PortalDuplicator {
             info: OutputInfo {
                 adapter: "Wayland".into(),
@@ -86,7 +95,9 @@ impl PortalDuplicator {
             })?;
         duplicator.info.width = size.0;
         duplicator.info.height = size.1;
-        let _ = &duplicator.portal;
+        // The format agreed: a virtual monitor exists now (Super Screen), and is set out as it should be.
+        duplicator.portal.stream_ready();
+        duplicator.info.output = duplicator.portal.describe();
         Ok(duplicator)
     }
 

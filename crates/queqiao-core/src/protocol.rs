@@ -122,6 +122,13 @@ pub enum Message {
         sizes: Vec<(u16, u16)>,
         note: String,
     },
+    /// Agent -> viewer: Super Screen is on (that PC shows a virtual screen of `size`) or off; `note`: why it did not
+    /// change (empty when it did). A viewer before it leaves it out.
+    SuperScreenState {
+        on: bool,
+        size: (u16, u16),
+        note: String,
+    },
     // Drawing on that PC's screen (annotation, 2026-11-28).
     /// Viewer -> agent: drawing on the shown screen of that PC for the person there (help sessions): pen strokes on top
     /// of everything, which clicks and keys pass through. An agent before it drops these, and then never answers with
@@ -308,6 +315,15 @@ pub enum Command {
         width: u16,
         height: u16,
     },
+    /// Super Screen (Windows): a virtual screen on that PC of this size and refresh rate (0: 60 Hz) and Windows'
+    /// scale in percent (0: as Windows recommends), shown instead of that PC's own screens (they go dark); 0 x 0:
+    /// back to its own screens. Undone when the session ends.
+    SuperScreen {
+        width: u16,
+        height: u16,
+        refresh: u8,
+        scale: u16,
+    },
     /// Show screen `n` (counted as in `Message::Screens`).
     Screen(u8),
     /// The highest bitrate, kbit/s (instead of a quality preset); 0 goes back to the preset.
@@ -376,6 +392,7 @@ const ENCODER: u8 = 68;
 const DISPLAY_MODES: u8 = 69;
 const ANNOTATE: u8 = 70;
 const ANNOTATE_STATE: u8 = 71;
+const SUPER_SCREEN_STATE: u8 = 72;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -477,6 +494,18 @@ impl Message {
                         out.extend_from_slice(&width.to_le_bytes());
                         out.extend_from_slice(&height.to_le_bytes());
                     }
+                    Command::SuperScreen {
+                        width,
+                        height,
+                        refresh,
+                        scale,
+                    } => {
+                        out.push(18);
+                        out.extend_from_slice(&width.to_le_bytes());
+                        out.extend_from_slice(&height.to_le_bytes());
+                        out.push(refresh);
+                        out.extend_from_slice(&scale.to_le_bytes());
+                    }
                     Command::MaxBitrate(kbit) => {
                         out.push(12);
                         out.extend_from_slice(&kbit.to_le_bytes());
@@ -540,6 +569,16 @@ impl Message {
                     end -= 1;
                 }
                 out.extend_from_slice(&picture.as_bytes()[..end]);
+            }
+            Message::SuperScreenState { on, size, ref note } => {
+                out.extend([SUPER_SCREEN_STATE, u8::from(on)]);
+                out.extend_from_slice(&size.0.to_le_bytes());
+                out.extend_from_slice(&size.1.to_le_bytes());
+                let mut end = note.len().min(200);
+                while !note.is_char_boundary(end) {
+                    end -= 1;
+                }
+                out.extend_from_slice(&note.as_bytes()[..end]);
             }
             Message::DisplayModes {
                 current,
@@ -706,6 +745,12 @@ impl Message {
                     width: u16::from_le_bytes(rest.get(1..3)?.try_into().ok()?),
                     height: u16::from_le_bytes(rest.get(3..5)?.try_into().ok()?),
                 },
+                18 => Command::SuperScreen {
+                    width: u16::from_le_bytes(rest.get(1..3)?.try_into().ok()?),
+                    height: u16::from_le_bytes(rest.get(3..5)?.try_into().ok()?),
+                    refresh: *rest.get(5)?,
+                    scale: u16::from_le_bytes(rest.get(6..8)?.try_into().ok()?),
+                },
                 12 => Command::MaxBitrate(u32::from_le_bytes(rest.get(1..5)?.try_into().ok()?)),
                 9 => Command::MuteSpeakers(match rest.get(1)? {
                     0 => false,
@@ -799,6 +844,23 @@ impl Message {
                 },
                 _ => return None,
             },
+            SUPER_SCREEN_STATE => {
+                let on = match rest.first()? {
+                    0 => false,
+                    1 => true,
+                    _ => return None,
+                };
+                let size = (u16_at(1)?, u16_at(3)?);
+                let note = rest.get(5..)?;
+                if note.len() > 200 {
+                    return None;
+                }
+                Message::SuperScreenState {
+                    on,
+                    size,
+                    note: String::from_utf8(note.to_vec()).ok()?,
+                }
+            }
             DISPLAY_MODES => {
                 let current = (u16_at(0)?, u16_at(2)?);
                 let own = (u16_at(4)?, u16_at(6)?);
@@ -993,6 +1055,28 @@ mod tests {
                 width: 0,
                 height: 0,
             }),
+            Message::Command(Command::SuperScreen {
+                width: 3840,
+                height: 2160,
+                refresh: 60,
+                scale: 200,
+            }),
+            Message::Command(Command::SuperScreen {
+                width: 0,
+                height: 0,
+                refresh: 0,
+                scale: 0,
+            }),
+            Message::SuperScreenState {
+                on: true,
+                size: (3840, 2160),
+                note: String::new(),
+            },
+            Message::SuperScreenState {
+                on: false,
+                size: (0, 0),
+                note: "Queqiao's display driver is not installed".into(),
+            },
             Message::DisplayModes {
                 current: (1920, 1080),
                 own: (2560, 1440),

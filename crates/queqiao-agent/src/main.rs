@@ -54,6 +54,10 @@ mod linux;
 #[cfg(target_os = "linux")]
 #[path = "linux/power.rs"]
 mod power;
+/// Super Screen on Linux: GNOME's virtual monitor for the session.
+#[cfg(target_os = "linux")]
+#[path = "linux/super_screen.rs"]
+mod super_screen;
 #[cfg(target_os = "linux")]
 #[path = "linux/update.rs"]
 mod update;

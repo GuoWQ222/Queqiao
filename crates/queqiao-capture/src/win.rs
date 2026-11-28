@@ -351,6 +351,14 @@ pub(crate) fn screen_names() -> Result<Vec<String>> {
         .collect())
 }
 
+/// The index (as [`screens`] counts them) of the screen Windows names `name` ("\\.\DISPLAY3").
+pub fn screen_index_named(name: &str) -> Option<usize> {
+    screen_names()
+        .ok()?
+        .iter()
+        .position(|screen| screen.eq_ignore_ascii_case(name))
+}
+
 /// The screens attached to the desktop, across all GPUs, with the GPU each belongs to.
 /// A screen's D3D11 device and description, without duplicating it: for a session that starts while another
 /// desktop takes input (the sign-in or lock screen), whose pictures come from the service's desktop helper.

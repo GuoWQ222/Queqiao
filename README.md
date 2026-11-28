@@ -46,7 +46,7 @@
     </td>
     <td width="33%" valign="top">
       <h4>🎞️ Sharp, fast picture</h4>
-      Hardware encoding on NVIDIA, Intel and AMD GPUs: H.264, H.265 (with 4:4:4 colour and 10-bit) and AV1, with adaptive bitrate. A software fallback runs on any PC. The controlled PC's resolution can be set for the session, and goes back afterwards.
+      Hardware encoding on NVIDIA, Intel and AMD GPUs: H.264, H.265 (with 4:4:4 colour and 10-bit) and AV1, with adaptive bitrate. A software fallback runs on any PC. The controlled PC's resolution can be set for the session, and goes back afterwards. Super Screen gives it a virtual screen at the size you choose, drawn at full sharpness (Windows; Linux with GNOME).
     </td>
     <td width="33%" valign="top">
       <h4>🌐 Relay Servers</h4>

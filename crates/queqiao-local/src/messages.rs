@@ -90,6 +90,20 @@ pub enum ToService {
     /// shown on it (GNOME shows no other program there); the service hands the text to the agent of whoever signs in
     /// next ([`FromService::Notice`]), as the person chose (2026-11-25).
     Notice(String),
+    /// Windows, Super Screen: a virtual monitor of Queqiao's display driver (only SYSTEM and administrators may open
+    /// it) at this size and refresh rate, `width_mm` x `height_mm` (0: 96 DPI) so Windows recommends the controlling
+    /// screen's scale; the same `id` again replaces it. Answered with [`FromService::Monitor`]. The service removes the
+    /// agent's monitors when the agent goes.
+    AddMonitor {
+        id: u32,
+        width: u32,
+        height: u32,
+        refresh: u32,
+        width_mm: u32,
+        height_mm: u32,
+    },
+    /// Windows: this agent's virtual monitors go (Windows shows the PC's own screens again).
+    RemoveMonitors,
 }
 
 /// The most an update's manifest may be in a message.
@@ -111,6 +125,14 @@ pub enum FromService {
     /// To the agent of the person who signed in, right after it starts: what happened at the sign-in screen while no
     /// notice could be shown there, to show them.
     Notice(String),
+    /// The answer to [`ToService::AddMonitor`]: where Windows has the monitor (its adapter's LUID and its target id,
+    /// as the display configuration names them), or why there is none (`error` not empty).
+    Monitor {
+        luid_low: u32,
+        luid_high: i32,
+        target: u32,
+        error: String,
+    },
 }
 
 /// This device as the agent for the sign-in screen is to be: its id, name and key, the account login, what the
@@ -451,6 +473,21 @@ impl ToService {
                 text(&mut out, notice);
                 out
             }
+            ToService::AddMonitor {
+                id,
+                width,
+                height,
+                refresh,
+                width_mm,
+                height_mm,
+            } => {
+                let mut out = vec![8];
+                for value in [id, width, height, refresh, width_mm, height_mm] {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+                out
+            }
+            ToService::RemoveMonitors => vec![9],
         }
     }
 
@@ -480,6 +517,20 @@ impl ToService {
             }
             [6, rest @ ..] => read_text(rest).map(ToService::CheckPassword),
             [7, rest @ ..] => read_text(rest).map(ToService::Notice),
+            [8, rest @ ..] if rest.len() == 24 => {
+                let value = |at: usize| {
+                    u32::from_le_bytes(rest[at * 4..at * 4 + 4].try_into().unwrap_or_default())
+                };
+                Some(ToService::AddMonitor {
+                    id: value(0),
+                    width: value(1),
+                    height: value(2),
+                    refresh: value(3),
+                    width_mm: value(4),
+                    height_mm: value(5),
+                })
+            }
+            [9] => Some(ToService::RemoveMonitors),
             _ => None,
         }
     }
@@ -504,6 +555,19 @@ impl FromService {
                 text(&mut out, notice);
                 out
             }
+            FromService::Monitor {
+                luid_low,
+                luid_high,
+                target,
+                error,
+            } => {
+                let mut out = vec![5];
+                out.extend_from_slice(&luid_low.to_le_bytes());
+                out.extend_from_slice(&luid_high.to_le_bytes());
+                out.extend_from_slice(&target.to_le_bytes());
+                text(&mut out, error);
+                out
+            }
         }
     }
 
@@ -518,6 +582,16 @@ impl FromService {
                 _ => None,
             },
             4 => read_text(rest).map(FromService::Notice),
+            5 => {
+                let value =
+                    |at: usize| Some(u32::from_le_bytes(rest.get(at..at + 4)?.try_into().ok()?));
+                Some(FromService::Monitor {
+                    luid_low: value(0)?,
+                    luid_high: value(4)? as i32,
+                    target: value(8)?,
+                    error: read_text(rest.get(12..)?)?,
+                })
+            }
             _ => None,
         }
     }
@@ -674,6 +748,15 @@ mod tests {
             ToService::Restart,
             ToService::ForgetLogon,
             ToService::CheckPassword("pässword".into()),
+            ToService::AddMonitor {
+                id: 7,
+                width: 3840,
+                height: 2160,
+                refresh: 60,
+                width_mm: 597,
+                height_mm: 336,
+            },
+            ToService::RemoveMonitors,
             ToService::Notice("the sign-in screen was used".into()),
         ] {
             assert_eq!(ToService::decode(&message.encode()), Some(message));
@@ -681,6 +764,18 @@ mod tests {
         for reply in [
             FromService::Reply("Ctrl+Alt+Del sent".into()),
             FromService::Password(true),
+            FromService::Monitor {
+                luid_low: 0x1234,
+                luid_high: -2,
+                target: 257,
+                error: String::new(),
+            },
+            FromService::Monitor {
+                luid_low: 0,
+                luid_high: 0,
+                target: 0,
+                error: "the display driver is not installed".into(),
+            },
             FromService::Password(false),
             FromService::Notice("used at 09:20".into()),
         ] {

@@ -22,8 +22,12 @@
 # it has one. KEPT=1: a later session, which must start without a dialog, the agent offering the kept answer.
 # MUTTER=1 (GNOME): the agent set to "Control GNOME without asking": the screen and the input through GNOME's own
 # interfaces (org.gnome.Mutter.ScreenCast and .RemoteDesktop), and no dialog may come at all.
-# Usage: [DESKTOP=gnome [NOBLE=1 [KEPT=1]]] scripts/run_wayland_linux.sh (CARGO_TARGET_DIR and SECONDS_RUN from the
-# environment).
+# SUPER=<W>x<H> (with MUTTER=1): Super Screen. The viewer asks for it once the session runs (--super-screen-test) and
+# keeps it on SUPER_HOLD seconds (10) after its pictures came: the session picture and the input test fall on GNOME's
+# virtual monitor, which must be the only one (the test window full screen on it: the pointer's places at that size),
+# then it is asked off, and the PC's own screen and layout must come back.
+# Usage: [DESKTOP=gnome [NOBLE=1 [KEPT=1]] [MUTTER=1 [SUPER=2560x1440]]] scripts/run_wayland_linux.sh (CARGO_TARGET_DIR
+# and SECONDS_RUN from the environment).
 set -u
 cd "$(dirname "$0")/.." || exit 1
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$PWD/target}
@@ -32,10 +36,17 @@ desktop=${DESKTOP:-sway}
 noble=${NOBLE:-}
 kept=${KEPT:-}
 mutter=${MUTTER:-}
+super=${SUPER:-}
+super_hold=${SUPER_HOLD:-10}
 py=/usr/bin/python3.10
 [ -n "$noble" ] && py=/usr/bin/python3
 if [ -n "$noble" ] && [ "$desktop" = sway ]; then echo "WAYLAND_LINUX_FAIL the 24.04 root has GNOME and KDE"; exit 0; fi
 if [ "$desktop" = kde ] && [ -z "$noble" ]; then echo "WAYLAND_LINUX_FAIL KDE runs in the 24.04 root (NOBLE=1)"; exit 0; fi
+if [ -n "$super" ] && { [ "$desktop" != gnome ] || [ -z "$mutter" ]; }; then
+    echo "WAYLAND_LINUX_FAIL Super Screen needs DESKTOP=gnome MUTTER=1"; exit 0
+fi
+# Super Screen: the session lasts until it was held and asked off again.
+[ -n "$super" ] && seconds=${SECONDS_RUN:-$(( super_hold + 12 ))}
 out=/tmp/queqiao_wayland_test
 rm -rf "$out"; mkdir -p "$out"; chmod 777 "$out"
 started=$(date +%s)
@@ -164,8 +175,11 @@ if [ "$desktop" = kde ]; then
     [ -f "$out/approve.txt" ] && echo "dialog: $(cat "$out/approve.txt")"
 else
 port=$(( 47200 + RANDOM % 500 ))
+super_args=''
+[ -n "$super" ] && super_args="--super-screen-test $super --super-screen-hold $super_hold"
 DISPLAY=:92 "$bin/queqiao-viewer" --listen "127.0.0.1:$port" --seconds "$(( seconds + 10 ))" --report "$out/viewer.txt" \
-    --input-test --input-test-click --input-test-at $input_at --picture-at ${PICTURE_AT:-5} --width 960 --codec h264 --ui-pictures "$out" > "$out/viewer.out" 2>&1 &
+    --input-test --input-test-click --input-test-at $input_at --picture-at ${PICTURE_AT:-5} --width 960 --codec h264 --ui-pictures "$out" \
+    $super_args > "$out/viewer.out" 2>&1 &
 viewer=$!
 sleep 1
 # A stalled agent ends the test, not hangs it.
@@ -213,6 +227,17 @@ elif [ "$desktop" != sway ]; then
         grep -q APPROVED "$out/approve.txt" 2> /dev/null || why="$why not-approved"
     fi
 fi
+if [ -n "$super" ]; then
+    # On, its pictures at that size, off again (the viewer); GNOME's virtual monitor the only one, gone again, the PC's
+    # own screen captured again and its layout back (the agent).
+    grep -q "super screen test: PASS" "$out/viewer.txt" 2> /dev/null || why="$why super-screen"
+    grep -q "Super Screen: the virtual monitor is .*the only monitor now" "$out/agent.txt" 2> /dev/null || why="$why super-not-only"
+    grep -q "Super Screen on: captured again ($super)" "$out/agent.txt" 2> /dev/null || why="$why super-not-captured"
+    grep -qE "Super Screen off, this PC's own screens back: captured again \(${WAYLAND_SIZE:-1920x1080}\)" "$out/agent.txt" 2> /dev/null \
+        || why="$why super-own-not-back"
+    grep -qE "Super Screen off: the virtual monitor gone .*(own layout back|layout before put back)" "$out/agent.txt" 2> /dev/null \
+        || why="$why super-layout-not-back"
+fi
 # The picture: sway's against the screen (grim); GNOME's and KDE's must be the test window's white.
 picture=$(python3 - "$out" "$desktop" << 'EOF'
 import sys
@@ -238,7 +263,8 @@ fi
 # Input: the test window's pointer positions (full screen: screen positions), the click, and F24: wev logs all three
 # (keys as X key codes, 202); on GNOME the GTK window logs the pointer and the click, its protocol log the keys (Linux
 # codes, 194).
-/usr/bin/python3.10 - "$out/events.log" "$desktop" "$out/protocol.log" << 'EOF' > "$out/input_check.txt"
+# With Super Screen the input falls on the virtual monitor: the places at its size.
+/usr/bin/python3.10 - "$out/events.log" "$desktop" "$out/protocol.log" "${super:-${WAYLAND_SIZE:-1920x1080}}" << 'EOF' > "$out/input_check.txt"
 import re, sys
 text = open(sys.argv[1], errors="replace").read()
 if sys.argv[2] == "sway":
@@ -258,7 +284,10 @@ else:
     keys = re.findall(r"wl_keyboard@\d+\.key\(\d+, \d+, (\d+), (\d)\)", protocol)
     down = ("194", "1") in keys
     up = ("194", "0") in keys
-expected = [(479, 269), (1439, 269), (1439, 809), (479, 809), (959, 539)]
+width, height = (int(side) for side in sys.argv[4].split("x"))
+# The viewer's five places (a quarter in, three quarters, the middle) on the screen's last pixel: 1920x1080 gives
+# (479, 269) (1439, 269) (1439, 809) (479, 809) (959, 539).
+expected = [(int(fx * (width - 1)), int(fy * (height - 1))) for fx, fy in [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75), (0.5, 0.5)]]
 found = sum(1 for ex, ey in expected if any(abs(x - ex) <= 2 and abs(y - ey) <= 2 for x, y in points))
 print(f"input check ({'wev' if sys.argv[2] == 'sway' else 'the GTK test window'}): pointer at the expected place {found}/5, click {bool(clicked)}, F24 down {down}, up {up}")
 print("INPUT_OK" if found == 5 and down and up and clicked else "INPUT_BAD")

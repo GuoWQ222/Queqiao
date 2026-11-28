@@ -1,0 +1,18 @@
+[package]
+name = "queqiao-vdisplay"
+description = "Windows: Queqiao's virtual display driver (drivers/queqiao-idd) installed, its virtual monitors added and arranged (Super Screen)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
+    "Win32_Devices_Display",
+    "Win32_Graphics_Gdi",
+] }

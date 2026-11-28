@@ -1,0 +1,76 @@
+;
+; QueqiaoIdd.inf - Queqiao virtual display ("Super Screen"): a UMDF 2 indirect display driver (IddCx 1.2).
+; Installed on a root-enumerated device with hardware id Root\QueqiaoIdd (Queqiao creates that device).
+; Windows 10 version 1803 (build 17134) and later, x64.
+;
+; Copyright (c) 2026 GuoWQ222. Part of Queqiao; see the LICENSE file of the Queqiao repository.
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Display
+ClassGuid   = {4D36E968-E325-11CE-BFC1-08002BE10318}
+ClassVer    = 2.0
+Provider    = %Provider%
+CatalogFile = QueqiaoIdd.cat
+DriverVer   = 11/28/2026,0.1.1.0
+PnpLockdown = 1
+
+[Manufacturer]
+%Provider% = QueqiaoIdd, NTamd64.10.0...17134
+
+[QueqiaoIdd.NTamd64.10.0...17134]
+%DeviceName% = QueqiaoIdd_Install, Root\QueqiaoIdd
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+QueqiaoIdd.dll = 1
+
+[DestinationDirs]
+QueqiaoIdd_CopyFiles = 13 ; run from the driver store
+
+[QueqiaoIdd_CopyFiles]
+QueqiaoIdd.dll
+
+; ---- UMDF device ----
+
+[QueqiaoIdd_Install.NT]
+Include   = WUDFRD.inf
+Needs     = WUDFRD.NT
+CopyFiles = QueqiaoIdd_CopyFiles
+
+[QueqiaoIdd_Install.NT.hw]
+Include = WUDFRD.inf
+Needs   = WUDFRD.NT.HW
+AddReg  = QueqiaoIdd_HwAddReg
+
+[QueqiaoIdd_HwAddReg]
+; IndirectKmd is Windows' kernel-mode part of every indirect display driver.
+HKR,,"UpperFilters",0x00010000,"IndirectKmd"
+; Its own UMDF host process: a fault in another UMDF driver cannot take the virtual display down, nor the reverse.
+HKR,"WUDF","DeviceGroupId",0x00000000,"QueqiaoIddGroup"
+; Only SYSTEM and Administrators may open the device (and so add or remove virtual monitors).
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+[QueqiaoIdd_Install.NT.Services]
+Include = WUDFRD.inf
+Needs   = WUDFRD.NT.Services
+
+[QueqiaoIdd_Install.NT.Wdf]
+UmdfService      = QueqiaoIdd, QueqiaoIdd_UmdfService
+UmdfServiceOrder = QueqiaoIdd
+; IndirectKmd (kernel mode) sits above this UMDF driver: without this the reflector refuses to start the device
+; (seen on the test VM: Code 10, dxgkrnl live dump 0x193/0x802, status 0xC0000182).
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+
+[QueqiaoIdd_UmdfService]
+UmdfLibraryVersion = 2.25.0
+ServiceBinary      = %13%\QueqiaoIdd.dll
+UmdfExtensions     = IddCx0102
+
+[Strings]
+Provider   = "Queqiao"
+DiskName   = "Queqiao Virtual Display Installation Disk"
+DeviceName = "Queqiao Virtual Display"

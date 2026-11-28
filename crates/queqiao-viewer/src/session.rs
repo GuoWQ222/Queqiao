@@ -97,6 +97,12 @@ pub(crate) const MENU_DISPLAY_FIT: u16 = 0x1790;
 pub(crate) const MENU_DISPLAY_MODES: u16 = 0x1800;
 pub(crate) const MAX_DISPLAY_MODES: u16 = 24;
 
+/// Super Screen (the control center's Screen group): off, the size of this window, and control::SUPER_SIZES
+/// (MENU_SUPER_SIZES + 16 * index).
+pub(crate) const MENU_SUPER_OFF: u16 = 0x1980;
+pub(crate) const MENU_SUPER_FIT: u16 = 0x1990;
+pub(crate) const MENU_SUPER_SIZES: u16 = 0x19A0;
+
 /// The picture's codec: (menu id, preference, label).
 pub(crate) const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 4] = [
     (
@@ -693,20 +699,37 @@ pub(crate) fn run_session(
     let mut volume = 100u8;
     // That PC's resolution as it last told it (the control center offers its sizes).
     let mut that_resolution: Option<crate::control::ThatResolution> = None;
+    // Super Screen as that PC last told it.
+    let mut super_state = crate::control::SuperScreen::default();
+    // Tests (--super-screen-test): 0 nothing asked, 1 asked, 2 on (since then), 3 off asked, 4 done.
+    let mut super_test: (u8, Instant) = (0, Instant::now());
     // Tests (--display-mode-test): 0 nothing asked yet, 1 the size asked for, 2 its own asked for again, 3 done.
     let mut display_mode_step = 0u8;
     let build_panel = |window: &Window,
                        screens: &[String],
                        keys: &hotkeys::Keys,
                        volume: u8,
-                       display: Option<&crate::control::ThatResolution>| {
+                       display: Option<&crate::control::ThatResolution>,
+                       super_screen: &crate::control::SuperScreen| {
         window.set_panel(crate::control::items(
             screens,
             display,
+            super_screen,
             &keys.full_screen().text(),
             &keys.game_mouse().text(),
             volume,
         ));
+        window.check_menu_item(MENU_SUPER_OFF, !super_screen.on);
+        window.check_menu_item(
+            MENU_SUPER_FIT,
+            super_screen.on && !crate::control::SUPER_SIZES.contains(&super_screen.size),
+        );
+        for (index, size) in crate::control::SUPER_SIZES.iter().enumerate() {
+            window.check_menu_item(
+                MENU_SUPER_SIZES + 16 * index as u16,
+                super_screen.on && *size == super_screen.size,
+            );
+        }
         if let Some(display) = display {
             let own = display.current == display.own;
             window.check_menu_item(MENU_DISPLAY_OWN, own);
@@ -723,7 +746,7 @@ pub(crate) fn run_session(
             }
         }
     };
-    build_panel(&window, &screen_names, &keys, volume, None);
+    build_panel(&window, &screen_names, &keys, volume, None, &super_state);
     let mut lock_after = false;
     window.check_menu_item(MENU_LOCK_AFTER, false);
     let (mut fps_cap, mut quality) = options.picture.unwrap_or((60, Quality::Balanced));
@@ -1124,6 +1147,17 @@ pub(crate) fn run_session(
                         current_screen = index;
                         Some(Command::Screen(index))
                     }
+                    MENU_SUPER_OFF => Some(Command::SuperScreen { width: 0, height: 0, refresh: 0, scale: 0 }),
+                    MENU_SUPER_FIT => {
+                        // The window's own size (even numbers, as encoders want), at least 1024 x 600.
+                        let (width, height) = window.client_size();
+                        let (width, height) = ((width & !1).clamp(1024, 7680), (height & !1).clamp(600, 4320));
+                        Some(Command::SuperScreen { width: width as u16, height: height as u16, refresh: 60, scale: 0 })
+                    }
+                    id if (MENU_SUPER_SIZES..MENU_SUPER_SIZES + 16 * crate::control::SUPER_SIZES.len() as u16).contains(&id) => {
+                        let (width, height) = crate::control::SUPER_SIZES[usize::from((id - MENU_SUPER_SIZES) / 16)];
+                        Some(Command::SuperScreen { width, height, refresh: 60, scale: 0 })
+                    }
                     MENU_DISPLAY_OWN => Some(Command::DisplayMode { width: 0, height: 0 }),
                     MENU_DISPLAY_FIT => that_resolution.as_ref().and_then(|display| {
                         let (width, height) = window.client_size();
@@ -1344,7 +1378,7 @@ pub(crate) fn run_session(
                             window.rename_menu_item(MENU_FULL_SCREEN, &trf("Full screen ({key})", &[("key", &keys.full_screen().text())]));
                             window.rename_menu_item(MENU_GAME_MOUSE, &trf("Game mouse ({key})", &[("key", &keys.game_mouse().text())]));
                             register_boss(&window, &keys, lines);
-                            build_panel(&window, &screen_names, &keys, volume, that_resolution.as_ref());
+                            build_panel(&window, &screen_names, &keys, volume, that_resolution.as_ref(), &super_state);
                             lines.push("hotkeys changed".into());
                         }
                         None
@@ -1538,6 +1572,23 @@ pub(crate) fn run_session(
                     None
                 }
             };
+        }
+        // Tests: Super Screen asked off once held long enough.
+        if super_test.0 == 5
+            && let Some(hold) = options.super_screen_hold
+            && super_test.1.elapsed() >= Duration::from_secs(hold)
+        {
+            lines.push(format!("super screen test: held {hold} s, asked off"));
+            peer.send_data(
+                Message::Command(Command::SuperScreen {
+                    width: 0,
+                    height: 0,
+                    refresh: 0,
+                    scale: 0,
+                })
+                .encode(),
+            );
+            super_test.0 = 3;
         }
         if options.input_test
             && channel_open
@@ -1995,6 +2046,37 @@ pub(crate) fn run_session(
                         for picture in decoded.drain(..) {
                             stats.decoded += 1;
                             picture_size = (picture.width, picture.height);
+                            // Tests: pictures at the Super Screen's size, then off again.
+                            if let Some((width, height)) = options.super_screen_test
+                                && super_test.0 == 2
+                            {
+                                if picture_size == (u32::from(width), u32::from(height)) {
+                                    lines.push(format!(
+                                        "super screen test: pictures at {width}x{height}"
+                                    ));
+                                    // Off at once, or after the hold (5: holding; asked off below).
+                                    if options.super_screen_hold.is_some() {
+                                        super_test = (5, Instant::now());
+                                    } else {
+                                        peer.send_data(
+                                            Message::Command(Command::SuperScreen {
+                                                width: 0,
+                                                height: 0,
+                                                refresh: 0,
+                                                scale: 0,
+                                            })
+                                            .encode(),
+                                        );
+                                        super_test.0 = 3;
+                                    }
+                                } else if super_test.1.elapsed() > Duration::from_secs(15) {
+                                    lines.push(format!(
+                                        "super screen test: FAIL (pictures still {}x{} 15 s after it was on)",
+                                        picture_size.0, picture_size.1
+                                    ));
+                                    super_test.0 = 4;
+                                }
+                            }
                             let show_start = Instant::now();
                             presenter
                                 .show(&picture.texture, picture_size, &window)
@@ -2075,6 +2157,7 @@ pub(crate) fn run_session(
                             &keys,
                             volume,
                             that_resolution.as_ref(),
+                            &super_state,
                         );
                         let english: Vec<String> = sizes
                             .iter()
@@ -2103,6 +2186,21 @@ pub(crate) fn run_session(
                         } else {
                             format!("that PC's resolution cannot change: {note}")
                         });
+                        // Tests: Super Screen asked for once that PC told its screens.
+                        if let Some((width, height)) = options.super_screen_test
+                            && super_test.0 == 0
+                        {
+                            peer.send_data(
+                                Message::Command(Command::SuperScreen {
+                                    width,
+                                    height,
+                                    refresh: 60,
+                                    scale: 0,
+                                })
+                                .encode(),
+                            );
+                            super_test = (1, Instant::now());
+                        }
                         // Tests: the size asked for once offered; its own again once shown; done once that is back.
                         if let Some(wanted) = options.display_mode_test {
                             let ask = |size: (u16, u16)| {
@@ -2154,6 +2252,7 @@ pub(crate) fn run_session(
                             &keys,
                             volume,
                             that_resolution.as_ref(),
+                            &super_state,
                         );
                     }
                     Some(Message::Encoder { picture, gpu }) => {
@@ -2162,6 +2261,46 @@ pub(crate) fn run_session(
                             if gpu { "GPU" } else { "CPU" }
                         ));
                         remote_encoder = Some((picture, gpu));
+                    }
+                    Some(Message::SuperScreenState { on, size, note }) => {
+                        lines.push(if note.is_empty() {
+                            format!(
+                                "Super Screen on that PC: {}",
+                                if on {
+                                    format!("on, {}x{}", size.0, size.1)
+                                } else {
+                                    "off".into()
+                                }
+                            )
+                        } else {
+                            format!("Super Screen on that PC not changed: {note}")
+                        });
+                        if !note.is_empty() {
+                            status.notice(&note);
+                        }
+                        if let Some(wanted) = options.super_screen_test {
+                            match super_test.0 {
+                                1 if on && size == wanted => super_test = (2, Instant::now()),
+                                3 if !on => {
+                                    lines.push("super screen test: PASS (on, its pictures at that size, off again)".into());
+                                    super_test.0 = 4;
+                                }
+                                1 | 3 if !note.is_empty() => {
+                                    lines.push(format!("super screen test: FAIL ({note})"));
+                                    super_test.0 = 4;
+                                }
+                                _ => {}
+                            }
+                        }
+                        super_state = crate::control::SuperScreen { on, size, note };
+                        build_panel(
+                            &window,
+                            &screen_names,
+                            &keys,
+                            volume,
+                            that_resolution.as_ref(),
+                            &super_state,
+                        );
                     }
                     Some(Message::Notice(text)) => {
                         lines.push(format!("notice from that PC: {text}"));

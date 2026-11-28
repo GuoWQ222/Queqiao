@@ -265,6 +265,9 @@ struct Pair {
     agent: Child,
     to_agent: Outbox,
     started: Instant,
+    /// Super Screen: the virtual display driver opened for this agent's monitors. They go when it is dropped (the
+    /// driver removes a handle's monitors when it closes): with the pair, or when the agent asks.
+    virtual_display: Option<queqiao_vdisplay::VirtualDisplay>,
 }
 
 /// Replies to the agent, written by a thread of their own (the security review of 2026-11-22: an agent that stopped
@@ -459,7 +462,31 @@ fn start_pair(
         agent,
         to_agent: Outbox::new(to_agent),
         started: Instant::now(),
+        virtual_display: None,
     })
+}
+
+/// Super Screen: monitor `id` at `mode` (width, height, Hz), `size_mm` (0: 96 DPI) on the driver opened for the agent
+/// (opened now when it is not yet); an earlier monitor of that id is replaced.
+fn add_monitor(
+    driver: &mut Option<queqiao_vdisplay::VirtualDisplay>,
+    id: u32,
+    mode: (u32, u32, u32),
+    size_mm: (u32, u32),
+) -> Result<queqiao_vdisplay::MonitorInfo, String> {
+    use queqiao_vdisplay::{Mode, MonitorConfig, VirtualDisplay};
+    if driver.is_none() {
+        *driver = Some(VirtualDisplay::open().map_err(|e| {
+            format!("Queqiao's display driver is not installed or not running ({e})")
+        })?);
+    }
+    let Some(driver) = driver.as_ref() else {
+        return Err("no display driver".into());
+    };
+    let config = MonitorConfig::new(id.max(1), Mode::new(mode.0, mode.1, mode.2))
+        .physical_size_mm(size_mm.0, size_mm.1);
+    let _ = driver.remove_monitor(id.max(1));
+    driver.add_monitor(&config).map_err(|e| e.message())
 }
 
 /// The start request's event exists in `session`'s namespace: the request came from a program of that session.
@@ -584,6 +611,52 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
                         }
                     };
                     stalled |= !current.to_agent.send(FromService::Reply(reply).encode());
+                }
+                ToService::AddMonitor {
+                    id,
+                    width,
+                    height,
+                    refresh,
+                    width_mm,
+                    height_mm,
+                } => {
+                    let added = add_monitor(
+                        &mut current.virtual_display,
+                        id,
+                        (width, height, refresh),
+                        (width_mm, height_mm),
+                    );
+                    log::line(&format!(
+                        "session {}: virtual monitor {id} {width}x{height} at {refresh} Hz for the agent: {}",
+                        current.session,
+                        match &added {
+                            Ok(_) => "added".to_string(),
+                            Err(error) => format!("not added: {error}"),
+                        }
+                    ));
+                    let reply = match added {
+                        Ok(info) => FromService::Monitor {
+                            luid_low: info.adapter_luid_low,
+                            luid_high: info.adapter_luid_high,
+                            target: info.target_id,
+                            error: String::new(),
+                        },
+                        Err(error) => FromService::Monitor {
+                            luid_low: 0,
+                            luid_high: 0,
+                            target: 0,
+                            error,
+                        },
+                    };
+                    stalled |= !current.to_agent.send(reply.encode());
+                }
+                ToService::RemoveMonitors => {
+                    if current.virtual_display.take().is_some() {
+                        log::line(&format!(
+                            "session {}: the agent's virtual monitors removed",
+                            current.session
+                        ));
+                    }
                 }
                 // Linux's (PAM, the sign-in screen's notice): Windows' agents check passwords themselves.
                 ToService::CheckPassword(_) | ToService::Notice(_) => {

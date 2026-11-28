@@ -18,6 +18,8 @@ queqiao-local.workspace = true
 queqiao-update.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# Super Screen: the agent's virtual monitors (only SYSTEM and administrators may open the driver).
+queqiao-vdisplay.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",

@@ -620,6 +620,17 @@ fn supervise(logind: &Logind) {
                     }
                 }
                 ToService::Notice(_) => {}
+                // Windows' Super Screen (its display driver): not on Linux.
+                ToService::AddMonitor { .. } => {
+                    let reply = FromService::Monitor {
+                        luid_low: 0,
+                        luid_high: 0,
+                        target: 0,
+                        error: "Super Screen is not on Linux yet".into(),
+                    };
+                    *stalled |= !current.to_agent.send(reply.encode());
+                }
+                ToService::RemoveMonitors => {}
             }
         };
         if let Ok((id, request)) = incoming.recv_timeout(Duration::from_millis(500)) {

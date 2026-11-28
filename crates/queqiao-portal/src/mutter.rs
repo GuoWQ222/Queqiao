@@ -5,11 +5,14 @@
 //! another account still goes through the portal and its question).
 //!
 //! A remote desktop session first, then a screen cast session tied to it ("remote-desktop-session-id"), recording the
-//! primary monitor (connector ""); starting the remote desktop session starts both. The session lives while this
-//! program's bus connection does (mutter ends it when the connection goes) and is stopped when dropped.
+//! primary monitor (connector "") or, for Super Screen, a virtual monitor (RecordVirtual: mutter makes it at the size
+//! the PipeWire stream agrees on, and removes it when the stream or the session ends); starting the remote desktop
+//! session starts both. The session lives while this program's bus connection does (mutter ends it when the
+//! connection goes) and is stopped when dropped.
 
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -34,6 +37,15 @@ fn error(what: &str) -> impl Fn(zbus::Error) -> String + '_ {
     move |e| format!("GNOME's remote desktop ({what}): {e}")
 }
 
+/// What a session records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// The primary monitor.
+    Monitor,
+    /// A virtual monitor of this size (Super Screen).
+    Virtual(u32, u32),
+}
+
 /// One mutter session: its bus connection, the remote desktop session (the input) and the stream recorded.
 pub(crate) struct MutterSession {
     connection: Connection,
@@ -44,6 +56,10 @@ pub(crate) struct MutterSession {
     pub(crate) size: (u32, u32),
     pub(crate) position: (i32, i32),
     pub(crate) pointer_apart: bool,
+    /// ScreenCast's API version (what the report says).
+    pub(crate) version: i32,
+    /// Stopped already (Super Screen going off stops its session while the capture and the input still hold it).
+    stopped: AtomicBool,
 }
 
 fn proxy(
@@ -62,7 +78,7 @@ fn pair(parameters: &HashMap<String, OwnedValue>, key: &str) -> Option<(i32, i32
 }
 
 impl MutterSession {
-    pub(crate) fn open() -> Result<MutterSession, String> {
+    pub(crate) fn open(source: Source) -> Result<MutterSession, String> {
         let connection = Connection::session().map_err(error("the session bus"))?;
         let desktop = proxy(&connection, RD_NAME, RD_PATH, RD_NAME)?;
         let devices: u32 = desktop
@@ -105,9 +121,21 @@ impl MutterSession {
                     }),
                 );
             }
-            let stream: OwnedObjectPath = screen
-                .call("RecordMonitor", &("", record))
-                .map_err(error("RecordMonitor"))?;
+            let stream: OwnedObjectPath = match source {
+                Source::Monitor => screen
+                    .call("RecordMonitor", &("", record))
+                    .map_err(error("RecordMonitor"))?,
+                Source::Virtual(..) => {
+                    // A monitor of the platform from version 3 on: GNOME treats it as a real one, not as a screen
+                    // being shared.
+                    if version >= 3 {
+                        record.insert("is-platform", Value::Bool(true));
+                    }
+                    screen
+                        .call("RecordVirtual", &(record,))
+                        .map_err(error("RecordVirtual"))?
+                }
+            };
             let stream_proxy = proxy(&connection, SC_NAME, stream.as_str(), SC_STREAM)?;
             // The stream's PipeWire node comes as a signal once started: listened for first.
             let mut added = stream_proxy
@@ -129,8 +157,13 @@ impl MutterSession {
                 .map_err(|e| format!("GNOME's remote desktop: its stream's node: {e}"))?;
             let parameters: HashMap<String, OwnedValue> =
                 stream_proxy.get_property("Parameters").unwrap_or_default();
-            let size = pair(&parameters, "size")
-                .map_or((1920, 1080), |(w, h)| (w.max(1) as u32, h.max(1) as u32));
+            // A virtual monitor has the size asked for (it is made once the stream agrees on it); where it goes in
+            // the layout is mutter's (the stream's positions are the monitor's own).
+            let size = match source {
+                Source::Monitor => pair(&parameters, "size")
+                    .map_or((1920, 1080), |(w, h)| (w.max(1) as u32, h.max(1) as u32)),
+                Source::Virtual(width, height) => (width.max(1), height.max(1)),
+            };
             let position = pair(&parameters, "position").unwrap_or((0, 0));
             Ok::<_, String>((
                 stream.as_str().to_string(),
@@ -138,10 +171,11 @@ impl MutterSession {
                 size,
                 position,
                 pointer_apart,
+                version,
             ))
         })();
         match opened {
-            Ok((stream, node, size, position, pointer_apart)) => Ok(MutterSession {
+            Ok((stream, node, size, position, pointer_apart, version)) => Ok(MutterSession {
                 connection,
                 remote,
                 stream,
@@ -149,6 +183,8 @@ impl MutterSession {
                 size,
                 position,
                 pointer_apart,
+                version,
+                stopped: AtomicBool::new(false),
             }),
             Err(e) => {
                 stop(&session);
@@ -224,12 +260,19 @@ impl MutterSession {
             .map_err(|e| format!("PipeWire ({}): {e}", path.display()))?;
         Ok(OwnedFd::from(socket))
     }
+
+    /// Stops the session now (its stream ends; a virtual monitor goes); once.
+    pub(crate) fn stop(&self) {
+        if !self.stopped.swap(true, Ordering::SeqCst)
+            && let Ok(session) = self.session()
+        {
+            let _ = session.call_method("Stop", &());
+        }
+    }
 }
 
 impl Drop for MutterSession {
     fn drop(&mut self) {
-        if let Ok(session) = self.session() {
-            let _ = session.call_method("Stop", &());
-        }
+        self.stop();
     }
 }

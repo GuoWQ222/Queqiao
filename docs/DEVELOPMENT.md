@@ -27,6 +27,7 @@ Queqiao does and how to use it, see the [README](../README.md); for the design, 
 | `crates/queqiao-mobile` | The core of the Android and iOS apps (account, sessions, input), called through a small C interface |
 | `crates/queqiao-agent` | The controlled side (the person's session) |
 | `crates/queqiao-viewer` | The controlling side (the session window) |
+| `drivers/queqiao-idd` | The Windows virtual display driver for Super Screen (a UMDF 2 indirect display driver in C++, its INF, the test tool `qqidd`, and `scripts/build.ps1`) |
 | `mobile/android`, `mobile/ios` | The phone apps: Jetpack Compose and SwiftUI on the shared core |
 | `packaging/linux` | What goes into the .deb and .rpm (files.txt), the systemd units, PAM files, desktop entries |
 | `scripts` | Build, package and test scripts |
@@ -37,8 +38,11 @@ Queqiao does and how to use it, see the [README](../README.md); for the design, 
 
 **Windows:** Rust 1.85 or later, Visual Studio Build Tools with the C++ workload and its CMake (libopus is built from
 source; `scripts\check.ps1` finds Visual Studio's CMake by itself), and [NASM](https://www.nasm.us) on the PATH
-(OpenH264's assembly; without it the software encoder is about 5x slower). The programs link the C runtime
-statically, so they need no Visual C++ Redistributable.
+(OpenH264's assembly; without it the software encoder is about 5x slower). The programs link the C runtime statically,
+so they need no Visual C++ Redistributable. The virtual display driver (`drivers/queqiao-idd`) also needs the [Windows
+Driver Kit](https://learn.microsoft.com/windows-hardware/drivers/download-the-wdk) of the installed SDK;
+`drivers\queqiao-idd\scripts\build.ps1` builds it with cl and link alone (no WDK Visual Studio integration) into
+`target\queqiao-idd`, signed with the programs' certificate.
 
 **Linux:** Rust, a C toolchain with clang, CMake, NASM and pkg-config, and the X11, Wayland, PipeWire, PulseAudio,
 D-Bus and OpenSSL development packages (on Ubuntu: `tools/linux/cc4_setup.sh` lists them).
@@ -65,7 +69,12 @@ pushed to the branches `ci-results-android` and `ci-results-ios`.
   `target\package\queqiao-setup-<version>.exe` and signs that. `-Server`/`-Pin` build in the account server the login
   window offers; they are given at build time, not kept in this repository. The installer installs for the person
   running it into `%LOCALAPPDATA%\Programs\Queqiao` (Start menu, Settings > Apps, start with Windows), and the service
-  if chosen (one UAC prompt): `--quiet [--autostart] [--service]`, `--uninstall [--quiet]`.
+  if chosen (one UAC prompt): `--quiet [--autostart] [--service]`, `--uninstall [--quiet]`. The installer also carries
+  the virtual display driver (built by `package.ps1` from `drivers/queqiao-idd`, `-NoDriver` to leave it out) and the
+  certificate's public part: with the service it trusts that certificate on the machine (Trusted Root and Trusted
+  Publishers: Windows refuses a driver package signed with our own certificate otherwise) and installs the driver;
+  uninstalling removes both. `--install-display-driver` and `--remove-display-driver` do that step alone (as an
+  administrator).
 - **Linux:** `scripts/package_linux.sh [--server <host:port> --pin <sha256>]` makes a .deb and an .rpm.
 - **Updates (Windows):** `queqiao-setup release-key --output <file>` makes the release key once, sealed with a
   passphrase asked twice in Windows' password dialog (PBKDF2-SHA256, AES-256-GCM; keep the file away from the build

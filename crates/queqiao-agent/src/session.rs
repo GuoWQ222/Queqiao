@@ -495,6 +495,7 @@ pub(crate) fn run_command(command: Command, dry_run: bool) -> String {
         | Command::MuteSpeakers(_)
         | Command::Resolution(_)
         | Command::DisplayMode { .. }
+        | Command::SuperScreen { .. }
         | Command::Screen(_)
         | Command::MaxBitrate(_)
         | Command::RestartQueqiao
@@ -761,8 +762,124 @@ pub(crate) fn session(
     if let Err(error) = &outcome {
         lines.push(format!("the session ended: {error}"));
     }
+    // Super Screen ends with the session, however it ended: the virtual monitor goes (Windows shows the PC's own
+    // screens again) and the display may sleep again.
+    #[cfg(windows)]
+    leave_super_screen(links);
+    #[cfg(target_os = "linux")]
+    crate::super_screen::leave(lines);
     ui::record_session_details(viewer, &local_time, &lines[first.min(lines.len())..]);
     outcome
+}
+
+/// The display driver opened by this agent itself (started without the service): its monitors go when it is dropped.
+#[cfg(windows)]
+static OWN_DRIVER: std::sync::Mutex<Option<queqiao_vdisplay::VirtualDisplay>> =
+    std::sync::Mutex::new(None);
+
+/// Super Screen's monitors go: through the service, or this agent's own driver handle.
+#[cfg(windows)]
+fn leave_super_screen(links: &mut Links) {
+    if let Some(service) = links.service.as_mut() {
+        let _ = service.remove_monitors();
+    }
+    if let Ok(mut own) = OWN_DRIVER.lock() {
+        own.take();
+    }
+    keep_display_on(false);
+}
+
+/// While Super Screen is on, the display stays on: Windows gives a virtual monitor no frames while the display sleeps.
+#[cfg(windows)]
+fn keep_display_on(on: bool) {
+    use windows::Win32::System::Power::{
+        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+    };
+    let flags = if on {
+        ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED
+    } else {
+        ES_CONTINUOUS
+    };
+    let _ = unsafe { SetThreadExecutionState(flags) };
+}
+
+/// Super Screen on: the service adds the virtual monitor (only it may open the display driver), this session makes it
+/// the only screen (the PC's own go dark) with the scale asked for; its index among the screens the capture counts.
+#[cfg(windows)]
+fn enter_super_screen(
+    links: &mut Links,
+    mode: (u32, u32, u32),
+    scale: u16,
+) -> Result<usize, String> {
+    use queqiao_vdisplay::{Mode, MonitorConfig, MonitorInfo, VirtualDisplay, topology};
+    let info = match links.service.as_mut() {
+        Some(service) => {
+            let (low, high, target) = service.add_monitor(1, mode, (0, 0))?;
+            MonitorInfo::located(1, low, high, target, Mode::new(mode.0, mode.1, mode.2))
+        }
+        // Started without the service (tests, an agent run by hand as an administrator): the driver opened here, where
+        // Windows lets this process (only SYSTEM and administrators may); the monitor goes with this process's handle.
+        None => {
+            let mut own = OWN_DRIVER
+                .lock()
+                .map_err(|_| "the display driver's lock broke".to_string())?;
+            if own.is_none() {
+                *own = Some(VirtualDisplay::open().map_err(|e| {
+                    format!("Super Screen needs the Queqiao service, or Queqiao run as an administrator ({})", e.message())
+                })?);
+            }
+            let driver = own.as_ref().ok_or("no display driver")?;
+            let _ = driver.remove_monitor(1);
+            driver
+                .add_monitor(&MonitorConfig::new(1, Mode::new(mode.0, mode.1, mode.2)))
+                .map_err(|e| e.message())?
+        }
+    };
+    // Windows sets a new monitor up in a moment.
+    let wait_for = |what: &str, mut found: Box<dyn FnMut() -> Option<String>>| {
+        let started = Instant::now();
+        loop {
+            if let Some(name) = found() {
+                return Ok(name);
+            }
+            if started.elapsed() > Duration::from_secs(8) {
+                return Err(format!(
+                    "Windows did not set the virtual screen up ({what})"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    // The new monitor made the only screen as soon as Windows has it among its paths (a laptop keeps a new monitor
+    // inactive until told, so its name comes only after this).
+    let started = Instant::now();
+    loop {
+        match topology::only(&info) {
+            Ok(()) => break,
+            Err(_) if started.elapsed() < Duration::from_secs(8) => {
+                std::thread::sleep(Duration::from_millis(200))
+            }
+            Err(e) => {
+                return Err(format!(
+                    "the virtual screen could not be made the only one: {}",
+                    e.message()
+                ));
+            }
+        }
+    }
+    if scale > 0 {
+        let _ = topology::set_scale_percent(&info, u32::from(scale));
+    }
+    let name = wait_for(
+        "no name after the change",
+        Box::new(|| topology::gdi_name(&info).ok().flatten()),
+    )?;
+    let index = wait_for(
+        "not among the screens",
+        Box::new(|| queqiao_capture::screen_index_named(&name).map(|index| index.to_string())),
+    )?;
+    keep_display_on(true);
+    index.parse().map_err(|_| "no screen index".to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1075,6 +1192,44 @@ fn session_with(
             waiting = Some((0, qpc_now()));
         }};
     }
+    // The capture opened again at screen `index` (Super Screen on or off: the screens change under it), trying while
+    // Windows settles.
+    macro_rules! reopen {
+        ($index:expr, $why:expr) => {{
+            drop(duplicator.take());
+            let mut reopened = Err(String::new());
+            for _ in 0..25 {
+                reopened = open_screen(
+                    $index,
+                    fps,
+                    options.fps.is_some(),
+                    resolution_limit,
+                    encoder.codec(),
+                )
+                .map_err(|e| e.to_string());
+                if reopened.is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            match reopened {
+                Ok(opened) => {
+                    adopt!(opened);
+                    lines.push(format!(
+                        "{} ms: {}: captured again ({}x{})",
+                        started.elapsed().as_millis(),
+                        $why,
+                        info.width,
+                        info.height
+                    ));
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        }};
+    }
+    // Super Screen: on (the screen shown before it), or off.
+    let mut super_screen: Option<usize> = None;
     let mut trust_checked = Instant::now();
     // Requests of other devices and "end this session" from the account, looked at four times a second.
     let mut interruptions_checked = Instant::now();
@@ -1522,6 +1677,117 @@ fn session_with(
                         };
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::SuperScreen {
+                        width,
+                        height,
+                        refresh,
+                        scale,
+                    })) => {
+                        let mode = (
+                            u32::from(width),
+                            u32::from(height),
+                            u32::from(if refresh == 0 { 60 } else { refresh }),
+                        );
+                        let outcome: Result<Option<(usize, &str)>, String> = if helper {
+                            Err("someone helping from another account cannot turn this PC's screens off".into())
+                        } else if width == 0 || height == 0 {
+                            match super_screen.take() {
+                                Some(before) => {
+                                    #[cfg(windows)]
+                                    {
+                                        leave_super_screen(links);
+                                        // Windows takes a moment to remove the virtual screen and bring this PC's own
+                                        // back: the capture opens again once the screen there is no longer the
+                                        // virtual one's size (or after 4 s, when both are the same size).
+                                        let virtual_size = (info.width, info.height);
+                                        let waited = Instant::now();
+                                        while waited.elapsed() < Duration::from_secs(4) {
+                                            let now = queqiao_capture::screens().ok().and_then(
+                                                |screens| {
+                                                    screens
+                                                        .get(before)
+                                                        .map(|screen| (screen.width, screen.height))
+                                                },
+                                            );
+                                            if now.is_some_and(|size| size != virtual_size) {
+                                                break;
+                                            }
+                                            std::thread::sleep(Duration::from_millis(200));
+                                        }
+                                    }
+                                    #[cfg(target_os = "linux")]
+                                    crate::super_screen::leave(lines);
+                                    Ok(Some((
+                                        before,
+                                        "Super Screen off, this PC's own screens back",
+                                    )))
+                                }
+                                None => Ok(None),
+                            }
+                        } else {
+                            #[cfg(windows)]
+                            {
+                                if let Some(line) = changed_mode.restore() {
+                                    lines.push(line);
+                                }
+                                let before = super_screen.unwrap_or(screen_index);
+                                enter_super_screen(links, mode, scale).map(|index| {
+                                    super_screen = Some(before);
+                                    Some((index, "Super Screen on"))
+                                })
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                let before = super_screen.unwrap_or(screen_index);
+                                crate::super_screen::enter(mode, scale, lines, || {
+                                    changed_mode.restore()
+                                })
+                                .map(|index| {
+                                    super_screen = Some(before);
+                                    Some((index, "Super Screen on"))
+                                })
+                            }
+                            #[cfg(not(any(windows, target_os = "linux")))]
+                            {
+                                let _ = (mode, scale);
+                                Err("Super Screen is on Windows and Linux only".to_string())
+                            }
+                        };
+                        let note = match outcome {
+                            Ok(Some((index, why))) => match reopen!(index, why) {
+                                Ok(()) => {
+                                    screen_index = index;
+                                    String::new()
+                                }
+                                Err(error) => {
+                                    return Err(format!(
+                                        "the screen cannot be captured after Super Screen changed: {error}"
+                                    ));
+                                }
+                            },
+                            Ok(None) => String::new(),
+                            Err(error) => {
+                                lines.push(format!("Super Screen not changed: {error}"));
+                                error
+                            }
+                        };
+                        let size = if super_screen.is_some() {
+                            (info.width.min(65535) as u16, info.height.min(65535) as u16)
+                        } else {
+                            (0, 0)
+                        };
+                        peer.send_data(
+                            Message::SuperScreenState {
+                                on: super_screen.is_some(),
+                                size,
+                                note,
+                            }
+                            .encode(),
+                        );
+                        peer.send_data(
+                            display_modes_message(screen_index, &changed_mode, helper).encode(),
+                        );
                     }
                     Some(Message::Command(Command::DisplayMode { width, height })) => {
                         let (width, height) = (u32::from(width), u32::from(height));

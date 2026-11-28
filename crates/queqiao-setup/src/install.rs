@@ -32,6 +32,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::{Interface, PCWSTR, PWSTR, w};
 
+use crate::display_driver;
 use crate::payload::Entry;
 
 /// What an installation holds: the device list (viewer), the agent, the service, and this installer.
@@ -497,6 +498,18 @@ pub fn install(
     // administrator first, as on a test PC with nobody at the screen to answer Windows' prompt).
     if choices.service && service_is_current(entries) {
         lines.push("the Queqiao service has this version already".into());
+        // The service's step installs the display driver (Super Screen) too; without that step, on its own when this
+        // installer's driver is not in place. Not having it never stops the install.
+        if display_driver::carried(entries) && !display_driver::is_current(entries) {
+            progress(66, tr("Installing the display driver...").into());
+            let me = std::env::current_exe().map_err(|e| e.to_string())?;
+            match run_elevated(&me, "--install-display-driver") {
+                Ok(_) => lines.extend(display_driver::report_lines()),
+                Err(error) => lines.push(format!(
+                    "display driver: not installed ({error}): Super Screen is unavailable"
+                )),
+            }
+        }
     } else if choices.service {
         progress(64, tr("Installing the Queqiao service...").into());
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -505,6 +518,7 @@ pub fn install(
                 lines.push(
                     "the Queqiao service is installed (sign-in, lock and UAC screens)".into(),
                 );
+                lines.extend(display_driver::report_lines());
                 None
             }
             Ok(code) => Some(format!("installing the service failed (exit code {code})")),
@@ -717,6 +731,11 @@ fn remove_folder(folder: &Path) {
 
 fn place(entries: &[Entry], target: &Path, progress: Progress) -> Result<(), String> {
     use queqiao_core::text::trf;
+    // The display driver's files are only for the administrator's step, which takes them from this installer itself.
+    let entries: Vec<&Entry> = entries
+        .iter()
+        .filter(|entry| !display_driver::FILES.contains(&entry.name.as_str()))
+        .collect();
     std::fs::create_dir_all(target).map_err(|e| format!("{}: {e}", target.display()))?;
     // Before anything goes in: the programs inherit the folder's permissions.
     protect_folder(target)?;
@@ -796,6 +815,14 @@ pub fn uninstall(lines: &mut Vec<String>) -> Result<(), String> {
             Ok(code) => return Err(format!("removing the service failed (exit code {code})")),
             Err(error) => return Err(format!("the service was not removed: {error}")),
         }
+    } else if display_driver::present(&crate::payload::own().unwrap_or_default()) {
+        // The display driver without the service (`--remove-service` takes it otherwise): reported, not a failure.
+        let me = std::env::current_exe().map_err(|e| e.to_string())?;
+        lines.push(match run_elevated(&me, "--remove-display-driver") {
+            Ok(0) => "the display driver and its certificate are removed".into(),
+            Ok(code) => format!("the display driver was not removed completely (exit code {code})"),
+            Err(error) => format!("the display driver was not removed: {error}"),
+        });
     }
     stop_running(&target, lines);
     // The Run entry only if it starts this installation's agent.
@@ -893,6 +920,10 @@ pub fn remove_service(lines: &mut Vec<String>) -> Result<(), String> {
     let updates = queqiao_core::platform::program_data().join(r"Queqiao\updates");
     if updates.exists() && std::fs::remove_dir_all(&updates).is_ok() {
         lines.push(format!("{} is removed", updates.display()));
+    }
+    // The display driver and its certificate, once nothing of the service uses them.
+    if let Err(error) = display_driver::remove(&crate::payload::own().unwrap_or_default(), lines) {
+        lines.push(format!("display driver: {error}"));
     }
     Ok(())
 }
@@ -1016,6 +1047,11 @@ pub fn install_service(entries: &[Entry], lines: &mut Vec<String>) -> Result<(),
         }
     })();
     let _ = std::fs::remove_dir_all(&staging);
+    // The display driver (Super Screen) once the service is in; without it Queqiao works, so its failure is only
+    // reported (display_driver::report_lines for the person's install).
+    if result.is_ok() {
+        let _ = display_driver::install_reported(entries, lines);
+    }
     result
 }
 

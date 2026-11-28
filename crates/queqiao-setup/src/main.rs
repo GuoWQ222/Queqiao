@@ -10,6 +10,11 @@
 //! - `--install-service`: run as an administrator (UAC) by the install when the service is chosen: the service and
 //!   its agent from this installer's own files, through a folder in Program Files (install::install_service).
 //! - `--remove-service`: run as an administrator by `--uninstall` when the service is installed.
+//! - `--install-display-driver [<folder>]`: as an administrator, the virtual display driver (Super Screen) from this
+//!   installer's own files (or an administrator's folder holding them, for tests): its certificate trusted, the driver
+//!   installed or updated (display_driver). `--install-service` and `--service-update` do the same after their step.
+//! - `--remove-display-driver`: as an administrator, the driver, its device, packages and display records, and the
+//!   certificate removed (`--remove-service` does the same).
 //! - `--ui-picture <file>`: shows the window, saves a picture of each page and leaves without installing (tests).
 //! - `--ui-auto [--report <file>]`: the window goes through its pages by itself (Install, then Finish) with what it
 //!   suggests: an install through the window as a person's clicks would make it (tests; pictures beside the report).
@@ -24,6 +29,8 @@
 //!   the manifest and signature for a Linux package (queqiao-update-deb.json or -rpm.json); the package goes beside.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod display_driver;
 #[cfg(windows)]
 mod install;
 #[cfg(windows)]

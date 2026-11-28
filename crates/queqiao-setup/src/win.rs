@@ -18,6 +18,11 @@
 //! - `--install-service`: run as an administrator (UAC) by the install: the service and its agent from this
 //!   installer's own files, through a folder in Program Files (install::install_service).
 //! - `--remove-service`: run as an administrator by `--uninstall` when the service is installed.
+//! - `--install-display-driver [<folder>]`: run as an administrator by the install when the service is current but the
+//!   virtual display driver (Super Screen) is not: the driver from this installer's own files (display_driver); with a
+//!   folder, the driver files in it (an administrator's tests). Exit code 1 if it is not installed.
+//! - `--remove-display-driver`: run as an administrator by `--uninstall` when the driver is there without the service:
+//!   the driver, its device, packages and display records, and the certificate removed.
 //! - `--ui-picture <file>`: shows the window, saves a picture of each page and leaves without installing (tests).
 //! - `--ui-auto [--report <file>]`: the window goes through its pages by itself (Install, then Finish) with what it
 //!   suggests: an install through the window as a person's clicks would make it (tests; pictures beside the report).
@@ -31,7 +36,7 @@
 //! - `release-package --key <file> --package <name> --size <bytes> --sha256 <hex> --version <x.y.z> --output <folder>`:
 //!   the manifest and signature for a Linux package (queqiao-update-deb.json or -rpm.json); the package goes beside.
 
-use crate::{install, payload, service_update};
+use crate::{display_driver, install, payload, service_update};
 
 use std::path::PathBuf;
 
@@ -47,6 +52,9 @@ struct Options {
     uninstall: bool,
     remove_service: bool,
     install_service: bool,
+    /// `--install-display-driver [<folder>]`: the folder, if given (else this installer's own files).
+    install_display_driver: Option<Option<PathBuf>>,
+    remove_display_driver: bool,
     update: bool,
     service_update: bool,
     report: Option<PathBuf>,
@@ -101,6 +109,8 @@ pub(crate) fn main() {
     // update folder new for each update, which fails while an earlier installer still runs from it: one at a time.
     let _turn = if options.remove_service
         || options.install_service
+        || options.install_display_driver.is_some()
+        || options.remove_display_driver
         || options.service_update
         || options.ui_picture.is_some()
     {
@@ -122,6 +132,14 @@ pub(crate) fn main() {
         payload::own().and_then(|entries| service_update::service_update(&entries, &mut lines))
     } else if options.install_service {
         payload::own().and_then(|entries| install::install_service(&entries, &mut lines))
+    } else if let Some(folder) = &options.install_display_driver {
+        match folder {
+            Some(folder) => display_driver::read_folder(folder),
+            None => payload::own(),
+        }
+        .and_then(|entries| display_driver::install_reported(&entries, &mut lines))
+    } else if options.remove_display_driver {
+        display_driver::remove(&payload::own().unwrap_or_default(), &mut lines)
     } else if options.remove_service {
         install::remove_service(&mut lines)
     } else if options.uninstall {
@@ -136,6 +154,8 @@ pub(crate) fn main() {
             if !options.quiet
                 && !options.remove_service
                 && !options.install_service
+                && options.install_display_driver.is_none()
+                && !options.remove_display_driver
                 && !failure_shown()
             {
                 show_error(tr("Queqiao"), &error);
@@ -172,6 +192,8 @@ fn parse(args: &[String]) -> Option<Options> {
         uninstall: false,
         remove_service: false,
         install_service: false,
+        install_display_driver: None,
+        remove_display_driver: false,
         update: false,
         service_update: false,
         report: None,
@@ -190,6 +212,19 @@ fn parse(args: &[String]) -> Option<Options> {
             "--uninstall" => options.uninstall = true,
             "--remove-service" => options.remove_service = true,
             "--install-service" => options.install_service = true,
+            "--install-display-driver" => {
+                // A folder may follow (not an option).
+                let folder = rest
+                    .clone()
+                    .next()
+                    .filter(|next| !next.starts_with("--"))
+                    .map(PathBuf::from);
+                if folder.is_some() {
+                    rest.next();
+                }
+                options.install_display_driver = Some(folder);
+            }
+            "--remove-display-driver" => options.remove_display_driver = true,
             "--update" => {
                 options.update = true;
                 options.quiet = true;

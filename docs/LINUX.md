@@ -154,6 +154,29 @@ build machine (scripts/run_wayland_linux.sh with MUTTER=1: the picture, all inpu
 resolution for a session goes through org.gnome.Mutter.DisplayConfig (ApplyMonitorsConfig, "temporary": never saved),
 X11's through RandR (crate queqiao-capture, display_mode.rs).
 
+Super Screen on Linux (2026-11-28): GNOME on Wayland, only with "Control GNOME without asking" (through the portal
+GNOME would ask the person at the PC first; a portal "virtual" source type exists on some desktops: a later step). A
+mutter session of its own records a virtual monitor (org.gnome.Mutter.ScreenCast RecordVirtual, cursor as metadata,
+"is-platform" from API 3: a monitor of the platform, not a shared screen); mutter makes the monitor at the size the
+PipeWire stream agrees on, so the capture asks for exactly that size and refresh rate (a plain rectangle and
+maxFramerate in its EnumFormat, pipewire.rs), and once mutter lists it the agent makes it the only monitor
+(DisplayConfig ApplyMonitorsConfig, "temporary"): windows move to it, the PC's own screens go dark. The session that
+recorded the PC's own monitor stops before that: mutter 42 crashed when a monitor still recorded went off. Input goes
+through the virtual session's remote desktop (NotifyPointerMotionAbsolute on its stream). Off, or at the session's end
+(also if the agent dies: mutter ends its sessions with its bus connection), the session stops, mutter removes the
+monitor and falls back to the PC's own layout, the layout seen before is put back where it differs, and the capture
+records the primary monitor again (crate queqiao-portal, super_screen.rs; the agent's linux/super_screen.rs). Not on
+KDE (KWin's zkde_screencast virtual output) or sway (wlroots' headless outputs) yet, nor on X11 (no general way: the X
+server's dummy driver or a kernel module): the viewer is told why. Tested with GNOME 42 and 46 on the build machine:
+run_wayland_linux.sh with MUTTER=1 SUPER=2560x1440 (the viewer's --super-screen-test, held 10 s: the session picture
+and the input test on the virtual monitor, then off and the PC's own screen and layout back); both versions take the
+virtual monitor as the only one. The Ubuntu 24.04 root (GNOME 46) encodes in software only (no NVENC under proot),
+which takes at most 1920x1080: there 2560x1440 is captured but sent scaled, so its full pass is SUPER=1600x900.
+NVIDIA's driver there
+crashed (libnvcuvid.so.1, on a driver thread) a few seconds after the first NVENC session of the process was closed
+while a later one ran, as when the encoder is replaced at a new size: the first session is now held open until the
+later ones close (nvenc_cuda.rs).
+
 Wayland (2026-11-25): the agent captures through the ScreenCast portal (xdg-desktop-portal, which GNOME, KDE and the
 wlroots desktops answer) and its PipeWire stream (libpipewire loaded at run time, as CUDA and PulseAudio are; only its
 stable C API, the format pods written by hand: it builds without PipeWire's headers and runs with any PipeWire 0.3 or

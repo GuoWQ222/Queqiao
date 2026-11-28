@@ -37,6 +37,7 @@ const FORMAT_MEDIA_SUBTYPE: u32 = 2;
 const FORMAT_VIDEO_FORMAT: u32 = 0x20001;
 const FORMAT_VIDEO_SIZE: u32 = 0x20003;
 const FORMAT_VIDEO_FRAMERATE: u32 = 0x20004;
+const FORMAT_VIDEO_MAX_FRAMERATE: u32 = 0x20005;
 const MEDIA_TYPE_VIDEO: u32 = 2;
 const MEDIA_SUBTYPE_RAW: u32 = 1;
 const CHOICE_RANGE: u32 = 1;
@@ -243,8 +244,23 @@ fn property(key: u32, value: Vec<u8>) -> Vec<u8> {
     out
 }
 
-/// The EnumFormat pod: raw video, these 32-bit formats, any size up to 8192, up to 240 frames a second.
-fn enum_format(width: u32, height: u32) -> Vec<u8> {
+/// The size a stream asks the screen's side for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// A monitor's stream: this size first (the screen's own), any other the screen's side has taken as well.
+    Default(u32, u32),
+    /// A virtual monitor's (Super Screen): exactly this size and refresh rate. mutter makes the virtual monitor at the
+    /// size the stream agrees on, so a choice here would let it pick its own default (1280 x 720) instead.
+    Exact {
+        width: u32,
+        height: u32,
+        refresh: u32,
+    },
+}
+
+/// The EnumFormat pod: raw video, these 32-bit formats, any size up to 8192 (or exactly the one asked for), up to 240
+/// frames a second.
+fn enum_format(asked: Asked) -> Vec<u8> {
     let mut body = words(&[TYPE_OBJECT_FORMAT, PARAM_ENUM_FORMAT]);
     body.extend(property(
         FORMAT_MEDIA_TYPE,
@@ -269,19 +285,32 @@ fn enum_format(width: u32, height: u32) -> Vec<u8> {
             ],
         ),
     ));
-    body.extend(property(
-        FORMAT_VIDEO_SIZE,
-        choice(
-            CHOICE_RANGE,
-            TYPE_RECTANGLE,
-            2,
-            &[width.max(1), height.max(1), 1, 1, 8192, 8192],
-        ),
-    ));
+    match asked {
+        Asked::Default(width, height) => body.extend(property(
+            FORMAT_VIDEO_SIZE,
+            choice(
+                CHOICE_RANGE,
+                TYPE_RECTANGLE,
+                2,
+                &[width.max(1), height.max(1), 1, 1, 8192, 8192],
+            ),
+        )),
+        Asked::Exact { width, height, .. } => body.extend(property(
+            FORMAT_VIDEO_SIZE,
+            pod(TYPE_RECTANGLE, &words(&[width.max(1), height.max(1)])),
+        )),
+    }
     body.extend(property(
         FORMAT_VIDEO_FRAMERATE,
         choice(CHOICE_RANGE, TYPE_FRACTION, 2, &[60, 1, 0, 1, 240, 1]),
     ));
+    // mutter gives a virtual monitor the refresh rate of the stream's highest frame rate.
+    if let Asked::Exact { refresh, .. } = asked {
+        body.extend(property(
+            FORMAT_VIDEO_MAX_FRAMERATE,
+            pod(TYPE_FRACTION, &words(&[refresh.clamp(1, 240), 1])),
+        ));
+    }
     pod(TYPE_OBJECT, &body)
 }
 
@@ -592,12 +621,12 @@ pub struct Stream {
 unsafe impl Send for Stream {}
 
 impl Stream {
-    /// Connects to the portal's PipeWire (`fd`, from OpenPipeWireRemote) and streams `node`, `size` the screen's.
+    /// Connects to the portal's PipeWire (`fd`, from OpenPipeWireRemote) and streams `node` at the size `asked`.
     /// `pointer_apart`: the portal gives the pointer as metadata (its shape is read; the pictures have none).
     pub fn open(
         fd: std::os::fd::OwnedFd,
         node: u32,
-        size: (u32, u32),
+        asked: Asked,
         pointer_apart: bool,
     ) -> Result<Stream, String> {
         use std::os::fd::IntoRawFd;
@@ -666,7 +695,7 @@ impl Stream {
                         (&mut *shared as *mut Shared).cast(),
                     )
                 };
-                let formats = enum_format(size.0, size.1);
+                let formats = enum_format(asked);
                 let mut params = [formats.as_ptr().cast::<SpaPod>()];
                 let connected = unsafe {
                     (api.stream_connect)(
@@ -853,8 +882,70 @@ mod tests {
         );
         // Our EnumFormat reads back with the defaults first.
         assert_eq!(
-            parse_format(&enum_format(1280, 720)),
+            parse_format(&enum_format(Asked::Default(1280, 720))),
             Some((VIDEO_FORMAT_BGRX, 1280, 720))
         );
+    }
+
+    /// The properties of an object pod: (key, value type, value body).
+    fn properties(pod: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
+        let size = word(pod, 0).unwrap() as usize;
+        let body = &pod[8..8 + size];
+        let mut found = Vec::new();
+        let mut at = 8;
+        while at + 16 <= body.len() {
+            let key = word(body, at).unwrap();
+            let value_size = word(body, at + 8).unwrap() as usize;
+            let value_type = word(body, at + 12).unwrap();
+            found.push((
+                key,
+                value_type,
+                body[at + 16..at + 16 + value_size].to_vec(),
+            ));
+            at += 16 + value_size.div_ceil(8) * 8;
+        }
+        found
+    }
+
+    #[test]
+    fn a_virtual_monitor_is_asked_for_at_exactly_its_size() {
+        let format = enum_format(Asked::Exact {
+            width: 2560,
+            height: 1440,
+            refresh: 60,
+        });
+        assert_eq!(parse_format(&format), Some((VIDEO_FORMAT_BGRX, 2560, 1440)));
+        let properties = properties(&format);
+        // The size a plain rectangle (no choice for the screen's side to fixate otherwise), the highest frame rate
+        // the refresh rate.
+        let size = properties
+            .iter()
+            .find(|(key, _, _)| *key == FORMAT_VIDEO_SIZE)
+            .unwrap();
+        assert_eq!(
+            (size.1, size.2.clone()),
+            (TYPE_RECTANGLE, words(&[2560, 1440]))
+        );
+        let max = properties
+            .iter()
+            .find(|(key, _, _)| *key == FORMAT_VIDEO_MAX_FRAMERATE)
+            .unwrap();
+        assert_eq!((max.1, max.2.clone()), (TYPE_FRACTION, words(&[60, 1])));
+        // A monitor's stream offers a range and says nothing of the highest frame rate.
+        let monitor = properties_of_default();
+        assert!(
+            monitor
+                .iter()
+                .any(|(key, kind, _)| *key == FORMAT_VIDEO_SIZE && *kind == TYPE_CHOICE)
+        );
+        assert!(
+            monitor
+                .iter()
+                .all(|(key, _, _)| *key != FORMAT_VIDEO_MAX_FRAMERATE)
+        );
+    }
+
+    fn properties_of_default() -> Vec<(u32, u32, Vec<u8>)> {
+        properties(&enum_format(Asked::Default(1920, 1080)))
     }
 }

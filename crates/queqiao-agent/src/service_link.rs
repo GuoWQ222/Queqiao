@@ -118,6 +118,47 @@ impl ServiceLink {
         }
     }
 
+    /// Windows, Super Screen: a virtual monitor `id` of `width` x `height` at `refresh` Hz (`size_mm`: the physical size
+    /// Windows takes for its scale; 0: 96 DPI), added by the service (only it may open the display driver). Where
+    /// Windows has it: (adapter LUID low, high, target id).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn add_monitor(
+        &mut self,
+        id: u32,
+        mode: (u32, u32, u32),
+        size_mm: (u32, u32),
+    ) -> Result<(u32, i32, u32), String> {
+        while self.replies.try_recv().is_ok() {}
+        let message = ToService::AddMonitor {
+            id,
+            width: mode.0,
+            height: mode.1,
+            refresh: mode.2,
+            width_mm: size_mm.0,
+            height_mm: size_mm.1,
+        };
+        self.writer.write(&message.encode())?;
+        match self.replies.recv_timeout(Duration::from_secs(20)) {
+            Ok(FromService::Monitor {
+                luid_low,
+                luid_high,
+                target,
+                error,
+            }) if error.is_empty() => Ok((luid_low, luid_high, target)),
+            Ok(FromService::Monitor { error, .. }) => Err(error),
+            Ok(_) => Err("the Queqiao service answered something else".into()),
+            Err(_) => {
+                Err("the Queqiao service did not answer (an older one has no Super Screen)".into())
+            }
+        }
+    }
+
+    /// Windows: the virtual monitors this agent asked for go (Windows shows the PC's own screens again).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn remove_monitors(&mut self) -> Result<(), String> {
+        self.writer.write(&ToService::RemoveMonitors.encode())
+    }
+
     /// Asks the service to end this agent and its helper and start both again.
     pub fn restart(&mut self) -> Result<(), String> {
         self.writer.write(&ToService::Restart.encode())

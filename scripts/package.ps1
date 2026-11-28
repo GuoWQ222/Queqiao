@@ -1,14 +1,17 @@
 # Makes the installer from the release build: signs queqiao-viewer.exe, queqiao-agent.exe and queqiao-service.exe
-# (scripts\sign.ps1), packs them into queqiao-setup.exe (queqiao-setup pack), signs that too, and prints its SHA-256.
+# (scripts\sign.ps1), builds and signs the virtual display driver (drivers\queqiao-idd\scripts\build.ps1), packs them
+# into queqiao-setup.exe (queqiao-setup pack), signs that too, and prints its SHA-256.
 # Output: target\package\queqiao-setup-<version>.exe. For now the signature is the test certificate's.
 # -Ship: a shipping build first (target\ship, a plain cargo build: without the options for the tests, which the test
 # build target\release has), checked to refuse those options; anything meant for people must be made so.
 # -Server host:port -Pin <SHA-256 hex>: the account server the login form offers (built in; the person can still type
 # another), with its certificate's fingerprint; with -Ship only. Not secret (every program that connects shows it),
 # but given here rather than kept in the public repository.
-# Usage: scripts\package.ps1 [-Ship [-Server <host:port> -Pin <sha256>] | -Bin <release folder, default target\release>] [-Subject 'CN=Queqiao Test Signing'] [-NoTimestamp]
+# -NoDriver: an installer without the display driver (a build PC without the Windows Driver Kit): Super Screen is then
+# not available where it is installed.
+# Usage: scripts\package.ps1 [-Ship [-Server <host:port> -Pin <sha256>] | -Bin <release folder, default target\release>] [-Subject 'CN=Queqiao Test Signing'] [-NoTimestamp] [-NoDriver]
 # Prints PACKAGE_PASS <file> <sha256> or PACKAGE_FAIL <reason>. ASCII only.
-param([string]$Bin = '', [switch]$Ship, [string]$Server = '', [string]$Pin = '', [string]$Subject = 'CN=Queqiao Test Signing', [switch]$NoTimestamp)
+param([string]$Bin = '', [switch]$Ship, [string]$Server = '', [string]$Pin = '', [string]$Subject = 'CN=Queqiao Test Signing', [switch]$NoTimestamp, [switch]$NoDriver)
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 if ($Ship -and $Bin) { 'PACKAGE_FAIL -Ship builds its own programs: no -Bin with it'; return }
@@ -114,11 +117,45 @@ $signed = @(& (Join-Path $PSScriptRoot 'sign.ps1') -Files $programs @signArgs)
 $signed | Where-Object { $_ -notmatch '^certificate:' }
 if ($signed[-1] -ne 'SIGN_PASS') { 'PACKAGE_FAIL signing the programs'; return }
 
+# The virtual display driver (Super Screen): built from drivers\queqiao-idd and signed with the programs' certificate,
+# whose public part (queqiao-signing.cer) goes with it: the installer trusts it on the machine (Trusted Root and Trusted
+# Publishers), as Windows wants for a package signed with our own certificate, then installs the driver. In its own
+# PowerShell, so the Build Tools' environment it sets up stays there.
+$driverFiles = @()
+if ($NoDriver) {
+    'WARNING no display driver (-NoDriver): Super Screen will not be available where this installer installs'
+} else {
+    $driverOut = Join-Path $root $(if ($Ship) { 'target\ship\queqiao-idd' } else { 'target\queqiao-idd' })
+    $driverArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'drivers\queqiao-idd\scripts\build.ps1'), '-Out', $driverOut, '-Subject', $Subject)
+    if ($NoTimestamp) { $driverArgs += '-NoTimestamp' }
+    $driverBuild = @(& powershell.exe @driverArgs 2>&1 | ForEach-Object { "$_" })
+    if ($driverBuild[-1] -ne 'BUILD_PASS') { $driverBuild | Select-Object -Last 15; 'PACKAGE_FAIL building the display driver'; return }
+    $driverBuild | Where-Object { $_ -match '^DRIVER_VERSION' } | ForEach-Object { "display driver $(($_ -split ' ')[1])" }
+    $driverFiles = @('QueqiaoIdd.inf', 'QueqiaoIdd.dll', 'QueqiaoIdd.cat', 'queqiao-signing.cer') | ForEach-Object { Join-Path $driverOut "package\$_" }
+    foreach ($file in $driverFiles) {
+        if (-not (Test-Path -LiteralPath $file)) { "PACKAGE_FAIL $file is missing"; return }
+    }
+    # The driver's DLL and catalog signed by the programs' certificate, and the .cer its public part only.
+    $signer = (Get-AuthenticodeSignature -LiteralPath $programs[0]).SignerCertificate.Thumbprint
+    $public = New-Object Security.Cryptography.X509Certificates.X509Certificate2 $driverFiles[3]
+    if ($public.HasPrivateKey -or $public.Thumbprint -ne $signer) { 'PACKAGE_FAIL queqiao-signing.cer is not the public part of the certificate the programs are signed with'; return }
+    foreach ($file in $driverFiles[1], $driverFiles[2]) {
+        if ((Get-AuthenticodeSignature -LiteralPath $file).SignerCertificate.Thumbprint -ne $signer) { "PACKAGE_FAIL $file is not signed with the programs' certificate"; return }
+    }
+    # Nothing of the build machine in the driver either (its PDB path keeps only the name: /PDBALTPATH).
+    $bytes = [IO.File]::ReadAllBytes($driverFiles[1])
+    $decoded = @([Text.Encoding]::ASCII.GetString($bytes), [Text.Encoding]::Unicode.GetString($bytes))
+    if (@($decoded | Where-Object { $_.IndexOf($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $_.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count) {
+        'PACKAGE_FAIL QueqiaoIdd.dll holds the build machine''s folders'; return
+    }
+    "display driver signed by $($public.Subject) ($($public.Thumbprint)), certificate public part only"
+}
+
 $out = Join-Path $root 'target\package'
 New-Item -ItemType Directory -Force $out | Out-Null
 $installer = Join-Path $out "queqiao-setup-$version.exe"
 Remove-Item -LiteralPath $installer -ErrorAction SilentlyContinue
-$packed = @(& (Join-Path $release 'queqiao-setup.exe') pack --output $installer @programs @texts 2>&1 | ForEach-Object { "$_" })
+$packed = @(& (Join-Path $release 'queqiao-setup.exe') pack --output $installer @programs @texts @driverFiles 2>&1 | ForEach-Object { "$_" })
 $packed
 if (-not (Test-Path -LiteralPath $installer)) { 'PACKAGE_FAIL packing'; return }
 

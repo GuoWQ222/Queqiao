@@ -28,6 +28,8 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# Super Screen: the virtual monitor arranged in the person's session (the service adds it).
+queqiao-vdisplay.workspace = true
 windows = { workspace = true, features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi_Common",
@@ -37,6 +39,7 @@ windows = { workspace = true, features = [
     "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authentication_Identity",
+    "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_Shutdown",

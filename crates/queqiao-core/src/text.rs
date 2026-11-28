@@ -507,6 +507,7 @@ const CHINESE: &[(&str, &str)] = &[
     ("Closing Queqiao...", "正在关闭鹊桥……"),
     ("Copying {file}...", "正在复制 {file}……"),
     ("Installing the Queqiao service...", "正在安装鹊桥服务……"),
+    ("Installing the display driver...", "正在安装显示驱动……"),
     ("Starting Queqiao...", "正在启动鹊桥……"),
     ("Adding Queqiao to Windows...", "正在将鹊桥添加到 Windows……"),
     ("Making shortcuts...", "正在创建快捷方式……"),
@@ -629,6 +630,37 @@ const CHINESE: &[(&str, &str)] = &[
         "把那台电脑的屏幕设为最接近本窗口的大小，画面更清晰。",
     ),
     ("Picture size", "画面大小"),
+    ("Super Screen", "超级屏幕"),
+    ("Off: that PC's own screens", "关闭：使用那台电脑自己的屏幕"),
+    (
+        "A virtual screen on that PC at this size: its programs draw at full sharpness; its own screens go dark meanwhile.",
+        "在那台电脑上建立这个大小的虚拟屏幕，程序按此分辨率绘制，画面更清晰；期间它自己的屏幕会熄灭。",
+    ),
+    ("Not changed", "未更改"),
+    (
+        "Super Screen is not available on X11: a virtual screen there needs the X server's dummy driver or a kernel module.",
+        "X11 下没有超级屏幕：在那里建立虚拟屏幕需要 X 服务器的 dummy 驱动或内核模块。",
+    ),
+    (
+        "Super Screen on Linux works with GNOME on Wayland for now, not on this desktop.",
+        "Linux 上的超级屏幕目前只支持 Wayland 下的 GNOME，不支持这个桌面。",
+    ),
+    (
+        "Super Screen on GNOME needs \"Control GNOME without asking\" turned on at that PC (through the desktop portal, GNOME would ask the person there first).",
+        "GNOME 上的超级屏幕需要在那台电脑上打开“控制 GNOME 时不询问”（通过桌面门户的话，GNOME 会先询问那里的人）。",
+    ),
+    (
+        "GNOME's own remote desktop is not available on that PC, so Super Screen is not either: {why}",
+        "那台电脑上没有 GNOME 自己的远程桌面，因此也无法使用超级屏幕：{why}",
+    ),
+    (
+        "Super Screen goes up to {max} x {max}.",
+        "超级屏幕最大为 {max} x {max}。",
+    ),
+    (
+        "GNOME did not make the virtual screen: {why}",
+        "GNOME 未能建立虚拟屏幕：{why}",
+    ),
     ("Screens", "屏幕"),
     ("Screen {n}", "屏幕 {n}"),
     ("As that screen", "与那台电脑的屏幕一致"),

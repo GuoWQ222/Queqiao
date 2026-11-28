@@ -15,13 +15,16 @@
 //!
 //! Where the person at the PC turned on "Control GNOME without asking" (for the account's own devices, see
 //! [`use_mutter`]), GNOME's own interfaces come first (mutter.rs): the same stream and input, no question. Where they
-//! are not there (another desktop) or refuse, the portal as above.
+//! are not there (another desktop) or refuse, the portal as above. Super Screen (a virtual monitor shown instead of the
+//! PC's own) goes only that way (super_screen.rs): while it is on, [`session`] gives its session.
 
 #![cfg(target_os = "linux")]
 
 /// GNOME on Wayland: the screen's resolution for a session (mutter's DisplayConfig).
 pub mod display_config;
 mod mutter;
+/// Super Screen on GNOME: a virtual monitor of mutter's for the session.
+pub mod super_screen;
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -76,12 +79,18 @@ pub struct PortalSession {
     pub pointer_apart: bool,
     /// Why GNOME's own interfaces were not used although turned on (the portal was), for the report.
     pub mutter_note: String,
+    /// Super Screen's virtual monitor, where this session records one.
+    virtual_monitor: Option<super_screen::Virtual>,
 }
 
 static SHARED: Mutex<Weak<PortalSession>> = Mutex::new(Weak::new());
 
-/// The session of this Queqiao session: the one open, or a new one (the desktop may ask the person first).
+/// The session of this Queqiao session: Super Screen's while it is on, else the one open, or a new one (the desktop
+/// may ask the person first).
 pub fn session() -> Result<Arc<PortalSession>, String> {
+    if let Some(on) = super_screen::current() {
+        return Ok(on);
+    }
     let mut shared = SHARED
         .lock()
         .map_err(|_| "the portal session broke".to_string())?;
@@ -146,26 +155,33 @@ impl PortalSession {
     fn open() -> Result<PortalSession, String> {
         let mut mutter_note = String::new();
         if USE_MUTTER.load(Ordering::Relaxed) {
-            match mutter::MutterSession::open() {
-                Ok(session) => {
-                    return Ok(PortalSession {
-                        screencast: None,
-                        node: session.node,
-                        size: session.size,
-                        position: session.position,
-                        pipewire: Mutex::new(None),
-                        asked: false,
-                        pointer_apart: session.pointer_apart,
-                        mutter_note,
-                        kind: Kind::Mutter(session),
-                    });
-                }
+            match mutter::MutterSession::open(mutter::Source::Monitor) {
+                Ok(session) => return Ok(PortalSession::of_mutter(session, None)),
                 Err(error) => mutter_note = error,
             }
         }
         let mut session = PortalSession::open_portal()?;
         session.mutter_note = mutter_note;
         Ok(session)
+    }
+
+    /// A session of GNOME's own interfaces (`virtual_monitor`: Super Screen's).
+    fn of_mutter(
+        session: mutter::MutterSession,
+        virtual_monitor: Option<super_screen::Virtual>,
+    ) -> PortalSession {
+        PortalSession {
+            screencast: None,
+            node: session.node,
+            size: session.size,
+            position: session.position,
+            pipewire: Mutex::new(None),
+            asked: false,
+            pointer_apart: session.pointer_apart,
+            mutter_note: String::new(),
+            virtual_monitor,
+            kind: Kind::Mutter(session),
+        }
     }
 
     fn open_portal() -> Result<PortalSession, String> {
@@ -311,8 +327,25 @@ impl PortalSession {
                 asked,
                 pointer_apart,
                 mutter_note: String::new(),
+                virtual_monitor: None,
             })
         })
+    }
+
+    /// Super Screen's virtual monitor: its refresh rate (the stream asks for exactly its size and that rate, which
+    /// mutter makes the monitor at). None for a monitor's stream.
+    pub fn virtual_refresh(&self) -> Option<u32> {
+        self.virtual_monitor
+            .as_ref()
+            .map(super_screen::Virtual::refresh)
+    }
+
+    /// The capture's stream agreed on its format. For Super Screen the virtual monitor exists from then on: it is
+    /// made the only one (see super_screen.rs). Nothing to do for a monitor's stream.
+    pub fn stream_ready(&self) {
+        if let Some(virtual_monitor) = &self.virtual_monitor {
+            virtual_monitor.settle(self.size);
+        }
     }
 
     /// A connection to PipeWire for the stream: the one opened with the session, then a new one each time (a capture
@@ -349,11 +382,13 @@ impl PortalSession {
     /// What the session is, for the reports.
     pub fn describe(&self) -> String {
         format!(
-            "{}, {}x{} stream (node {}){}{}{}",
-            match self.kind {
-                Kind::RemoteDesktop { .. } => "RemoteDesktop portal",
-                Kind::ScreenCast { .. } => "ScreenCast portal",
-                Kind::Mutter(_) => "Mutter remote desktop (GNOME's own, no question asked)",
+            "{}, {}x{} stream (node {}){}{}{}{}",
+            match (&self.kind, &self.virtual_monitor) {
+                (Kind::RemoteDesktop { .. }, _) => "RemoteDesktop portal",
+                (Kind::ScreenCast { .. }, _) => "ScreenCast portal",
+                (Kind::Mutter(_), None) => "Mutter remote desktop (GNOME's own, no question asked)",
+                (Kind::Mutter(_), Some(_)) =>
+                    "Mutter remote desktop (GNOME's own, no question asked) on Super Screen's virtual monitor",
             },
             self.size.0,
             self.size.1,
@@ -375,8 +410,19 @@ impl PortalSession {
                     " (GNOME's own remote desktop not used: {})",
                     self.mutter_note
                 )
-            }
+            },
+            self.virtual_monitor
+                .as_ref()
+                .map(super_screen::Virtual::describe)
+                .unwrap_or_default()
         )
+    }
+
+    /// Stops a session of GNOME's own interfaces now, while others still hold it (Super Screen going off).
+    fn stop(&self) {
+        if let Kind::Mutter(session) = &self.kind {
+            session.stop();
+        }
     }
 
     fn remote(&self) -> Result<(&RemoteDesktop, &Session<RemoteDesktop>), String> {

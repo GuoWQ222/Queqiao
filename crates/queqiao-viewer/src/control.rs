@@ -14,7 +14,8 @@ use crate::session::{
     MENU_HOTKEYS, MENU_LOCK, MENU_LOCK_AFTER, MENU_MICROPHONE, MENU_MOUSE_SPEED,
     MENU_MUTE_SPEAKERS, MENU_NEXT_SCREEN, MENU_ON_TOP, MENU_OPACITY, MENU_POINTER_SHAPE,
     MENU_PRIVACY, MENU_QUALITY, MENU_RESOLUTION, MENU_RESTART, MENU_RESTART_QUEQIAO, MENU_SCREENS,
-    MENU_SEND_FILES, MENU_SHORTCUTS, MENU_SOUND, MENU_TEN_BIT, MENU_TERMINAL, MENU_VOLUME,
+    MENU_SEND_FILES, MENU_SHORTCUTS, MENU_SOUND, MENU_SUPER_FIT, MENU_SUPER_OFF, MENU_SUPER_SIZES,
+    MENU_TEN_BIT, MENU_TERMINAL, MENU_VOLUME,
 };
 
 /// The groups' places in the column (tests open one by its place).
@@ -41,9 +42,21 @@ pub(crate) fn fitting(sizes: &[(u32, u32)], wanted: (u32, u32)) -> Option<(u32, 
         .or_else(|| sizes.iter().copied().min_by_key(|(w, h)| w * h))
 }
 
+/// Super Screen as that PC last told it: on (and the virtual screen's size), or why it did not change.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SuperScreen {
+    pub(crate) on: bool,
+    pub(crate) size: (u16, u16),
+    pub(crate) note: String,
+}
+
+/// The sizes Super Screen offers besides "Fit this window".
+pub(crate) const SUPER_SIZES: [(u16, u16); 3] = [(1920, 1080), (2560, 1440), (3840, 2160)];
+
 pub(crate) fn items(
     screens: &[String],
     display: Option<&ThatResolution>,
+    super_screen: &SuperScreen,
     full_screen_key: &str,
     game_mouse_key: &str,
     volume: u8,
@@ -52,7 +65,7 @@ pub(crate) fn items(
         PanelItem::group(
             PanelIcon::Screen,
             tr("Screen"),
-            screen_items(screens, display),
+            screen_items(screens, display, super_screen),
         ),
         PanelItem::action(MENU_NEXT_SCREEN, tr("Next screen")).icon(PanelIcon::NextScreen),
         PanelItem::group(PanelIcon::Picture, tr("Picture"), picture_items()),
@@ -74,7 +87,11 @@ pub(crate) fn items(
 
 /// The Screen group: that PC's screens (one choice each), its resolution (its own, one fitting this window, its
 /// sizes), then the picture's size.
-pub(crate) fn screen_items(screens: &[String], display: Option<&ThatResolution>) -> Vec<PanelItem> {
+pub(crate) fn screen_items(
+    screens: &[String],
+    display: Option<&ThatResolution>,
+    super_screen: &SuperScreen,
+) -> Vec<PanelItem> {
     let mut items = vec![PanelItem::heading(tr("That PC's screens"))];
     if screens.is_empty() {
         items.push(PanelItem::action(0, tr("One screen")).disabled());
@@ -116,6 +133,26 @@ pub(crate) fn screen_items(screens: &[String], display: Option<&ThatResolution>)
                     }),
             );
         }
+    }
+    items.push(PanelItem::Separator);
+    items.push(PanelItem::heading(tr("Super Screen")));
+    items.push(PanelItem::radio(
+        MENU_SUPER_OFF,
+        tr("Off: that PC's own screens"),
+    ));
+    items.push(
+        PanelItem::radio(MENU_SUPER_FIT, tr("Fit this window"))
+            .detail(tr("A virtual screen on that PC at this size: its programs draw at full sharpness; its own screens go dark meanwhile.")),
+    );
+    items.extend(SUPER_SIZES.iter().enumerate().map(|(index, (w, h))| {
+        PanelItem::radio(MENU_SUPER_SIZES + 16 * index as u16, &format!("{w}x{h}"))
+    }));
+    if !super_screen.note.is_empty() {
+        items.push(
+            PanelItem::action(0, tr("Not changed"))
+                .detail(&super_screen.note)
+                .disabled(),
+        );
     }
     items.push(PanelItem::Separator);
     items.push(PanelItem::heading(tr("Picture size")));
@@ -289,6 +326,7 @@ mod tests {
         let items = super::items(
             &["Screen 1".into(), "Screen 2".into()],
             Some(&display),
+            &super::SuperScreen::default(),
             "Ctrl+Alt+Enter",
             "Ctrl+Alt+M",
             100,

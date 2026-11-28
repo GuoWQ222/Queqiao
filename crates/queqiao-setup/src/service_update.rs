@@ -61,6 +61,8 @@ pub fn service_update(entries: &[Entry], lines: &mut Vec<String>) -> Result<(), 
             lines.push(note);
             let _ = std::fs::remove_dir_all(&old);
             lines.push("the earlier programs were replaced".into());
+            // The display driver of this version (updated when its version changed); Queqiao works without it.
+            let _ = crate::display_driver::install_reported(entries, lines);
             Ok(())
         }
         Err(error) => {

@@ -2767,6 +2767,7 @@ dependencies = [
  "queqiao-transport",
  "queqiao-tunnel",
  "queqiao-update",
+ "queqiao-vdisplay",
  "serde",
  "serde_json",
  "windows",
@@ -2934,6 +2935,7 @@ dependencies = [
  "queqiao-input",
  "queqiao-local",
  "queqiao-update",
+ "queqiao-vdisplay",
  "windows",
  "zbus",
 ]
@@ -2945,6 +2947,7 @@ dependencies = [
  "queqiao-core",
  "queqiao-display",
  "queqiao-update",
+ "queqiao-vdisplay",
  "sha2",
  "windows",
 ]
@@ -2989,6 +2992,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "windows",
+]
+
+[[package]]
+name = "queqiao-vdisplay"
+version = "0.1.0"
+dependencies = [
  "windows",
 ]
 

@@ -132,6 +132,11 @@ pub(crate) struct Options {
     pub(crate) tunnel_test: Option<u16>,
     /// Tests: once that PC tells its resolutions, this one asked for; once it shows it, its own asked for again.
     pub(crate) display_mode_test: Option<(u16, u16)>,
+    /// Tests: Super Screen at this size, its pictures seen at that size, then off again.
+    pub(crate) super_screen_test: Option<(u16, u16)>,
+    /// Tests: Super Screen kept on this many seconds after its pictures came before it is asked off (the input test
+    /// and the session picture then fall on the virtual screen).
+    pub(crate) super_screen_hold: Option<u64>,
     /// Tests: drawing on that PC's screen through the window's own events (annotate.rs's DrawTest), each step answered.
     pub(crate) annotate_test: bool,
 }
@@ -231,6 +236,12 @@ pub(crate) fn test_switch(
             let (w, h) = text.split_once('x')?;
             options.display_mode_test = Some((w.parse().ok()?, h.parse().ok()?));
         }
+        "--super-screen-test" => {
+            let text = args.next()?;
+            let (w, h) = text.split_once('x')?;
+            options.super_screen_test = Some((w.parse().ok()?, h.parse().ok()?));
+        }
+        "--super-screen-hold" => options.super_screen_hold = Some(args.next()?.parse().ok()?),
         "--annotate-test" => options.annotate_test = true,
         "--picture-at" => options.picture_at = Some(args.next()?.parse().ok()?),
         "--input-test-at" => options.input_test_at = Some(args.next()?.parse().ok()?),
@@ -383,6 +394,7 @@ mod option_tests {
             "--signup",
             "--tunnel-test",
             "--display-mode-test",
+            "--super-screen-test",
             "--annotate-test",
         ] {
             assert!(
