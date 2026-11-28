@@ -78,7 +78,7 @@
     <td width="300" valign="top"><img src="docs/images/login.png" alt="The login window" width="280"></td>
     <td valign="top">
 
-1. **Log in.** Open Queqiao and enter a user name and password. If the user name is new, the account is created and you are signed in. If it already exists, the password is checked.
+1. **Sign up or log in.** Open Queqiao. New here? Choose **No account yet? Create one**, pick a user name and type the password twice. Otherwise log in with your user name and password.
 2. **Add your computers.** Install Queqiao on each computer and log in with the same account. Each one appears in **My devices**.
 3. **Connect.** Choose a device and press **Connect**. If another of your devices is controlling it, you are asked whether to take control, and the other session ends only if you confirm.
 4. **Use the session.** The session bar at the top opens the **control center** (picture, sound, screens, input, tools), the **file transfer** window, full screen and **End**.
