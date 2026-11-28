@@ -70,6 +70,10 @@
   </tr>
 </table>
 
+### Latency
+
+<img src="docs/images/latency.png" width="720" alt="Same LAN: 7 ms. LAN to a 4G/5G phone hotspot: 50 ms. Mainland China LAN to a US AT&amp;T network: 160 ms.">
+
 ---
 
 ## Getting started

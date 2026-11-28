@@ -70,6 +70,10 @@
   </tr>
 </table>
 
+### 延迟
+
+<img src="docs/images/latency-zh-CN.png" width="720" alt="同一局域网：7 ms。局域网与 4G/5G 手机移动热点之间：50 ms。国内局域网与美国 AT&amp;T 网络之间：160 ms。">
+
 ---
 
 ## 快速上手
