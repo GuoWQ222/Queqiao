@@ -3,9 +3,9 @@
 # sign-in screen (GDM), the lock screen, /dev/uinput, KMS (virtio-gpu) and package installs with their scripts.
 # QEMU boots Ubuntu 24.04 with GNOME (ubuntu-desktop-minimal and GDM) from a disk built here out of Ubuntu's packages:
 # Ubuntu Base and apt inside a root folder entered with proot (as scripts/noble_root_linux.sh does), written into an
-# ext4 image by mke2fs -d (no mount needed), booted with its own kernel and initramfs. Without /dev/kvm (cc4-1 is a
-# container) QEMU emulates the CPU (TCG, many threads): slow but complete. Only this host reaches it (SSH on
-# 127.0.0.1:$SSH_PORT).
+# ext4 image by mke2fs -d (no mount needed), booted with its own kernel and initramfs. Without /dev/kvm (the Linux build
+# machine is a container) QEMU emulates the CPU (TCG, many threads): slow but complete. Only this host reaches it (SSH
+# on 127.0.0.1:$SSH_PORT).
 #
 # Usage:
 #   scripts/vm_linux.sh setup          builds the disk (about 20 minutes, once)
@@ -16,8 +16,8 @@
 #   scripts/vm_linux.sh keys <text>    types text on its keyboard as the person at it would (QMP, a USB keyboard)
 #   scripts/vm_linux.sh key <qcode>... presses keys together (QMP send-key: ret, ctrl alt delete ...)
 #   scripts/vm_linux.sh stop | status
-# Environment: VM_DIR (default /tmp/queqiao_vm), APT_MIRROR (Aliyun's internal one: cc4-1 runs in Aliyun; elsewhere
-# archive.ubuntu.com or a mirror near it), SSH_PORT (2222),
+# Environment: VM_DIR (default /tmp/queqiao_vm), APT_MIRROR (Aliyun's internal one: the Linux build machine runs in
+# Aliyun; elsewhere archive.ubuntu.com or a mirror near it), SSH_PORT (2222),
 # CPUS (16), MEMORY (8G).
 set -u
 VM_DIR=${VM_DIR:-/tmp/queqiao_vm}

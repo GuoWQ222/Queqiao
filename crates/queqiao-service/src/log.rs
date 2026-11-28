@@ -24,8 +24,8 @@ pub fn line(text: &str) {
 }
 
 /// Appends `line` in one write. The service and its desktop helper (two processes) write to the same log; a line
-/// written in pieces, as `writeln!` does on a `File`, got mixed into the other's (seen on sunshine on 2026-11-23:
-/// "10:58:19.140 [26440] 10:58:19.139desktop helper: started ...").
+/// written in pieces, as `writeln!` does on a `File`, got mixed into the other's (seen on the test laptop on
+/// 2026-11-23: "10:58:19.140 [26440] 10:58:19.139desktop helper: started ...").
 fn append(path: &Path, line: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)

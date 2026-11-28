@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 /// What the encoder sent lately (changed frames, keyframes left out) against its bitrate: motion is when it uses
 /// most of it (a drag on a narrow link used 60 to 95 %), the screen is still when it uses little. Not "nothing
-/// changed": most screens have a clock, a caret or an animation somewhere (sunshine's animated wallpaper kept
+/// changed": most screens have a clock, a caret or an animation somewhere (the test laptop's animated wallpaper kept
 /// sending 15 frames a second, a quarter of the bitrate, 2026-11-26).
 const WINDOW: Duration = Duration::from_millis(300);
 const MOTION_SHARE: f64 = 0.5;
@@ -227,8 +227,8 @@ mod tests {
 
     #[test]
     fn motion_uses_most_of_the_bitrate_and_an_animated_wallpaper_does_not() {
-        // As measured on sunshine at 5.8 Mbit/s: its animated wallpaper, 15 frames a second of 11 kB, a quarter of it:
-        // still, not motion.
+        // As measured on the test laptop at 5.8 Mbit/s: its animated wallpaper, 15 frames a second of 11 kB, a quarter
+        // of it: still, not motion.
         let start = Instant::now();
         let bitrate = 5_800_000;
         let mut wallpaper = Motion::default();

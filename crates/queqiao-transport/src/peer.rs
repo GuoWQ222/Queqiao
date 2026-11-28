@@ -704,15 +704,15 @@ impl Drop for Peer {
 
 /// The data channels' SCTP retransmission timeouts. RFC 4960's (3 s at first, never under 1 s) made file transfers
 /// stall: sctp-proto sends without pacing, a burst overflows a queue on the path and loses its tail, no later SACK
-/// reports the gap, and the timer is the only way out; measured 2026-11-23 between sunshine's Wi-Fi and the PC, 14
-/// pauses of about 1 s in 21 s, 4.9 MB/s where the link carries 11.3. The minimum stays above the receiver's 200 ms
+/// reports the gap, and the timer is the only way out; measured 2026-11-23 between the test laptop's Wi-Fi and the PC,
+/// 14 pauses of about 1 s in 21 s, 4.9 MB/s where the link carries 11.3. The minimum stays above the receiver's 200 ms
 /// delayed SACK, so a lone packet's late SACK is no timeout. Test switches: QUEQIAO_FORCE=sctp_rto_min:<ms>,
 /// sctp_rto_max:<ms>.
 /// The longest wait is 1 s (3 s before 2026-11-27): the control channel (mouse, keyboard, control messages) is reliable
 /// and in order, so everything after the messages lost while a network went away waited for their retransmission,
-/// whose backoff had reached 3 s by then; 4.8 s without input after a 2 s outage on sunshine (the picture, on RTP, was
-/// back after 2 s). Now input comes back within 1 s of the path. Files go over QUIC when they can, so a link slower
-/// than 1 s round trip mostly costs a few needless retransmissions of small control messages.
+/// whose backoff had reached 3 s by then; 4.8 s without input after a 2 s outage on the test laptop (the picture, on
+/// RTP, was back after 2 s). Now input comes back within 1 s of the path. Files go over QUIC when they can, so a link
+/// slower than 1 s round trip mostly costs a few needless retransmissions of small control messages.
 pub const SCTP_RTO_MS: (u64, u64, u64) = (1000, 250, 1000);
 
 fn set_sctp_timeouts() {
@@ -1103,7 +1103,7 @@ fn gather_all(
     let mut notes = gathered.notes;
     // The candidates added first are preferred (str0m's local preference goes down by the order of each kind).
     // The server connection may leave through a VPN or a proxy's tunnel holding the route (Clash Verge's
-    // Mihomo on sunshine, 2026-11-23: the session went through it): then this PC's own uplinks come first
+    // Mihomo on the test laptop, 2026-11-23: the session went through it): then this PC's own uplinks come first
     // and the tunnel is the fallback, as UU Remote gives VPN networks a cost.
     let mut uplink_candidates = Vec::new();
     // What each IPv4 socket's NAT does, for the other side (in the SDP) and for punching.
@@ -1507,7 +1507,7 @@ impl Network {
                                 }
                             },
                             // Straight to the other side's relay: relayed all the same (it was shown as direct,
-                            // 2026-11-25, sunshine behind a phone's hotspot).
+                            // 2026-11-25, the test laptop behind a phone's hotspot).
                             // Named by its address among the relays the account server named for this session (both
                             // ends get the same ones): "... relay 198.51.100.1:47203 (shanghai) (from ...)".
                             None if self.remote_relays.contains(&packet.destination) => {

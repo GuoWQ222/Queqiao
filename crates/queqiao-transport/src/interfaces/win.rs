@@ -47,8 +47,8 @@ fn for_each_adapter(family: u16, mut each: impl FnMut(&IP_ADAPTER_ADDRESSES_LH))
 }
 
 /// This PC's uplinks: network cards first (Windows marks them as hardware interfaces), then virtual adapters that
-/// have a gateway of their own (Radmin VPN's has one: between the PC and sunshine it was taken for the PC's uplink
-/// and the session went through Tailscale, 2026-11-23); each in route order (the adapter's IPv4 metric).
+/// have a gateway of their own (Radmin VPN's has one: between the PC and the test laptop it was taken for the PC's
+/// uplink and the session went through Tailscale, 2026-11-23); each in route order (the adapter's IPv4 metric).
 pub fn uplinks() -> Vec<Ipv4Addr> {
     let mut found: Vec<((bool, u32), Ipv4Addr)> = Vec::new();
     for_each_adapter(AF_INET.0, |entry| {

@@ -46,7 +46,7 @@ pub fn is_tunnel(address: Ipv4Addr, uplinks: &[Ipv4Addr], others: usize) -> bool
 /// (`all`); for someone of another account none, so that they do not learn this PC's other networks, unless
 /// `address` is a tunnel: then the uplink this PC itself would use (the first: `uplinks` are in route order), with
 /// the tunnel after it. Through the tunnel alone a help session went where the proxy sends it: Clash Verge carried
-/// sunshine's UDP to the PC in 318 ms, Wi-Fi in 3-4 ms (2026-11-23). The other account sees what it would see
+/// the test laptop's UDP to the PC in 318 ms, Wi-Fi in 3-4 ms (2026-11-23). The other account sees what it would see
 /// without the tunnel.
 pub fn offered(address: Ipv4Addr, uplinks: &[Ipv4Addr], all: bool) -> Vec<Ipv4Addr> {
     let others: Vec<Ipv4Addr> = uplinks
@@ -204,16 +204,16 @@ mod tests {
     #[test]
     fn the_server_goes_direct_only_at_a_public_address() {
         let public = |text: &str| super::public_address(text.parse().unwrap());
-        // The Aliyun server, the PC's campus address, a public IPv6 address.
+        // The Aliyun server, a public address, a public IPv6 address.
         assert!(public("101.201.221.56"));
-        assert!(public("59.66.29.128"));
+        assert!(public("1.2.3.4"));
         assert!(public("2402:f000:4:1008:809:fffc:8a2f:5778"));
         // A LAN, Tailscale, Mihomo's tunnel and fake DNS addresses, this PC, nothing, multicast, IPv6 ULA.
         for text in [
             "192.168.1.10",
             "10.0.2.2",
             "172.24.43.86",
-            "100.69.159.77",
+            "100.64.0.13",
             "198.19.0.1",
             "198.18.0.5",
             "127.0.0.1",

@@ -224,7 +224,7 @@ struct ResetOption {
 
 /// The coding options the encoder is opened with: no HRD conformance (no buffering parameters in the stream's
 /// headers). With them, a new bitrate changed the headers, so a reset could only begin a new sequence (refused
-/// with StartNewSequence off: status -15, sunshine 2026-11-26).
+/// with StartNewSequence off: status -15, the test laptop 2026-11-26).
 fn coding_option() -> Box<sys::mfxExtCodingOption> {
     let mut option: Box<sys::mfxExtCodingOption> = Box::new(unsafe { zeroed() });
     option.Header = sys::mfxExtBuffer {
@@ -463,9 +463,9 @@ impl VplEncoder {
     }
 
     /// Changes the bitrate of the running encoder: a reset of its rate control that goes on with the same sequence
-    /// (StartNewSequence off). Without it the reset began a new sequence with a keyframe (measured on sunshine's Iris
-    /// Xe 2026-11-26: every change, up or down, one more keyframe; in a session over a phone's network each one is many
-    /// times a frame's size and held the picture up).
+    /// (StartNewSequence off). Without it the reset began a new sequence with a keyframe (measured on the test laptop's
+    /// Iris Xe 2026-11-26: every change, up or down, one more keyframe; in a session over a phone's network each one is
+    /// many times a frame's size and held the picture up).
     pub(crate) fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
         unsafe {
             let mfx = &mut self.params.__bindgen_anon_1.mfx;
@@ -498,10 +498,10 @@ impl VplEncoder {
 
 /// The encoder's parameters: low latency (one frame in flight, no B-frames, the GPU's own low-power encoder),
 /// peak-constrained VBR as the Media Foundation path. H.264 on the fastest preset (7); H.265 on the balanced one (4):
-/// on 7 its motion search reaches too short for a quick drag. Measured 2026-11-26 on sunshine's Iris Xe (codec_probe,
-/// 2240x1400 at 5 Mbit/s, the page moving 7/28/56 rows a frame): H.265 on 7 47.8/37.1/30.7 dB, on 4 48.2/48.9/41.0, on 1
-/// 48.4/50.0/46.5 (H.264 on 7 38.5/40.5/39.6, on 4 under 1 dB more); screen change -> sent in a session 12.8 ms
-/// median on 7, 14.6 on 4 (H.264 on 7: 14.1), 15.8 on 1 with fewer frames.
+/// on 7 its motion search reaches too short for a quick drag. Measured 2026-11-26 on the test laptop's Iris Xe
+/// (codec_probe, 2240x1400 at 5 Mbit/s, the page moving 7/28/56 rows a frame): H.265 on 7 47.8/37.1/30.7 dB, on 4
+/// 48.2/48.9/41.0, on 1 48.4/50.0/46.5 (H.264 on 7 38.5/40.5/39.6, on 4 under 1 dB more); screen change -> sent in a
+/// session 12.8 ms median on 7, 14.6 on 4 (H.264 on 7: 14.1), 15.8 on 1 with fewer frames.
 fn params(config: &EncoderConfig, format: EncodeFormat) -> sys::mfxVideoParam {
     let mut params: sys::mfxVideoParam = unsafe { zeroed() };
     params.AsyncDepth = 1;

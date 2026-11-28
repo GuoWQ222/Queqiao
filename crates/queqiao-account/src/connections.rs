@@ -101,12 +101,12 @@ mod tests {
         let connection = Connection {
             when: "2026-11-23 15:04".into(),
             seconds: 754,
-            device_id: "sunshine-1234".into(),
+            device_id: "laptop-1234".into(),
             device_name: "SUN\tSHINE\nPC".into(),
         };
         let back = parse(&line(&connection)).unwrap();
         assert_eq!(back.seconds, 754);
-        assert_eq!(back.device_id, "sunshine-1234");
+        assert_eq!(back.device_id, "laptop-1234");
         assert_eq!(back.device_name, "SUN SHINE PC");
         assert_eq!(parse("2026-11-23 15:04\tnot a number\tid\tname"), None);
         assert_eq!(parse("2026-11-23 15:04\t3\t\tname"), None);

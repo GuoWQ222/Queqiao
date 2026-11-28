@@ -167,7 +167,7 @@ pub fn set_integrity_level(
 /// starts the person's agent so (the security review of 2026-11-22): the person's other programs, at Medium, can then
 /// not hook it, send its windows messages or open its threads. (An administrator's full token is High already.)
 /// Exactly High, the level the service sets: a service account's own System level is not raised (the agent for the
-/// sign-in screen, as LocalService, reported "raised by the service" on sunshine on 2026-11-23).
+/// sign-in screen, as LocalService, reported "raised by the service" on the test laptop on 2026-11-23).
 pub fn runs_raised() -> bool {
     use windows::Win32::Security::{
         GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,

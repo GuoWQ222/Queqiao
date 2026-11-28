@@ -197,6 +197,8 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
                     );
                     return Ok(true);
                 }
+                // Held while asking: the service takes the request only with it in this session (CONTROL_START).
+                let _request = autostart::StartRequest::hold();
                 let asked = autostart::ask_service_to_start();
                 let shown = asked.is_ok()
                     && (0..60).any(|_| {

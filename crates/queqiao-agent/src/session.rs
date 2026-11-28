@@ -56,11 +56,11 @@ pub(crate) fn adapted_bitrate(estimate: u64, max: u32) -> u32 {
 
 /// The encoders give each frame its share of their bitrate at the frame rate they were made for (oneVPL's
 /// FrameRateExtN, NVENC's frameRateNum): a screen changes fewer times a second (30 to 40 while a window is dragged,
-/// measured 2026-11-27 on sunshine), so they sent about 60 % of their target, and the bandwidth estimate, which stays
-/// near what is sent, followed it down to 0.5 Mbit/s: a picture too blurred to read over a link that carried 4 and more
-/// (0 lost, round trip steady; with the encoder made for 40 fps the same drag kept 2 to 5 Mbit/s). The target given to
-/// the encoder is raised by the rate it was made for over the frames it really encoded in the last second (at most
-/// RATE_FIT_MOST times), so what it sends is what the estimate allows.
+/// measured 2026-11-27 on the test laptop), so they sent about 60 % of their target, and the bandwidth estimate, which
+/// stays near what is sent, followed it down to 0.5 Mbit/s: a picture too blurred to read over a link that carried 4
+/// and more (0 lost, round trip steady; with the encoder made for 40 fps the same drag kept 2 to 5 Mbit/s). The target
+/// given to the encoder is raised by the rate it was made for over the frames it really encoded in the last second (at
+/// most RATE_FIT_MOST times), so what it sends is what the estimate allows.
 pub(crate) struct RateFit {
     frames: VecDeque<Instant>,
     factor: f64,
@@ -2468,8 +2468,8 @@ pub(crate) fn verify_delta(event: &InputEvent, before: (i32, i32), stats: &mut S
 
 /// Windows applies injected input asynchronously (SendInput returns before the key state or the pointer has
 /// changed, later still when another program has a low-level hook): a check waits up to this long for it. The time
-/// it took is reported. 50 ms was too short on sunshine on 2026-11-23 (its key down "NOT within 50 ms" once, in 0 ms
-/// otherwise): up to a second tells a late key from a lost one.
+/// it took is reported. 50 ms was too short on the test laptop on 2026-11-23 (its key down "NOT within 50 ms" once, in
+/// 0 ms otherwise): up to a second tells a late key from a lost one.
 pub(crate) const VERIFY_WAIT: Duration = Duration::from_millis(1000);
 
 /// Whether `done` turns true within [`VERIFY_WAIT`].
@@ -2676,7 +2676,7 @@ mod tests {
         // (both do AV1, both do H.265) -> the codec.
         assert_eq!(automatic_codec(true, true), VideoCodec::Av1);
         assert_eq!(automatic_codec(true, false), VideoCodec::Av1);
-        // sunshine's Iris Xe makes no AV1, but H.265: the PC controlling it gets H.265, not H.264.
+        // the test laptop's Iris Xe makes no AV1, but H.265: the PC controlling it gets H.265, not H.264.
         assert_eq!(automatic_codec(false, true), VideoCodec::H265);
         assert_eq!(automatic_codec(false, false), VideoCodec::H264);
     }

@@ -7,8 +7,9 @@
 // Also the version resource (2026-11-27, the user: "add version information first"): product, publisher, the
 // program's own description (`description`: Task Manager, the firewall's "Allow access" dialog and the file's
 // Properties show it), version and copyright. Windows showed the programs with an unknown publisher and no
-// description, and its Defender took them for a trojan by machine learning (Trojan:Win32/Bearfoos.A!ml on sunshine);
-// a program that says what it is and who made it is one of the signs such checks weigh (a signature is the other).
+// description, and its Defender took them for a trojan by machine learning (Trojan:Win32/Bearfoos.A!ml on the test
+// laptop); a program that says what it is and who made it is one of the signs such checks weigh (a signature is the
+// other).
 
 fn embed_icon(description: &str) {
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {

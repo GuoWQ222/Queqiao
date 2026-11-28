@@ -31,7 +31,9 @@ use windows::Win32::System::Services::{
     SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
     StartServiceCtrlDispatcherW,
 };
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenEventW, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects,
+};
 use windows::core::{PCWSTR, PWSTR};
 
 use crate::launch::{self, Child, Job, Owned, wide};
@@ -460,6 +462,24 @@ fn start_pair(
     })
 }
 
+/// The start request's event exists in `session`'s namespace: the request came from a program of that session.
+/// `Session\<id>\<name>` is that session's `Local\<name>` (the `Session` link leads to its BaseNamedObjects; with
+/// `BaseNamedObjects` written out the path is not found: relay, 2026-11-28). Only programs of that session (and SYSTEM)
+/// may make objects there: an administrator in another session was refused (access denied).
+fn asked_at_screen(session: u32) -> bool {
+    let name = wide(&format!(
+        "Session\\{session}\\{}",
+        queqiao_local::START_REQUEST
+    ));
+    match unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr())) } {
+        Ok(event) => {
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(event) };
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 fn supervise(stop: HANDLE, wake: HANDLE) {
     let (requests, incoming) = mpsc::sync_channel::<(u64, ToService)>(MAX_REQUESTS);
     let mut pair: Option<Pair> = None;
@@ -472,12 +492,19 @@ fn supervise(stop: HANDLE, wake: HANDLE) {
     let mut last_error = String::new();
     loop {
         let console = unsafe { WTSGetActiveConsoleSessionId() };
-        // A Queqiao started by hand asked for this one (its shortcut, after Quit too): started now.
+        // A Queqiao started by hand asked for this one (its shortcut, after Quit too): started now, when the request
+        // came from the session at the screen (queqiao_local::START_REQUEST).
         if START_ASKED.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            log::line("asked to start Queqiao now (a Queqiao started by hand)");
-            done_in = None;
-            failures = 0;
-            next_start = Instant::now();
+            if console != NO_SESSION && asked_at_screen(console) {
+                log::line("asked to start Queqiao now (a Queqiao started by hand at the screen)");
+                done_in = None;
+                failures = 0;
+                next_start = Instant::now();
+            } else {
+                log::line(&format!(
+                    "asked to start Queqiao, not from the session at the screen ({console}): ignored"
+                ));
+            }
         }
         // Set when the agent left the service's replies unread (Outbox).
         let mut stalled = false;

@@ -1828,9 +1828,9 @@ pub(crate) fn run_session(
                         }
                     }
                     // After a loss the frames that follow are made from a picture this side does not have:
-                    // decoded, they showed blocks out of place and doubled text (measured over the PC -> sunshine
-                    // path, 2026-11-23: str0m gives up on missing packets after about three round trips, and that
-                    // path stalls for up to a second). The last good picture stays until a keyframe comes, asked
+                    // decoded, they showed blocks out of place and doubled text (measured over the PC -> the test
+                    // laptop path, 2026-11-23: str0m gives up on missing packets after about three round trips, and
+                    // that path stalls for up to a second). The last good picture stays until a keyframe comes, asked
                     // for again while waiting (the transport spaces the requests 600 ms apart).
                     if !contiguous && stats.shown > 0 && !held_after_loss {
                         held_after_loss = true;

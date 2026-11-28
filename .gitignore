@@ -1,11 +1,7 @@
 /target/
 
-# The UU Remote analysis stays on this PC only (decompiled NetEase code, dumps, extracted interface text). The
-# repository holds our own design notes (research\uu\*FINDINGS.md) and our own tools, never third-party material:
-# everything else in research\uu is ignored.
-/research/uu/*
-!/research/uu/FINDINGS.md
-!/research/uu/STREAMER_FINDINGS.md
+# Research on other products stays on the machines it was made on (never in this public repository).
+/research/
 
 # The Android app's build output, and the core libraries scripts/build_android.sh builds into it.
 /mobile/android/.gradle/

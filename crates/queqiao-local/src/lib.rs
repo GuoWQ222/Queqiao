@@ -27,7 +27,17 @@ pub use pipe::{Ends, channel};
 /// now". A Queqiao started by hand sends it (its shortcut, also after Quit), and the service's permissions let
 /// signed-in users send it (Interactive users have SERVICE_USER_DEFINED_CONTROL by default); it only starts the
 /// service's own Queqiao where the service would start it anyway. 2026-11-27: a click on the shortcut did nothing.
+///
+/// Any interactive user may send a control, and a control does not say who sent it: the service honours it only while
+/// [`START_REQUEST`] exists in the namespace of the session at the screen (`Session\<id>\<name>`), which only that
+/// session's programs (and SYSTEM) can make objects in: an administrator in another session is refused. Someone else
+/// signed in (Remote Desktop) cannot bring back the Queqiao the person at the screen quit (the security check of
+/// 2026-11-28).
 pub const CONTROL_START: u32 = 200;
+
+/// The event a Queqiao started by hand holds in its own session (`Local\` + this) while it asks for
+/// [`CONTROL_START`].
+pub const START_REQUEST: &str = "QueqiaoStartRequest";
 
 use pipe::Pipe;
 

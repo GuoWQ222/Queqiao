@@ -129,7 +129,7 @@ impl H264Encoder {
             return Err(Error::new(E_FAIL, skipped.join("; ")));
         }
         // H.264 on an Intel GPU: its encoder through oneVPL first. Windows' own (the Quick Sync MFT) starts a new
-        // sequence with a keyframe at every bitrate change, however it is told (measured on sunshine's Iris Xe
+        // sequence with a keyframe at every bitrate change, however it is told (measured on the test laptop's Iris Xe
         // 2026-11-26), and a session changes the bitrate whenever the network's estimate does: over a phone's network
         // the keyframes, many times a frame's size, held the picture up. oneVPL changes it within the sequence.
         if choice == EncoderChoice::Auto && intel_gpu(device) {

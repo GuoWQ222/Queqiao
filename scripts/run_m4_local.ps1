@@ -25,8 +25,8 @@ param(
     [string]$AgentSoundDevice = '',
     [string]$ViewerSoundDevice = '',
     # This PC has no AV1 encoder that works (an Intel Iris Xe of the 12th generation registers one that refuses
-    # everything: sunshine, 2026-11-23). The av1 session then checks the fallback: the agent says so and stays on H.264.
-    # Not found out here: only the agent's own check (it opens the encoder) knows, and that is what is tested.
+    # everything: the test laptop, 2026-11-23). The av1 session then checks the fallback: the agent says so and stays on
+    # H.264. Not found out here: only the agent's own check (it opens the encoder) knows, and that is what is tested.
     [switch]$NoAv1Encoder,
     [switch]$SkipProbe
 )
@@ -81,7 +81,7 @@ $password3 | & $server add-user carol --data $data | Out-Null
 $serveArgs = @('serve', '--listen', $listen, '--data', "`"$data`"", '--public-ip', $Address, '--relay-private', '--allow-signup')
 $serverProcess = Start-Process -FilePath $server -ArgumentList $serveArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput "$Out\server_out.txt" -RedirectStandardError "$Out\server_err.txt"
 $failed = @()
-# A comma list comes as one string when the script is started with -File (tools\sunshine_run.ps1): split it. Unknown
+# A comma list comes as one string when the script is started with -File (a remote test tool): split it. Unknown
 # names fail the run: "direct,h265" taken as one name ran no session and still passed (2026-11-23).
 $Sessions = @($Sessions | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $knownSessions = @("all", "direct", "relay", "allowed", "declined", "ended-here", "av1", "h265", "drag", "window", "help", "help-link", "help-fixed", "help-noask", "removed", "locked", "two-at-once")
@@ -205,8 +205,8 @@ try {
         # AV1 asked for: the agent switches to its AV1 encoder, the viewer to Windows' AV1 decoder (needs both).
         # The viewer's microphone too (a test tone): the agent plays it into this PC's virtual microphone and hears it there.
         @('av1', '', '--mic-check', $av1Agent, $av1Viewer, $true),
-        # H.265 4:4:4 10-bit through the GPU makers' SDKs (on sunshine Intel's oneVPL both ways): the agent makes it,
-        # the viewer decodes it.
+        # H.265 4:4:4 10-bit through the GPU makers' SDKs (on the test laptop Intel's oneVPL both ways): the agent makes
+        # it, the viewer decodes it.
         @('h265', '', '', 'command from the viewer: picture: H\.265 4:4:4 10-bit \(', 'the picture is H\.265 now', $true),
         # A File Explorer window dragged round the screen for 12 s mid-session (scripts\drag_window.ps1), with the
         # bitrate course on both sides and a picture in the middle of it. The viewer asks for 4 Mbit/s at most: the

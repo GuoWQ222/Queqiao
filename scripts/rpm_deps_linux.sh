@@ -3,8 +3,9 @@
 # installed and removed again. A Fedora root (the official container image) entered with proot, as
 # scripts/noble_root_linux.sh does for Ubuntu 24.04; its systemd does not run there (systemctl ignores what the
 # package's scripts ask), so the service itself is tested by scripts/run_service_vm_linux.sh (rpm step).
-# Usage: scripts/rpm_deps_linux.sh <package.rpm>. Environment: FEDORA (43), MIRROR (Aliyun's internal one: cc4-1 runs
-# in Aliyun; elsewhere a Fedora mirror near you), FEDORA_ROOT (/tmp/fedora). Ends with RPM_DEPS_PASS or RPM_DEPS_FAIL.
+# Usage: scripts/rpm_deps_linux.sh <package.rpm>. Environment: FEDORA (43), MIRROR (Aliyun's internal one: the Linux
+# build machine runs in Aliyun; elsewhere a Fedora mirror near you), FEDORA_ROOT (/tmp/fedora). Ends with RPM_DEPS_PASS
+# or RPM_DEPS_FAIL.
 set -u
 package=${1:?usage: scripts/rpm_deps_linux.sh <package.rpm>}
 fedora=${FEDORA:-43}

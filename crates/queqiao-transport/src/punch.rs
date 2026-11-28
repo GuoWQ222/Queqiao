@@ -43,14 +43,14 @@ pub(crate) const LIMIT: Duration = Duration::from_secs(30);
 /// New sockets one session opens at most (all plans together).
 const MAX_SOCKETS: usize = 300;
 /// When the many-sockets and random-ports methods start where a prediction was tried first. Measured 2026-11-27 on
-/// sunshine's carrier (its STUN answers count up by one, so it looks predictable): the ports it gave towards the PC came
-/// from another block each session (33651-33786, 46407-46503), never the predicted ones; the many sockets met the
-/// PC's random ports 0.3 to 1.6 s after they started, in each of three sessions.
+/// the test laptop's carrier (its STUN answers count up by one, so it looks predictable): the ports it gave towards the
+/// PC came from another block each session (33651-33786, 46407-46503), never the predicted ones; the many sockets met
+/// the PC's random ports 0.3 to 1.6 s after they started, in each of three sessions.
 const FALLBACK: Duration = Duration::from_millis(1500);
 /// How long after the other side's many sockets start (all of them send at once) a sweep of its ports starts. Measured
-/// 2026-11-27 on sunshine's carrier: a packet that reaches the NAT at a port before a mapping is made there leaves that
-/// port broken for the mapping made after (its packets still come out, nothing gets in): with the sweep and the sockets
-/// starting together, four sessions of four found only such a one-way path.
+/// 2026-11-27 on the test laptop's carrier: a packet that reaches the NAT at a port before a mapping is made there
+/// leaves that port broken for the mapping made after (its packets still come out, nothing gets in): with the sweep and
+/// the sockets starting together, four sessions of four found only such a one-way path.
 const SWEEP_AFTER: Duration = Duration::from_secs(1);
 
 /// What a socket's NAT does, from the public addresses STUN servers at different addresses saw.
@@ -320,7 +320,7 @@ fn predicted(public: SocketAddr, step: i32, count: i32) -> Vec<SocketAddr> {
 
 /// Every `stride`th port of `ip` from 1024 up, starting at a random one of the first `stride`: a block of `stride` or more
 /// ports in a row is met for certain (a NAT counting up per destination gives the other side's many sockets such a
-/// block: sunshine's carrier, 2026-11-27), any scattered port with the same odds as random ones.
+/// block: the test laptop's carrier, 2026-11-27), any scattered port with the same odds as random ones.
 fn sweep(ip: IpAddr, stride: u16, random: &mut dyn FnMut() -> u16) -> Vec<SocketAddr> {
     let first = 1024 + random() % stride.max(1);
     (first..=u16::MAX)
@@ -959,7 +959,7 @@ mod tests {
             .unwrap()
             .nat
         };
-        // sunshine's carrier (2026-11-27): +1 for every new destination.
+        // the test laptop's carrier (2026-11-27): +1 for every new destination.
         assert_eq!(
             nat(&[
                 "122.13.163.201:57657",
@@ -1011,15 +1011,15 @@ mod tests {
                 public: address("122.13.163.201:57659"),
             },
             NatInfo {
-                base: address("59.66.29.128:52960"),
+                base: address("1.2.3.4:52960"),
                 nat: Nat::Open,
-                public: address("59.66.29.128:52960"),
+                public: address("1.2.3.4:52960"),
             },
         ];
         let sdp = add_to_sdp("v=0\r\ns=-\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n", &infos);
         assert!(sdp.contains(
             "a=x-queqiao-nat:33.252.114.161:62664 linear:1 122.13.163.201:57659\r\n\
-             a=x-queqiao-nat:59.66.29.128:52960 open 59.66.29.128:52960\r\nm=video"
+             a=x-queqiao-nat:1.2.3.4:52960 open 1.2.3.4:52960\r\nm=video"
         ));
         assert_eq!(from_sdp(&sdp), infos);
         // Nonsense is left out.
@@ -1065,15 +1065,15 @@ mod tests {
             nat,
             public: address(public),
         };
-        let pc = info("59.66.29.128:52960", Nat::Open, "59.66.29.128:52960");
-        let sunshine = info(
+        let pc = info("1.2.3.4:52960", Nat::Open, "1.2.3.4:52960");
+        let laptop = info(
             "33.252.114.161:62664",
             Nat::Linear(1),
             "122.13.163.201:57659",
         );
-        // The PC (no NAT, Windows' firewall) for sunshine: its own address, then the 50 ports sunshine's carrier hands
-        // out next, then a sweep of every 128th port: any block of 128 ports in a row is met.
-        let plans = plan(&pc, &sunshine, true, &mut random);
+        // The PC (no NAT, Windows' firewall) for the test laptop: its own address, then the 50 ports the test laptop's
+        // carrier hands out next, then a sweep of every 128th port: any block of 128 ports in a row is met.
+        let plans = plan(&pc, &laptop, true, &mut random);
         assert_eq!(plans[0].targets, vec![address("122.13.163.201:57659")]);
         assert_eq!(plans[1].targets.len(), 50);
         assert_eq!(plans[1].targets[0], address("122.13.163.201:57660"));
@@ -1086,13 +1086,13 @@ mod tests {
         let block = 36_800..36_928;
         assert_eq!(swept.iter().filter(|port| block.contains(*port)).count(), 1);
         assert_eq!(plans[2].start, FALLBACK + SWEEP_AFTER);
-        // sunshine for the PC: to the PC first, many sockets only after FALLBACK.
-        let plans = plan(&sunshine, &pc, false, &mut random);
+        // the test laptop for the PC: to the PC first, many sockets only after FALLBACK.
+        let plans = plan(&laptop, &pc, false, &mut random);
         assert_eq!(plans[0].targets, vec![pc.public]);
         assert_eq!((plans[1].sockets, plans[1].start), (150, FALLBACK));
         // Both linear: 30 sockets each to the 30th port after the other's latest.
         let other = info("10.0.0.2:4000", Nat::Linear(2), "5.6.7.8:20000");
-        let plans = plan(&sunshine, &other, true, &mut random);
+        let plans = plan(&laptop, &other, true, &mut random);
         assert_eq!(plans[1].sockets, 30);
         assert_eq!(plans[1].targets, vec![address("5.6.7.8:20060")]);
         // Random behind one mapping: every 32nd port; the random side: 150 sockets.

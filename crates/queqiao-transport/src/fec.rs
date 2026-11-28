@@ -1,9 +1,9 @@
 //! Forward error correction for the video, as UU Remote has beside WebRTC's retransmissions (Reed-Solomon parity,
 //! 5 % to 35 % by the loss measured).
 //!
-//! Measured over the PC -> sunshine path (2026-11-23): 77 of 37,000 video packets lost in 40 s; NACK repaired most,
-//! but 5 frames still came incomplete, and the viewer showed them broken (blocks out of place, doubled text) until
-//! a keyframe came. Parity repairs a loss as soon as the group's parity arrives, without a round trip.
+//! Measured over the PC -> the test laptop path (2026-11-23): 77 of 37,000 video packets lost in 40 s; NACK repaired
+//! most, but 5 frames still came incomplete, and the viewer showed them broken (blocks out of place, doubled text)
+//! until a keyframe came. Parity repairs a loss as soon as the group's parity arrives, without a round trip.
 //!
 //! The parity is made from the video's SRTP datagrams as they leave (encrypted, the RTP header in clear), in groups
 //! of up to [`MAX_GROUP`] consecutive packets of one stream, closed at the end of each frame (the marker bit). It

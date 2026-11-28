@@ -1047,7 +1047,7 @@ mod tests {
             ("0.0.0.0:5000", false),
             ("192.168.1.5:5000", false),
             ("10.0.0.5:5000", false),
-            ("100.99.120.92:5000", false),
+            ("100.64.0.10:5000", false),
             ("[::1]:5000", false),
             ("[fe80::1]:5000", false),
             ("[fd00::1]:5000", false),
@@ -1073,7 +1073,7 @@ mod tests {
         }
         let lan = config(true);
         // Private addresses that are not this machine's own, which is refused (below): a fixed one can be. The test
-        // failed on sunshine on 2026-11-23, whose Tailscale address 100.99.120.92 was the one written here.
+        // failed on the test laptop on 2026-11-23, whose Tailscale address was the one written here.
         let not_own = |candidates: [&str; 3]| -> SocketAddr {
             candidates
                 .iter()
@@ -1087,9 +1087,9 @@ mod tests {
             "10.31.7.9:5000"
         ])));
         assert!(lan.peer_allowed(not_own([
-            "100.99.120.92:5000",
-            "100.101.7.21:5000",
-            "100.70.3.44:5000"
+            "100.64.0.10:5000",
+            "100.64.0.11:5000",
+            "100.64.0.12:5000"
         ])));
         assert!(!lan.peer_allowed("127.0.0.1:5000".parse().unwrap()));
         // This machine's own address (the one its default route leaves from), even where private ones may go.

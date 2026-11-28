@@ -49,7 +49,8 @@ mod nvenc_cuda;
 #[cfg_attr(target_os = "linux", path = "nvenc_sys_linux.rs")]
 mod nvenc_sys;
 // The same for NVENC API 12.0 (AV1), from nv-codec-headers at tag n12.0.16.1 (tools/gen_nvenc.ps1 -Tag n12.0.16.1;
-// on Linux the same bindgen options without the Windows target, on cc4-1); used where the driver has 12.0.
+// on Linux the same bindgen options without the Windows target, on the Linux build machine); used where the driver has
+// 12.0.
 #[rustfmt::skip]
 #[allow(warnings, clippy::all)]
 #[cfg_attr(target_os = "linux", path = "nvenc_sys12_linux.rs")]

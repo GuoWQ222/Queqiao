@@ -20,8 +20,8 @@
 //!   candidates come first (str0m ranks a side's candidates by the order they are added), so ICE takes its pairs when
 //!   they work and keeps the others as the way back (the user, 2026-11-27: "Do as you suggest").
 //! - Never on an address that is gone: gathering waits until the server connection is on one of this PC's addresses
-//!   (sunshine's mobile data switched off, 2026-11-27: each attempt gathered on the vanished address, through a server
-//!   connection that was dead but not yet noticed, until the session ended after 40 s).
+//!   (the test laptop's mobile data switched off, 2026-11-27: each attempt gathered on the vanished address, through a
+//!   server connection that was dead but not yet noticed, until the session ended after 40 s).
 //!
 //! The session loops hand it the events it uses ([`Restarter::on_event`]) and call [`Restarter::step`] on each pass.
 

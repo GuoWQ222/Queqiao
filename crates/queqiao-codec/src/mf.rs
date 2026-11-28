@@ -20,8 +20,8 @@ use windows::core::{Error, GUID, Interface, PWSTR, Result};
 use crate::encoder::{EncodedFrame, EncoderConfig};
 
 /// The rate control mode: peak-constrained VBR (a mean bitrate and a peak, PEAK times it). Intel's Quick Sync
-/// encoder takes a new bitrate while encoding only so (measured on sunshine 2026-11-23, 18 -> 4 Mbit/s after 3 s:
-/// CBR and low-delay VBR kept 16-19 Mbit/s, whether the bitrate came through the codec API or a new output type;
+/// encoder takes a new bitrate while encoding only so (measured on the test laptop 2026-11-23, 18 -> 4 Mbit/s after 3
+/// s: CBR and low-delay VBR kept 16-19 Mbit/s, whether the bitrate came through the codec API or a new output type;
 /// peak-constrained and unconstrained VBR went down to 4 within a second); before, the bandwidth estimate never
 /// reached its picture. For measurements (encode_probe mf_rc=) another of Media Foundation's: "cbr", "vbr"
 /// (unconstrained), "ldvbr" (low delay), "gldvbr" (global low delay).

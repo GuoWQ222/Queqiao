@@ -1,7 +1,7 @@
 # Queqiao on Linux: design (draft 1, 2026-11-24)
 
 The user, 2026-11-24: "design and invent the code for linux system ... Same function and feature as Windows", developed
-on cc4-1 (Ubuntu 22.04). This document says how: what is shared with Windows, what each platform feature becomes on
+on the Linux build machine (Ubuntu 22.04). This document says how: what is shared with Windows, what each platform feature becomes on
 Linux, the security choices, what can be tested where, and the order of the work.
 
 ## Principle: one Queqiao, two platform layers
@@ -22,7 +22,7 @@ Two programs that only look alike would drift apart, so the work is a refactor, 
   converter fills the gap (GPU first, CPU as the fallback, as on Windows).
 - The agent's and viewer's session loops move out of their `main.rs` into shared modules that call the platform API;
   `main.rs` keeps start-up and the platform's own pieces.
-- Windows is checked after every step (sunshine: `check.ps1`, then the M4 sessions), so the refactor costs nothing
+- Windows is checked after every step (the test laptop: `check.ps1`, then the M4 sessions), so the refactor costs nothing
   there.
 
 Already portable (no change, or paths only): `queqiao-server`, `queqiao-core` (protocol, STUN, invitations; paths
@@ -91,16 +91,16 @@ flow; the interface list and one timer call are Windows), `queqiao-local`, `queq
 
 ## Where it is tested
 
-cc4-1 is a container: Ubuntu 22.04, root, 4 x RTX 4090 with NVIDIA's encode/decode/CUDA libraries, no systemd, no
+The Linux build machine is a container: Ubuntu 22.04, root, 4 x RTX 4090 with NVIDIA's encode/decode/CUDA libraries, no systemd, no
 `/dev/uinput`, no sound card, no monitor. There: the build, the unit tests, X11 sessions on Xvfb (capture, XTest,
 the X11 clipboard), Wayland on headless compositors (sway + xdg-desktop-portal-wlr: the ScreenCast portal and
 PipeWire; GNOME's mutter + xdg-desktop-portal-gnome: the RemoteDesktop portal and its dialog; the same with GNOME 46
 in an Ubuntu 24.04 root entered with proot, scripts/noble_root_linux.sh; KDE's KWin 5.27 + xdg-desktop-portal-kde in
 that root: the portal session and input, not its pictures), PulseAudio with null sinks, NVENC/NVDEC on the 4090s, Linux
-agent and viewer against each other. In a virtual machine on cc4-1 (scripts/vm_linux.sh: QEMU, Ubuntu 24.04 with GNOME
+agent and viewer against each other. In a virtual machine on the Linux build machine (scripts/vm_linux.sh: QEMU, Ubuntu 24.04 with GNOME
 and GDM): systemd and logind, GNOME Shell, the service on the real sign-in and lock screens, uinput, KMS capture
 (virtio-gpu), the .deb and .rpm installed and removed, updates. Not there (a real Linux PC is needed): KDE's screen-cast
-pictures (KWin's virtual backend records none), VA-API on Intel/AMD, a real GPU's tiled framebuffers (cc4-1's NVIDIA
+pictures (KWin's virtual backend records none), VA-API on Intel/AMD, a real GPU's tiled framebuffers (the Linux build machine's NVIDIA
 driver exports none: modeset off), real sound devices. Windows <-> Linux sessions need both on one network (or a reachable test server).
 
 ## Where it stands (2026-11-24)
@@ -108,7 +108,7 @@ driver exports none: modeset off), real sound devices. Windows <-> Linux session
 Steps 1 to 3 are in for X11: the capture, input, encoders (OpenH264, NVENC on CUDA), the OpenH264 decoder, sound
 (PulseAudio), the clipboard (X11 selections), files, command lines on the controlled side, and the agent's and
 viewer's sessions, shared with Windows. `scripts/run_m2_linux.sh` runs a Linux agent against a Linux viewer (video,
-input, clipboard, files, commands, sound with the speakers muted) and passes on cc4-1.
+input, clipboard, files, commands, sound with the speakers muted) and passes on the Linux build machine.
 
 Step 5 so far: the GUI (egui on one GUI thread; every window a viewport): the tray icon (StatusNotifierItem, the menu
 shared with Windows in tray.rs; without a tray the main window opens instead), the main window (Devices, Help,
@@ -125,7 +125,7 @@ entry), one agent per user (a lock in a private runtime folder; opened again, it
 `scripts/run_m3_linux.sh` runs both with a queqiao-server of their own on 127.0.0.1: direct (with the clipboard),
 allowed and declined (the consent prompt; the banner and prompt pictured), ui (the viewer through its login form and
 device list, with pictures), main (the agent's main window, each page pictured), and the transfer list and password
-form (examples/linux_forms_probe), and passes on cc4-1. Updates come with the system's packages (step 6), not from Queqiao.
+form (examples/linux_forms_probe), and passes on the Linux build machine. Updates come with the system's packages (step 6), not from Queqiao.
 
 Command lines on the viewer side open in the desktop's terminal emulator (x-terminal-emulator, else GNOME Terminal,
 Konsole, Xfce's, xterm) running the viewer's helper over a Unix socket in the private runtime folder (this user only,
@@ -164,7 +164,7 @@ for a still screen. The GUI runs natively
 on Wayland (its hidden root window is a 4 x 4 transparent window there: Wayland hides no
 window; mutter refuses smaller); the session window runs through XWayland and shows its last picture again where it
 was uncovered or resized (the X server keeps none, and a still remote screen sends no new one: the session bar left a
-black strip after tucking away). Tested on cc4-1 on virtual Wayland displays (the user, 2026-11-25: passing on cc4-1's
+black strip after tucking away). Tested on the Linux build machine on virtual Wayland displays (the user, 2026-11-25: passing on the Linux build machine's
 virtual screens is enough): scripts/wayland_display_linux.sh starts, as the user qqtest, headless sway (DESKTOP=sway,
 the default) or GNOME's mutter (DESKTOP=gnome, with a system bus) with XWayland, PipeWire, WirePlumber and the portals;
 scripts/run_wayland_linux.sh runs a session against it: the viewer's picture against the Wayland screen (grim on
@@ -177,7 +177,7 @@ keeps the restore token for the user only (0600) and offers it the next time, an
 without asking until the person revokes it in its settings; elsewhere the desktop asks each session (Ubuntu 22.04:
 1.14). Tested with GNOME 46 (Ubuntu 24.04, its dialog's "Remember This Selection" ticked by default): the first session
 asks, the next starts with no dialog, picture and input as in the first (run_wayland_linux.sh NOBLE=1, then KEPT=1).
-That root (Ubuntu 24.04 on cc4-1, a container without mount rights or user namespaces) runs under proot 5.5 (22.04's
+That root (Ubuntu 24.04 on the Linux build machine, a container without mount rights or user namespaces) runs under proot 5.5 (22.04's
 5.1 does not know statx), its programs as the test user from the start (proot cannot follow a change of user), with a
 system bus that keeps its user, and a library in PipeWire alone answering its sandbox check (/proc/<pid>/root, which
 proot cannot open) with "permission denied", which PipeWire takes for "not sandboxed": all for the test bench only.
@@ -196,7 +196,7 @@ have no pointer; the stream's buffers carry its bitmap and hot spot (spa_meta_cu
 pointer's shape, which draws it at its own mouse, and a bitmap of no size hides it. The screen's side offers room for
 its bitmap at one size (mutter: 384 x 384) that must fall in the range asked for (up to 1024 x 1024), or no pointer meta
 comes at all; shapes over 256 x 256 are passed over. A buffer that carries only the pointer is no frame. Tested: GNOME
-42 and 46 send the shapes (the test checks at least one), GNOME 42 with a cursor theme sends the arrow (cc4-1 had none:
+42 and 46 send the shapes (the test checks at least one), GNOME 42 with a cursor theme sends the arrow (the Linux build machine had none:
 mutter then sends a grey square), KDE gives the pointer apart (no frames there, so no shapes). Not yet on Wayland:
 KDE's pictures (a real KDE desktop), the banner at the top (Wayland programs cannot place themselves: it floats where
 the compositor puts it).
@@ -226,8 +226,8 @@ Queqiao's name), installs it from a systemd unit of its own (installing restarts
 an earlier update installed if the new service or its agent does not keep running. `queqiao-setup release-package`
 signs a package's manifest from its name, size and SHA-256 where the release key is.
 
-Tested in a virtual machine on cc4-1 (scripts/vm_linux.sh: Ubuntu 24.04, GNOME and GDM on Wayland, systemd, uinput,
-virtio-gpu's KMS; QEMU without KVM) by scripts/run_service_vm_linux.sh, with the server and viewer on cc4-1: the .deb
+Tested in a virtual machine on the Linux build machine (scripts/vm_linux.sh: Ubuntu 24.04, GNOME and GDM on Wayland, systemd, uinput,
+virtio-gpu's KMS; QEMU without KVM) by scripts/run_service_vm_linux.sh, with the server and viewer on the Linux build machine: the .deb
 installs and the service starts qq's agent, which hands the device over (install); qq's session locked, the viewer gives
 the password (a wrong one refused), sees the lock screen through the helper and unlocks it by typing, and qq is told
 (lock); qq signed out, the agent for the sign-in screen serves, the viewer gives qq's password, sees GDM and signs qq in
@@ -237,7 +237,7 @@ leaves nothing after `rpm -e` (rpm); `apt remove --purge` leaves nothing (purge)
 the .rpm in Fedora 43 with dnf (its dependencies from Fedora's repositories), runs the programs there and removes it.
 The GPU's reading was tested on the machine's own framebuffers, forced through EGL (kms_probe <folder> gpu: Mesa there,
 the lock screen read right with its pointer). Not tested: framebuffers in a real GPU's tiled layout (no such machine:
-cc4-1's NVIDIA driver has nvidia-drm's modeset off, so it exports nothing; `kms_probe gpu-self-test` checks it where
+the Linux build machine's NVIDIA driver has nvidia-drm's modeset off, so it exports nothing; `kms_probe gpu-self-test` checks it where
 it does), GDM or LightDM on X11 (the banner there), several screens at the sign-in screen (the pointer's range covers all
 of them).
 
@@ -250,7 +250,7 @@ Not yet on Linux: VA-API, the privacy screen and input block.
 2. The platform API (Surface, capture, encode, decode, present, input, sound, clipboard) with the Windows
    implementation moved behind it; the session loops shared. Windows M4 must pass unchanged.
 3. Linux agent on X11: capture, OpenH264 + NVENC, XTest, sound, clipboard, files; Linux viewer: window, decode
-   (OpenH264, NVDEC), input, sound, clipboard, file drop. `scripts/run_m4_local.sh` on cc4-1.
+   (OpenH264, NVDEC), input, sound, clipboard, file drop. `scripts/run_m4_local.sh` on the Linux build machine.
 4. Wayland (portal capture, libei input), VA-API, dav1d, H.265 / 4:4:4 / 10-bit where the hardware has them.
 5. The main window, forms, tray, settings, transfers, languages (egui), the session bar; then accounts (the agent's
    and viewer's account modes shared as the sessions are). Next, before step 4.

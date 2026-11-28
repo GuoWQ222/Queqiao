@@ -277,8 +277,8 @@ mod tests {
     fn a_refused_certificate_is_said_plainly_without_the_whole_fingerprint() {
         let actual = format!("a2db11f0{}", "b".repeat(56));
         let entered = "01dba320".repeat(8);
-        let text = super::mismatch("59.66.29.128:47100", &actual, &entered);
-        assert!(text.contains("59.66.29.128:47100"), "{text}");
+        let text = super::mismatch("1.2.3.4:47100", &actual, &entered);
+        assert!(text.contains("1.2.3.4:47100"), "{text}");
         assert!(
             text.contains("a2db11f0") && text.contains("01dba320"),
             "{text}"

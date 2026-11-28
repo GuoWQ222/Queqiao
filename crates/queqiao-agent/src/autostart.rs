@@ -108,6 +108,29 @@ fn delete(key: &str, value: &str) -> Result<(), String> {
     result.ok().map_err(|e| e.message())
 }
 
+/// The start request's event in this session ([`queqiao_local::START_REQUEST`]), held while asking the service: it
+/// takes the request only with the event in the namespace of the session at the screen.
+pub struct StartRequest(Option<windows::Win32::Foundation::HANDLE>);
+
+impl StartRequest {
+    pub fn hold() -> StartRequest {
+        use windows::Win32::System::Threading::CreateEventW;
+        let name: Vec<u16> = format!("Local\\{}", queqiao_local::START_REQUEST)
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        StartRequest(unsafe { CreateEventW(None, true, false, PCWSTR(name.as_ptr())) }.ok())
+    }
+}
+
+impl Drop for StartRequest {
+    fn drop(&mut self) {
+        if let Some(event) = self.0.take() {
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(event) };
+        }
+    }
+}
+
 /// Whether the Queqiao service runs on this PC (it then starts Queqiao for the person signed in).
 /// Asks the Queqiao service to start its Queqiao at the screen now ([`queqiao_local::CONTROL_START`]): what a Queqiao
 /// started by hand does when the service runs but no Queqiao runs here (after Quit).

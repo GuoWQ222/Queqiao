@@ -182,8 +182,9 @@ try {
     '=== 3. a session: Ctrl+Alt+Del, its screen through the desktop helper, Escape, the own desktop again'
     Start-Sleep -Seconds 3
     # --mute: viewer and agent run on this one PC. Played here, the sound the agent captures from this PC's speakers
-    # would be captured again and go round (a beep repeated for the whole session, heard on sunshine on 2026-11-22).
-    # The agent still makes its sound sender at the start (what the socket check below needs); SoundOff ends it.
+    # would be captured again and go round (a beep repeated for the whole session, heard on the test laptop on
+    # 2026-11-22). The agent still makes its sound sender at the start (what the socket check below needs); SoundOff
+    # ends it.
     Start-SessionTask 'Queqiao-M5-Viewer' $viewer "--server $listen --pin $pin --user alice --password $password --device $device --seconds $Seconds --secure-test --width 960 --mute --report `"$Out\viewer_secure.txt`""
     $viewerResult = Wait-SessionTask 'Queqiao-M5-Viewer' ($Seconds + 150)
     "viewer task: $viewerResult"

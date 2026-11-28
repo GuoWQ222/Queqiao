@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Tests on a newer desktop (docs/LINUX.md): an Ubuntu 24.04 root file system on cc4-1 (Ubuntu 22.04 in a container
-# without mount rights or user namespaces), entered with proot, for GNOME 46: mutter, xdg-desktop-portal 1.18 and its
-# GNOME backend, whose RemoteDesktop portal keeps the person's answer (version 2), which 22.04's (1.14) does not.
-# The build folder, the tests' output folder and the workspace are bound in at the same paths, so the tests' commands
-# run unchanged inside it (scripts/wayland_display_linux.sh with DESKTOP=gnome, the agent, the test window).
-# Usage (as root on cc4-1):
+# Tests on a newer desktop (docs/LINUX.md): an Ubuntu 24.04 root file system on the Linux build machine (Ubuntu 22.04 in
+# a container without mount rights or user namespaces), entered with proot, for GNOME 46: mutter, xdg-desktop-portal
+# 1.18 and its GNOME backend, whose RemoteDesktop portal keeps the person's answer (version 2), which 22.04's (1.14)
+# does not. The build folder, the tests' output folder and the workspace are bound in at the same paths, so the tests'
+# commands run unchanged inside it (scripts/wayland_display_linux.sh with DESKTOP=gnome, the agent, the test window).
+# Usage (as root on the Linux build machine):
 #   scripts/noble_root_linux.sh setup          the root under $NOBLE_ROOT (/tmp/noble), about 1 GB; once
 #   scripts/noble_root_linux.sh run <command>  <command> inside it as the test user (qqtest), through bash
 #   scripts/noble_root_linux.sh root <command> the same as root
@@ -30,9 +30,9 @@ packages=(mutter xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-
     # KDE (Plasma 5.27 on 24.04): KWin headless on its virtual backend, its portal backend (Qt: AT-SPI built in).
     kwin-wayland xdg-desktop-portal-kde qtwayland5)
 
-# proot binds the folders; run as root on cc4-1, commands inside run as root for real. -0 (pretended root) only for
-# apt, whose dpkg would otherwise trip over proot. Programs started in the background keep their proot running: start
-# them apart (setsid ... &).
+# proot binds the folders; run as root on the Linux build machine, commands inside run as root for real. -0 (pretended
+# root) only for apt, whose dpkg would otherwise trip over proot. Programs started in the background keep their proot
+# running: start them apart (setsid ... &).
 inside() {
     mkdir -p "$out" "$target"
     chmod 777 "$out"

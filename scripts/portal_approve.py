@@ -73,8 +73,8 @@ def click(node):
 
 def main():
     """Waits for a dialog: a fresh one-shot pass each half second. A process that was already waiting when the dialog
-    opened can press its buttons but not switch its switch (seen with GNOME 42 on cc4-1), one started after can."""
-    if "--once" in sys.argv:
+    opened can press its buttons but not switch its switch (seen with GNOME 42 on the Linux build machine), one started
+    after can.""" if "--once" in sys.argv:
         return once("--remember" in sys.argv)
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else 20.0
     extra = [flag for flag in ("--remember", "--list") if flag in sys.argv]

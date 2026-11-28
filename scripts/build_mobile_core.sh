@@ -1,11 +1,11 @@
 #!/bin/bash
 # Builds the mobile core (crates/queqiao-mobile) for Android: libqueqiao_mobile.so for arm64-v8a and x86_64 (the
-# emulator), with the NDK (NDK_HOME, default /cpfs/user/guowenqi/android/android-ndk-r27c), API level 26.
+# emulator), with the NDK (NDK_HOME, default ~/android/android-ndk-r27c), API level 26.
 # Usage: scripts/build_mobile_core.sh [out folder, default target/android-libs]. Prints CORE_BUILT <folder> or
 # CORE_FAIL <target>.
 set -u
 cd "$(dirname "$0")/.." || exit 1
-ndk=${NDK_HOME:-/cpfs/user/guowenqi/android/android-ndk-r27c}
+ndk=${NDK_HOME:-$HOME/android/android-ndk-r27c}
 target_dir=${CARGO_TARGET_DIR:-target}
 mkdir -p "$target_dir"
 out=${1:-$target_dir/android-libs}

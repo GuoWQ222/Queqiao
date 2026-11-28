@@ -687,8 +687,8 @@ impl Account {
     /// mobile data, the other kept as the way back).
     /// - Its address is gone (that network went away): the connection is closed at once and made again on the network
     ///   left. Before, a connection on a vanished network was noticed only after 60 s of silence; a session's restart,
-    ///   which needs the server, ran out of time meanwhile (sunshine's mobile data switched off while on Wi-Fi too:
-    ///   frozen, then ended after 40 s, 2026-11-27).
+    ///   which needs the server, ran out of time meanwhile (the test laptop's mobile data switched off while on Wi-Fi
+    ///   too: frozen, then ended after 40 s, 2026-11-27).
     /// - A network the system routes before this one (Windows puts Wi-Fi and Ethernet before mobile data) has been up
     ///   for [`MOVE_AFTER`]: a new connection is made there and takes this one's place (the server closes the older
     ///   one), at most once in [`MOVE_GAP`]. A session follows the connection's address (restart.rs): it gathers on the
