@@ -1,0 +1,260 @@
+Command line invocation:
+    /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/xcodebuild -project mobile/ios/Queqiao.xcodeproj -scheme Queqiao -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build
+
+Build settings from command line:
+    CODE_SIGN_IDENTITY = 
+    CODE_SIGNING_ALLOWED = NO
+    CODE_SIGNING_REQUIRED = NO
+    SDKROOT = iphoneos18.5
+
+note: Using codesigning identity override: 
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (1 target)
+    Target 'Queqiao' in project 'Queqiao' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --print-asset-tag-combinations --output-format xml1 /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Assets.xcassets
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -isysroot /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -x c -c /dev/null
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool --version --output-format xml1
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc --version
+
+ExecuteExternalTool /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -version_details
+
+Build description signature: 71ad52f8878a0823c9f9978fe4b7423a
+Build description path: /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/XCBuildData/71ad52f8878a0823c9f9978fe4b7423a.xcbuilddata
+ClangStatCache /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk /Users/runner/work/Queqiao/Queqiao/build/device/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao.xcodeproj
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -o /Users/runner/work/Queqiao/Queqiao/build/device/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache
+
+CreateBuildDirectory /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao.xcodeproj
+    builtin-create-build-directory /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products
+
+CreateBuildDirectory /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao.xcodeproj
+    builtin-create-build-directory /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao-bf4c0b839e8e986780c31b5fdd78348d-VFS-iphoneos/all-product-headers.yaml
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao.xcodeproj
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao-bf4c0b839e8e986780c31b5fdd78348d-VFS-iphoneos/all-product-headers.yaml
+
+CreateBuildDirectory /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao.xcodeproj
+    builtin-create-build-directory /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos
+
+CreateBuildDirectory /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/EagerLinkingTBDs/Release-iphoneos
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao.xcodeproj
+    builtin-create-build-directory /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/EagerLinkingTBDs/Release-iphoneos
+
+ProcessXCFramework /Users/runner/work/Queqiao/Queqiao/mobile/ios/build/QueqiaoCore.xcframework /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/libqueqiao_mobile.a ios
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao.xcodeproj
+    builtin-process-xcframework --xcframework /Users/runner/work/Queqiao/Queqiao/mobile/ios/build/QueqiaoCore.xcframework --platform ios --target-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.DependencyStaticMetadataFileList (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.DependencyStaticMetadataFileList
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.hmap (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.DependencyMetadataFileList (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.DependencyMetadataFileList
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-project-headers.hmap (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-project-headers.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-own-target-headers.hmap (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-own-target-headers.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-generated-files.hmap (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-generated-files.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-all-target-headers.hmap (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-all-target-headers.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-all-non-framework-target-headers.hmap (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-all-non-framework-target-headers.hmap
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao_const_extract_protocols.json (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao_const_extract_protocols.json
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftFileList (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftFileList
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftConstValuesFileList (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftConstValuesFileList
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.LinkFileList (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.LinkFileList
+
+WriteAuxiliaryFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-OutputFileMap.json (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    write-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-OutputFileMap.json
+
+MkDir /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /bin/mkdir -p /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app
+
+MkDir /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/thinned (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /bin/mkdir -p /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/thinned
+
+MkDir /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/unthinned (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /bin/mkdir -p /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/unthinned
+
+GenerateAssetSymbols /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Assets.xcassets (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Assets.xcassets --compile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app --output-format human-readable-text --notices --warnings --export-dependency-info /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_dependencies --output-partial-info-plist /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_generated_info.plist --app-icon AppIcon --compress-pngs --enable-on-demand-resources YES --development-region en --target-device iphone --target-device ipad --minimum-deployment-target 15.0 --platform iphoneos --bundle-identifier com.queqiao.app --generate-swift-asset-symbol-extensions NO --generate-swift-asset-symbols /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/GeneratedAssetSymbols.swift --generate-objc-asset-symbols /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/GeneratedAssetSymbols.h --generate-asset-symbol-index /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/GeneratedAssetSymbols-Index.plist
+/* com.apple.actool.compilation-results */
+/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/GeneratedAssetSymbols-Index.plist
+/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/GeneratedAssetSymbols.h
+/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/GeneratedAssetSymbols.swift
+
+
+CopyStringsFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/zh-Hans.lproj/Localizable.strings /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/zh-Hans.lproj/Localizable.strings (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-copyStrings --validate --outputencoding binary --outfilename Localizable.strings --outdir /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/zh-Hans.lproj -- /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/zh-Hans.lproj/Localizable.strings
+/Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/zh-Hans.lproj/Localizable.strings:1:1: note: detected encoding of input file as Unicode (UTF-8) (in target 'Queqiao' from project 'Queqiao')
+
+CopyStringsFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/en.lproj/Localizable.strings /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/en.lproj/Localizable.strings (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-copyStrings --validate --outputencoding binary --outfilename Localizable.strings --outdir /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/en.lproj -- /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/en.lproj/Localizable.strings
+/Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/en.lproj/Localizable.strings:1:1: note: detected encoding of input file as Unicode (UTF-8) (in target 'Queqiao' from project 'Queqiao')
+
+CompileAssetCatalogVariant thinned /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Assets.xcassets (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/actool /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Assets.xcassets --compile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/thinned --output-format human-readable-text --notices --warnings --export-dependency-info /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_dependencies_thinned --output-partial-info-plist /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_generated_info.plist_thinned --app-icon AppIcon --compress-pngs --enable-on-demand-resources YES --development-region en --target-device iphone --target-device ipad --minimum-deployment-target 15.0 --platform iphoneos
+/* com.apple.actool.compilation-results */
+/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_generated_info.plist_thinned
+/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/thinned/AppIcon60x60@2x.png
+/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/thinned/AppIcon76x76@2x~ipad.png
+/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/thinned/Assets.car
+
+
+SwiftDriver Queqiao normal arm64 com.apple.xcode.tools.swift.compiler (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-SwiftDriver -- /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name Queqiao -O -whole-module-optimization -enforce-exclusivity\=checked @/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftFileList -enable-bare-slash-regex -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -target arm64-apple-ios15.0 -g -module-cache-path /Users/runner/work/Queqiao/Queqiao/build/device/ModuleCache.noindex -Xfrontend -serialize-debugging-options -swift-version 5 -I /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos -F /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos -F build -c -num-threads 3 -Xcc -ivfsstatcache -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache -output-file-map /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftmodule -validate-clang-modules-once -clang-build-session-file /Users/runner/work/Queqiao/Queqiao/build/device/ModuleCache.noindex/Session.modulevalidation -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/swift-overrides.hmap -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao_const_extract_protocols.json -Xcc -iquote -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-generated-files.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-own-target-headers.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-all-target-headers.hmap -Xcc -iquote -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-project-headers.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/include -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources-normal/arm64 -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/arm64 -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources -emit-objc-header -emit-objc-header-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-Swift.h -import-objc-header /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Queqiao-Bridging-Header.h -pch-output-dir /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/PrecompiledHeaders -working-directory /Users/runner/work/Queqiao/Queqiao/mobile/ios -no-emit-module-separately-wmo
+
+SwiftDriver\ Compilation Queqiao normal arm64 com.apple.xcode.tools.swift.compiler (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-Swift-Compilation -- /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name Queqiao -O -whole-module-optimization -enforce-exclusivity\=checked @/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftFileList -enable-bare-slash-regex -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -target arm64-apple-ios15.0 -g -module-cache-path /Users/runner/work/Queqiao/Queqiao/build/device/ModuleCache.noindex -Xfrontend -serialize-debugging-options -swift-version 5 -I /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos -F /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos -F build -c -num-threads 3 -Xcc -ivfsstatcache -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache -output-file-map /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftmodule -validate-clang-modules-once -clang-build-session-file /Users/runner/work/Queqiao/Queqiao/build/device/ModuleCache.noindex/Session.modulevalidation -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/swift-overrides.hmap -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao_const_extract_protocols.json -Xcc -iquote -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-generated-files.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-own-target-headers.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-all-target-headers.hmap -Xcc -iquote -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-project-headers.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/include -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources-normal/arm64 -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/arm64 -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources -emit-objc-header -emit-objc-header-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-Swift.h -import-objc-header /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Queqiao-Bridging-Header.h -pch-output-dir /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/PrecompiledHeaders -working-directory /Users/runner/work/Queqiao/Queqiao/mobile/ios -no-emit-module-separately-wmo
+
+SwiftGeneratePch normal arm64 Compiling\ bridging\ header (in target 'Queqiao' from project 'Queqiao')
+
+PrecompileSwiftBridgingHeader normal arm64 (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    
+
+SwiftDriverJobDiscovery normal arm64 Compiling bridging header (in target 'Queqiao' from project 'Queqiao')
+
+SwiftCompile normal arm64 Compiling\ AudioPlayer.swift,\ Engine.swift,\ Keys.swift,\ QueqiaoApp.swift,\ RemoteScreenView.swift,\ SessionView.swift,\ Theme.swift,\ VideoDecoder.swift,\ GeneratedAssetSymbols.swift /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/AudioPlayer.swift /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Engine.swift /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Keys.swift /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/QueqiaoApp.swift /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/RemoteScreenView.swift /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/SessionView.swift /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Theme.swift /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/VideoDecoder.swift /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/GeneratedAssetSymbols.swift /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/PrecompiledHeaders/Queqiao-Bridging-Header.pch (in target 'Queqiao' from project 'Queqiao')
+CompileSwift normal arm64 (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    
+
+LinkAssetCatalog /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Assets.xcassets (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-linkAssetCatalog --thinned /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/thinned --thinned-dependencies /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_dependencies_thinned --thinned-info-plist-content /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_generated_info.plist_thinned --unthinned /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_output/unthinned --unthinned-dependencies /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_dependencies_unthinned --unthinned-info-plist-content /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_generated_info.plist_unthinned --output /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app --plist-output /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_generated_info.plist
+note: Emplaced /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/AppIcon76x76@2x~ipad.png (in target 'Queqiao' from project 'Queqiao')
+note: Emplaced /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Assets.car (in target 'Queqiao' from project 'Queqiao')
+note: Emplaced /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/AppIcon60x60@2x.png (in target 'Queqiao' from project 'Queqiao')
+
+ProcessInfoPlistFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Info.plist /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Info.plist (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-infoPlistUtility /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/PkgInfo -expandbuildsettings -format binary -platform iphoneos -additionalcontentfile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/assetcatalog_generated_info.plist -requiredArchitecture arm64 -o /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Info.plist
+
+SwiftDriverJobDiscovery normal arm64 Compiling AudioPlayer.swift, Engine.swift, Keys.swift, QueqiaoApp.swift, RemoteScreenView.swift, SessionView.swift, Theme.swift, VideoDecoder.swift, GeneratedAssetSymbols.swift (in target 'Queqiao' from project 'Queqiao')
+
+SwiftDriver\ Compilation\ Requirements Queqiao normal arm64 com.apple.xcode.tools.swift.compiler (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-Swift-Compilation-Requirements -- /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name Queqiao -O -whole-module-optimization -enforce-exclusivity\=checked @/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftFileList -enable-bare-slash-regex -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -target arm64-apple-ios15.0 -g -module-cache-path /Users/runner/work/Queqiao/Queqiao/build/device/ModuleCache.noindex -Xfrontend -serialize-debugging-options -swift-version 5 -I /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos -F /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos -F build -c -num-threads 3 -Xcc -ivfsstatcache -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/SDKStatCaches.noindex/iphoneos18.5-22F76-a529daf784b3616c7c04a36aeb7f5c05.sdkstatcache -output-file-map /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-OutputFileMap.json -use-frontend-parseable-output -save-temps -no-color-diagnostics -serialize-diagnostics -emit-dependencies -emit-module -emit-module-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftmodule -validate-clang-modules-once -clang-build-session-file /Users/runner/work/Queqiao/Queqiao/build/device/ModuleCache.noindex/Session.modulevalidation -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/swift-overrides.hmap -emit-const-values -Xfrontend -const-gather-protocols-file -Xfrontend /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao_const_extract_protocols.json -Xcc -iquote -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-generated-files.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-own-target-headers.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-all-target-headers.hmap -Xcc -iquote -Xcc /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao-project-headers.hmap -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/include -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources-normal/arm64 -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/arm64 -Xcc -I/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources -emit-objc-header -emit-objc-header-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-Swift.h -import-objc-header /Users/runner/work/Queqiao/Queqiao/mobile/ios/Queqiao/Queqiao-Bridging-Header.h -pch-output-dir /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/PrecompiledHeaders -working-directory /Users/runner/work/Queqiao/Queqiao/mobile/ios -no-emit-module-separately-wmo
+
+SwiftMergeGeneratedHeaders /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/Queqiao-Swift.h /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-Swift.h (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-swiftHeaderTool -arch arm64 /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao-Swift.h -o /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/DerivedSources/Queqiao-Swift.h
+
+Copy /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.swiftmodule/arm64-apple-ios.swiftdoc /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftdoc (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftdoc /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.swiftmodule/arm64-apple-ios.swiftdoc
+
+Copy /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.swiftmodule/arm64-apple-ios.swiftmodule /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftmodule (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftmodule /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.swiftmodule/arm64-apple-ios.swiftmodule
+
+Copy /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.swiftmodule/arm64-apple-ios.abi.json /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.abi.json (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.abi.json /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.swiftmodule/arm64-apple-ios.abi.json
+
+Copy /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.swiftmodule/Project/arm64-apple-ios.swiftsourceinfo /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftsourceinfo (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftsourceinfo /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.swiftmodule/Project/arm64-apple-ios.swiftsourceinfo
+
+Ld /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Queqiao normal (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -Xlinker -reproducible -target arm64-apple-ios15.0 -isysroot /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk -Os -L/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/EagerLinkingTBDs/Release-iphoneos -L/Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos -F/Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/EagerLinkingTBDs/Release-iphoneos -F/Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos -Fbuild -filelist /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.LinkFileList -Xlinker -rpath -Xlinker @executable_path/Frameworks -dead_strip -Xlinker -object_path_lto -Xlinker /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao_lto.o -Xlinker -dependency_info -Xlinker /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao_dependency_info.dat -fobjc-link-runtime -L/Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos -L/usr/lib/swift -Xlinker -add_ast_path -Xlinker /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.swiftmodule -lc++ -lresolv -lqueqiao_mobile -o /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Queqiao
+
+CopySwiftLibs /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-swiftStdLibTool --copy --verbose --scan-executable /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Queqiao --scan-folder /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Frameworks --scan-folder /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/PlugIns --scan-folder /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/SystemExtensions --scan-folder /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Extensions --platform iphoneos --toolchain /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+Ignoring --strip-bitcode because --sign was not passed
+
+ExtractAppIntentsMetadata (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --module-name Queqiao --sdk-root /Applications/Xcode_16.4.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk --xcode-version 16F6 --platform-family iOS --deployment-target 15.0 --bundle-identifier com.queqiao.app --output /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app --target-triple arm64-apple-ios15.0 --binary-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Queqiao --dependency-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao_dependency_info.dat --stringsdata-file /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftFileList --metadata-file-list /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Objects-normal/arm64/Queqiao.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
+2026-11-28 10:36:37.411 appintentsmetadataprocessor[5282:19171] Starting appintentsmetadataprocessor export
+2026-11-28 10:36:37.412 appintentsmetadataprocessor[5282:19171] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+
+GenerateDSYMFile /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app.dSYM /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Queqiao (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/dsymutil /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Queqiao -o /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app.dSYM
+
+AppIntentsSSUTraining (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsnltrainingprocessor --infoplist-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Info.plist --temp-dir-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/ssu --bundle-id com.queqiao.app --product-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app --extracted-metadata-path /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app/Metadata.appintents --metadata-file-list /Users/runner/work/Queqiao/Queqiao/build/device/Build/Intermediates.noindex/Queqiao.build/Release-iphoneos/Queqiao.build/Queqiao.DependencyMetadataFileList --archive-ssu-assets
+2026-11-28 10:36:37.431 appintentsnltrainingprocessor[5284:19175] Parsing options for appintentsnltrainingprocessor
+2026-11-28 10:36:37.431 appintentsnltrainingprocessor[5284:19175] No AppShortcuts found - Skipping.
+
+RegisterExecutionPolicyException /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-RegisterExecutionPolicyException /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app
+
+Validate /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    builtin-validationUtility /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app -infoplist-subpath Info.plist
+
+Touch /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app (in target 'Queqiao' from project 'Queqiao')
+    cd /Users/runner/work/Queqiao/Queqiao/mobile/ios
+    /usr/bin/touch -c /Users/runner/work/Queqiao/Queqiao/build/device/Build/Products/Release-iphoneos/Queqiao.app
+
+note: Disabling previews because SWIFT_VERSION is set and SWIFT_OPTIMIZATION_LEVEL=-O, expected -Onone (in target 'Queqiao' from project 'Queqiao')
+** BUILD SUCCEEDED **
+

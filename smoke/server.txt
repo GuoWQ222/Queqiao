@@ -1,0 +1,6 @@
+queqiao-server 0.1.0 (protocol 1)
+listening on 127.0.0.1:47744, data in /tmp/ios_results/smoke/server
+certificate fingerprint (clients: --pin): 3144ba825e7e74fbeb476616749d5663f9594ed79436abcff16e8fcccecd8a49
+STUN/TURN off
+new accounts from the login form: no (queqiao-server add-user)
+127.0.0.1:49191: TLS: tls handshake eof

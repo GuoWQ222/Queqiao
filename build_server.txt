@@ -1,0 +1,8 @@
+warning: function `private_ipv6` is never used
+  --> crates/queqiao-transport/src/interfaces.rs:74:4
+   |
+74 | fn private_ipv6(ip: Ipv6Addr) -> bool {
+   |    ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+

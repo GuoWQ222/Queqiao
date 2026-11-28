@@ -1,0 +1,17 @@
+    Updating crates.io index
+   Compiling sctp-proto v0.10.8 (/Users/runner/work/Queqiao/Queqiao/third_party/sctp-proto)
+   Compiling queqiao-core v0.1.0 (/Users/runner/work/Queqiao/Queqiao/crates/queqiao-core)
+   Compiling str0m v0.25.0
+   Compiling queqiao-transport v0.1.0 (/Users/runner/work/Queqiao/Queqiao/crates/queqiao-transport)
+warning: function `private_ipv6` is never used
+  --> crates/queqiao-transport/src/interfaces.rs:74:4
+   |
+74 | fn private_ipv6(ip: Ipv6Addr) -> bool {
+   |    ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling queqiao-account v0.1.0 (/Users/runner/work/Queqiao/Queqiao/crates/queqiao-account)
+warning: `queqiao-transport` (lib) generated 1 warning
+   Compiling queqiao-mobile v0.1.0 (/Users/runner/work/Queqiao/Queqiao/crates/queqiao-mobile)
+    Finished `release` profile [optimized] target(s) in 55.22s

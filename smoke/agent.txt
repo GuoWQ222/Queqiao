@@ -1,0 +1,8 @@
+online as sim-test-pc
+[OpenH264] this = 0x0x6000024d1d40, Warning:ParamValidation(), AdaptiveQuant(1) is not supported yet for screen content, auto turned off
+[OpenH264] this = 0x0x6000024d1d40, Warning:ParamValidation(), BackgroundDetection(1) is not supported yet for screen content, auto turned off
+session: yes
+frames sent: 1048
+input events: 1
+typed: typed 中文 é
+ended: time is up

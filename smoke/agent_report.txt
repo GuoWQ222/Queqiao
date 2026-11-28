@@ -1,0 +1,5 @@
+session: yes
+frames sent: 1048
+input events: 1
+typed: typed 中文 é
+ended: time is up
