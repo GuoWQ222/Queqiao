@@ -10,10 +10,10 @@ use queqiao_core::text::{LanguageChoice, tr, trf};
 use crate::model::HelpMode;
 use crate::tray::{
     MENU_ALLOW, MENU_ASK, MENU_AUTO_UPDATE, MENU_AUTOSTART, MENU_CLIPBOARD, MENU_FILES,
-    MENU_FIXED_CODE, MENU_HELP_ASK_ONLY, MENU_HELP_BOTH, MENU_HELP_CODE_ONLY, MENU_HELP_FILES,
-    MENU_KEY_BOSS, MENU_KEY_FULL_SCREEN, MENU_KEY_GAME_MOUSE, MENU_KEYS_DEFAULT, MENU_LANGUAGE_EN,
-    MENU_LANGUAGE_SYSTEM, MENU_LANGUAGE_ZH, MENU_LOCK_AFTER, MENU_PASSWORD, MENU_TERMINAL,
-    MENU_UPDATE_CHECK, MENU_WOL_CHECK, autostart_text,
+    MENU_FIXED_CODE, MENU_GNOME_DIRECT, MENU_HELP_ASK_ONLY, MENU_HELP_BOTH, MENU_HELP_CODE_ONLY,
+    MENU_HELP_FILES, MENU_KEY_BOSS, MENU_KEY_FULL_SCREEN, MENU_KEY_GAME_MOUSE, MENU_KEYS_DEFAULT,
+    MENU_LANGUAGE_EN, MENU_LANGUAGE_SYSTEM, MENU_LANGUAGE_ZH, MENU_LOCK_AFTER, MENU_PASSWORD,
+    MENU_TERMINAL, MENU_UPDATE_CHECK, MENU_WOL_CHECK, autostart_text,
 };
 
 /// What the Settings page shows.
@@ -28,6 +28,7 @@ pub(crate) struct Shown {
     pub terminal: bool,
     pub autostart: bool,
     pub lock_after: bool,
+    pub gnome_direct: bool,
     pub auto_update: bool,
     pub password: bool,
     pub fixed_code: bool,
@@ -248,7 +249,17 @@ pub(crate) fn rows(tab: Tab, shown: &Shown) -> Vec<Row> {
                 tr("This PC locks as soon as a session ends."),
                 switch(MENU_LOCK_AFTER, shown.lock_after),
             ),
-        ],
+        ]
+        .into_iter()
+        .chain(cfg!(target_os = "linux").then(|| {
+            row(
+                "\u{E7F4}",
+                tr("Control GNOME without asking"),
+                tr("On GNOME with Wayland, your devices see and control this PC without GNOME asking to share the screen. Someone helping from another account is still asked."),
+                switch(MENU_GNOME_DIRECT, shown.gnome_direct),
+            )
+        }))
+        .collect(),
         Tab::Keyboard => {
             let keys = |text: &str| -> Vec<String> {
                 text.split('+')

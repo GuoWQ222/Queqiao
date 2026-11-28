@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// Entries of one folder at most (the rest are left out, and the listing says so).
 pub const MAX_ENTRIES: usize = 20_000;
@@ -304,10 +304,198 @@ pub fn files_of(path: &Path) -> Result<Vec<(PathBuf, String, u64)>, String> {
     Ok(files)
 }
 
+/// A change the file transfer window makes (in either pane: this PC's here, the other PC's through
+/// `FileMessage::Change`). The window offers what file managers do (new folder, rename, delete), as UU Remote's does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// A new folder `name` in `folder`.
+    MakeFolder { folder: String, name: String },
+    /// The file or folder `path` is named `name` (in the same folder).
+    Rename { path: String, name: String },
+    /// The file or folder `path` is deleted (a folder with all it holds).
+    Delete { path: String },
+}
+
+/// What a file or folder holds, all levels down (the window's "Folder size").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Size {
+    pub files: u64,
+    pub folders: u64,
+    pub bytes: u64,
+    /// Counted to the end; false when it stopped at [`MEASURE_ENTRIES`] or [`MEASURE_TIME`].
+    pub complete: bool,
+}
+
+/// A count stops after this many entries or this long (a whole drive could take minutes).
+pub const MEASURE_ENTRIES: u64 = 1_000_000;
+pub const MEASURE_TIME: Duration = Duration::from_secs(20);
+
+/// A name a change may give: one part (no folder in it), not "." or "..", at most 255 bytes; on Windows none of the
+/// characters or device names Windows refuses (CON, NUL, COM1, ...), and no dot or space at the end.
+pub fn check_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Err("a name is needed".into());
+    }
+    if name.len() > 255 {
+        return Err("the name is too long".into());
+    }
+    if name.chars().any(|c| c == '/' || c == '\\' || c == '\0') {
+        return Err("a name cannot hold / or \\".into());
+    }
+    if cfg!(windows) {
+        if let Some(c) = name
+            .chars()
+            .find(|c| (*c as u32) < 32 || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        {
+            return Err(format!("Windows does not allow {c:?} in a name"));
+        }
+        if name.ends_with(['.', ' ']) {
+            return Err("Windows does not allow a name ending in a dot or a space".into());
+        }
+        let stem = name
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .to_ascii_uppercase();
+        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+            || (stem.len() == 4
+                && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                && stem.as_bytes()[3].is_ascii_digit()
+                && stem.as_bytes()[3] != b'0');
+        if reserved {
+            return Err(format!("Windows keeps the name {stem} for itself"));
+        }
+    }
+    Ok(())
+}
+
+/// A full path, as `list` takes it.
+fn full(path: &str) -> Result<&Path, String> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(format!("not a full path: {}", path.display()))
+    }
+}
+
+/// The drives (or the file system's root), the home folder and the person's own folders (Desktop, Documents,
+/// Downloads): never deleted or renamed. Compared once `.`, `..` and links are resolved: a path that leads there
+/// another way is protected too.
+fn protected(path: &Path) -> bool {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path.parent().is_none()
+        || own_folders()
+            .iter()
+            .any(|own| std::fs::canonicalize(own).unwrap_or_else(|_| own.clone()) == path)
+}
+
+/// Makes `change` on this PC. Nothing is ever overwritten; see [`protected`] for what is never deleted or renamed.
+pub fn apply(change: &Change) -> Result<(), String> {
+    match change {
+        Change::MakeFolder { folder, name } => {
+            check_name(name)?;
+            let folder = full(folder)?;
+            if !folder.is_dir() {
+                return Err(format!("{} is not a folder", folder.display()));
+            }
+            let target = folder.join(name);
+            if target.symlink_metadata().is_ok() {
+                return Err(format!("{name} is there already"));
+            }
+            std::fs::create_dir(&target).map_err(|e| format!("{}: {e}", target.display()))
+        }
+        Change::Rename { path, name } => {
+            check_name(name)?;
+            let source = full(path)?;
+            source
+                .symlink_metadata()
+                .map_err(|e| format!("{}: {e}", source.display()))?;
+            if protected(source) {
+                return Err(format!("{} is not renamed", source.display()));
+            }
+            let Some(parent) = source.parent() else {
+                return Err(format!("{} is not renamed", source.display()));
+            };
+            let target = parent.join(name);
+            // Taken already, unless only the letters' case changes (Windows' names ignore it).
+            let same = target.as_os_str().to_string_lossy().to_lowercase()
+                == source.as_os_str().to_string_lossy().to_lowercase();
+            if target.symlink_metadata().is_ok() && !(cfg!(windows) && same) {
+                return Err(format!("{name} is there already"));
+            }
+            std::fs::rename(source, &target).map_err(|e| format!("{}: {e}", source.display()))
+        }
+        Change::Delete { path } => {
+            let path = full(path)?;
+            let meta = path
+                .symlink_metadata()
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if protected(path) {
+                return Err(format!("{} is not deleted", path.display()));
+            }
+            let done = if meta.file_type().is_symlink() {
+                // The link goes, never what it points to (a link to a folder is a folder entry on Windows).
+                std::fs::remove_file(path)
+                    .or_else(|first| std::fs::remove_dir(path).map_err(|_| first))
+            } else if meta.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            done.map_err(|e| format!("{}: {e}", path.display()))
+        }
+    }
+}
+
+/// Counts what `path` holds, all levels down, without following links (see [`Size::complete`]).
+pub fn measure(path: &str) -> Result<Size, String> {
+    let path = full(path)?;
+    let started = Instant::now();
+    let mut size = Size {
+        complete: true,
+        ..Size::default()
+    };
+    let first = path
+        .symlink_metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if !first.is_dir() {
+        size.files = 1;
+        size.bytes = first.len();
+        return Ok(size);
+    }
+    let mut folders = vec![path.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if size.files + size.folders >= MEASURE_ENTRIES || started.elapsed() >= MEASURE_TIME {
+                size.complete = false;
+                return Ok(size);
+            }
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                size.folders += 1;
+                folders.push(entry.path());
+            } else {
+                size.files += 1;
+                size.bytes += meta.len();
+            }
+        }
+    }
+    Ok(size)
+}
+
 /// A job for the worker thread.
 enum Work {
     List(u32, String),
     Files(u32, PathBuf),
+    Change(u32, Change),
+    Measure(u32, String),
 }
 
 /// What the worker thread found.
@@ -316,6 +504,10 @@ pub enum Found {
     Listing(u32, Listing),
     /// The files of what was asked to be sent with this number.
     Files(u32, Result<Vec<(PathBuf, String, u64)>, String>),
+    /// The change asked for with this number: made, or why not.
+    Changed(u32, Result<(), String>),
+    /// The count asked for with this number.
+    Measured(u32, Result<Size, String>),
 }
 
 /// Reads folders on a thread of its own; answers come back in the order asked.
@@ -341,6 +533,8 @@ impl Lister {
                     let reply = match job {
                         Work::List(id, path) => Found::Listing(id, list(&path)),
                         Work::Files(id, path) => Found::Files(id, files_of(&path)),
+                        Work::Change(id, change) => Found::Changed(id, apply(&change)),
+                        Work::Measure(id, path) => Found::Measured(id, measure(&path)),
                     };
                     if answer.send(reply).is_err() {
                         break;
@@ -358,6 +552,16 @@ impl Lister {
     /// Finds the files to send for `path`; they come back as `Found::Files(id, ...)`.
     pub fn files(&self, id: u32, path: &Path) {
         let _ = self.work.send(Work::Files(id, path.to_path_buf()));
+    }
+
+    /// Makes `change`; the outcome comes back as `Found::Changed(id, ...)`.
+    pub fn change(&self, id: u32, change: Change) {
+        let _ = self.work.send(Work::Change(id, change));
+    }
+
+    /// Counts what `path` holds; the count comes back as `Found::Measured(id, ...)`.
+    pub fn measure(&self, id: u32, path: &str) {
+        let _ = self.work.send(Work::Measure(id, path.to_string()));
     }
 
     /// What was found since the last call.
@@ -440,6 +644,104 @@ mod tests {
         // Each place lists without an error, and its parent leads up.
         let listing = list(&places[0].name);
         assert!(listing.error.is_empty(), "{listing:?}");
+    }
+
+    #[test]
+    fn names_a_change_may_give() {
+        assert!(check_name("notes.txt").is_ok());
+        assert!(check_name("新建文件夹").is_ok());
+        for bad in ["", ".", "..", "a/b", "a\\b", "a\0b", &"x".repeat(256)] {
+            assert!(check_name(bad).is_err(), "{bad:?}");
+        }
+        if cfg!(windows) {
+            for bad in [
+                "a:b", "a?b", "a*", "CON", "nul.txt", "COM1", "lpt9.log", "end.", "end ",
+            ] {
+                assert!(check_name(bad).is_err(), "{bad:?}");
+            }
+            assert!(check_name("COM0").is_ok());
+            assert!(check_name("console").is_ok());
+        }
+    }
+
+    #[test]
+    fn changes_never_overwrite_and_a_count_goes_all_the_way_down() {
+        let root = std::env::temp_dir().join(format!("queqiao-change-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let at = |name: &str| root.join(name).to_string_lossy().into_owned();
+        let folder = root.to_string_lossy().into_owned();
+        apply(&Change::MakeFolder {
+            folder: folder.clone(),
+            name: "new".into(),
+        })
+        .unwrap();
+        assert!(root.join("new").is_dir());
+        assert!(
+            apply(&Change::MakeFolder {
+                folder: folder.clone(),
+                name: "new".into()
+            })
+            .is_err()
+        );
+        assert!(
+            apply(&Change::MakeFolder {
+                folder: folder.clone(),
+                name: "../out".into()
+            })
+            .is_err()
+        );
+        std::fs::write(root.join("new").join("a.txt"), b"12345").unwrap();
+        std::fs::write(root.join("b.txt"), b"1").unwrap();
+        // Renamed in its folder; never onto a name taken.
+        apply(&Change::Rename {
+            path: at("b.txt"),
+            name: "c.txt".into(),
+        })
+        .unwrap();
+        assert!(root.join("c.txt").is_file() && !root.join("b.txt").exists());
+        assert!(
+            apply(&Change::Rename {
+                path: at("c.txt"),
+                name: "new".into()
+            })
+            .is_err()
+        );
+        assert!(
+            apply(&Change::Rename {
+                path: at("none.txt"),
+                name: "x".into()
+            })
+            .is_err()
+        );
+        assert!(
+            apply(&Change::Rename {
+                path: "relative.txt".into(),
+                name: "x".into()
+            })
+            .is_err()
+        );
+        // The count: 1 folder, 2 files, 6 bytes.
+        let size = measure(&folder).unwrap();
+        assert_eq!(
+            (size.folders, size.files, size.bytes, size.complete),
+            (1, 2, 6, true)
+        );
+        assert_eq!(measure(&at("c.txt")).unwrap().bytes, 1);
+        // A folder goes with what it holds; a drive or the home folder never.
+        apply(&Change::Delete { path: at("new") }).unwrap();
+        assert!(!root.join("new").exists());
+        apply(&Change::Delete { path: at("c.txt") }).unwrap();
+        assert!(apply(&Change::Delete { path: at("c.txt") }).is_err());
+        // A drive or the home folder: never (checked without asking for it).
+        let top = if cfg!(windows) { "C:\\" } else { "/" };
+        assert!(protected(Path::new(top)));
+        for own in own_folders() {
+            assert!(protected(&own), "{}", own.display());
+            assert!(protected(&own.join(".")), "{}", own.display());
+        }
+        assert!(!protected(&root));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

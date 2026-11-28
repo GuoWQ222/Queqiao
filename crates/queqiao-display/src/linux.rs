@@ -6,6 +6,8 @@
 //!   banner and consent prompt (banner.rs), dialogs (dialogs.rs);
 //! - what is not on Linux yet (the session bar, lists, the password form, the privacy screen) is refused with a message.
 
+/// Drawing on the controlled PC's screen: its X11 window (crate::annotation has the rest).
+pub(crate) mod annotation;
 mod banner;
 mod control_center;
 mod cursor;

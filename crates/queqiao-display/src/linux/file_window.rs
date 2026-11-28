@@ -37,6 +37,137 @@ struct FilesState {
     jobs: Vec<JobRow>,
     events: Vec<FileWindowEvent>,
     focus: bool,
+    /// A name being typed in a pane: for the entry `name`, or for a new folder (None).
+    editing: [Option<NameEdit>; 2],
+    /// The pane clicked last (the keys F2, Delete and Ctrl+Shift+N act there).
+    active: usize,
+    /// A delete question open now: the pane, the names, the question.
+    deleting: Option<(usize, Vec<String>, String)>,
+}
+
+struct NameEdit {
+    name: Option<String>,
+    text: String,
+    /// The field takes the keyboard on its first frame.
+    focus: bool,
+}
+
+/// Whether the entry can be renamed or deleted: a file or folder inside a folder (not a drive or a place).
+fn changeable(item: &FileItem, folder: &str) -> bool {
+    !folder.is_empty() && matches!(item.kind, FileKind::File | FileKind::Folder)
+}
+
+/// "New folder", or "New folder (2)" ... when the folder has one already.
+fn new_folder_name(pane: &FilePane) -> String {
+    let base = tr("New folder").to_string();
+    (1..1000)
+        .map(|n| {
+            if n == 1 {
+                base.clone()
+            } else {
+                format!("{base} ({n})")
+            }
+        })
+        .find(|name| !pane.items.iter().any(|item| &item.name == name))
+        .unwrap_or(base)
+}
+
+/// The delete question for `names` of pane `side`, when they can be deleted.
+fn delete_question(state: &FilesState, side: usize, names: &[String]) -> Option<String> {
+    let pane = &state.panes[side];
+    let items: Vec<&FileItem> = names
+        .iter()
+        .filter_map(|name| pane.items.iter().find(|item| &item.name == name))
+        .collect();
+    if items.is_empty()
+        || items.len() != names.len()
+        || !items.iter().all(|item| changeable(item, &pane.folder))
+    {
+        return None;
+    }
+    let pc = state.names[side].as_str();
+    let question = match items.as_slice() {
+        [item] if item.kind == FileKind::Folder => trf(
+            "Delete the folder \"{name}\" and everything in it on {pc}?",
+            &[("name", &item.label), ("pc", pc)],
+        ),
+        [item] => trf(
+            "Delete \"{name}\" on {pc}?",
+            &[("name", &item.label), ("pc", pc)],
+        ),
+        _ => trf(
+            "Delete these {count} items on {pc}?",
+            &[("count", &items.len().to_string()), ("pc", pc)],
+        ),
+    };
+    Some(format!(
+        "{question}\n\n{}",
+        tr("This cannot be undone: nothing goes to the Recycle Bin or the Trash.")
+    ))
+}
+
+fn ask_delete(state: &mut FilesState, side: usize, names: Vec<String>) {
+    if state.deleting.is_none()
+        && let Some(question) = delete_question(state, side, &names)
+    {
+        state.deleting = Some((side, names, question));
+    }
+}
+
+fn start_rename(state: &mut FilesState, side: usize, name: &str) {
+    let pane = &state.panes[side];
+    if pane
+        .items
+        .iter()
+        .any(|item| item.name == name && changeable(item, &pane.folder))
+    {
+        state.editing[side] = Some(NameEdit {
+            name: Some(name.to_string()),
+            text: name.to_string(),
+            focus: true,
+        });
+    }
+}
+
+fn start_new_folder(state: &mut FilesState, side: usize) {
+    if !state.panes[side].folder.is_empty() {
+        state.editing[side] = Some(NameEdit {
+            name: None,
+            text: new_folder_name(&state.panes[side]),
+            focus: true,
+        });
+    }
+}
+
+/// The field a name is typed in; on Enter the change goes to the session, on Escape (or a click elsewhere) it is
+/// dropped.
+fn name_field(ui: &mut egui::Ui, state: &mut FilesState, side: usize) {
+    let Some(edit) = state.editing[side].as_mut() else {
+        return;
+    };
+    let response = ui.add(egui::TextEdit::singleline(&mut edit.text).desired_width(220.0));
+    if std::mem::take(&mut edit.focus) {
+        response.request_focus();
+    }
+    if response.lost_focus() {
+        let typed = edit.text.trim().to_string();
+        let entered = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let edit = state.editing[side].take();
+        let remote = side == 1;
+        match edit.and_then(|edit| edit.name) {
+            _ if !entered || typed.is_empty() => {}
+            None => state.events.push(FileWindowEvent::MakeFolder {
+                remote,
+                name: typed,
+            }),
+            Some(name) if name != typed => state.events.push(FileWindowEvent::Rename {
+                remote,
+                name,
+                new_name: typed,
+            }),
+            Some(_) => {}
+        }
+    }
 }
 
 struct FilesView {
@@ -169,6 +300,14 @@ impl FilesView {
                     if ui.button("⟳").on_hover_text(tr("Refresh")).clicked() {
                         state.events.push(FileWindowEvent::Refresh { remote });
                     }
+                    if ui
+                        .add_enabled(!pane.folder.is_empty(), egui::Button::new("＋📁"))
+                        .on_hover_text(tr("New folder"))
+                        .clicked()
+                    {
+                        state.active = side;
+                        start_new_folder(state, side);
+                    }
                     let mut chosen: Option<String> = None;
                     egui::ComboBox::from_id_salt(("places", side))
                         .selected_text("☰")
@@ -232,17 +371,32 @@ impl FilesView {
                                     };
                                     let selected =
                                         state.selected[side].as_deref() == Some(item.name.as_str());
-                                    let response = ui.selectable_label(
-                                        selected,
-                                        format!("{icon} {}", item.label),
-                                    );
-                                    if response.clicked() {
-                                        state.selected[side] = Some(item.name.clone());
-                                    }
-                                    if response.double_clicked() && item.kind != FileKind::File {
-                                        state.events.push(FileWindowEvent::OpenItem {
-                                            remote,
-                                            name: item.name.clone(),
+                                    let renaming = state.editing[side]
+                                        .as_ref()
+                                        .is_some_and(|edit| edit.name.as_ref() == Some(&item.name));
+                                    if renaming {
+                                        ui.horizontal(|ui| {
+                                            ui.label(icon);
+                                            name_field(ui, state, side);
+                                        });
+                                    } else {
+                                        let response = ui.selectable_label(
+                                            selected,
+                                            format!("{icon} {}", item.label),
+                                        );
+                                        if response.clicked() || response.secondary_clicked() {
+                                            state.selected[side] = Some(item.name.clone());
+                                            state.active = side;
+                                        }
+                                        if response.double_clicked() && item.kind != FileKind::File
+                                        {
+                                            state.events.push(FileWindowEvent::OpenItem {
+                                                remote,
+                                                name: item.name.clone(),
+                                            });
+                                        }
+                                        response.context_menu(|ui| {
+                                            Self::item_menu(ui, state, side, item);
                                         });
                                     }
                                     ui.label(
@@ -257,10 +411,169 @@ impl FilesView {
                                     });
                                     ui.end_row();
                                 }
+                                if state.editing[side]
+                                    .as_ref()
+                                    .is_some_and(|edit| edit.name.is_none())
+                                {
+                                    ui.label("");
+                                    ui.horizontal(|ui| {
+                                        ui.label("📁");
+                                        name_field(ui, state, side);
+                                    });
+                                    ui.end_row();
+                                }
                             });
                     });
                 ui.label(egui::RichText::new(&pane.status).small().color(SECONDARY));
             });
+    }
+
+    /// The menu of an entry (right click).
+    fn item_menu(ui: &mut egui::Ui, state: &mut FilesState, side: usize, item: &FileItem) {
+        let remote = side == 1;
+        let pane = state.panes[side].clone();
+        // All checked entries when this one is checked, else this one.
+        let names = if state.checked[side].contains(&item.name) {
+            checked_names(state, side)
+        } else {
+            vec![item.name.clone()]
+        };
+        let can_change = names.iter().all(|name| {
+            pane.items
+                .iter()
+                .any(|entry| &entry.name == name && changeable(entry, &pane.folder))
+        });
+        let other = state.names[1 - side].clone();
+        let other_has_folder = !state.panes[1 - side].folder.is_empty();
+        if ui
+            .add_enabled(
+                names.len() == 1 && item.kind != FileKind::File,
+                egui::Button::new(tr("Open")),
+            )
+            .clicked()
+        {
+            state.events.push(FileWindowEvent::OpenItem {
+                remote,
+                name: item.name.clone(),
+            });
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                other_has_folder,
+                egui::Button::new(trf("Send to {pc}", &[("pc", &other)])),
+            )
+            .clicked()
+        {
+            state.events.push(FileWindowEvent::Send {
+                from_remote: remote,
+                names: names.clone(),
+            });
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(!pane.folder.is_empty(), egui::Button::new(tr("New folder")))
+            .clicked()
+        {
+            start_new_folder(state, side);
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                can_change && names.len() == 1,
+                egui::Button::new(tr("Rename")),
+            )
+            .clicked()
+        {
+            start_rename(state, side, &item.name);
+            ui.close();
+        }
+        if ui
+            .add_enabled(can_change, egui::Button::new(tr("Delete")))
+            .clicked()
+        {
+            ask_delete(state, side, names.clone());
+            ui.close();
+        }
+        if ui
+            .add_enabled(!pane.folder.is_empty(), egui::Button::new(tr("Size")))
+            .clicked()
+        {
+            state
+                .events
+                .push(FileWindowEvent::Measure { remote, names });
+            ui.close();
+        }
+        ui.separator();
+        if ui.button(tr("Refresh")).clicked() {
+            state.events.push(FileWindowEvent::Refresh { remote });
+            ui.close();
+        }
+    }
+
+    /// F2, Delete and Ctrl+Shift+N in the pane clicked last (not while a field takes the keys).
+    fn keys(ctx: &egui::Context, state: &mut FilesState) {
+        if ctx.wants_keyboard_input() || state.deleting.is_some() {
+            return;
+        }
+        let side = state.active;
+        let (rename, delete, new_folder) = ctx.input(|input| {
+            (
+                input.key_pressed(egui::Key::F2),
+                input.key_pressed(egui::Key::Delete),
+                input.key_pressed(egui::Key::N) && input.modifiers.ctrl && input.modifiers.shift,
+            )
+        });
+        if rename && let Some(name) = state.selected[side].clone() {
+            start_rename(state, side, &name);
+        }
+        if delete {
+            let names = checked_names(state, side);
+            ask_delete(state, side, names);
+        }
+        if new_folder {
+            start_new_folder(state, side);
+        }
+    }
+
+    /// The delete question, over the window until answered.
+    fn delete_modal(ctx: &egui::Context, state: &mut FilesState) {
+        let Some((side, names, question)) = state.deleting.clone() else {
+            return;
+        };
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::new("queqiao-delete")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(egui::RichText::new(tr("Delete")).strong().size(16.0));
+            ui.add_space(6.0);
+            ui.label(&question);
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(tr("Cancel")).clicked() {
+                    answer = Some(false);
+                }
+                let delete = egui::Button::new(
+                    egui::RichText::new(tr("Delete")).color(egui::Color32::WHITE),
+                )
+                .fill(FAILED);
+                if ui.add(delete).clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+        if modal.should_close() && answer.is_none() {
+            answer = Some(false);
+        }
+        if let Some(yes) = answer {
+            state.deleting = None;
+            if yes {
+                state.events.push(FileWindowEvent::Delete {
+                    remote: side == 1,
+                    names,
+                });
+            }
+        }
     }
 
     fn jobs(ui: &mut egui::Ui, state: &mut FilesState) {
@@ -466,6 +779,8 @@ impl View for FilesView {
                     }
                 });
             });
+        Self::keys(ctx, &mut state);
+        Self::delete_modal(ctx, &mut state);
         true
     }
 
@@ -513,6 +828,9 @@ impl FileWindow {
         if let Ok(mut state) = self.state.lock() {
             if state.panes[side] == *pane {
                 return;
+            }
+            if state.panes[side].folder != pane.folder {
+                state.editing[side] = None;
             }
             if state.panes[side].folder != pane.folder || state.panes[side].items != pane.items {
                 state.checked[side].clear();

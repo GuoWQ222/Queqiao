@@ -12,11 +12,20 @@
 //! `$XDG_CONFIG_HOME/queqiao/` (0600): later sessions start without asking until the person revokes it in the
 //! desktop's settings. xdg-desktop-portal keeps RemoteDesktop answers from version 2 of that interface (1.17 and later);
 //! earlier, GNOME and KDE ask each session.
+//!
+//! Where the person at the PC turned on "Control GNOME without asking" (for the account's own devices, see
+//! [`use_mutter`]), GNOME's own interfaces come first (mutter.rs): the same stream and input, no question. Where they
+//! are not there (another desktop) or refuse, the portal as above.
 
 #![cfg(target_os = "linux")]
 
+/// GNOME on Wayland: the screen's resolution for a session (mutter's DisplayConfig).
+pub mod display_config;
+mod mutter;
+
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use ashpd::desktop::remote_desktop::{
@@ -35,11 +44,22 @@ enum Kind {
     ScreenCast {
         session: Session<Screencast>,
     },
+    /// GNOME's own interfaces, without the portal (and its question).
+    Mutter(mutter::MutterSession),
+}
+
+/// Sessions opened from now on try GNOME's own interfaces first (the person turned on "Control GNOME without asking",
+/// and the controlling device is one of the account's: never for someone helping from another account).
+static USE_MUTTER: AtomicBool = AtomicBool::new(false);
+
+pub fn use_mutter(on: bool) {
+    USE_MUTTER.store(on, Ordering::Relaxed);
 }
 
 /// One portal session: one monitor's PipeWire stream, and on RemoteDesktop desktops the input.
 pub struct PortalSession {
-    _screencast: Screencast,
+    /// The portal's ScreenCast (None for GNOME's own interfaces).
+    screencast: Option<Screencast>,
     kind: Kind,
     /// The PipeWire node of the stream, its size and place (logical pixels).
     pub node: u32,
@@ -54,6 +74,8 @@ pub struct PortalSession {
     /// The pointer apart from the pictures, as metadata of the stream (where the portal offers that mode), as on
     /// Windows and X11: the viewer draws it. Else the portal draws it into the pictures.
     pub pointer_apart: bool,
+    /// Why GNOME's own interfaces were not used although turned on (the portal was), for the report.
+    pub mutter_note: String,
 }
 
 static SHARED: Mutex<Weak<PortalSession>> = Mutex::new(Weak::new());
@@ -122,6 +144,31 @@ fn portal_error(error: ashpd::Error) -> String {
 
 impl PortalSession {
     fn open() -> Result<PortalSession, String> {
+        let mut mutter_note = String::new();
+        if USE_MUTTER.load(Ordering::Relaxed) {
+            match mutter::MutterSession::open() {
+                Ok(session) => {
+                    return Ok(PortalSession {
+                        screencast: None,
+                        node: session.node,
+                        size: session.size,
+                        position: session.position,
+                        pipewire: Mutex::new(None),
+                        asked: false,
+                        pointer_apart: session.pointer_apart,
+                        mutter_note,
+                        kind: Kind::Mutter(session),
+                    });
+                }
+                Err(error) => mutter_note = error,
+            }
+        }
+        let mut session = PortalSession::open_portal()?;
+        session.mutter_note = mutter_note;
+        Ok(session)
+    }
+
+    fn open_portal() -> Result<PortalSession, String> {
         async_io::block_on(async {
             let screencast = Screencast::new().await.map_err(portal_error)?;
             // The pointer apart where the portal offers it (GNOME, KDE); drawn into the pictures elsewhere.
@@ -248,13 +295,14 @@ impl PortalSession {
                         .open_pipe_wire_remote(session, Default::default())
                         .await
                 }
+                Kind::Mutter(_) => unreachable!("the portal's sessions only here"),
             }
             .map_err(portal_error)?;
             let size = stream
                 .size()
                 .map_or((1920, 1080), |(w, h)| (w.max(1) as u32, h.max(1) as u32));
             Ok(PortalSession {
-                _screencast: screencast,
+                screencast: Some(screencast),
                 kind,
                 node: stream.pipe_wire_node_id(),
                 size,
@@ -262,6 +310,7 @@ impl PortalSession {
                 pipewire: Mutex::new(Some(pipewire)),
                 asked,
                 pointer_apart,
+                mutter_note: String::new(),
             })
         })
     }
@@ -272,35 +321,39 @@ impl PortalSession {
         if let Some(fd) = self.pipewire.lock().ok().and_then(|mut fd| fd.take()) {
             return Ok(fd);
         }
+        let screencast = match (&self.kind, &self.screencast) {
+            (Kind::Mutter(session), _) => return session.pipewire(),
+            (_, Some(screencast)) => screencast,
+            (_, None) => return Err("no screen cast".into()),
+        };
         async_io::block_on(match &self.kind {
-            Kind::RemoteDesktop { session, .. } => Box::pin(
-                self._screencast
-                    .open_pipe_wire_remote(session, Default::default()),
-            )
-                as std::pin::Pin<
-                    Box<dyn std::future::Future<Output = Result<OwnedFd, ashpd::Error>>>,
-                >,
-            Kind::ScreenCast { session } => Box::pin(
-                self._screencast
-                    .open_pipe_wire_remote(session, Default::default()),
-            ),
+            Kind::RemoteDesktop { session, .. } => {
+                Box::pin(screencast.open_pipe_wire_remote(session, Default::default()))
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<OwnedFd, ashpd::Error>>>,
+                    >
+            }
+            Kind::ScreenCast { session } => {
+                Box::pin(screencast.open_pipe_wire_remote(session, Default::default()))
+            }
+            Kind::Mutter(_) => unreachable!("answered above"),
         })
         .map_err(portal_error)
     }
 
-    /// Whether input goes through this session (RemoteDesktop).
+    /// Whether input goes through this session (RemoteDesktop, the portal's or GNOME's own).
     pub fn has_input(&self) -> bool {
-        matches!(self.kind, Kind::RemoteDesktop { .. })
+        matches!(self.kind, Kind::RemoteDesktop { .. } | Kind::Mutter(_))
     }
 
     /// What the session is, for the reports.
     pub fn describe(&self) -> String {
         format!(
-            "{} portal, {}x{} stream (node {}){}{}",
-            if self.has_input() {
-                "RemoteDesktop"
-            } else {
-                "ScreenCast"
+            "{}, {}x{} stream (node {}){}{}{}",
+            match self.kind {
+                Kind::RemoteDesktop { .. } => "RemoteDesktop portal",
+                Kind::ScreenCast { .. } => "ScreenCast portal",
+                Kind::Mutter(_) => "Mutter remote desktop (GNOME's own, no question asked)",
             },
             self.size.0,
             self.size.1,
@@ -310,10 +363,18 @@ impl PortalSession {
             } else {
                 ", the pointer in the pictures"
             },
-            if self.asked {
+            if self.asked || matches!(self.kind, Kind::Mutter(_)) {
                 ""
             } else {
                 ", the person's earlier answer offered"
+            },
+            if self.mutter_note.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (GNOME's own remote desktop not used: {})",
+                    self.mutter_note
+                )
             }
         )
     }
@@ -321,7 +382,16 @@ impl PortalSession {
     fn remote(&self) -> Result<(&RemoteDesktop, &Session<RemoteDesktop>), String> {
         match &self.kind {
             Kind::RemoteDesktop { proxy, session } => Ok((proxy, session)),
-            Kind::ScreenCast { .. } => Err("no input through this portal session".into()),
+            Kind::ScreenCast { .. } | Kind::Mutter(_) => {
+                Err("no input through this portal session".into())
+            }
+        }
+    }
+
+    fn mutter(&self) -> Option<&mutter::MutterSession> {
+        match &self.kind {
+            Kind::Mutter(session) => Some(session),
+            _ => None,
         }
     }
 
@@ -339,6 +409,9 @@ impl PortalSession {
 
     /// The pointer to (`x`, `y`) of the stream (logical pixels).
     pub fn pointer_to(&self, x: f64, y: f64) -> Result<(), String> {
+        if let Some(mutter) = self.mutter() {
+            return mutter.pointer_to(x, y);
+        }
         let (proxy, session) = self.remote()?;
         async_io::block_on(proxy.notify_pointer_motion_absolute(
             session,
@@ -351,6 +424,9 @@ impl PortalSession {
     }
 
     pub fn pointer_by(&self, dx: f64, dy: f64) -> Result<(), String> {
+        if let Some(mutter) = self.mutter() {
+            return mutter.pointer_by(dx, dy);
+        }
         let (proxy, session) = self.remote()?;
         async_io::block_on(proxy.notify_pointer_motion(session, dx, dy, Default::default()))
             .map_err(portal_error)
@@ -358,6 +434,9 @@ impl PortalSession {
 
     /// A button (a Linux input code, BTN_LEFT ...).
     pub fn button(&self, code: i32, down: bool) -> Result<(), String> {
+        if let Some(mutter) = self.mutter() {
+            return mutter.button(code, down);
+        }
         let (proxy, session) = self.remote()?;
         let state = if down {
             KeyState::Pressed
@@ -370,6 +449,9 @@ impl PortalSession {
 
     /// Wheel notches: positive is down (vertical) or right (horizontal).
     pub fn scroll(&self, vertical: bool, steps: i32) -> Result<(), String> {
+        if let Some(mutter) = self.mutter() {
+            return mutter.scroll(vertical, steps);
+        }
         let (proxy, session) = self.remote()?;
         let axis = if vertical {
             Axis::Vertical
@@ -387,6 +469,9 @@ impl PortalSession {
 
     /// A key (a Linux input code, evdev).
     pub fn key(&self, code: i32, down: bool) -> Result<(), String> {
+        if let Some(mutter) = self.mutter() {
+            return mutter.key(code, down);
+        }
         let (proxy, session) = self.remote()?;
         let state = if down {
             KeyState::Pressed
@@ -399,6 +484,9 @@ impl PortalSession {
 
     /// A key by its X keysym (Unicode characters as 0x01000000 + code point): typing text whatever the layout.
     pub fn key_symbol(&self, keysym: i32, down: bool) -> Result<(), String> {
+        if let Some(mutter) = self.mutter() {
+            return mutter.key_symbol(keysym, down);
+        }
         let (proxy, session) = self.remote()?;
         let state = if down {
             KeyState::Pressed
@@ -416,6 +504,8 @@ impl Drop for PortalSession {
             match &self.kind {
                 Kind::RemoteDesktop { session, .. } => session.close().await,
                 Kind::ScreenCast { session } => session.close().await,
+                // Stopped by its own drop.
+                Kind::Mutter(_) => Ok(()),
             }
         });
     }

@@ -18,6 +18,7 @@ queqiao-audio.workspace = true
 queqiao-display.workspace = true
 queqiao-files.workspace = true
 queqiao-terminal.workspace = true
+queqiao-tunnel.workspace = true
 queqiao-core.workspace = true
 queqiao-input.workspace = true
 queqiao-local.workspace = true
@@ -46,5 +47,7 @@ windows = { workspace = true, features = [
 # Linux (docs/LINUX.md): the session banner on the X display.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
+# Which way the Wayland session opens (GNOME's own interfaces when the person turned that on).
+queqiao-portal.workspace = true
 # The account's name and number, and closing this process to others when the service started it.
 libc = "0.2"

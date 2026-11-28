@@ -619,6 +619,16 @@ const CHINESE: &[(&str, &str)] = &[
     ("Frame rate", "帧率"),
     ("Picture quality", "画质"),
     ("Resolution", "分辨率"),
+    ("That PC's resolution", "那台电脑的分辨率"),
+    ("Not offered by that PC's Queqiao", "那台电脑的鹊桥不支持"),
+    ("Cannot be changed", "无法更改"),
+    ("Its own", "原始分辨率"),
+    ("Fit this window", "适应本窗口"),
+    (
+        "The size of that PC's screen nearest to this window's, for a sharp picture.",
+        "把那台电脑的屏幕设为最接近本窗口的大小，画面更清晰。",
+    ),
+    ("Picture size", "画面大小"),
     ("Screens", "屏幕"),
     ("Screen {n}", "屏幕 {n}"),
     ("As that screen", "与那台电脑的屏幕一致"),
@@ -1065,6 +1075,62 @@ const CHINESE: &[(&str, &str)] = &[
     ("Size", "大小"),
     ("Folder", "文件夹"),
     ("Drive", "磁盘"),
+    ("New folder", "新建文件夹"),
+    ("Open", "打开"),
+    ("Rename", "重命名"),
+    ("Delete", "删除"),
+    ("Send to {pc}", "发送到 {pc}"),
+    (
+        "Delete the folder \"{name}\" and everything in it on {pc}?",
+        "删除 {pc} 上的文件夹“{name}”及其中的全部内容？",
+    ),
+    ("Delete \"{name}\" on {pc}?", "删除 {pc} 上的“{name}”？"),
+    (
+        "Delete these {count} items on {pc}?",
+        "删除 {pc} 上的这 {count} 项？",
+    ),
+    (
+        "This cannot be undone: nothing goes to the Recycle Bin or the Trash.",
+        "此操作无法撤销：不会移到回收站。",
+    ),
+    ("{count} items", "{count} 项"),
+    ("Control GNOME without asking", "控制 GNOME 时不询问"),
+    (
+        "On GNOME with Wayland, your devices see and control this PC without GNOME asking to share the screen. Someone helping from another account is still asked.",
+        "在使用 Wayland 的 GNOME 上，你的设备可直接查看和控制这台电脑，GNOME 不再询问是否共享屏幕。其他账号的人协助时仍会询问。",
+    ),
+    ("Port mapping...", "端口映射……"),
+    ("Port mapping", "端口映射"),
+    ("Add a port mapping...", "添加端口映射……"),
+    (
+        "{local} → {target} on that PC ({count} open): remove",
+        "{local} → 那台电脑的 {target}（{count} 个连接）：移除",
+    ),
+    (
+        "Where it leads: a port of that PC (22), or an address and port that PC reaches (192.168.1.5:80):",
+        "映射到哪里：那台电脑的端口（如 22），或那台电脑能访问的地址和端口（如 192.168.1.5:80）：",
+    ),
+    (
+        "The port on this PC programs connect to (0: any free one):",
+        "这台电脑上供程序连接的端口（0：任选一个空闲端口）：",
+    ),
+    (
+        "{port} is not a port (0 to 65535)",
+        "{port} 不是端口号（0 到 65535）",
+    ),
+    (
+        "Programs on this PC connect to {local}: it leads to {target} on that PC.",
+        "这台电脑上的程序连接 {local}，即可到达那台电脑的 {target}。",
+    ),
+    ("Counting...", "正在计算……"),
+    (
+        "{name}: {size}; files: {files}, folders: {folders}",
+        "{name}：{size}，{files} 个文件，{folders} 个文件夹",
+    ),
+    (
+        "{name}: at least {size}; files: {files}, folders: {folders} (it holds too many to count them all)",
+        "{name}：至少 {size}，{files} 个文件，{folders} 个文件夹（内容太多，未全部计算）",
+    ),
     ("This PC's places", "这台电脑的常用位置"),
     ("That PC's places", "那台电脑的常用位置"),
     ("Reading...", "正在读取……"),
@@ -1247,6 +1313,43 @@ const CHINESE: &[(&str, &str)] = &[
     (
         "Please enter a user name and a password.",
         "请输入用户名和密码。",
+    ),
+    // Drawing on that PC's screen (annotation, 2026-11-28): the session window's drawing mode, and the agent's answers.
+    ("Draw on that PC's screen", "在那台电脑的屏幕上标注"),
+    ("Clear drawings", "清除标注"),
+    ("Pen colour", "画笔颜色"),
+    ("Red pen", "红色画笔"),
+    ("Yellow pen", "黄色画笔"),
+    ("Green pen", "绿色画笔"),
+    ("Blue pen", "蓝色画笔"),
+    ("Drawing", "标注"),
+    (
+        "Your mouse draws on that PC's screen for the person there instead of controlling it; keys still go there. Esc ends it, and the drawings go with it.",
+        "鼠标在那台电脑的屏幕上画给对方看，而不再控制它；键盘照常输入。按 Esc 结束，标注随之清除。",
+    ),
+    (
+        "Drawing on that PC's screen: Esc ends it.",
+        "正在那台电脑的屏幕上标注：按 Esc 结束。",
+    ),
+    (
+        "That PC's Queqiao cannot show drawings (it may be an older version): drawing ended.",
+        "那台电脑上的鹊桥无法显示标注（可能版本较旧）：已结束标注。",
+    ),
+    (
+        "Drawing on the screen is not possible on Wayland yet.",
+        "Wayland 下暂不支持在屏幕上标注。",
+    ),
+    (
+        "That PC is locked: drawing waits until it is unlocked.",
+        "那台电脑已锁定：解锁后才能标注。",
+    ),
+    (
+        "That PC shows its sign-in, lock or UAC screen: drawing waits until it is gone.",
+        "那台电脑正显示登录、锁屏或 UAC 界面：该界面消失后才能标注。",
+    ),
+    (
+        "Drawing cannot be shown on that PC's screen: {error}",
+        "无法在那台电脑的屏幕上显示标注：{error}",
     ),
 ];
 

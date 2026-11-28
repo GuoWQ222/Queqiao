@@ -1,0 +1,8 @@
+[package]
+name = "queqiao-tunnel"
+description = "Port mapping: TCP connections to the controlled PC (or a computer it reaches) through the session"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -494,6 +494,7 @@ pub(crate) fn run_command(command: Command, dry_run: bool) -> String {
         | Command::PrivacyOff
         | Command::MuteSpeakers(_)
         | Command::Resolution(_)
+        | Command::DisplayMode { .. }
         | Command::Screen(_)
         | Command::MaxBitrate(_)
         | Command::RestartQueqiao
@@ -552,6 +553,63 @@ pub(crate) fn open_screen(
     })
 }
 
+/// A still-screen refresh keyframe goes only when the link carries the last keyframe within this long.
+const REFRESH_KEYFRAME_TIME: Duration = Duration::from_millis(250);
+
+/// A screen whose resolution this session changed (its index, and its own size): put back when dropped, however the
+/// session ends.
+struct ChangedMode(Option<(usize, (u32, u32))>);
+
+impl ChangedMode {
+    /// Puts the screen back now; a line for the report.
+    fn restore(&mut self) -> Option<String> {
+        let (index, own) = self.0.take()?;
+        Some(
+            match queqiao_capture::display_mode::restore_display_mode(index, own) {
+                Ok(()) => format!(
+                    "screen {}: its own resolution {}x{} back",
+                    index + 1,
+                    own.0,
+                    own.1
+                ),
+                Err(error) => format!("screen {}: its resolution not put back: {error}", index + 1),
+            },
+        )
+    }
+}
+
+impl Drop for ChangedMode {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+/// The shown screen's resolutions for the viewer's menu; `changed`: its own size when this session changed it.
+fn display_modes_message(index: usize, changed: &ChangedMode, helper: bool) -> Message {
+    let clamp = |(w, h): (u32, u32)| (w.min(65535) as u16, h.min(65535) as u16);
+    let own = changed.0.filter(|(at, _)| *at == index).map(|(_, own)| own);
+    match queqiao_capture::display_mode::display_modes(index) {
+        Ok(modes) if !helper => Message::DisplayModes {
+            current: clamp(modes.current),
+            own: clamp(own.unwrap_or(modes.current)),
+            sizes: modes.sizes.into_iter().map(clamp).collect(),
+            note: String::new(),
+        },
+        Ok(modes) => Message::DisplayModes {
+            current: clamp(modes.current),
+            own: clamp(modes.current),
+            sizes: Vec::new(),
+            note: "someone helping from another account cannot change this PC's resolution".into(),
+        },
+        Err(note) => Message::DisplayModes {
+            current: (0, 0),
+            own: (0, 0),
+            sizes: Vec::new(),
+            note,
+        },
+    }
+}
+
 /// What a session may do: the person's settings, and less for someone helping from another account.
 pub(crate) struct Permissions {
     pub(crate) clipboard: bool,
@@ -559,6 +617,9 @@ pub(crate) struct Permissions {
     pub(crate) terminal: bool,
     /// Another account's device, joined by a help code: no privacy screen, no restart.
     pub(crate) helper: bool,
+    /// Linux, GNOME on Wayland: through GNOME's own interfaces, without its question (the person turned it on, and
+    /// this is one of the account's devices).
+    pub(crate) gnome_direct: bool,
     /// The viewer rebuilds lost video packets from parity (its hello said "fec"): it is sent parity.
     pub(crate) fec: bool,
     /// The controlling device's name as the account's other devices see it (one controller at a time: they are shown
@@ -723,9 +784,14 @@ fn session_with(
         files: receive_files,
         terminal: allow_terminal,
         helper,
+        gnome_direct,
         fec,
         controller,
     } = permissions;
+    #[cfg(target_os = "linux")]
+    queqiao_portal::use_mutter(gnome_direct && !helper);
+    #[cfg(not(target_os = "linux"))]
+    let _ = gnome_direct;
     // Told once per secure desktop that someone helping cannot operate it.
     let mut secure_refused_told = false;
     ui.session_started(viewer)
@@ -845,6 +911,8 @@ fn session_with(
     #[cfg(target_os = "linux")]
     lines.push(format!("input through {}", injector.describe()));
     // The screen shown (counted as queqiao_capture::screens does) and the picture size the viewer chose.
+    // A resolution this session changes: put back when it ends (see ChangedMode).
+    let mut changed_mode = ChangedMode(None);
     let mut screen_index = queqiao_capture::screens()
         .ok()
         .and_then(|list| list.iter().position(|s| s.primary))
@@ -896,6 +964,8 @@ fn session_with(
     let mut speakers_before: Option<bool> = None;
     // The viewer's "lock that PC when the session ends".
     let mut lock_requested = false;
+    // The viewer's drawing on this PC's screen (annotate.rs), while drawing mode is on there.
+    let mut drawing = crate::annotate::Drawing::default();
     // Adaptive bitrate: start at the transport's starting estimate, then follow the estimate (85 % of it),
     // never above the size-based bitrate the encoder was opened with.
     // The viewer's picture settings change the highest bitrate (quality) and the frame interval (frame rate).
@@ -906,6 +976,8 @@ fn session_with(
     let mut custom_bitrate: Option<u32> = None;
     let mut max_bitrate = size_bitrate;
     let mut last_estimate = START_BITRATE;
+    // The last keyframe's size: a still-screen refresh waits until the link carries one quickly (see below).
+    let mut last_keyframe_bytes = 0usize;
     // The encoder's target follows the frames it really makes (RateFit).
     let mut rate_fit = RateFit::new();
     peer.set_bitrate_range(u64::from(MIN_BITRATE), u64::from(max_bitrate));
@@ -973,6 +1045,9 @@ fn session_with(
     let mut clip_files_set = 0u32;
     // Remote command lines (while the person at this PC allows them).
     let mut terminals = Terminals::new(allow_terminal);
+    // Port mapping (on the command lines' stream): for a device of the same account, never for someone helping.
+    let mut tunnels = queqiao_tunnel::Tunnels::new();
+    tunnels.serve(!helper);
     for path in &options.send_files {
         let _ = transfers.send(path);
     }
@@ -1064,6 +1139,8 @@ fn session_with(
             break;
         }
         restarter.step(&peer, signal, lines);
+        // The drawing follows the shown screen (another one shown, its resolution changed).
+        drawing.follow(injector.screen(), lines);
         // The session card's encoding line (the user, 2026-11-27): once the channel is open, and when the encoder changes.
         if channel_open_at.is_some() {
             let current = (
@@ -1289,6 +1366,15 @@ fn session_with(
                     Some(Message::Ping { id, sent_us }) => {
                         peer.send_data(Message::Pong { id, sent_us }.encode());
                     }
+                    // Drawing on this PC's screen (annotate.rs): also for someone helping, which is what it is for.
+                    Some(Message::Annotate(annotation)) => {
+                        let refused = crate::annotate::refusal(
+                            &info.adapter,
+                            gate.closed(),
+                            duplicator.is_none(),
+                        );
+                        drawing.handle(annotation, injector.screen(), refused, &peer, lines);
+                    }
                     Some(Message::Leave) => {
                         closed = Some("the viewer left".to_string());
                         break 'session;
@@ -1436,6 +1522,85 @@ fn session_with(
                         };
                         lines.push(format!("command from the viewer: {notice}"));
                         peer.send_data(Message::Notice(notice).encode());
+                    }
+                    Some(Message::Command(Command::DisplayMode { width, height })) => {
+                        let (width, height) = (u32::from(width), u32::from(height));
+                        let result = if helper {
+                            Err("someone helping from another account cannot change this PC's resolution".to_string())
+                        } else if width == 0 || height == 0 {
+                            Ok(changed_mode
+                                .restore()
+                                .unwrap_or_else(|| "the resolution is the screen's own".into()))
+                        } else {
+                            // The screen's own size is noted before the first change, to come back to.
+                            let own = match changed_mode.0 {
+                                Some((at, own)) if at == screen_index => Ok(own),
+                                _ => {
+                                    let _ = changed_mode.restore();
+                                    queqiao_capture::display_mode::display_modes(screen_index)
+                                        .map(|m| m.current)
+                                }
+                            };
+                            own.and_then(|own| {
+                                queqiao_capture::display_mode::set_display_mode(screen_index, width, height)?;
+                                changed_mode.0 = Some((screen_index, own));
+                                Ok(format!(
+                                    "screen {}: resolution {width}x{height} for this session (its own: {}x{})",
+                                    screen_index + 1,
+                                    own.0,
+                                    own.1
+                                ))
+                            })
+                        };
+                        // The capture opened again at the screen's new size: a capture of a region (X11) would go on
+                        // with the old one when the screen grows back, and a new mode may take a moment to settle.
+                        if result.is_ok() {
+                            drop(duplicator.take());
+                            let fixed = options.fps.is_some();
+                            let mut reopened = Err(String::new());
+                            for _ in 0..10 {
+                                reopened = open_screen(
+                                    screen_index,
+                                    fps,
+                                    fixed,
+                                    resolution_limit,
+                                    encoder.codec(),
+                                )
+                                .map_err(|e| e.to_string());
+                                if reopened.is_ok() {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(200));
+                            }
+                            match reopened {
+                                Ok(opened) => {
+                                    adopt!(opened);
+                                    lines.push(format!(
+                                        "{} ms: the resolution changed: captured again ({}x{})",
+                                        started.elapsed().as_millis(),
+                                        info.width,
+                                        info.height
+                                    ));
+                                }
+                                Err(error) => {
+                                    return Err(format!(
+                                        "the screen cannot be captured after its resolution changed: {error}"
+                                    ));
+                                }
+                            }
+                        }
+                        match result {
+                            Ok(line) => lines.push(format!("command from the viewer: {line}")),
+                            Err(error) => {
+                                let notice = format!("the resolution was not changed: {error}");
+                                lines.push(format!("command from the viewer: {notice}"));
+                                peer.send_data(Message::Notice(notice).encode());
+                            }
+                        }
+                        // The menu shows what the screen has now (the capture follows by itself: the display changed).
+                        peer.send_data(
+                            display_modes_message(screen_index, &changed_mode, helper).encode(),
+                        );
                     }
                     Some(Message::Command(Command::Resolution(short))) => {
                         // A new encoder for the new size (the screen is still captured whole and scaled).
@@ -1677,6 +1842,15 @@ fn session_with(
                         injector = opened.injector;
                         if shown {
                             screen_index = usize::from(index);
+                            // The screen left gets its own resolution back; the menu shows the new one's.
+                            if changed_mode.0.is_some_and(|(at, _)| at != screen_index)
+                                && let Some(line) = changed_mode.restore()
+                            {
+                                lines.push(line);
+                            }
+                            peer.send_data(
+                                display_modes_message(screen_index, &changed_mode, helper).encode(),
+                            );
                         }
                         size_bitrate = encoder.config().bitrate;
                         max_bitrate = custom_bitrate.unwrap_or(
@@ -1843,6 +2017,9 @@ fn session_with(
                         let current = screen_index.min(255) as u8;
                         peer.send_data(Message::Screens { current, sizes }.encode());
                     }
+                    peer.send_data(
+                        display_modes_message(screen_index, &changed_mode, helper).encode(),
+                    );
                 }
                 PeerEvent::StreamOpen(Stream::Files) => {
                     report_files(transfers.opened(), viewer, lines, started.elapsed())
@@ -1868,7 +2045,9 @@ fn session_with(
                 }
                 PeerEvent::StreamOpen(Stream::Terminal) => {}
                 PeerEvent::StreamData(Stream::Terminal, bytes) => {
-                    if let Some(message) = TerminalMessage::decode(&bytes) {
+                    if tunnels.handle(&bytes) {
+                        // A port mapping's message: answered by its poll below.
+                    } else if let Some(message) = TerminalMessage::decode(&bytes) {
                         for reply in terminals.handle(message) {
                             match &reply {
                                 TerminalMessage::Opened { id, shell } => {
@@ -1926,6 +2105,7 @@ fn session_with(
             lines.extend(transfers.take_courses());
         }
         report_files(outcomes, viewer, lines, started.elapsed());
+        lines.extend(transfers.served());
         for message in images.take(peer.room(Stream::Clipboard)) {
             peer.send_stream(Stream::Clipboard, message);
         }
@@ -1935,6 +2115,10 @@ fn session_with(
             }
             peer.send_stream(Stream::Terminal, message.encode());
         }
+        for message in tunnels.poll(peer.room(Stream::Terminal)) {
+            peer.send_stream(Stream::Terminal, message);
+        }
+        lines.extend(tunnels.notes());
 
         if privacy_check_due {
             privacy_check_due = false;
@@ -2184,10 +2368,17 @@ fn session_with(
         }
 
         watch.mark("capture");
-        // After motion, the still screen once more as a keyframe (hold.rs).
+        // After motion, the still screen once more as a keyframe (hold.rs) — only once the link carries a keyframe within
+        // REFRESH_KEYFRAME_TIME: on a narrow link (LTE at its start: 0.3-0.8 Mbit/s) a 90-160 kB keyframe held every
+        // later frame behind it for 1.4-2.2 s, the freezes of 2026-11-28. It waits (not dropped) until the estimate
+        // has come back up.
+        let refresh_affordable = last_keyframe_bytes == 0
+            || (last_keyframe_bytes as u64 * 8 * 1000) / last_estimate.max(1)
+                <= REFRESH_KEYFRAME_TIME.as_millis() as u64;
         if connected_after.is_some()
             && waiting.is_none()
             && !gate.closed()
+            && refresh_affordable
             && refresh.due(
                 Instant::now(),
                 motion.still(Instant::now(), rate_fit.effective(encoder.bitrate())),
@@ -2203,11 +2394,21 @@ fn session_with(
             && let Some((screen_time, captured_time)) = waiting.take()
         {
             let budget_bitrate = rate_fit.effective(encoder.bitrate());
+            let encode_started = Instant::now();
             let frames = encoder
                 .encode(&latest, force_keyframe)
                 .map_err(|e| format!("encode: {}", describe(e)))?;
             force_keyframe = false;
-            last_encode = Some(Instant::now());
+            // The frame clock keeps its beat: the next frame is due one interval after this one was due, not after
+            // its encoding ended (that added the encoding's time to every frame: 16.7 ms + ~7 ms capped 60 fps at
+            // about 42 on every network, 2026-11-28). Only a frame started more than an interval late begins a new beat.
+            last_encode = Some(
+                if encode_started.saturating_duration_since(due) < interval {
+                    due
+                } else {
+                    encode_started
+                },
+            );
             // Motion (the changed frames of the last moments use most of the bitrate, not a clock's tick or an
             // animation's; hold.rs): after a pause, the estimate starts again from what the link carried if it sank
             // meanwhile, and once the motion stops the still screen goes once more as a keyframe.
@@ -2236,6 +2437,7 @@ fn session_with(
                 stats.keyframes += u32::from(frame.keyframe);
                 if frame.keyframe {
                     refresh.keyframe();
+                    last_keyframe_bytes = frame.data.len();
                 }
                 if frame_sizes.len() < 200_000 {
                     frame_sizes.push(frame.data.len() as f64 / 1e3);
@@ -2281,6 +2483,9 @@ fn session_with(
             lines.push(format!("{} ms: {note}", started.elapsed().as_millis()));
         }
     }
+    // The drawing on this PC's screen goes with the session.
+    let drawing_report = drawing.report();
+    drop(drawing);
     if let Some(link) = links.desktop.as_mut() {
         link.banner(None);
         link.session(false);
@@ -2321,6 +2526,7 @@ fn session_with(
         summary(&mut stats.agent_ms)
     ));
     lines.push(clipboard_stats.line());
+    lines.extend(drawing_report);
     if clip_files_set > 0 {
         lines.push(format!(
             "clipboard files: {clip_files_set} put on the clipboard from the other side"
@@ -2400,7 +2606,7 @@ fn session_with(
         rate_fit.highest
     ));
     lines.push(format!(
-        "sharp pictures: the estimate started again from what the link carried {} times (held {:.1} Mbit/s at the end); {} keyframes of the still screen after motion",
+        "sharp pictures: the estimate started again from what the link carried {} times (held {:.1} Mbit/s at the end); {} keyframes of the still screen after motion (each only once the link carried it within 250 ms)",
         hold.resets,
         hold.carried() as f64 / 1e6,
         refresh.count

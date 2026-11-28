@@ -234,6 +234,7 @@ impl Presence {
                 terminal: m.terminal,
                 autostart: m.autostart,
                 lock_after: m.lock_after,
+                gnome_direct: m.gnome_direct,
                 auto_update: m.auto_update,
                 password: m.password_check.is_some(),
                 fixed_code: m.fixed_code,
@@ -490,6 +491,12 @@ impl Presence {
         self.refresh();
     }
 
+    /// "Control GNOME without asking" as the person set it.
+    pub fn set_gnome_direct(&mut self, on: bool) {
+        self.menu.gnome_direct = on;
+        self.refresh();
+    }
+
     pub fn set_account_state(&mut self, state: AccountState) {
         self.menu.account = state;
         self.refresh();
@@ -703,6 +710,7 @@ impl ksni::Tray for SniTray {
                             | MENU_TERMINAL
                             | MENU_AUTOSTART
                             | MENU_LOCK_AFTER
+                            | MENU_GNOME_DIRECT
                             | MENU_AUTO_UPDATE
                     );
                     if checkable {

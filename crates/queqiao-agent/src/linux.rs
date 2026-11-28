@@ -132,6 +132,10 @@ pub(crate) fn main() {
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    // A screen's resolution an earlier session changed and could not put back (it ended unexpectedly): back now.
+    if !options.logon {
+        lines.extend(queqiao_capture::display_mode::pending_restore());
+    }
     if options.wol_check {
         let check = wol_check::check();
         lines.extend(wol_check::report(&check));
@@ -324,6 +328,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             files: settings.receive_files,
             terminal: settings.allow_terminal,
             helper: false,
+            gnome_direct: settings.gnome_direct,
             fec: hello.fec,
             controller: viewer.to_string(),
         },

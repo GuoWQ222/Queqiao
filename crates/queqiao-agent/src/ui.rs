@@ -320,6 +320,8 @@ fn run(
     };
     presence.set_password_check(password_check(password));
     presence.set_auto_update(settings.auto_update);
+    #[cfg(target_os = "linux")]
+    presence.set_gnome_direct(settings.gnome_direct);
     presence.set_fixed_code(!settings.fixed_help_code.is_empty());
     presence.set_help_settings(settings.help_mode(), settings.help_files);
     let _ = ready.send(Ok(presence.tray_shown()));
@@ -486,6 +488,10 @@ pub struct Settings {
     /// while being assisted"; off: they go neither way).
     #[serde(default)]
     pub help_files: bool,
+    /// Linux, GNOME on Wayland: the account's devices see and control this PC through GNOME's own interfaces, without
+    /// its question (someone helping from another account is asked all the same). Off unless the person turns it on.
+    #[serde(default)]
+    pub gnome_direct: bool,
 }
 
 /// The check for the settings password's stored form.
@@ -578,6 +584,7 @@ impl Default for Settings {
             fixed_help_code: String::new(),
             help_mode: help_mode_both(),
             help_files: false,
+            gnome_direct: false,
         }
     }
 }

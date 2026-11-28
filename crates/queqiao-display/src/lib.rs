@@ -2,6 +2,9 @@
 //! to send) and a [`Presenter`] that puts decoded NV12 pictures into it through a D3D11 swap chain (GPU
 //! video processor, or the CPU on devices without one).
 
+/// Drawing on the controlled PC's screen (the viewer's pen strokes over it).
+#[cfg(any(windows, target_os = "linux"))]
+mod annotation;
 #[cfg(windows)]
 mod control_center;
 #[cfg(windows)]
@@ -38,6 +41,8 @@ mod tray;
 mod window;
 mod yuv;
 
+#[cfg(any(windows, target_os = "linux"))]
+pub use annotation::{DrawingArea, DrawingOverlay};
 #[cfg(windows)]
 pub use cursor::RemoteCursor;
 #[cfg(windows)]

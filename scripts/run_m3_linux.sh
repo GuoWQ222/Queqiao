@@ -4,8 +4,11 @@
 # online, the viewer logged in and connected to it by name (--device), with the input test. Sessions (SESSIONS, default
 # "direct allowed declined ui"): direct (the clipboard both ways too; the session bar and card of figures, pictured with
 # the bar out and tucked away, its Control center button clicked (it opens, then closes); the file transfer window's test
-# (--browse-test: that PC's folder listed, a file fetched, one sent there); a command line on the agent in a terminal window
-# here, detached and shown again: --terminal-test), allowed (the agent asks the person, who allows:
+# (--browse-test: that PC's folder listed, a file fetched, one sent there, a folder made, renamed, counted and deleted
+# there); a command line on the agent in a terminal window here, detached and shown again: --terminal-test; a port
+# mapping to a web server on the agent's side, a page fetched through it: --tunnel-test; that PC's resolution changed
+# to 1280x720 and back: --display-mode-test; a stroke drawn on the agent's screen, pictured on both sides, cleared:
+# --annotate-test), allowed (the agent asks the person, who allows:
 # the consent prompt answered by the test; pictures of the banner and the prompt), declined (who declines: neither side passes, both must say so), ui (the
 # viewer through its login form and device list as a person would, filled and pressed by the program, with pictures of
 # both: login.bmp and devices.bmp). Then the session's forms no session opens by itself (the transfer list, the
@@ -47,6 +50,10 @@ for display in 91 92; do
     pgrep -f "Xvfb :$display " > /dev/null || { Xvfb ":$display" -screen 0 1920x1080x24 -noreset > "$out/xvfb$display.log" 2>&1 & }
 done
 sleep 1
+# A second resolution for the agent's screen (Xvfb has one until another is added): the direct session's viewer
+# switches that PC to it and back (--display-mode-test).
+DISPLAY=:91 xrandr --newmode 1280x720_m3 74.50 1280 1344 1472 1664 720 723 728 748 -hsync +vsync 2> /dev/null
+DISPLAY=:91 xrandr --addmode screen 1280x720_m3 2> /dev/null
 DISPLAY=:91 xclock -update 1 -geometry 300x300+100+100 > /dev/null 2>&1 &
 clock=$!
 DISPLAY=:91 xterm -geometry 100x30+500+100 -e "top -d 0.5" > /dev/null 2>&1 &
@@ -83,10 +90,14 @@ why=''
 # "That PC's" folder for the file transfer window's test (direct session): down.txt to fetch, up.txt arrives.
 browse_remote=$out/browse_remote
 rm -rf "$browse_remote" && mkdir -p "$browse_remote" && printf 'queqiao browse test: down' > "$browse_remote/down.txt"
+# The web server the port mapping test reaches (loopback only), serving the browse folder.
+tunnel_port=47391
+python3 -m http.server "$tunnel_port" --bind 127.0.0.1 --directory "$browse_remote" > "$out/http.txt" 2>&1 &
+web=$!
 for label in $sessions; do
     agent_env=''
     case $label in
-        direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out --terminal-test --browse-test $browse_remote";
+        direct) agent_extra='--clipboard-test --dry-run-commands'; viewer_extra="--clipboard-test --command lock --figures --ui-pictures $out --terminal-test --browse-test $browse_remote --tunnel-test $tunnel_port --display-mode-test 1280x720 --annotate-test";
                 agent_expects='test text from the other side received: yes'; viewer_expects='test text from the other side received: yes'; both_pass=yes ;;
         # The agent's banner and consent prompt pictured.
         allowed) agent_extra="--ask --answer allow --ui-pictures $out"; viewer_extra='';
@@ -152,6 +163,36 @@ for label in $sessions; do
         wm=$!
         sleep 2
     fi
+    # The direct session's drawing (--annotate-test, a magenta stroke): the agent's screen pictured twice a second
+    # meanwhile, its magenta pixels counted; the most of them pictured (agent_annotation.png); none at the end.
+    grabber=''
+    if [ "$label" = direct ]; then
+        python3 - "$out" :91 $(( seconds + 4 )) > "$out/annotation_screen.txt" 2>&1 << 'EOF' &
+import sys, time
+from PIL import ImageChops, ImageGrab
+out, display, seconds = sys.argv[1], sys.argv[2], float(sys.argv[3])
+def magenta(image):
+    r, g, b = image.convert("RGB").split()
+    mask = ImageChops.multiply(ImageChops.multiply(r.point(lambda v: 255 if v > 180 else 0),
+                                                   g.point(lambda v: 255 if v < 90 else 0)),
+                               b.point(lambda v: 255 if v > 180 else 0))
+    return mask.histogram()[255]
+began, most, most_at, last, best = time.time(), 0, 0.0, -1, None
+while time.time() - began < seconds:
+    try:
+        screen = ImageGrab.grab(xdisplay=display)
+        last = magenta(screen)
+        if last > most:
+            most, most_at, best = last, time.time() - began, screen
+    except Exception as error:
+        print("grab:", error)
+    time.sleep(0.5)
+if best is not None:
+    best.save(out + "/agent_annotation.png")
+print(f"ANNOTATION_SCREEN most {most} at {most_at:.1f} s, last {last}")
+EOF
+        grabber=$!
+    fi
     viewer_code=none
     if [ "$label" != main ]; then
     DISPLAY=:92 "$bin/queqiao-viewer" $account "${target[@]}" --seconds "$seconds" --input-test --width 960 \
@@ -159,6 +200,7 @@ for label in $sessions; do
     viewer_code=$?
     fi
     [ -n "$wm" ] && { kill "$wm" 2> /dev/null; wait "$wm" 2> /dev/null; }
+    [ -n "$grabber" ] && wait "$grabber"
     # The agent leaves after its one session, or at its --seconds.
     for _ in $(seq $(( (seconds + 70) * 5 ))); do kill -0 "$agent" 2> /dev/null || break; sleep 0.2; done
     kill "$agent" 2> /dev/null
@@ -241,12 +283,42 @@ EOF
         done
         grep -qE "^bar: no Control center button|^overlay: " "$out/viewer_direct.txt" && why="$why direct-bar"
         grep -q "^terminal test: PASS" "$out/viewer_direct.txt" || why="$why direct-terminal"
+        grep -q "^tunnel test: PASS" "$out/viewer_direct.txt" || why="$why direct-tunnel"
+        # That PC's resolution changed for the session and back (its capture following), and its own after it.
+        grep -q "^display mode test: PASS" "$out/viewer_direct.txt" || why="$why direct-display-mode"
+        grep -q "captured again (1280x720)" "$out/agent_direct.txt" || why="$why direct-display-mode-capture"
+        grep -q "resolution changed: captured again (1920x1080)" "$out/agent_direct.txt" || why="$why direct-display-mode-capture-back"
+        [ "$(DISPLAY=:91 xrandr | grep -o "current [0-9]* x [0-9]*")" = "current 1920 x 1080" ] || why="$why direct-display-mode-left"
         # The bar's Control center opened it and it closed again; the file transfer window's test (that PC's folder
         # listed, down.txt fetched, up.txt sent), its picture, and up.txt there.
         for line in "^control center open after the click: true" "^control center closed: true" "^browse test: PASS" "^file transfer picture: "; do
             grep -q "$line" "$out/viewer_direct.txt" || why="$why direct-[$line]"
         done
         [ "$(cat "$browse_remote/up.txt" 2> /dev/null)" = 'queqiao browse test: up' ] || why="$why direct-up.txt"
+        # Drawing: each step answered by the agent, its window up, the stroke on the agent's screen (the most magenta
+        # pixels at one time; none at the end, after Clear and Esc) and in the viewer's picture of it.
+        grep -q "^annotate test: PASS" "$out/viewer_direct.txt" || why="$why direct-annotate"
+        grep -q "^drawing: stroke 1 shown" "$out/agent_direct.txt" || why="$why direct-annotate-agent"
+        cat "$out/annotation_screen.txt"
+        screen_line=$(grep "^ANNOTATION_SCREEN" "$out/annotation_screen.txt")
+        most=$(echo "$screen_line" | awk '{print $3}'); last=$(echo "$screen_line" | awk '{print $NF}')
+        { [ "${most:-0}" -ge 2000 ] && [ "${last:-1}" -eq 0 ]; } || why="$why direct-annotate-screen"
+        shown=$(python3 - "$out/viewer_annotation.bmp" << 'EOF'
+import sys
+from PIL import Image, ImageChops
+try:
+    r, g, b = Image.open(sys.argv[1]).convert("RGB").split()
+except Exception as error:
+    print("0 (no picture:", error, ")")
+    sys.exit()
+mask = ImageChops.multiply(ImageChops.multiply(r.point(lambda v: 255 if v > 150 else 0),
+                                               g.point(lambda v: 255 if v < 110 else 0)),
+                           b.point(lambda v: 255 if v > 150 else 0))
+print(mask.histogram()[255])
+EOF
+)
+        echo "annotation in the viewer's picture: $shown magenta pixels"
+        [ "${shown%% *}" -ge 500 ] 2> /dev/null || why="$why direct-annotate-picture"
     fi
     pictures=''
     [ "$label" = allowed ] && pictures='banner prompt'
@@ -267,7 +339,7 @@ done
 "$bin/queqiao-server" path-stats --data "$data" > "$out/path_stats.txt" 2>&1
 echo "=== path-stats"; cat "$out/path_stats.txt"
 grep -qE '^[a-z]+ +[a-z]+ +ice +' "$out/path_stats.txt" || why="$why path-stats"
-kill "$server" 2> /dev/null
+kill "$server" "$web" 2> /dev/null
 echo "=== forms"
 DISPLAY=:92 timeout 60 "$bin/examples/linux_forms_probe" "$out" | tee "$out/forms.txt"
 grep -q FORMS_PASS "$out/forms.txt" || why="$why forms"

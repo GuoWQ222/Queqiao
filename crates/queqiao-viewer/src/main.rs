@@ -20,6 +20,8 @@
 // On every system (docs/LINUX.md step 3): the command line, the session with an agent, the session's keys.
 /// The account mode, on every system.
 mod account;
+/// Drawing on that PC's screen: the session window's drawing mode (help sessions).
+mod annotate;
 mod control;
 mod files_ui;
 /// A session thread's signaling through the device list's account (ICE restarts during the session).

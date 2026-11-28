@@ -28,6 +28,8 @@ pub(crate) const MENU_HELP_BOTH: u16 = 224;
 pub(crate) const MENU_HELP_CODE_ONLY: u16 = 225;
 pub(crate) const MENU_HELP_ASK_ONLY: u16 = 226;
 pub(crate) const MENU_HELP_FILES: u16 = 227;
+/// Linux, GNOME on Wayland: the account's devices control this PC through GNOME's own interfaces, without its question.
+pub(crate) const MENU_GNOME_DIRECT: u16 = 228;
 // Settings kept by this PC's Queqiao for this person alone (no event for the agent): the display language and the
 // session window's keys.
 pub(crate) const MENU_LANGUAGE_SYSTEM: u16 = 230;
@@ -183,6 +185,7 @@ pub(crate) struct Tray {
     pub(crate) fixed_code: bool,
     pub(crate) help_mode: HelpMode,
     pub(crate) help_files: bool,
+    pub(crate) gnome_direct: bool,
 }
 
 impl Tray {
@@ -211,6 +214,7 @@ impl Tray {
             fixed_code: false,
             help_mode: HelpMode::default(),
             help_files: false,
+            gnome_direct: false,
         }
     }
 
@@ -298,6 +302,14 @@ impl Tray {
             self.lock_after,
             true,
         ));
+        if cfg!(target_os = "linux") {
+            entries.push(item(
+                MENU_GNOME_DIRECT,
+                tr("Control GNOME without asking"),
+                self.gnome_direct,
+                true,
+            ));
+        }
         entries.push(item(
             MENU_PASSWORD,
             if self.password_check.is_some() {
@@ -344,6 +356,7 @@ impl Tray {
                 | MENU_TERMINAL
                 | MENU_AUTOSTART
                 | MENU_LOCK_AFTER
+                | MENU_GNOME_DIRECT
                 | MENU_AUTO_UPDATE
                 | MENU_QUIT
                 | MENU_HELP_BOTH
@@ -421,6 +434,10 @@ impl Tray {
             MENU_LOCK_AFTER => {
                 self.lock_after = !self.lock_after;
                 Some(PresenceEvent::SetLockAfter(self.lock_after))
+            }
+            MENU_GNOME_DIRECT => {
+                self.gnome_direct = !self.gnome_direct;
+                Some(PresenceEvent::SetGnomeDirect(self.gnome_direct))
             }
             MENU_AUTO_UPDATE => {
                 self.auto_update = !self.auto_update;

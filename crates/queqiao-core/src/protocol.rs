@@ -113,7 +113,49 @@ pub enum Message {
         picture: String,
         gpu: bool,
     },
+    /// Agent -> viewer: the resolutions the shown screen offers (largest first, at most 24), the one it has, and the
+    /// one it had before this session changed it (`own`; the same as `current` while unchanged). `note`: why its
+    /// resolution cannot change (then `sizes` is empty). A viewer before it leaves it out.
+    DisplayModes {
+        current: (u16, u16),
+        own: (u16, u16),
+        sizes: Vec<(u16, u16)>,
+        note: String,
+    },
+    // Drawing on that PC's screen (annotation, 2026-11-28).
+    /// Viewer -> agent: drawing on the shown screen of that PC for the person there (help sessions): pen strokes on top
+    /// of everything, which clicks and keys pass through. An agent before it drops these, and then never answers with
+    /// `AnnotateState`.
+    Annotate(Annotation),
+    /// Agent -> viewer: the drawing on its screen now: shown with `strokes` strokes (the answer to `On`, to each stroke's
+    /// `End` and to `Clear`), or not shown (the answer to `Off`; or it cannot be shown: `note` says why, e.g. Wayland).
+    AnnotateState {
+        shown: bool,
+        strokes: u16,
+        note: String,
+    },
 }
+
+/// One step of drawing on that PC's screen (`Message::Annotate`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Annotation {
+    /// Drawing mode is on: the drawing's window goes up over that screen (empty).
+    On,
+    /// A new stroke in `colour` (0xRRGGBB), `width` thick in pixels of a 1080-line screen (the agent scales it to its
+    /// screen's short side, so a stroke looks as thick on any screen; 1 to [`MAX_STROKE_WIDTH`]).
+    Begin { colour: u32, width: u8 },
+    /// The stroke goes on to here: 0..=65535 across the shown screen, as `InputEvent::MouseMove`.
+    Point { x: u16, y: u16 },
+    /// The stroke is finished.
+    End,
+    /// Every stroke taken away (drawing mode stays on).
+    Clear,
+    /// Drawing mode is off: the strokes and their window go.
+    Off,
+}
+
+/// The thickest stroke, in pixels of a 1080-line screen.
+pub const MAX_STROKE_WIDTH: u8 = 64;
 
 /// The longest password sent (UTF-8 bytes).
 pub const MAX_PASSWORD: usize = 256;
@@ -260,6 +302,12 @@ pub enum Command {
     MuteSpeakers(bool),
     /// The picture's size: its short side at most this many pixels (e.g. 720, 1080), or 0 for the screen's own.
     Resolution(u16),
+    /// The shown screen of that PC to this resolution for the session (one of `Message::DisplayModes`' sizes);
+    /// 0 x 0: back to its own. Put back when the session ends.
+    DisplayMode {
+        width: u16,
+        height: u16,
+    },
     /// Show screen `n` (counted as in `Message::Screens`).
     Screen(u8),
     /// The highest bitrate, kbit/s (instead of a quality preset); 0 goes back to the preset.
@@ -325,6 +373,9 @@ const PASSWORD_NEEDED: u8 = 65;
 const PASSWORD: u8 = 66;
 const PASSWORD_RESULT: u8 = 67;
 const ENCODER: u8 = 68;
+const DISPLAY_MODES: u8 = 69;
+const ANNOTATE: u8 = 70;
+const ANNOTATE_STATE: u8 = 71;
 
 impl Message {
     pub fn encode(&self) -> Vec<u8> {
@@ -421,6 +472,11 @@ impl Message {
                         out.extend_from_slice(&short.to_le_bytes());
                     }
                     Command::Screen(index) => out.extend([11, index]),
+                    Command::DisplayMode { width, height } => {
+                        out.push(17);
+                        out.extend_from_slice(&width.to_le_bytes());
+                        out.extend_from_slice(&height.to_le_bytes());
+                    }
                     Command::MaxBitrate(kbit) => {
                         out.push(12);
                         out.extend_from_slice(&kbit.to_le_bytes());
@@ -484,6 +540,60 @@ impl Message {
                     end -= 1;
                 }
                 out.extend_from_slice(&picture.as_bytes()[..end]);
+            }
+            Message::DisplayModes {
+                current,
+                own,
+                ref sizes,
+                ref note,
+            } => {
+                out.push(DISPLAY_MODES);
+                for value in [current.0, current.1, own.0, own.1] {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+                out.push(sizes.len().min(24) as u8);
+                for (width, height) in sizes.iter().take(24) {
+                    out.extend_from_slice(&width.to_le_bytes());
+                    out.extend_from_slice(&height.to_le_bytes());
+                }
+                // At most 200 bytes, cut between characters.
+                let mut end = note.len().min(200);
+                while !note.is_char_boundary(end) {
+                    end -= 1;
+                }
+                out.extend_from_slice(&note.as_bytes()[..end]);
+            }
+            Message::Annotate(annotation) => {
+                out.push(ANNOTATE);
+                match annotation {
+                    Annotation::On => out.push(1),
+                    Annotation::Begin { colour, width } => {
+                        let [blue, green, red, _] = colour.to_le_bytes();
+                        out.extend([2, red, green, blue, width.clamp(1, MAX_STROKE_WIDTH)]);
+                    }
+                    Annotation::Point { x, y } => {
+                        out.push(3);
+                        out.extend_from_slice(&x.to_le_bytes());
+                        out.extend_from_slice(&y.to_le_bytes());
+                    }
+                    Annotation::End => out.push(4),
+                    Annotation::Clear => out.push(5),
+                    Annotation::Off => out.push(6),
+                }
+            }
+            Message::AnnotateState {
+                shown,
+                strokes,
+                ref note,
+            } => {
+                out.extend([ANNOTATE_STATE, u8::from(shown)]);
+                out.extend_from_slice(&strokes.to_le_bytes());
+                // At most 200 bytes, cut between characters.
+                let mut end = note.len().min(200);
+                while !note.is_char_boundary(end) {
+                    end -= 1;
+                }
+                out.extend_from_slice(&note.as_bytes()[..end]);
             }
         }
         out
@@ -592,6 +702,10 @@ impl Message {
                 7 => Command::PrivacyOff,
                 10 => Command::Resolution(u16::from_le_bytes(rest.get(1..3)?.try_into().ok()?)),
                 11 => Command::Screen(*rest.get(1)?),
+                17 => Command::DisplayMode {
+                    width: u16::from_le_bytes(rest.get(1..3)?.try_into().ok()?),
+                    height: u16::from_le_bytes(rest.get(3..5)?.try_into().ok()?),
+                },
                 12 => Command::MaxBitrate(u32::from_le_bytes(rest.get(1..5)?.try_into().ok()?)),
                 9 => Command::MuteSpeakers(match rest.get(1)? {
                     0 => false,
@@ -683,6 +797,57 @@ impl Message {
                     picture: String::from_utf8(picture.to_vec()).ok()?,
                     gpu: *gpu == 1,
                 },
+                _ => return None,
+            },
+            DISPLAY_MODES => {
+                let current = (u16_at(0)?, u16_at(2)?);
+                let own = (u16_at(4)?, u16_at(6)?);
+                let count = usize::from(*rest.get(8)?);
+                let sizes_end = 9 + count * 4;
+                if count > 24 || rest.len() < sizes_end || rest.len() - sizes_end > 200 {
+                    return None;
+                }
+                let sizes = rest[9..sizes_end]
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|pair| {
+                        (
+                            u16::from_le_bytes([pair[0], pair[1]]),
+                            u16::from_le_bytes([pair[2], pair[3]]),
+                        )
+                    })
+                    .collect();
+                Message::DisplayModes {
+                    current,
+                    own,
+                    sizes,
+                    note: String::from_utf8(rest[sizes_end..].to_vec()).ok()?,
+                }
+            }
+            ANNOTATE => Message::Annotate(match rest {
+                [1] => Annotation::On,
+                [2, red, green, blue, width @ 1..=MAX_STROKE_WIDTH] => Annotation::Begin {
+                    colour: u32::from_le_bytes([*blue, *green, *red, 0]),
+                    width: *width,
+                },
+                [3, x0, x1, y0, y1] => Annotation::Point {
+                    x: u16::from_le_bytes([*x0, *x1]),
+                    y: u16::from_le_bytes([*y0, *y1]),
+                },
+                [4] => Annotation::End,
+                [5] => Annotation::Clear,
+                [6] => Annotation::Off,
+                _ => return None,
+            }),
+            ANNOTATE_STATE => match rest {
+                [shown @ (0 | 1), low, high, note @ ..] if note.len() <= 200 => {
+                    Message::AnnotateState {
+                        shown: *shown == 1,
+                        strokes: u16::from_le_bytes([*low, *high]),
+                        note: String::from_utf8(note.to_vec()).ok()?,
+                    }
+                }
                 _ => return None,
             },
             _ => return None,
@@ -820,6 +985,26 @@ mod tests {
             Message::Command(Command::Microphone(true)),
             Message::Command(Command::Microphone(false)),
             Message::Command(Command::LockAfter(true)),
+            Message::Command(Command::DisplayMode {
+                width: 2560,
+                height: 1440,
+            }),
+            Message::Command(Command::DisplayMode {
+                width: 0,
+                height: 0,
+            }),
+            Message::DisplayModes {
+                current: (1920, 1080),
+                own: (2560, 1440),
+                sizes: vec![(2560, 1440), (1920, 1080), (1280, 720)],
+                note: String::new(),
+            },
+            Message::DisplayModes {
+                current: (1920, 1080),
+                own: (1920, 1080),
+                sizes: Vec::new(),
+                note: "not on Wayland yet".into(),
+            },
             Message::Command(Command::LockAfter(false)),
             Message::Command(Command::VideoCodec {
                 prefer: CodecPreference::Av1,
@@ -890,6 +1075,85 @@ mod tests {
             assert_eq!(Message::decode(&bytes), None, "{bad}");
         }
     }
+
+    #[test]
+    fn annotations_round_trip_and_bad_ones_are_refused() {
+        for message in [
+            Message::Annotate(Annotation::On),
+            Message::Annotate(Annotation::Begin {
+                colour: 0xE5_3935,
+                width: 5,
+            }),
+            Message::Annotate(Annotation::Begin {
+                colour: 0xFF_FFFF,
+                width: MAX_STROKE_WIDTH,
+            }),
+            Message::Annotate(Annotation::Point { x: 0, y: 65535 }),
+            Message::Annotate(Annotation::Point { x: 12345, y: 1 }),
+            Message::Annotate(Annotation::End),
+            Message::Annotate(Annotation::Clear),
+            Message::Annotate(Annotation::Off),
+            Message::AnnotateState {
+                shown: true,
+                strokes: 3,
+                note: String::new(),
+            },
+            Message::AnnotateState {
+                shown: false,
+                strokes: 0,
+                note: "not on Wayland yet".into(),
+            },
+        ] {
+            assert_eq!(Message::decode(&message.encode()), Some(message));
+        }
+        // The tags others use stay theirs: drawing is 70 and 71.
+        assert_eq!(Message::Annotate(Annotation::On).encode(), [70, 1]);
+        assert_eq!(
+            Message::AnnotateState {
+                shown: true,
+                strokes: 2,
+                note: String::new()
+            }
+            .encode(),
+            [71, 1, 2, 0]
+        );
+        // The colour goes as red, green, blue.
+        assert_eq!(
+            Message::Annotate(Annotation::Begin {
+                colour: 0x11_2233,
+                width: 7
+            })
+            .encode(),
+            [70, 2, 0x11, 0x22, 0x33, 7]
+        );
+        // A width of 0 or above the most, an unknown step, a byte short or long, a long note: refused.
+        assert_eq!(Message::decode(&[ANNOTATE, 2, 1, 2, 3, 0]), None);
+        assert_eq!(
+            Message::decode(&[ANNOTATE, 2, 1, 2, 3, MAX_STROKE_WIDTH + 1]),
+            None
+        );
+        assert_eq!(Message::decode(&[ANNOTATE, 7]), None);
+        assert_eq!(Message::decode(&[ANNOTATE]), None);
+        assert_eq!(Message::decode(&[ANNOTATE, 3, 1, 2, 3]), None);
+        assert_eq!(Message::decode(&[ANNOTATE, 4, 0]), None);
+        assert_eq!(Message::decode(&[ANNOTATE_STATE, 2, 0, 0]), None);
+        assert_eq!(Message::decode(&[ANNOTATE_STATE, 1, 0]), None);
+        let mut long = vec![ANNOTATE_STATE, 0, 0, 0];
+        long.extend([b'x'; 201]);
+        assert_eq!(Message::decode(&long), None);
+        // A width above the most is sent as the most, not dropped on the way.
+        let wide = Message::Annotate(Annotation::Begin {
+            colour: 0,
+            width: 200,
+        });
+        assert_eq!(
+            Message::decode(&wide.encode()),
+            Some(Message::Annotate(Annotation::Begin {
+                colour: 0,
+                width: MAX_STROKE_WIDTH
+            }))
+        );
+    }
 }
 
 /// Robustness: the other side's bytes are not trusted. Random and mutated inputs must never panic, and whatever
@@ -956,6 +1220,16 @@ mod robustness {
                 quality: Quality::Balanced,
             }),
             Message::Notice("notice".into()),
+            Message::Annotate(Annotation::Begin {
+                colour: 0xFF_00FF,
+                width: 5,
+            }),
+            Message::Annotate(Annotation::Point { x: 300, y: 400 }),
+            Message::AnnotateState {
+                shown: true,
+                strokes: 1,
+                note: "note".into(),
+            },
         ]
         .iter()
         .map(Message::encode)

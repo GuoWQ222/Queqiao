@@ -19,6 +19,7 @@ queqiao-audio.workspace = true
 queqiao-display.workspace = true
 queqiao-files.workspace = true
 queqiao-terminal.workspace = true
+queqiao-tunnel.workspace = true
 queqiao-input.workspace = true
 queqiao-transport.workspace = true
 # The viewer's own settings (its keys).

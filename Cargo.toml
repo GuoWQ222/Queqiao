@@ -22,6 +22,7 @@ queqiao-account = { path = "crates/queqiao-account" }
 queqiao-audio = { path = "crates/queqiao-audio" }
 queqiao-files = { path = "crates/queqiao-files" }
 queqiao-terminal = { path = "crates/queqiao-terminal" }
+queqiao-tunnel = { path = "crates/queqiao-tunnel" }
 queqiao-local = { path = "crates/queqiao-local" }
 queqiao-update = { path = "crates/queqiao-update" }
 queqiao-portal = { path = "crates/queqiao-portal" }

@@ -19,21 +19,51 @@ use crate::model::{AccountState, MainDevice, Page};
 use crate::settings::{Control, Tab};
 use crate::tray::{MENU_FIXED_CODE, MENU_HELP};
 
-// Layout, as Windows' (96-DPI units are egui's points).
+// Layout, as Windows' (96-DPI units are egui's points). WIDTH x HEIGHT is the window's first size and its smallest:
+// dragged larger, the page's width (`content`) and the height (`height`) follow it.
 const WIDTH: f32 = 880.0;
 const HEIGHT: f32 = 580.0;
 const SIDEBAR: f32 = 216.0;
-/// The page's left margin and its content's width.
+/// The page's left margin.
 const LEFT: f32 = 32.0;
-const CONTENT: f32 = 600.0;
-const NAV_TOP: f32 = 318.0;
+const NAV_TOP_BASE: f32 = 318.0;
+
+thread_local! {
+    /// The window's size this frame (points), never below WIDTH x HEIGHT.
+    static SIZE: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((WIDTH, HEIGHT)) };
+}
+
+/// The page content's width (600 at the first size).
+fn content() -> f32 {
+    SIZE.get().0 - SIDEBAR - LEFT - 32.0
+}
+
+fn height() -> f32 {
+    SIZE.get().1
+}
+
+/// How much taller than at first the window is: the device list takes it, the page links move down by it.
+fn taller() -> f32 {
+    SIZE.get().1 - HEIGHT
+}
+
+fn nav_top() -> f32 {
+    NAV_TOP_BASE + taller()
+}
 const NAV_STEP: f32 = 40.0;
 const DEVICE_ROW: f32 = 36.0;
-const HERO: [f32; 4] = [LEFT, 92.0, CONTENT, 180.0];
-const ACTIONS: [f32; 4] = [LEFT, 288.0, CONTENT, 52.0];
+fn hero() -> [f32; 4] {
+    [LEFT, 92.0, content(), 180.0]
+}
+
+fn actions() -> [f32; 4] {
+    [LEFT, 288.0, content(), 52.0]
+}
 const RECENT_Y: f32 = 360.0;
 /// The "being controlled" banner under the heading, and how far it moves the rest of the page down (as Windows').
-const BANNER: [f32; 4] = [LEFT, 90.0, CONTENT, 46.0];
+fn banner() -> [f32; 4] {
+    [LEFT, 90.0, content(), 46.0]
+}
 const BANNER_SPACE: f32 = 58.0;
 const BANNER_BACK: Color32 = Color32::from_rgb(0xEA, 0xF2, 0xFE);
 const BANNER_EDGE: Color32 = Color32::from_rgb(0xC6, 0xDC, 0xF6);
@@ -144,7 +174,7 @@ impl MainView {
                 theme::SIDE_MUTED,
             );
         }
-        let list = at(10.0, 84.0, SIDEBAR - 20.0, 216.0);
+        let list = at(10.0, 84.0, SIDEBAR - 20.0, 216.0 + taller());
         let chosen = (shown.page == Page::Devices)
             .then(|| self.chosen(shown).map(|device| device.id.clone()))
             .flatten();
@@ -279,8 +309,8 @@ impl MainView {
         // Help, Transfers, Settings.
         painter.line_segment(
             [
-                side.min + Vec2::new(18.0, NAV_TOP - 12.0),
-                side.min + Vec2::new(SIDEBAR - 18.0, NAV_TOP - 12.0),
+                side.min + Vec2::new(18.0, nav_top() - 12.0),
+                side.min + Vec2::new(SIDEBAR - 18.0, nav_top() - 12.0),
             ],
             Stroke::new(1.0_f32, theme::SIDE_LINE),
         );
@@ -294,7 +324,7 @@ impl MainView {
         {
             let row = at(
                 10.0,
-                NAV_TOP + index as f32 * NAV_STEP,
+                nav_top() + index as f32 * NAV_STEP,
                 SIDEBAR - 20.0,
                 36.0,
             );
@@ -342,12 +372,12 @@ impl MainView {
         // The account: a gold circle with the initial, the name, the state, Log in or out.
         painter.line_segment(
             [
-                side.min + Vec2::new(18.0, HEIGHT - 82.0),
-                side.min + Vec2::new(SIDEBAR - 18.0, HEIGHT - 82.0),
+                side.min + Vec2::new(18.0, height() - 82.0),
+                side.min + Vec2::new(SIDEBAR - 18.0, height() - 82.0),
             ],
             Stroke::new(1.0_f32, theme::SIDE_LINE),
         );
-        let area = at(12.0, HEIGHT - 70.0, SIDEBAR - 24.0, 58.0);
+        let area = at(12.0, height() - 70.0, SIDEBAR - 24.0, 58.0);
         let response = theme::hit(ui, area, "account");
         let center = Pos2::new(area.left() + 24.0, area.center().y);
         painter.circle_filled(center, 17.0, theme::GOLD);
@@ -429,7 +459,7 @@ impl MainView {
     /// A page's title and the line under it (Help and Transfers).
     fn heading(&self, painter: &egui::Painter, page: Rect, title: &str, subtitle: &str) {
         let at = |y: f32, h: f32| {
-            Rect::from_min_size(page.min + Vec2::new(LEFT, y), Vec2::new(CONTENT, h))
+            Rect::from_min_size(page.min + Vec2::new(LEFT, y), Vec2::new(content(), h))
         };
         theme::text_in(
             painter,
@@ -502,7 +532,7 @@ impl MainView {
         let name_x = pill_rect.right() - page.left() + 12.0;
         theme::text_in(
             &painter,
-            at(name_x, 24.0, LEFT + CONTENT - name_x, 40.0),
+            at(name_x, 24.0, LEFT + content() - name_x, 40.0),
             Align2::LEFT_CENTER,
             &device.name,
             theme::bold(26.0),
@@ -517,7 +547,7 @@ impl MainView {
         };
         theme::text_in(
             &painter,
-            at(LEFT, 62.0, CONTENT, 20.0),
+            at(LEFT, 62.0, content(), 20.0),
             Align2::LEFT_CENTER,
             line,
             theme::regular(12.0),
@@ -537,7 +567,7 @@ impl MainView {
         let recent_y = RECENT_Y + below;
         theme::text_in(
             &painter,
-            at(LEFT, recent_y, CONTENT, 24.0),
+            at(LEFT, recent_y, content(), 24.0),
             Align2::LEFT_CENTER,
             tr("Recent connections"),
             theme::bold(16.0),
@@ -547,7 +577,8 @@ impl MainView {
             .connections
             .iter()
             .filter(|row| row.device_id == device.id)
-            .take(3)
+            // Three at the first size; more as the window grows taller.
+            .take(3 + (taller() / 38.0).max(0.0) as usize)
             .collect();
         if rows.is_empty() {
             let empty = if device.this_pc {
@@ -557,7 +588,7 @@ impl MainView {
             };
             theme::text_in(
                 &painter,
-                at(LEFT, recent_y + 32.0, CONTENT, 20.0),
+                at(LEFT, recent_y + 32.0, content(), 20.0),
                 Align2::LEFT_CENTER,
                 empty,
                 theme::regular(12.0),
@@ -582,7 +613,7 @@ impl MainView {
             );
             theme::text_in(
                 &painter,
-                at(LEFT + 300.0, y, CONTENT - 300.0, 38.0),
+                at(LEFT + 300.0, y, content() - 300.0, 38.0),
                 Align2::RIGHT_CENTER,
                 &row.length,
                 theme::regular(12.0),
@@ -591,7 +622,7 @@ impl MainView {
             painter.line_segment(
                 [
                     page.min + Vec2::new(LEFT + 32.0, y + 38.0),
-                    page.min + Vec2::new(LEFT + CONTENT, y + 38.0),
+                    page.min + Vec2::new(LEFT + content(), y + 38.0),
                 ],
                 Stroke::new(1.0_f32, theme::DIVIDER),
             );
@@ -605,7 +636,8 @@ impl MainView {
         let at = |x: f32, y: f32, w: f32, h: f32| {
             Rect::from_min_size(page.min + Vec2::new(x, y), Vec2::new(w, h))
         };
-        let band = at(BANNER[0], BANNER[1], BANNER[2], BANNER[3]);
+        let [bx, by, bw, bh] = banner();
+        let band = at(bx, by, bw, bh);
         painter.rect_filled(band, CornerRadius::same(10), BANNER_BACK);
         painter.rect_stroke(
             band,
@@ -674,8 +706,8 @@ impl MainView {
     ) {
         let painter = ui.painter().clone();
         let card = Rect::from_min_size(
-            page.min + Vec2::new(HERO[0], HERO[1] + below),
-            Vec2::new(HERO[2], HERO[3]),
+            page.min + Vec2::new(hero()[0], hero()[1] + below),
+            Vec2::new(hero()[2], hero()[3]),
         );
         // The gradient: a mesh from the top colour to the bottom one, then the corners rounded off with the page's white.
         let mut mesh = egui::Mesh::default();
@@ -821,8 +853,8 @@ impl MainView {
     /// The tools under the card: Send files, Command line, Wake up, More (each where it can be used now).
     fn actions(&mut self, ui: &mut egui::Ui, page: Rect, device: &MainDevice, below: f32) {
         let row = Rect::from_min_size(
-            page.min + Vec2::new(ACTIONS[0], ACTIONS[1] + below),
-            Vec2::new(ACTIONS[2], ACTIONS[3]),
+            page.min + Vec2::new(actions()[0], actions()[1] + below),
+            Vec2::new(actions()[2], actions()[3]),
         );
         let painter = ui.painter().clone();
         painter.rect_filled(row, CornerRadius::same(10), theme::WHITE);
@@ -928,13 +960,13 @@ impl MainView {
         self.heading(&painter, page, Page::Help.title(), Page::Help.subtitle());
         theme::text_in(
             &painter,
-            at(LEFT, 98.0, CONTENT, 24.0),
+            at(LEFT, 98.0, content(), 24.0),
             Align2::LEFT_CENTER,
             tr("Let someone help this PC"),
             theme::bold(16.0),
             theme::TEXT,
         );
-        let card = at(LEFT, 128.0, CONTENT, 132.0);
+        let card = at(LEFT, 128.0, content(), 132.0);
         painter.rect_filled(card, CornerRadius::same(12), theme::CARD);
         painter.rect_stroke(
             card,
@@ -1001,7 +1033,7 @@ impl MainView {
                     text.to_string(),
                     theme::regular(14.0),
                     theme::SECONDARY,
-                    CONTENT - 40.0,
+                    content() - 40.0,
                 );
                 painter.galley(
                     page.min + Vec2::new(LEFT + 20.0, 140.0),
@@ -1023,7 +1055,7 @@ impl MainView {
                 };
                 if theme::button(
                     ui,
-                    at(LEFT + CONTENT - 200.0, 212.0, 180.0, 34.0),
+                    at(LEFT + content() - 200.0, 212.0, 180.0, 34.0),
                     fixed,
                     true,
                 ) {
@@ -1033,7 +1065,7 @@ impl MainView {
         }
         theme::text_in(
             &painter,
-            at(LEFT, 290.0, CONTENT, 24.0),
+            at(LEFT, 290.0, content(), 24.0),
             Align2::LEFT_CENTER,
             tr("Help someone"),
             theme::bold(16.0),
@@ -1096,7 +1128,7 @@ impl MainView {
             hint.to_string(),
             theme::regular(12.0),
             theme::SECONDARY,
-            CONTENT,
+            content(),
         );
         painter.galley(page.min + Vec2::new(LEFT, 396.0), galley, theme::SECONDARY);
     }
@@ -1120,11 +1152,11 @@ impl MainView {
                 text.to_string(),
                 theme::regular(14.0),
                 theme::SECONDARY,
-                CONTENT,
+                content(),
             );
             painter.galley(page.min + Vec2::new(LEFT, 110.0), galley, theme::SECONDARY);
         }
-        let list = at(LEFT, 100.0, CONTENT, 372.0);
+        let list = at(LEFT, 100.0, content(), 372.0);
         ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("transfers")
@@ -1210,7 +1242,7 @@ impl MainView {
         let painter = ui.painter().clone();
         theme::text_in(
             &painter,
-            at(LEFT, 20.0, CONTENT, 40.0),
+            at(LEFT, 20.0, content(), 40.0),
             Align2::LEFT_CENTER,
             Page::Settings.title(),
             theme::bold(26.0),
@@ -1253,11 +1285,11 @@ impl MainView {
         painter.line_segment(
             [
                 page.min + Vec2::new(LEFT, 106.0),
-                page.min + Vec2::new(LEFT + CONTENT, 106.0),
+                page.min + Vec2::new(LEFT + content(), 106.0),
             ],
             Stroke::new(1.0_f32, theme::DIVIDER),
         );
-        let area = at(LEFT, 112.0, CONTENT + 16.0, HEIGHT - 124.0);
+        let area = at(LEFT, 112.0, content() + 16.0, height() - 124.0);
         let rows = crate::settings::rows(shown.tab, &shown.settings);
         ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
             egui::ScrollArea::vertical()
@@ -1280,7 +1312,7 @@ impl MainView {
                                 .stroke(Stroke::new(1.0_f32, theme::DIVIDER))
                                 .corner_radius(12)
                                 .show(ui, |ui| {
-                                    ui.set_width(CONTENT);
+                                    ui.set_width(content());
                                     ui.spacing_mut().item_spacing = Vec2::ZERO;
                                     for (offset, row) in rows[index..end].iter().enumerate() {
                                         self.setting(ui, row, index + offset, offset > 0);
@@ -1303,7 +1335,7 @@ impl MainView {
         line_above: bool,
     ) {
         let height = if row.detail.is_empty() { 52.0 } else { 68.0 };
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(CONTENT, height), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(content(), height), egui::Sense::hover());
         let painter = ui.painter().clone();
         if line_above {
             painter.line_segment(
@@ -1536,7 +1568,8 @@ impl View for MainView {
         let mut builder = egui::ViewportBuilder::default()
             .with_title(tr("Queqiao"))
             .with_inner_size([WIDTH, HEIGHT])
-            .with_resizable(false);
+            .with_min_inner_size([WIDTH, HEIGHT])
+            .with_resizable(true);
         if let Some((width, height, rgba)) = super::icon::icon(64) {
             builder = builder.with_icon(egui::IconData {
                 rgba,
@@ -1551,6 +1584,8 @@ impl View for MainView {
         if !self.open.load(Ordering::Relaxed) {
             return false;
         }
+        let screen = ctx.screen_rect();
+        SIZE.set((screen.width().max(WIDTH), screen.height().max(HEIGHT)));
         let Ok(shown) = self.shown.lock().map(|shown| shown.clone()) else {
             return true;
         };

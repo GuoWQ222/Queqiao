@@ -215,6 +215,13 @@ pub(crate) fn run_account(
                         "the person at this PC set: lock this PC when a session ends: {on}"
                     ));
                 }
+                PresenceEvent::SetGnomeDirect(on) => {
+                    settings.gnome_direct = on;
+                    let _ = settings.save();
+                    lines.push(format!(
+                        "the person at this PC set: control GNOME without asking: {on}"
+                    ));
+                }
                 PresenceEvent::SetTerminal(on) => {
                     settings.allow_terminal = on;
                     let _ = settings.save();
@@ -745,6 +752,7 @@ pub(crate) fn run_account(
                         files: settings.receive_files && (helper.is_none() || settings.help_files),
                         terminal: settings.allow_terminal && helper.is_none(),
                         helper: helper.is_some(),
+                        gnome_direct: settings.gnome_direct && helper.is_none(),
                         fec: hello.fec,
                         controller: match &helper {
                             Some(user) => format!("{from_name} ({user})"),

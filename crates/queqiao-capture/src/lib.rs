@@ -6,6 +6,8 @@
 //!   pointer, RandR for the monitors. In a Wayland session (`portal.rs`): the ScreenCast portal's PipeWire stream
 //!   (`pipewire.rs`, libpipewire loaded at run time).
 
+/// The screens' resolution for a session: the sizes offered, a change, the screen's own size back (Windows, X11).
+pub mod display_mode;
 /// The screen as the display hardware shows it, for the Queqiao service's desktop helper (root).
 #[cfg(target_os = "linux")]
 pub mod kms;

@@ -2762,8 +2762,10 @@ dependencies = [
  "queqiao-files",
  "queqiao-input",
  "queqiao-local",
+ "queqiao-portal",
  "queqiao-terminal",
  "queqiao-transport",
+ "queqiao-tunnel",
  "queqiao-update",
  "serde",
  "serde_json",
@@ -2897,6 +2899,7 @@ dependencies = [
  "async-io",
  "enumflags2",
  "libc",
+ "zbus",
 ]
 
 [[package]]
@@ -2975,6 +2978,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "queqiao-tunnel"
+version = "0.1.0"
+
+[[package]]
 name = "queqiao-update"
 version = "0.1.0"
 dependencies = [
@@ -2999,6 +3006,7 @@ dependencies = [
  "queqiao-input",
  "queqiao-terminal",
  "queqiao-transport",
+ "queqiao-tunnel",
  "serde",
  "serde_json",
  "windows",

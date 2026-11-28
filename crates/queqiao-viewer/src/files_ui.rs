@@ -3,19 +3,25 @@
 //! pane with its history; Send turns checked entries into jobs (sent into the other pane's folder, or fetched into
 //! this pane's), and the transfer list shows the session's jobs.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use queqiao_core::text::tr;
+use queqiao_core::text::{tr, trf};
 use queqiao_display::{
     FileItem, FileKind, FilePane, FileWindow, FileWindowEvent, JobCommand, JobRow, JobRowState,
 };
-use queqiao_files::{EntryKind, Found, Job, JobState, Lister, Listing, Transfers, browse};
+use queqiao_files::{
+    Answer, Change, EntryKind, Found, Job, JobState, Lister, Listing, Size, Transfers, browse,
+};
 
 /// A remote folder not answered within this long is given up (that PC's Queqiao may not know browsing).
 const ANSWER_LIMIT: Duration = Duration::from_secs(10);
 /// The transfer list is refreshed this often while the window is open.
 const JOBS_EVERY: Duration = Duration::from_millis(250);
+/// A change (new folder, rename, delete) not answered within this long is given up; a count, after its own limit.
+const CHANGE_LIMIT: Duration = Duration::from_secs(30);
+const COUNT_LIMIT: Duration = Duration::from_secs(45);
 
 #[derive(Default)]
 struct Pane {
@@ -27,6 +33,8 @@ struct Pane {
     history: Vec<String>,
     /// The listing asked for, the folder it is for, whether it goes into the history, and when it was asked.
     asked: Option<(u32, String, bool, Instant)>,
+    /// What a change or count came to (shown in place of the status until the person goes elsewhere).
+    notice: String,
 }
 
 impl Pane {
@@ -34,7 +42,11 @@ impl Pane {
         FilePane {
             folder: self.folder.clone(),
             items: self.items.clone(),
-            status: self.status.clone(),
+            status: if self.notice.is_empty() {
+                self.status.clone()
+            } else {
+                self.notice.clone()
+            },
             places: self.places.clone(),
             can_go_back: !self.history.is_empty(),
             can_go_up: !self.folder.is_empty(),
@@ -119,7 +131,8 @@ fn this_pc_name() -> String {
 }
 
 /// Tests (--browse-test): the window opened, this pane in a test folder and the other in the given one, a file fetched
-/// from there and one sent there, both confirmed by the receiving side.
+/// from there and one sent there, both confirmed by the receiving side; then, in that PC's folder, a new folder made,
+/// renamed, counted with down.txt, and deleted, each seen in the folder read again.
 pub(crate) struct BrowseTest {
     /// That PC's folder holding `down.txt`.
     pub(crate) remote_folder: String,
@@ -128,7 +141,15 @@ pub(crate) struct BrowseTest {
     jobs: Vec<u32>,
     started: Instant,
     remote_entries: usize,
+    /// The transfers' outcome, and what the changes came to so far.
+    transfers_passed: bool,
+    changes: Vec<String>,
+    changes_passed: bool,
 }
+
+/// The folder the browse test makes in that PC's folder, and its name once renamed.
+const TEST_FOLDER: &str = "queqiao test folder";
+const TEST_RENAMED: &str = "queqiao test renamed";
 
 impl BrowseTest {
     pub(crate) fn new(remote_folder: &str) -> BrowseTest {
@@ -139,7 +160,41 @@ impl BrowseTest {
             jobs: Vec::new(),
             started: Instant::now(),
             remote_entries: 0,
+            transfers_passed: false,
+            changes: Vec::new(),
+            changes_passed: true,
         }
+    }
+}
+
+/// A count asked for (of one entry or several, here or there), until all its answers are in.
+struct Count {
+    side: usize,
+    label: String,
+    waiting: Vec<u32>,
+    total: Size,
+    error: String,
+    at: Instant,
+}
+
+/// What a count came to, for the pane's note.
+fn count_text(label: &str, size: &Size) -> String {
+    let values = [
+        ("name", label),
+        ("size", &queqiao_display::size_text(size.bytes)),
+        ("files", &size.files.to_string()),
+        ("folders", &size.folders.to_string()),
+    ];
+    if size.complete {
+        trf(
+            "{name}: {size}; files: {files}, folders: {folders}",
+            &values,
+        )
+    } else {
+        trf(
+            "{name}: at least {size}; files: {files}, folders: {folders} (it holds too many to count them all)",
+            &values,
+        )
     }
 }
 
@@ -152,6 +207,9 @@ pub(crate) struct FilesUi {
     next_local: u32,
     jobs_shown: Instant,
     pub(crate) test: Option<BrowseTest>,
+    /// Changes asked for and not answered yet: (pane, number) -> the entry's name and when.
+    changes: HashMap<(usize, u32), (String, Instant)>,
+    counts: Vec<Count>,
 }
 
 impl FilesUi {
@@ -164,6 +222,8 @@ impl FilesUi {
             next_local: 0,
             jobs_shown: Instant::now(),
             test: None,
+            changes: HashMap::new(),
+            counts: Vec::new(),
         }
     }
 
@@ -199,8 +259,130 @@ impl FilesUi {
         self.go(1, "", false, transfers);
     }
 
+    /// Asks for `change` in pane `side` (this PC's worker, or that PC over the files channel).
+    fn change(&mut self, side: usize, change: Change, label: &str, transfers: &mut Transfers) {
+        let id = if side == 0 {
+            self.next_local += 1;
+            self.local.change(self.next_local, change);
+            self.next_local
+        } else {
+            transfers.change_remote(change)
+        };
+        self.changes
+            .insert((side, id), (label.to_string(), Instant::now()));
+        self.panes[side].notice.clear();
+    }
+
+    /// A change's answer: the pane is read again once its changes are all answered; a refusal shows in its note.
+    fn changed(
+        &mut self,
+        side: usize,
+        id: u32,
+        result: Result<(), String>,
+        transfers: &mut Transfers,
+        lines: &mut Vec<String>,
+    ) {
+        let Some((label, _)) = self.changes.remove(&(side, id)) else {
+            return;
+        };
+        let pc = if side == 0 { "this PC" } else { "that PC" };
+        match result {
+            Ok(()) => lines.push(format!("changed on {pc}: {label}")),
+            Err(error) => {
+                lines.push(format!("not changed on {pc}: {label}: {error}"));
+                self.panes[side].notice = format!("{label}: {error}");
+            }
+        }
+        if !self.changes.keys().any(|(other, _)| *other == side) {
+            let folder = self.panes[side].folder.clone();
+            self.go(side, &folder, false, transfers);
+        }
+    }
+
+    /// Counts what `names` of pane `side` hold, all levels down.
+    fn count(&mut self, side: usize, names: &[String], transfers: &mut Transfers) {
+        let folder = self.panes[side].folder.clone();
+        if folder.is_empty() || names.is_empty() {
+            return;
+        }
+        let mut waiting = Vec::new();
+        for name in names {
+            let path = browse::child(&folder, name);
+            waiting.push(if side == 0 {
+                self.next_local += 1;
+                self.local.measure(self.next_local, &path);
+                self.next_local
+            } else {
+                transfers.measure_remote(&path)
+            });
+        }
+        let label = match names {
+            [name] => self.panes[side]
+                .items
+                .iter()
+                .find(|item| &item.name == name)
+                .map_or_else(|| name.clone(), |item| item.label.clone()),
+            _ => trf("{count} items", &[("count", &names.len().to_string())]),
+        };
+        self.counts.push(Count {
+            side,
+            label,
+            waiting,
+            total: Size {
+                complete: true,
+                ..Size::default()
+            },
+            error: String::new(),
+            at: Instant::now(),
+        });
+        self.panes[side].notice = tr("Counting...").to_string();
+        self.show_pane(side);
+    }
+
+    /// One answer of a count; the whole count shows once all its answers are in.
+    fn counted(
+        &mut self,
+        side: usize,
+        id: u32,
+        result: Result<Size, String>,
+        lines: &mut Vec<String>,
+    ) {
+        let Some(at) = self
+            .counts
+            .iter()
+            .position(|count| count.side == side && count.waiting.contains(&id))
+        else {
+            return;
+        };
+        let count = &mut self.counts[at];
+        count.waiting.retain(|waiting| *waiting != id);
+        match result {
+            Ok(size) => {
+                count.total.files += size.files;
+                count.total.folders += size.folders;
+                count.total.bytes += size.bytes;
+                count.total.complete &= size.complete;
+            }
+            Err(error) => count.error = error,
+        }
+        if count.waiting.is_empty() {
+            let count = self.counts.remove(at);
+            let text = if count.error.is_empty() {
+                count_text(&count.label, &count.total)
+            } else {
+                format!("{}: {}", count.label, count.error)
+            };
+            lines.push(format!("count: {text}"));
+            self.panes[side].notice = text;
+            self.show_pane(side);
+        }
+    }
+
     /// Shows `path` in pane `side` (0 here, 1 there); `remember`: the folder left goes into its history.
     fn go(&mut self, side: usize, path: &str, remember: bool, transfers: &mut Transfers) {
+        if path != self.panes[side].folder {
+            self.panes[side].notice.clear();
+        }
         let id = if side == 0 {
             self.next_local += 1;
             self.local.list(self.next_local, path);
@@ -224,15 +406,49 @@ impl FilesUi {
     pub(crate) fn poll(&mut self, transfers: &mut Transfers, lines: &mut Vec<String>) {
         // Listings of this PC (worker thread) and of the other (the files channel).
         for found in self.local.found() {
-            if let Found::Listing(id, listing) = found
-                && self.panes[0]
-                    .asked
-                    .as_ref()
-                    .is_some_and(|asked| asked.0 == id)
-            {
-                self.panes[0].take(listing);
-                self.show_pane(0);
+            match found {
+                Found::Listing(id, listing)
+                    if self.panes[0]
+                        .asked
+                        .as_ref()
+                        .is_some_and(|asked| asked.0 == id) =>
+                {
+                    self.panes[0].take(listing);
+                    self.show_pane(0);
+                }
+                Found::Changed(id, result) => self.changed(0, id, result, transfers, lines),
+                Found::Measured(id, result) => self.counted(0, id, result, lines),
+                _ => {}
             }
+        }
+        for (id, answer) in transfers.answers() {
+            match answer {
+                Answer::Changed(result) => self.changed(1, id, result, transfers, lines),
+                Answer::Measured(result) => self.counted(1, id, result, lines),
+            }
+        }
+        // Changes and counts that PC never answered (an older Queqiao does not know them).
+        let late: Vec<(usize, u32)> = self
+            .changes
+            .iter()
+            .filter(|(_, (_, at))| at.elapsed() > CHANGE_LIMIT)
+            .map(|(key, _)| *key)
+            .collect();
+        for (side, id) in late {
+            let error =
+                tr("That PC did not answer: its Queqiao may be older than this one.").to_string();
+            self.changed(side, id, Err(error), transfers, lines);
+        }
+        let late: Vec<(usize, u32)> = self
+            .counts
+            .iter()
+            .filter(|count| count.at.elapsed() > COUNT_LIMIT)
+            .flat_map(|count| count.waiting.iter().map(|id| (count.side, *id)))
+            .collect();
+        for (side, id) in late {
+            let error =
+                tr("That PC did not answer: its Queqiao may be older than this one.").to_string();
+            self.counted(side, id, Err(error), lines);
         }
         for (id, listing) in transfers.listings() {
             if self.panes[1]
@@ -348,6 +564,43 @@ impl FilesUi {
                     lines.push(format!("sending {} (dropped)", path.display()));
                 }
             }
+            FileWindowEvent::MakeFolder { remote, name } => {
+                let side = usize::from(remote);
+                let folder = self.panes[side].folder.clone();
+                if !folder.is_empty() {
+                    let label = name.clone();
+                    self.change(side, Change::MakeFolder { folder, name }, &label, transfers);
+                }
+            }
+            FileWindowEvent::Rename {
+                remote,
+                name,
+                new_name,
+            } => {
+                let side = usize::from(remote);
+                let folder = self.panes[side].folder.clone();
+                if !folder.is_empty() {
+                    let path = browse::child(&folder, &name);
+                    let change = Change::Rename {
+                        path,
+                        name: new_name,
+                    };
+                    self.change(side, change, &name, transfers);
+                }
+            }
+            FileWindowEvent::Delete { remote, names } => {
+                let side = usize::from(remote);
+                let folder = self.panes[side].folder.clone();
+                if !folder.is_empty() {
+                    for name in names {
+                        let path = browse::child(&folder, &name);
+                        self.change(side, Change::Delete { path }, &name, transfers);
+                    }
+                }
+            }
+            FileWindowEvent::Measure { remote, names } => {
+                self.count(usize::from(remote), &names, transfers);
+            }
             FileWindowEvent::PauseAll => transfers.pause_all(true),
             FileWindowEvent::ResumeAll => transfers.pause_all(false),
             FileWindowEvent::CancelAll => transfers.cancel_all(),
@@ -431,6 +684,8 @@ impl FilesUi {
                     test.step = 2;
                 }
             }
+            // Then the changes there.
+            3.. => self.change_step(transfers, lines),
             // The jobs: two, both done.
             _ => {
                 let jobs = transfers.jobs();
@@ -451,7 +706,7 @@ impl FilesUi {
                 let passed =
                     sent_done && fetched_done && fetched.starts_with(b"queqiao browse test: down");
                 lines.push(format!(
-                    "browse test: {} (fetched down.txt: {fetched_done}, {} bytes here; sent up.txt: {sent_done}; jobs: {:?})",
+                    "browse test: transfers {} (fetched down.txt: {fetched_done}, {} bytes here; sent up.txt: {sent_done}; jobs: {:?})",
                     if passed { "PASS" } else { "FAIL" },
                     fetched.len(),
                     jobs.iter()
@@ -459,6 +714,91 @@ impl FilesUi {
                         .collect::<Vec<_>>()
                 ));
                 test.jobs = jobs.iter().map(|job| job.id).collect();
+                test.transfers_passed = passed;
+                test.step = 3;
+                test.started = Instant::now();
+            }
+        }
+    }
+
+    /// The browse test's changes in that PC's folder, one at a time, each checked in the folder read again.
+    fn change_step(&mut self, transfers: &mut Transfers, lines: &mut Vec<String>) {
+        let idle = self.changes.is_empty()
+            && self.counts.is_empty()
+            && self.panes.iter().all(|pane| pane.asked.is_none());
+        let Some(step) = self.test.as_ref().map(|test| test.step) else {
+            return;
+        };
+        let timed_out = self
+            .test
+            .as_ref()
+            .is_some_and(|test| test.started.elapsed() > Duration::from_secs(60));
+        if !idle && !timed_out {
+            return;
+        }
+        let there = |name: &str| self.panes[1].items.iter().any(|item| item.name == name);
+        let (made, renamed, gone) = (
+            there(TEST_FOLDER),
+            there(TEST_RENAMED),
+            !there(TEST_RENAMED),
+        );
+        let notice = self.panes[1].notice.clone();
+        let event = match step {
+            3 => Some(FileWindowEvent::MakeFolder {
+                remote: true,
+                name: TEST_FOLDER.into(),
+            }),
+            4 => Some(FileWindowEvent::Rename {
+                remote: true,
+                name: TEST_FOLDER.into(),
+                new_name: TEST_RENAMED.into(),
+            }),
+            5 => Some(FileWindowEvent::Measure {
+                remote: true,
+                names: vec![TEST_RENAMED.into(), "down.txt".into()],
+            }),
+            6 => Some(FileWindowEvent::Delete {
+                remote: true,
+                names: vec![TEST_RENAMED.into()],
+            }),
+            _ => None,
+        };
+        let Some(test) = self.test.as_mut() else {
+            return;
+        };
+        // What the step before came to.
+        let (ok, what) = match step {
+            4 => (made, format!("new folder made: {made}")),
+            5 => (renamed && !made, format!("renamed: {}", renamed && !made)),
+            // The renamed folder is empty: the count is down.txt's 1 file (and no folder).
+            6 => (
+                (notice.contains(": 1,") || notice.contains(" 1 "))
+                    && !notice.contains("did not answer"),
+                format!("counted: {notice}"),
+            ),
+            7 => (gone, format!("deleted: {gone}")),
+            _ => (true, String::new()),
+        };
+        if !what.is_empty() {
+            test.changes.push(what);
+            test.changes_passed &= ok && !timed_out;
+        }
+        test.step += 1;
+        test.started = Instant::now();
+        match event {
+            Some(event) => self.handle(event, transfers, lines),
+            None => {
+                let passed = test.transfers_passed && test.changes_passed;
+                lines.push(format!(
+                    "browse test: {} (transfers: {}; changes there: {})",
+                    if passed { "PASS" } else { "FAIL" },
+                    if test.transfers_passed {
+                        "PASS"
+                    } else {
+                        "FAIL"
+                    },
+                    test.changes.join(", ")
+                ));
                 self.test = None;
             }
         }

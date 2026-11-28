@@ -87,6 +87,16 @@ pub(crate) const MENU_END: u16 = 0x1750;
 /// Lock that PC when the session ends (the control center's Security).
 pub(crate) const MENU_LOCK_AFTER: u16 = 0x1760;
 
+/// Port mapping: a port on this PC that leads to one on that PC (or a computer it reaches).
+pub(crate) const MENU_PORT_MAPPING: u16 = 0x1770;
+
+/// That PC's resolution (the control center's Screen group): back to its own, the size fitting this window, and its
+/// sizes (MENU_DISPLAY_MODES + 16 * index, at most 24).
+pub(crate) const MENU_DISPLAY_OWN: u16 = 0x1780;
+pub(crate) const MENU_DISPLAY_FIT: u16 = 0x1790;
+pub(crate) const MENU_DISPLAY_MODES: u16 = 0x1800;
+pub(crate) const MAX_DISPLAY_MODES: u16 = 24;
+
 /// The picture's codec: (menu id, preference, label).
 pub(crate) const MENU_CODEC: [(u16, queqiao_core::protocol::CodecPreference, &str); 4] = [
     (
@@ -513,6 +523,7 @@ pub(crate) fn run_session(
         (MENU_PRIVACY, tr("Darken that PC's screen")),
         (MENU_TERMINAL, tr("Open a command line on that PC")),
         (MENU_COMMAND_LINES, tr("Command lines...")),
+        (MENU_PORT_MAPPING, tr("Port mapping...")),
         (MENU_FULL_SCREEN, full_screen_label.as_str()),
         (MENU_ON_TOP, tr("Always on top")),
         (MENU_SEND_FILES, tr("Send files...")),
@@ -587,7 +598,7 @@ pub(crate) fn run_session(
         .iter()
         .map(|(id, _, text)| (*id, tr(text)))
         .collect();
-    window.add_submenu(tr("Resolution"), &resolution_items);
+    window.add_submenu(tr("Picture size"), &resolution_items);
     let opacity_items: Vec<(u16, &str)> = MENU_OPACITY
         .iter()
         .map(|(id, _, text)| (*id, tr(text)))
@@ -626,6 +637,23 @@ pub(crate) fn run_session(
     let mut last_pointer: Option<queqiao_core::protocol::PointerShape> = None;
     let mut pointer_hidden = false;
     let mut pointer_shapes = 0u32;
+    // Drawing on that PC's screen (annotate.rs): its menu items, its mode, its test; the window as drawing mode has it
+    // (the pen's pointer while drawing, that PC's pointer again after).
+    crate::annotate::add_menu(&window);
+    let mut drawing = crate::annotate::Drawing::new();
+    let mut draw_test = options
+        .annotate_test
+        .then(crate::annotate::DrawTest::default);
+    macro_rules! show_drawing {
+        () => {
+            crate::annotate::show(
+                &mut window,
+                &drawing,
+                last_pointer.as_ref().filter(|_| pointer_shape_on),
+                pointer_shape_on && pointer_hidden,
+            )
+        };
+    }
     // The game mouse's speed in percent, and the part of a count not sent yet (so slow loses nothing).
     let mut mouse_speed = 100u32;
     let mut mouse_rest = (0i32, 0i32);
@@ -663,15 +691,39 @@ pub(crate) fn run_session(
     // that PC's screens or the keys change. Its check marks follow the menu's.
     let mut screen_names: Vec<String> = Vec::new();
     let mut volume = 100u8;
-    let build_panel = |window: &Window, screens: &[String], keys: &hotkeys::Keys, volume: u8| {
+    // That PC's resolution as it last told it (the control center offers its sizes).
+    let mut that_resolution: Option<crate::control::ThatResolution> = None;
+    // Tests (--display-mode-test): 0 nothing asked yet, 1 the size asked for, 2 its own asked for again, 3 done.
+    let mut display_mode_step = 0u8;
+    let build_panel = |window: &Window,
+                       screens: &[String],
+                       keys: &hotkeys::Keys,
+                       volume: u8,
+                       display: Option<&crate::control::ThatResolution>| {
         window.set_panel(crate::control::items(
             screens,
+            display,
             &keys.full_screen().text(),
             &keys.game_mouse().text(),
             volume,
         ));
+        if let Some(display) = display {
+            let own = display.current == display.own;
+            window.check_menu_item(MENU_DISPLAY_OWN, own);
+            for (index, size) in display
+                .sizes
+                .iter()
+                .enumerate()
+                .take(usize::from(MAX_DISPLAY_MODES))
+            {
+                window.check_menu_item(
+                    MENU_DISPLAY_MODES + 16 * index as u16,
+                    !own && *size == display.current,
+                );
+            }
+        }
     };
-    build_panel(&window, &screen_names, &keys, volume);
+    build_panel(&window, &screen_names, &keys, volume, None);
     let mut lock_after = false;
     window.check_menu_item(MENU_LOCK_AFTER, false);
     let (mut fps_cap, mut quality) = options.picture.unwrap_or((60, Quality::Balanced));
@@ -685,6 +737,11 @@ pub(crate) fn run_session(
     };
     show_picture_choice(&window, fps_cap, quality);
     let mut terminals = TerminalWindows::default();
+    // Port mapping (on the command lines' stream).
+    let mut tunnels = queqiao_tunnel::Tunnels::new();
+    // Tests (--tunnel-test): the page fetched through the mapping comes back here.
+    let (tunnel_answer, tunnel_result) = std::sync::mpsc::channel::<String>();
+    let mut tunnel_test_started = false;
     // The file picker runs on a thread of its own (the session goes on meanwhile); the files chosen come back here.
     let (picked_files, picked) = std::sync::mpsc::channel::<Vec<PathBuf>>();
     let pick_title = trf("Send files to {name}", &[("name", agent)]);
@@ -1017,7 +1074,22 @@ pub(crate) fn run_session(
             closed = Some("the window was closed".to_string());
             break;
         }
-        for event in window.take_events() {
+        // Tests (--annotate-test): drawing through the window's own events, as a person's.
+        let mut test_events = Vec::new();
+        if let Some(test) = draw_test.as_mut() {
+            let since_first = first_picture_after.map(|at| started.elapsed().saturating_sub(at));
+            let (events, picture_due) = test.events(
+                since_first,
+                &mut drawing,
+                picture_size,
+                window.client_size(),
+            );
+            test_events = events;
+            if picture_due {
+                due_pictures.push((Instant::now(), "viewer_annotation.bmp".into()));
+            }
+        }
+        for event in window.take_events().into_iter().chain(test_events) {
             // The control center's volume slider.
             if let WindowEvent::Value { id, value } = event {
                 if id == MENU_VOLUME {
@@ -1052,6 +1124,19 @@ pub(crate) fn run_session(
                         current_screen = index;
                         Some(Command::Screen(index))
                     }
+                    MENU_DISPLAY_OWN => Some(Command::DisplayMode { width: 0, height: 0 }),
+                    MENU_DISPLAY_FIT => that_resolution.as_ref().and_then(|display| {
+                        let (width, height) = window.client_size();
+                        let sizes: Vec<(u32, u32)> =
+                            display.sizes.iter().map(|(w, h)| (u32::from(*w), u32::from(*h))).collect();
+                        let fit = crate::control::fitting(&sizes, (width, height))?;
+                        lines.push(format!("that PC's resolution to fit this window ({width}x{height}): {}x{}", fit.0, fit.1));
+                        Some(Command::DisplayMode { width: fit.0 as u16, height: fit.1 as u16 })
+                    }),
+                    id if (MENU_DISPLAY_MODES..MENU_DISPLAY_MODES + 16 * MAX_DISPLAY_MODES).contains(&id) => that_resolution
+                        .as_ref()
+                        .and_then(|display| display.sizes.get(usize::from((id - MENU_DISPLAY_MODES) / 16)).copied())
+                        .map(|(width, height)| Command::DisplayMode { width, height }),
                     id if MENU_RESOLUTION.iter().any(|(item, _, _)| *item == id) => {
                         resolution = MENU_RESOLUTION.iter().find(|(item, _, _)| *item == id).map_or(0, |(_, short, _)| *short);
                         show_resolution(&window, resolution);
@@ -1059,6 +1144,20 @@ pub(crate) fn run_session(
                     }
                     MENU_TERMINAL => {
                         terminals.open(&peer, agent, false, lines);
+                        None
+                    }
+                    id if crate::annotate::menu_ids().contains(&id) => {
+                        for message in drawing.menu(id, Instant::now()) {
+                            peer.send_data(message.encode());
+                        }
+                        show_drawing!();
+                        if drawing.is_on() {
+                            status.notice(tr("Drawing on that PC's screen: Esc ends it."));
+                        }
+                        None
+                    }
+                    MENU_PORT_MAPPING => {
+                        port_mapping_menu(|items| popup_menu(window.hwnd(), items), &mut tunnels, lines);
                         None
                     }
                     MENU_SEND_FILES => {
@@ -1245,7 +1344,7 @@ pub(crate) fn run_session(
                             window.rename_menu_item(MENU_FULL_SCREEN, &trf("Full screen ({key})", &[("key", &keys.full_screen().text())]));
                             window.rename_menu_item(MENU_GAME_MOUSE, &trf("Game mouse ({key})", &[("key", &keys.game_mouse().text())]));
                             register_boss(&window, &keys, lines);
-                            build_panel(&window, &screen_names, &keys, volume);
+                            build_panel(&window, &screen_names, &keys, volume, that_resolution.as_ref());
                             lines.push("hotkeys changed".into());
                         }
                         None
@@ -1369,6 +1468,20 @@ pub(crate) fn run_session(
                 }
                 continue;
             }
+            // Drawing mode (annotate.rs): the mouse draws on that PC's screen instead of controlling it; Esc ends it.
+            if drawing.takes_events() {
+                let outcome =
+                    drawing.event(&event, picture_size, window.client_size(), Instant::now());
+                for message in &outcome.messages {
+                    peer.send_data(message.encode());
+                }
+                if outcome.ended {
+                    show_drawing!();
+                }
+                if outcome.taken {
+                    continue;
+                }
+            }
             if options.input_test {
                 continue;
             }
@@ -1386,6 +1499,18 @@ pub(crate) fn run_session(
                 peer.send_data(message.encode());
                 stats.inputs_sent += 1;
             }
+        }
+        // Drawing mode: points the throttle held back; that PC never answering it (a Queqiao before drawing there).
+        let (messages, unanswered) = drawing.poll(Instant::now());
+        for message in &messages {
+            peer.send_data(message.encode());
+        }
+        if unanswered {
+            status.notice(tr(
+                "That PC's Queqiao cannot show drawings (it may be an older version): drawing ended.",
+            ));
+            lines.push("drawing: that PC did not answer drawing mode: ended here".into());
+            show_drawing!();
         }
         // Boss key test: pressed once (hidden?), again (shown?).
         if let Some((due, step, hidden_seen)) = boss_test
@@ -1653,6 +1778,13 @@ pub(crate) fn run_session(
             peer.send_stream(Stream::Clipboard, message);
         }
         terminals.poll(&peer, lines);
+        for message in tunnels.poll(peer.room(Stream::Terminal)) {
+            peer.send_stream(Stream::Terminal, message);
+        }
+        lines.extend(tunnels.notes());
+        if let Ok(result) = tunnel_result.try_recv() {
+            lines.push(result);
+        }
         restarter.step(&peer, signal, lines);
 
         let mut event = peer.wait_event(Duration::from_millis(2));
@@ -1749,9 +1881,17 @@ pub(crate) fn run_session(
                     if options.terminal_test {
                         terminals.open(&peer, agent, true, lines);
                     }
+                    if let Some(port) = options.tunnel_test
+                        && !tunnel_test_started
+                    {
+                        tunnel_test_started = true;
+                        start_tunnel_test(&mut tunnels, port, tunnel_answer.clone(), lines);
+                    }
                 }
                 PeerEvent::StreamData(Stream::Terminal, bytes) => {
-                    if let Some(message) = TerminalMessage::decode(&bytes) {
+                    if tunnels.handle(&bytes) {
+                        // A port mapping's message: its replies go with its poll.
+                    } else if let Some(message) = TerminalMessage::decode(&bytes) {
                         terminals.on_message(message, &peer, lines);
                     }
                 }
@@ -1929,7 +2069,13 @@ pub(crate) fn run_session(
                         window.check_menu_item(MENU_SCREENS + 16 * u16::from(current), true);
                         current_screen = current;
                         screen_names = names.clone();
-                        build_panel(&window, &screen_names, &keys, volume);
+                        build_panel(
+                            &window,
+                            &screen_names,
+                            &keys,
+                            volume,
+                            that_resolution.as_ref(),
+                        );
                         let english: Vec<String> = sizes
                             .iter()
                             .enumerate()
@@ -1938,6 +2084,77 @@ pub(crate) fn run_session(
                             })
                             .collect();
                         lines.push(format!("screens of that PC: {}", english.join(", ")));
+                    }
+                    Some(Message::DisplayModes {
+                        current,
+                        own,
+                        sizes,
+                        note,
+                    }) => {
+                        lines.push(if note.is_empty() {
+                            format!(
+                                "that PC's resolution: {}x{} (its own {}x{}), {} sizes offered",
+                                current.0,
+                                current.1,
+                                own.0,
+                                own.1,
+                                sizes.len()
+                            )
+                        } else {
+                            format!("that PC's resolution cannot change: {note}")
+                        });
+                        // Tests: the size asked for once offered; its own again once shown; done once that is back.
+                        if let Some(wanted) = options.display_mode_test {
+                            let ask = |size: (u16, u16)| {
+                                let (width, height) = size;
+                                peer.send_data(
+                                    Message::Command(Command::DisplayMode { width, height })
+                                        .encode(),
+                                );
+                            };
+                            match display_mode_step {
+                                0 if sizes.contains(&wanted) => {
+                                    ask(wanted);
+                                    display_mode_step = 1;
+                                }
+                                0 => {
+                                    lines.push(format!(
+                                        "display mode test: FAIL ({}x{} not offered)",
+                                        wanted.0, wanted.1
+                                    ));
+                                    display_mode_step = 3;
+                                }
+                                1 if current == wanted && own != wanted => {
+                                    lines.push(format!(
+                                        "display mode test: that PC shows {}x{}",
+                                        wanted.0, wanted.1
+                                    ));
+                                    ask((0, 0));
+                                    display_mode_step = 2;
+                                }
+                                2 if current == own => {
+                                    lines.push(format!(
+                                        "display mode test: PASS (its own {}x{} back)",
+                                        own.0, own.1
+                                    ));
+                                    display_mode_step = 3;
+                                }
+                                _ => {}
+                            }
+                        }
+                        that_resolution = Some(crate::control::ThatResolution {
+                            current,
+                            own,
+                            sizes,
+                            note,
+                        });
+                        build_panel(
+                            &window,
+                            &screen_names,
+                            &keys,
+                            volume,
+                            that_resolution.as_ref(),
+                        );
                     }
                     Some(Message::Encoder { picture, gpu }) => {
                         lines.push(format!(
@@ -1991,9 +2208,36 @@ pub(crate) fn run_session(
                             ));
                         }
                     }
+                    // Drawing on that PC's screen: its answer to each step (annotate.rs).
+                    Some(Message::AnnotateState {
+                        shown,
+                        strokes,
+                        note,
+                    }) => {
+                        lines.push(format!(
+                            "drawing on that PC's screen: {}{}",
+                            if shown {
+                                format!("shown with {strokes} strokes")
+                            } else {
+                                "not shown".to_string()
+                            },
+                            if note.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({note})")
+                            }
+                        ));
+                        if let Some(test) = draw_test.as_mut() {
+                            test.answers.push((shown, strokes));
+                        }
+                        if drawing.answered(shown) {
+                            status.notice(&note);
+                            show_drawing!();
+                        }
+                    }
                     Some(Message::PointerShape(shape)) => {
                         pointer_shapes += 1;
-                        if pointer_shape_on {
+                        if pointer_shape_on && !drawing.is_on() {
                             window.set_remote_cursor(queqiao_display::RemoteCursor::from_shape(
                                 &shape,
                             ));
@@ -2002,7 +2246,9 @@ pub(crate) fn run_session(
                     }
                     Some(Message::PointerVisible(visible)) => {
                         pointer_hidden = !visible;
-                        window.set_pointer_hidden(pointer_shape_on && pointer_hidden);
+                        window.set_pointer_hidden(
+                            pointer_shape_on && pointer_hidden && !drawing.is_on(),
+                        );
                     }
                     Some(Message::ClipboardText(text)) => {
                         clipboard_in += 1;
@@ -2135,6 +2381,10 @@ pub(crate) fn run_session(
         summary(&mut total)
     ));
     lines.push(format!("input events sent: {}", stats.inputs_sent));
+    lines.extend(drawing.report());
+    if let Some(test) = &draw_test {
+        lines.push(test.result(&drawing));
+    }
     if let Some(microphone) = &microphone {
         let sent = microphone.stats();
         lines.push(format!(
@@ -2703,6 +2953,142 @@ pub(crate) fn scaled_move(value: i32, percent: u32, rest: &mut i32) -> i32 {
     out
 }
 
+/// Tests (--tunnel-test): a port mapping to `port` of that PC, then GET /down.txt through it on a thread of its own;
+/// "tunnel test: PASS" when the page holds the browse test's text.
+fn start_tunnel_test(
+    tunnels: &mut queqiao_tunnel::Tunnels,
+    port: u16,
+    answer: std::sync::mpsc::Sender<String>,
+    lines: &mut Vec<String>,
+) {
+    let rule = match tunnels.add_rule(0, "127.0.0.1", port) {
+        Ok(rule) => rule,
+        Err(error) => {
+            lines.push(format!("tunnel test: FAIL (no mapping: {error})"));
+            return;
+        }
+    };
+    lines.push(format!("tunnel test: {} -> {port} there", rule.local));
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let started = Instant::now();
+        let result = (|| -> Result<String, String> {
+            let mut stream =
+                std::net::TcpStream::connect_timeout(&rule.local, Duration::from_secs(5))
+                    .map_err(|e| e.to_string())?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .map_err(|e| e.to_string())?;
+            stream
+                .write_all(b"GET /down.txt HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                .map_err(|e| e.to_string())?;
+            let mut page = Vec::new();
+            stream.read_to_end(&mut page).map_err(|e| e.to_string())?;
+            Ok(String::from_utf8_lossy(&page).into_owned())
+        })();
+        let line = match result {
+            Ok(page)
+                if page.starts_with("HTTP/1.") && page.contains("queqiao browse test: down") =>
+            {
+                format!(
+                    "tunnel test: PASS ({} bytes through the mapping in {} ms)",
+                    page.len(),
+                    started.elapsed().as_millis()
+                )
+            }
+            Ok(page) => format!(
+                "tunnel test: FAIL (the page: {:?})",
+                page.chars().take(120).collect::<String>()
+            ),
+            Err(error) => format!("tunnel test: FAIL ({error})"),
+        };
+        let _ = answer.send(line);
+    });
+}
+
+/// "Port mapping...": the mappings (each removed with a click) and "Add a port mapping...", which asks where it leads
+/// and which port of this PC it takes.
+fn port_mapping_menu(
+    menu: impl FnOnce(&[(u16, &str, bool)]) -> Option<u16>,
+    tunnels: &mut queqiao_tunnel::Tunnels,
+    lines: &mut Vec<String>,
+) {
+    const ADD: u16 = 0x3FF0;
+    let rules = tunnels.rules();
+    let mut labels: Vec<(u16, String)> = rules
+        .iter()
+        .enumerate()
+        .map(|(at, rule)| {
+            (
+                0x3000 + at as u16,
+                trf(
+                    "{local} → {target} on that PC ({count} open): remove",
+                    &[
+                        ("local", &rule.local.to_string()),
+                        ("target", &format!("{}:{}", rule.host, rule.port)),
+                        ("count", &rule.open.to_string()),
+                    ],
+                ),
+            )
+        })
+        .collect();
+    labels.push((ADD, tr("Add a port mapping...").to_string()));
+    let items: Vec<(u16, &str, bool)> = labels
+        .iter()
+        .map(|(id, label)| (*id, label.as_str(), false))
+        .collect();
+    let tell = |text: String| {
+        std::thread::spawn(move || queqiao_display::show_info(tr("Port mapping"), &text));
+    };
+    match menu(&items) {
+        Some(ADD) => {
+            let Some(typed) = ask_text(
+                tr("Port mapping"),
+                tr(
+                    "Where it leads: a port of that PC (22), or an address and port that PC reaches (192.168.1.5:80):",
+                ),
+                "",
+            ) else {
+                return;
+            };
+            let (host, port) = match queqiao_tunnel::parse_target(&typed) {
+                Ok(target) => target,
+                Err(error) => return tell(error),
+            };
+            let Some(local) = ask_text(
+                tr("Port mapping"),
+                tr("The port on this PC programs connect to (0: any free one):"),
+                &port.to_string(),
+            ) else {
+                return;
+            };
+            let Ok(local) = local.trim().parse::<u16>() else {
+                return tell(trf(
+                    "{port} is not a port (0 to 65535)",
+                    &[("port", local.trim())],
+                ));
+            };
+            match tunnels.add_rule(local, &host, port) {
+                Ok(rule) => tell(trf(
+                    "Programs on this PC connect to {local}: it leads to {target} on that PC.",
+                    &[
+                        ("local", &rule.local.to_string()),
+                        ("target", &format!("{host}:{port}")),
+                    ],
+                )),
+                Err(error) => tell(error),
+            }
+        }
+        Some(id) if id >= 0x3000 => {
+            if let Some(rule) = rules.get(usize::from(id - 0x3000)) {
+                tunnels.remove_rule(rule.id);
+            }
+        }
+        _ => {}
+    }
+    lines.extend(tunnels.notes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2727,6 +3113,7 @@ mod tests {
             MENU_TRANSFERS,
             MENU_RESTART_QUEQIAO,
             MENU_COMMAND_LINES,
+            MENU_PORT_MAPPING,
             MENU_ACTUAL_SIZE,
             MENU_HOTKEYS,
             MENU_POINTER_SHAPE,
@@ -2747,6 +3134,8 @@ mod tests {
         ids.extend(MENU_OPACITY.iter().map(|(id, _, _)| *id));
         // Up to 16 screens.
         ids.extend((0..16u16).map(|index| MENU_SCREENS + 16 * index));
+        // Drawing's items.
+        ids.extend(crate::annotate::menu_ids());
         for id in &ids {
             assert_eq!(id & 0xF, 0, "menu id {id:#x} is not a multiple of 16");
             assert!(*id < 0xF000, "menu id {id:#x} is in Windows' own range");

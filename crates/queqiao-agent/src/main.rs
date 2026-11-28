@@ -16,6 +16,8 @@
 
 // On every system (docs/LINUX.md steps 3 and 5): the command line, the session with a viewer, the account mode.
 mod account;
+/// Drawing on this PC's screen: the viewer's pen strokes over it (help sessions).
+mod annotate;
 /// Sharp pictures on a narrow link: the bitrate the link carried, held while the screen is still; a keyframe after motion.
 mod hold;
 mod lock_gate;

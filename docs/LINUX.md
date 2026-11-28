@@ -144,6 +144,16 @@ agent makes it with NVENC API 12 where the driver has it (8-bit 4:2:0), the view
 does, and the viewer's default (Automatic) gets AV1 when both can, else H.265 when both can, else H.264; run_m3_linux.sh's av1 session checks
 it (colours too), av1_api11 the agent on API 11.1 (an older driver): H.264.
 
+GNOME without the portal's question (2026-11-28, opt-in): with "Control GNOME without asking" turned on in the
+controlled PC's settings (When controlled), sessions of the account's own devices open GNOME's own interfaces instead of
+the portal: org.gnome.Mutter.RemoteDesktop (the keyboard and pointer) and a linked org.gnome.Mutter.ScreenCast session
+recording the primary monitor, its PipeWire node read through the person's own PipeWire socket (crate queqiao-portal,
+mutter.rs). No dialog comes; someone helping from another account still goes through the portal and its question.
+Where mutter's interfaces are not there, the portal as below (the report says why). Tested with GNOME 42 and 46 on the
+build machine (scripts/run_wayland_linux.sh with MUTTER=1: the picture, all input, and no dialog). The screen's
+resolution for a session goes through org.gnome.Mutter.DisplayConfig (ApplyMonitorsConfig, "temporary": never saved),
+X11's through RandR (crate queqiao-capture, display_mode.rs).
+
 Wayland (2026-11-25): the agent captures through the ScreenCast portal (xdg-desktop-portal, which GNOME, KDE and the
 wlroots desktops answer) and its PipeWire stream (libpipewire loaded at run time, as CUDA and PulseAudio are; only its
 stable C API, the format pods written by hand: it builds without PipeWire's headers and runs with any PipeWire 0.3 or

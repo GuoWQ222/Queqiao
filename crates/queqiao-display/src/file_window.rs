@@ -35,7 +35,10 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Time::FileTimeToSystemTime;
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
-use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, VK_BACK, VK_F5, VK_RETURN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_F2, VK_F5, VK_RETURN,
+    VK_SHIFT,
+};
 use windows::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, SHFILEINFOW,
     SHGFI_SMALLICON, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
@@ -83,6 +86,9 @@ const ID_CANCEL_ALL: u16 = 172;
 const ID_CLEAR: u16 = 173;
 /// The folder box's Enter (sent by its edit field's subclass).
 const ID_FOLDER_ENTER: [u16; 2] = [180, 181];
+const ID_NEW_FOLDER: [u16; 2] = [190, 191];
+/// The answer to a delete question (asked on a thread of its own): wparam 1 for yes.
+const WM_DELETE_ANSWER: u32 = WM_APP + 41;
 
 // List view and combo box messages and styles (commctrl.h).
 const LVM_SETIMAGELIST: u32 = 0x1003;
@@ -97,6 +103,11 @@ const LVM_INSERTITEMW: u32 = 0x104D;
 const LVM_INSERTCOLUMNW: u32 = 0x1061;
 const LVM_SETITEMTEXTW: u32 = 0x1074;
 const LVM_GETITEMW: u32 = 0x104B;
+const LVM_DELETEITEM: u32 = 0x1008;
+const LVM_EDITLABELW: u32 = 0x1076;
+const LVM_ENSUREVISIBLE: u32 = 0x1013;
+const LVS_EDITLABELS: u32 = 0x200;
+const EM_SETSEL: u32 = 0xB1;
 const LVS_REPORT: u32 = 0x1;
 const LVS_SINGLESEL: u32 = 0x4;
 const LVS_SHOWSELALWAYS: u32 = 0x8;
@@ -122,6 +133,8 @@ const NM_CUSTOMDRAW: u32 = (-12i32) as u32;
 const LVN_ITEMCHANGING: u32 = (-100i32) as u32;
 const LVN_ITEMCHANGED: u32 = (-101i32) as u32;
 const LVN_KEYDOWN: u32 = (-155i32) as u32;
+const LVN_BEGINLABELEDITW: u32 = (-175i32) as u32;
+const LVN_ENDLABELEDITW: u32 = (-176i32) as u32;
 const CDDS_PREPAINT: u32 = 0x1;
 const CDDS_ITEMPREPAINT: u32 = 0x10001;
 const CDDS_SUBITEM: u32 = 0x20000;
@@ -156,6 +169,7 @@ const GLYPH_PLAY: &str = "\u{E768}";
 const GLYPH_CANCEL: &str = "\u{E711}";
 const GLYPH_CLEAR: &str = "\u{E74D}";
 const GLYPH_FOLDER: &str = "\u{E838}";
+const GLYPH_NEW_FOLDER: &str = "\u{E8F4}";
 
 // Layout in 96-DPI units.
 const MARGIN: i32 = 16;
@@ -286,6 +300,13 @@ struct NmLvKeyDown {
     key: u16,
 }
 
+/// NMLVDISPINFOW: a label edit's end (the text typed, null when cancelled).
+#[repr(C)]
+struct NmLvDispInfo {
+    hdr: NmHdr,
+    item: LvItem,
+}
+
 #[repr(C)]
 struct DrawItem {
     control_type: u32,
@@ -340,8 +361,19 @@ struct State {
     icons: HashMap<String, i32>,
 }
 
+/// A name being typed in a pane's list: its side, its row, and whether the row is a new folder's (made for it).
+#[derive(Clone, Copy)]
+struct Editing {
+    side: usize,
+    row: usize,
+    new_folder: bool,
+}
+
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    static EDITING: std::cell::Cell<Option<Editing>> = const { std::cell::Cell::new(None) };
+    /// The entries a delete question (open now) is about: their pane, their names.
+    static DELETING: RefCell<Option<(bool, Vec<String>)>> = const { RefCell::new(None) };
     /// While a list is filled: its item changes are not the person's.
     static FILLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -655,7 +687,11 @@ impl FileWindow {
             let list = child(
                 w!("SysListView32"),
                 "",
-                LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS | LVS_NOSORTHEADER,
+                LVS_REPORT
+                    | LVS_SHOWSELALWAYS
+                    | LVS_SHAREIMAGELISTS
+                    | LVS_NOSORTHEADER
+                    | LVS_EDITLABELS,
                 ID_LIST[side],
             );
             unsafe {
@@ -725,6 +761,12 @@ impl FileWindow {
                 (ID_BACK[side], Look::Glyph, GLYPH_BACK, tr("Back")),
                 (ID_UP[side], Look::Glyph, GLYPH_UP, tr("Up")),
                 (ID_REFRESH[side], Look::Glyph, GLYPH_REFRESH, tr("Refresh")),
+                (
+                    ID_NEW_FOLDER[side],
+                    Look::Glyph,
+                    GLYPH_NEW_FOLDER,
+                    tr("New folder"),
+                ),
                 (
                     ID_SEND[side],
                     Look::Primary,
@@ -1355,7 +1397,12 @@ fn layout(hwnd: HWND) {
             let row = card.top + px(8, s);
             let size = px(TOOLBAR, s);
             let mut x = card.left + px(8, s);
-            for id in [ID_BACK[side], ID_UP[side], ID_REFRESH[side]] {
+            for id in [
+                ID_BACK[side],
+                ID_UP[side],
+                ID_REFRESH[side],
+                ID_NEW_FOLDER[side],
+            ] {
                 if let Some(button) = state.buttons.get(&id) {
                     place(
                         button.hwnd,
@@ -1733,6 +1780,7 @@ fn refresh_buttons() {
             let pane = &state.panes[side];
             enable(ID_BACK[side], pane.can_go_back);
             enable(ID_UP[side], pane.can_go_up);
+            enable(ID_NEW_FOLDER[side], !pane.folder.is_empty());
             // Into the other side's folder: never into the places list.
             enable(
                 ID_SEND[side],
@@ -2030,6 +2078,358 @@ fn job_menu(hwnd: HWND, row: usize) {
     }
 }
 
+/// The rows of pane `side` that are selected (not those only checked).
+fn selected_rows(side: usize) -> Vec<usize> {
+    STATE.with_borrow(|state| {
+        let Some(state) = state.as_ref() else {
+            return Vec::new();
+        };
+        let list = state.lists[side];
+        (0..row_count(list).min(state.panes[side].items.len()))
+            .filter(|row| {
+                let flags = unsafe {
+                    SendMessageW(
+                        list,
+                        LVM_GETITEMSTATE,
+                        Some(WPARAM(*row)),
+                        Some(LPARAM(LVIS_SELECTED as isize)),
+                    )
+                };
+                flags.0 as u32 & LVIS_SELECTED != 0
+            })
+            .collect()
+    })
+}
+
+/// Whether the entry can be renamed or deleted: a file or folder inside a folder (not a drive or a place).
+fn changeable(item: &FileItem, folder: &str) -> bool {
+    !folder.is_empty() && matches!(item.kind, FileKind::File | FileKind::Folder)
+}
+
+/// Starts typing a new name for row `row` of pane `side` (its name's part before the extension selected).
+fn start_rename(side: usize, row: usize) {
+    let Some((list, name, is_file)) = STATE.with_borrow(|state| {
+        let state = state.as_ref()?;
+        let pane = &state.panes[side];
+        let item = pane
+            .items
+            .get(row)
+            .filter(|item| changeable(item, &pane.folder))?;
+        Some((
+            state.lists[side],
+            item.name.clone(),
+            item.kind == FileKind::File,
+        ))
+    }) else {
+        return;
+    };
+    EDITING.set(Some(Editing {
+        side,
+        row,
+        new_folder: false,
+    }));
+    let _ = unsafe { SetFocus(Some(list)) };
+    let edit = unsafe { SendMessageW(list, LVM_EDITLABELW, Some(WPARAM(row)), None) };
+    if edit.0 == 0 {
+        EDITING.set(None);
+        return;
+    }
+    // "report.docx": "report" selected, as Explorer does.
+    if is_file && let Some(dot) = name.rfind('.').filter(|dot| *dot > 0) {
+        let end = name[..dot].encode_utf16().count();
+        unsafe {
+            SendMessageW(
+                HWND(edit.0 as *mut c_void),
+                EM_SETSEL,
+                Some(WPARAM(0)),
+                Some(LPARAM(end as isize)),
+            )
+        };
+    }
+}
+
+/// A row "New folder" at the end of pane `side`, its name being typed; the folder is made once the name is given.
+fn start_new_folder(side: usize) {
+    let Some((list, label, image)) = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut()?;
+        if state.panes[side].folder.is_empty() || EDITING.get().is_some() {
+            return None;
+        }
+        let taken = |name: &str| {
+            state.panes[side]
+                .items
+                .iter()
+                .any(|item| item.name.eq_ignore_ascii_case(name))
+        };
+        let base = tr("New folder").to_string();
+        let label = (1..1000)
+            .map(|n| {
+                if n == 1 {
+                    base.clone()
+                } else {
+                    format!("{base} ({n})")
+                }
+            })
+            .find(|name| !taken(name))?;
+        let image = icon_for(&mut state.icons, FileKind::Folder, &label);
+        Some((state.lists[side], label, image))
+    }) else {
+        return;
+    };
+    let row = row_count(list);
+    FILLING.set(true);
+    insert_row(
+        list,
+        row,
+        &[label, String::new(), tr("Folder").to_string(), "--".into()],
+        image,
+        -1,
+    );
+    FILLING.set(false);
+    EDITING.set(Some(Editing {
+        side,
+        row,
+        new_folder: true,
+    }));
+    unsafe {
+        SendMessageW(list, LVM_ENSUREVISIBLE, Some(WPARAM(row)), Some(LPARAM(0)));
+        let _ = SetFocus(Some(list));
+        if SendMessageW(list, LVM_EDITLABELW, Some(WPARAM(row)), None).0 == 0 {
+            EDITING.set(None);
+            SendMessageW(list, LVM_DELETEITEM, Some(WPARAM(row)), None);
+        }
+    }
+}
+
+/// A typed name is done (or cancelled): the folder to make or the entry to rename goes to the session. True keeps
+/// the typed text on the row until the folder is read again.
+fn end_edit(list: HWND, side: usize, info: &NmLvDispInfo) -> bool {
+    let Some(editing) = EDITING.take().filter(|editing| editing.side == side) else {
+        return false;
+    };
+    let typed = (!info.item.text.is_null()).then(|| {
+        let mut length = 0;
+        while unsafe { *info.item.text.add(length) } != 0 && length < 4096 {
+            length += 1;
+        }
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(info.item.text, length) })
+            .trim()
+            .to_string()
+    });
+    let remote = side == 1;
+    if editing.new_folder {
+        match typed.filter(|name| !name.is_empty()) {
+            Some(name) if !FILLING.get() => {
+                push(FileWindowEvent::MakeFolder { remote, name });
+                true
+            }
+            _ => {
+                // Cancelled: the row made for it goes (unless the list is being filled anew).
+                if !FILLING.get() {
+                    unsafe { SendMessageW(list, LVM_DELETEITEM, Some(WPARAM(editing.row)), None) };
+                }
+                false
+            }
+        }
+    } else {
+        let name = STATE.with_borrow(|state| {
+            state
+                .as_ref()
+                .and_then(|state| state.panes[side].items.get(editing.row))
+                .map(|item| item.name.clone())
+        });
+        match (typed, name) {
+            (Some(new_name), Some(name))
+                if !new_name.is_empty() && new_name != name && !FILLING.get() =>
+            {
+                push(FileWindowEvent::Rename {
+                    remote,
+                    name,
+                    new_name,
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Asks (on a thread of its own: the session's picture goes on meanwhile) whether `names` of pane `side` are deleted;
+/// a yes comes back as WM_DELETE_ANSWER.
+fn ask_delete(hwnd: HWND, side: usize, names: Vec<String>) {
+    let Some((question, title)) = STATE.with_borrow(|state| {
+        let state = state.as_ref()?;
+        let pane = &state.panes[side];
+        let items: Vec<&FileItem> = names
+            .iter()
+            .filter_map(|name| pane.items.iter().find(|item| &item.name == name))
+            .collect();
+        if items.is_empty()
+            || items.len() != names.len()
+            || !items.iter().all(|item| changeable(item, &pane.folder))
+        {
+            return None;
+        }
+        let pc = &state.names[side];
+        let question = match items.as_slice() {
+            [item] if item.kind == FileKind::Folder => trf(
+                "Delete the folder \"{name}\" and everything in it on {pc}?",
+                &[("name", &item.label), ("pc", pc)],
+            ),
+            [item] => trf(
+                "Delete \"{name}\" on {pc}?",
+                &[("name", &item.label), ("pc", pc)],
+            ),
+            _ => trf(
+                "Delete these {count} items on {pc}?",
+                &[("count", &items.len().to_string()), ("pc", pc)],
+            ),
+        };
+        Some((
+            format!(
+                "{question}\n\n{}",
+                tr("This cannot be undone: nothing goes to the Recycle Bin or the Trash.")
+            ),
+            tr("Delete").to_string(),
+        ))
+    }) else {
+        return;
+    };
+    if DELETING.with_borrow(Option::is_some) {
+        return;
+    }
+    DELETING.set(Some((side == 1, names)));
+    let owner = hwnd.0 as isize;
+    let _ = std::thread::Builder::new()
+        .name("queqiao-delete-question".into())
+        .spawn(move || {
+            let (question, title) = (wide(&question), wide(&title));
+            let owner = HWND(owner as *mut c_void);
+            let answer = unsafe {
+                MessageBoxW(
+                    Some(owner),
+                    PCWSTR(question.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2,
+                )
+            };
+            let yes = usize::from(answer == IDYES);
+            let _ = unsafe { PostMessageW(Some(owner), WM_DELETE_ANSWER, WPARAM(yes), LPARAM(0)) };
+        });
+}
+
+/// The menu of a pane's entries (right click): on row `row`, or on the empty part of the list.
+fn pane_menu(hwnd: HWND, side: usize, row: Option<usize>) {
+    const OPEN: usize = 1;
+    const SEND: usize = 2;
+    const NEW_FOLDER: usize = 3;
+    const RENAME: usize = 4;
+    const DELETE: usize = 5;
+    const SIZE: usize = 6;
+    const REFRESH: usize = 7;
+    // The entries it is about: all checked ones when the row is checked, else the selected ones.
+    let checked = checked_names(side);
+    let Some((names, folder_row, can_change, has_folder, other_has_folder, other)) = STATE
+        .with_borrow(|state| {
+            let state = state.as_ref()?;
+            let pane = &state.panes[side];
+            let clicked = row.and_then(|row| pane.items.get(row));
+            let names: Vec<String> = match clicked {
+                Some(item) if checked.contains(&item.name) => checked.clone(),
+                Some(_) => selected_rows(side)
+                    .into_iter()
+                    .filter_map(|row| pane.items.get(row).map(|item| item.name.clone()))
+                    .collect(),
+                None => Vec::new(),
+            };
+            let items: Vec<&FileItem> = names
+                .iter()
+                .filter_map(|name| pane.items.iter().find(|item| &item.name == name))
+                .collect();
+            let folder_row = match items.as_slice() {
+                [item] if item.kind != FileKind::File => Some(item.name.clone()),
+                _ => None,
+            };
+            let can_change =
+                !items.is_empty() && items.iter().all(|item| changeable(item, &pane.folder));
+            Some((
+                names,
+                folder_row,
+                can_change,
+                !pane.folder.is_empty(),
+                !state.panes[1 - side].folder.is_empty(),
+                state.names[1 - side].clone(),
+            ))
+        })
+    else {
+        return;
+    };
+    let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
+        return;
+    };
+    let add = |id: usize, label: &str, on: bool| {
+        let text = wide(label);
+        let flags = if on { MF_STRING } else { MF_STRING | MF_GRAYED };
+        let _ = unsafe { AppendMenuW(menu, flags, id, PCWSTR(text.as_ptr())) };
+    };
+    let line = || {
+        let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) };
+    };
+    if !names.is_empty() {
+        add(OPEN, tr("Open"), folder_row.is_some());
+        add(
+            SEND,
+            &trf("Send to {pc}", &[("pc", &other)]),
+            other_has_folder,
+        );
+        line();
+    }
+    add(NEW_FOLDER, tr("New folder"), has_folder);
+    if !names.is_empty() {
+        add(RENAME, tr("Rename"), can_change && names.len() == 1);
+        add(DELETE, tr("Delete"), can_change);
+        add(SIZE, tr("Size"), has_folder);
+    }
+    line();
+    add(REFRESH, tr("Refresh"), true);
+    let mut cursor = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut cursor) };
+    let chosen = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            cursor.x,
+            cursor.y,
+            None,
+            hwnd,
+            None,
+        )
+    };
+    let _ = unsafe { DestroyMenu(menu) };
+    let remote = side == 1;
+    match usize::try_from(chosen.0).unwrap_or(0) {
+        OPEN => {
+            if let Some(name) = folder_row {
+                push(FileWindowEvent::OpenItem { remote, name });
+            }
+        }
+        SEND => push(FileWindowEvent::Send {
+            from_remote: remote,
+            names,
+        }),
+        NEW_FOLDER => start_new_folder(side),
+        RENAME => {
+            if let Some(row) = row {
+                start_rename(side, row);
+            }
+        }
+        DELETE => ask_delete(hwnd, side, names),
+        SIZE => push(FileWindowEvent::Measure { remote, names }),
+        REFRESH => push(FileWindowEvent::Refresh { remote }),
+        _ => {}
+    }
+}
+
 fn notify(hwnd: HWND, header: &NmHdr, lparam: LPARAM) -> Option<LRESULT> {
     let id = header.id_from as u16;
     let side = ID_LIST.iter().position(|list| *list == id);
@@ -2057,13 +2457,42 @@ fn notify(hwnd: HWND, header: &NmHdr, lparam: LPARAM) -> Option<LRESULT> {
             }
             Some(LRESULT(0))
         }
+        // A name is typed only when the person asked to (F2, the menu, New folder), never by a slow click.
+        (LVN_BEGINLABELEDITW, Some(side)) => {
+            let info = unsafe { &*(lparam.0 as *const NmLvDispInfo) };
+            let asked = EDITING.get().is_some_and(|editing| {
+                editing.side == side && editing.row as i32 == info.item.item
+            });
+            Some(LRESULT(isize::from(!asked)))
+        }
+        (LVN_ENDLABELEDITW, Some(side)) => {
+            let info = unsafe { &*(lparam.0 as *const NmLvDispInfo) };
+            Some(LRESULT(isize::from(end_edit(header.hwnd_from, side, info))))
+        }
+        (NM_RCLICK, Some(side)) => {
+            let activate = unsafe { &*(lparam.0 as *const NmItemActivate) };
+            pane_menu(hwnd, side, usize::try_from(activate.item).ok());
+            Some(LRESULT(0))
+        }
         (LVN_KEYDOWN, Some(side)) => {
             let key = unsafe { &*(lparam.0 as *const NmLvKeyDown) }.key;
             let remote = side == 1;
+            let held = |key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| {
+                let state = unsafe { GetKeyState(i32::from(key.0)) };
+                state < 0
+            };
             if key == VK_BACK.0 {
                 push(FileWindowEvent::Back { remote });
             } else if key == VK_F5.0 {
                 push(FileWindowEvent::Refresh { remote });
+            } else if key == VK_F2.0 {
+                if let Some(row) = selected_rows(side).first() {
+                    start_rename(side, *row);
+                }
+            } else if key == VK_DELETE.0 {
+                ask_delete(hwnd, side, checked_names(side));
+            } else if key == u16::from(b'N') && held(VK_CONTROL) && held(VK_SHIFT) {
+                start_new_folder(side);
             } else if key == VK_RETURN.0 {
                 let names = checked_names(side);
                 let folder = STATE.with_borrow(|state| {
@@ -2147,6 +2576,10 @@ fn command(id: u16, code: u16) {
             i if i == ID_BACK[side] => Some(FileWindowEvent::Back { remote }),
             i if i == ID_UP[side] => Some(FileWindowEvent::Up { remote }),
             i if i == ID_REFRESH[side] => Some(FileWindowEvent::Refresh { remote }),
+            i if i == ID_NEW_FOLDER[side] => {
+                start_new_folder(side);
+                None
+            }
             i if i == ID_SEND[side] => {
                 let names = checked_names(side);
                 (!names.is_empty()).then_some(FileWindowEvent::Send {
@@ -2283,6 +2716,14 @@ extern "system" fn files_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: 
         }
         WM_CLOSE => {
             push(FileWindowEvent::Closed);
+            LRESULT(0)
+        }
+        WM_DELETE_ANSWER => {
+            if let Some((remote, names)) = DELETING.take()
+                && wparam.0 == 1
+            {
+                push(FileWindowEvent::Delete { remote, names });
+            }
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },

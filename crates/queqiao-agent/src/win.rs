@@ -92,6 +92,10 @@ pub(crate) fn main() {
 
 fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
     lines.extend(queqiao_core::platform::prepare_process());
+    // A screen's resolution an earlier session changed and could not put back (it ended unexpectedly): back now.
+    if !options.logon {
+        lines.extend(queqiao_capture::display_mode::pending_restore());
+    }
     // Windows' firewall asks once whether the agent may take connections (allowed, sessions reach this PC directly
     // from behind any NAT). Shipping builds; test builds only when asked (QUEQIAO_FORCE=firewall:ask), so tests on the
     // developer's PC never put the dialog in front of its user.
@@ -320,6 +324,7 @@ fn run(options: &Options, lines: &mut Vec<String>) -> Result<bool, String> {
             files: settings.receive_files,
             terminal: settings.allow_terminal,
             helper: false,
+            gnome_direct: false,
             fec: hello.fec,
             controller: viewer.to_string(),
         },

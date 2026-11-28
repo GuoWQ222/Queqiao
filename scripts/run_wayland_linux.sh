@@ -20,6 +20,8 @@
 # NOBLE=1 (GNOME, KDE): the desktop in the Ubuntu 24.04 root of scripts/noble_root_linux.sh (GNOME 46, whose portal keeps
 # the person's answer); the first session starts without a kept answer and the dialog's "remember" is ticked where
 # it has one. KEPT=1: a later session, which must start without a dialog, the agent offering the kept answer.
+# MUTTER=1 (GNOME): the agent set to "Control GNOME without asking": the screen and the input through GNOME's own
+# interfaces (org.gnome.Mutter.ScreenCast and .RemoteDesktop), and no dialog may come at all.
 # Usage: [DESKTOP=gnome [NOBLE=1 [KEPT=1]]] scripts/run_wayland_linux.sh (CARGO_TARGET_DIR and SECONDS_RUN from the
 # environment).
 set -u
@@ -29,6 +31,7 @@ seconds=${SECONDS_RUN:-15}
 desktop=${DESKTOP:-sway}
 noble=${NOBLE:-}
 kept=${KEPT:-}
+mutter=${MUTTER:-}
 py=/usr/bin/python3.10
 [ -n "$noble" ] && py=/usr/bin/python3
 if [ -n "$noble" ] && [ "$desktop" = sway ]; then echo "WAYLAND_LINUX_FAIL the 24.04 root has GNOME and KDE"; exit 0; fi
@@ -113,6 +116,12 @@ else
     # answers one that does, so the rest of the session runs), and the test window starts after the agent's main window
     # (no tray there) opened, so that it is the newest again.
     [ -z "$kept" ] && as_user "rm -f \$XDG_CONFIG_HOME/queqiao/portal-*.token"
+    # MUTTER: the person turned on "Control GNOME without asking" (the settings file the agent reads); as KEPT, the
+    # watcher looks for a dialog that must not come.
+    if [ -n "$mutter" ]; then
+        as_user "mkdir -p \$XDG_CONFIG_HOME/queqiao && printf '%s' '{\"allow_account_control\":true,\"ask_before_session\":false,\"gnome_direct\":true}' > \$XDG_CONFIG_HOME/queqiao/agent_settings.json"
+        kept=1
+    fi
     as_user_bg "$py $out/portal_approve.py $(if [ -n "$kept" ]; then echo 15; elif [ "$desktop" = kde ]; then echo 12; else echo 40; fi) --remember > $out/approve.txt 2>&1"
     cat > "$out/window.sh" << 'EOF'
 # $1 the output folder, $2 the Python, $3 "wait" for the dialog's answer first, or the seconds to wait.
@@ -187,7 +196,12 @@ else
 grep -q "RESULT PASS" "$out/agent.txt" 2> /dev/null || why="$why agent"
 grep -q "RESULT PASS" "$out/viewer.txt" 2> /dev/null || why="$why viewer"
 grep -q "on Wayland" "$out/agent.txt" 2> /dev/null || why="$why not-the-portal"
-if [ "$desktop" != sway ]; then
+[ -n "$mutter" ] && as_user "rm -f \$XDG_CONFIG_HOME/queqiao/agent_settings.json"
+if [ -n "$mutter" ]; then
+    grep -q "captured through the Mutter remote desktop" "$out/agent.txt" 2> /dev/null || why="$why not-mutter"
+    grep -q APPROVED "$out/approve.txt" 2> /dev/null && why="$why asked"
+    grep -q "captured through .*the pointer apart" "$out/agent.txt" 2> /dev/null || why="$why pointer-not-apart"
+elif [ "$desktop" != sway ]; then
     grep -q "captured through the RemoteDesktop portal" "$out/agent.txt" 2> /dev/null || why="$why not-remote-desktop"
     # GNOME gives the pointer apart from the pictures: its shape goes to the viewer (as on Windows and X11).
     grep -q "captured through .*the pointer apart" "$out/agent.txt" 2> /dev/null || why="$why pointer-not-apart"
@@ -211,8 +225,9 @@ except Exception as error:
     print("none", error)
     sys.exit()
 pa, pb = a.load(), b.load()
-# The bar's tab at the top centre is Queqiao's own: left out.
-cells = [(x, y) for x in range(480) for y in range(270) if not (200 <= x < 280 and y < 12)]
+# Queqiao's own parts are left out: the bar's tab at the top centre, and the card of figures at the bottom right
+# (shown from the start since 2583f0b).
+cells = [(x, y) for x in range(480) for y in range(270) if not (200 <= x < 280 and y < 12) and not (x >= 360 and y >= 150)]
 total = sum(abs(pa[x, y][c] - pb[x, y][c]) for x, y in cells for c in range(3))
 print("%.1f" % (total / (len(cells) * 3)))
 EOF

@@ -25,7 +25,7 @@ pub mod browse;
 mod clip;
 pub mod history;
 
-pub use browse::{Entry, EntryKind, Found, Lister, Listing};
+pub use browse::{Change, Entry, EntryKind, Found, Lister, Listing, Size};
 pub use clip::{
     ClipMessage, ImageReceiver, ImageSender, MAX_IMAGE, image_fingerprint, test_picture,
 };
@@ -128,6 +128,28 @@ pub enum FileMessage {
     Drop {
         id: u32,
     },
+    /// The controlling side asks for a change in its folders there (new folder, rename, delete); answered by
+    /// `Changed`.
+    Change {
+        id: u32,
+        change: Change,
+    },
+    /// Change `id` is made (`error` empty), or why not.
+    Changed {
+        id: u32,
+        error: String,
+    },
+    /// The controlling side asks what `path` holds, all levels down; answered by `Measured`.
+    Measure {
+        id: u32,
+        path: String,
+    },
+    /// Measure `id`: the count, or why there is none (`error`).
+    Measured {
+        id: u32,
+        size: Size,
+        error: String,
+    },
 }
 
 const OFFER: u8 = 1;
@@ -148,6 +170,15 @@ const PLAN: u8 = 15;
 const REFUSED: u8 = 16;
 const PAUSE: u8 = 17;
 const DROP: u8 = 18;
+const CHANGE: u8 = 19;
+const CHANGED: u8 = 20;
+const MEASURE: u8 = 21;
+const MEASURED: u8 = 22;
+
+/// The kinds of a Change.
+const MAKE_FOLDER: u8 = 1;
+const RENAME: u8 = 2;
+const DELETE: u8 = 3;
 
 /// Entries in one Listing message at most, and their names' bytes (a listing comes in parts below the channel's
 /// message size).
@@ -251,6 +282,45 @@ impl FileMessage {
                 });
                 out.extend_from_slice(&id.to_le_bytes());
                 put_text(&mut out, path);
+            }
+            FileMessage::Change { id, change } => {
+                out.push(CHANGE);
+                out.extend_from_slice(&id.to_le_bytes());
+                match change {
+                    Change::MakeFolder { folder, name } => {
+                        out.push(MAKE_FOLDER);
+                        put_text(&mut out, folder);
+                        put_text(&mut out, name);
+                    }
+                    Change::Rename { path, name } => {
+                        out.push(RENAME);
+                        put_text(&mut out, path);
+                        put_text(&mut out, name);
+                    }
+                    Change::Delete { path } => {
+                        out.push(DELETE);
+                        put_text(&mut out, path);
+                    }
+                }
+            }
+            FileMessage::Changed { id, error } => {
+                out.push(CHANGED);
+                out.extend_from_slice(&id.to_le_bytes());
+                put_text(&mut out, error);
+            }
+            FileMessage::Measure { id, path } => {
+                out.push(MEASURE);
+                out.extend_from_slice(&id.to_le_bytes());
+                put_text(&mut out, path);
+            }
+            FileMessage::Measured { id, size, error } => {
+                out.push(MEASURED);
+                out.extend_from_slice(&id.to_le_bytes());
+                out.extend_from_slice(&size.files.to_le_bytes());
+                out.extend_from_slice(&size.folders.to_le_bytes());
+                out.extend_from_slice(&size.bytes.to_le_bytes());
+                out.push(u8::from(size.complete));
+                put_text(&mut out, error);
             }
             FileMessage::Listing { id, listing, more } => {
                 out.push(LISTING);
@@ -389,6 +459,41 @@ impl FileMessage {
                 paused: reader.u8()? != 0,
             },
             DROP => FileMessage::Drop { id },
+            CHANGE => FileMessage::Change {
+                id,
+                change: match reader.u8()? {
+                    MAKE_FOLDER => Change::MakeFolder {
+                        folder: reader.text()?,
+                        name: reader.text()?,
+                    },
+                    RENAME => Change::Rename {
+                        path: reader.text()?,
+                        name: reader.text()?,
+                    },
+                    DELETE => Change::Delete {
+                        path: reader.text()?,
+                    },
+                    _ => return None,
+                },
+            },
+            CHANGED => FileMessage::Changed {
+                id,
+                error: reader.text()?,
+            },
+            MEASURE => FileMessage::Measure {
+                id,
+                path: reader.text()?,
+            },
+            MEASURED => FileMessage::Measured {
+                id,
+                size: Size {
+                    files: reader.u64()?,
+                    folders: reader.u64()?,
+                    bytes: reader.u64()?,
+                    complete: reader.u8()? != 0,
+                },
+                error: reader.text()?,
+            },
             _ => return None,
         })
     }
@@ -1260,6 +1365,16 @@ enum Purpose {
     /// The other side's List and Fetch, answered here (the controlled side).
     ServeList(u32),
     ServeFetch(u32),
+    /// The other side's Change and Measure, answered here (the change described for the session's log).
+    ServeChange(u32, String),
+    ServeMeasure(u32),
+}
+
+/// The answer to this side's Change or Measure of the other side's folders.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Changed(Result<(), String>),
+    Measured(Result<Size, String>),
 }
 
 /// Requests of the other side waiting for the worker at most (more are refused as busy).
@@ -1294,6 +1409,11 @@ pub struct Transfers {
     fetches: HashMap<u32, u32>,
     /// Outcomes not yet taken by the program.
     outcomes: Vec<Outcome>,
+    /// Changes and counts this side asked of the other (numbered with the jobs), and their answers so far.
+    asks: HashSet<u32>,
+    answers: Vec<(u32, Answer)>,
+    /// The changes made here at the other side's request, for the session's log.
+    served: Vec<String>,
 }
 
 impl Transfers {
@@ -1319,6 +1439,9 @@ impl Transfers {
             lists: HashSet::new(),
             fetches: HashMap::new(),
             outcomes: Vec::new(),
+            asks: HashSet::new(),
+            answers: Vec::new(),
+            served: Vec::new(),
         }
     }
 
@@ -1439,6 +1562,37 @@ impl Transfers {
         id
     }
 
+    /// Asks the other side for `change` in its folders; the answer comes from `answers`.
+    pub fn change_remote(&mut self, change: Change) -> u32 {
+        self.next_job += 1;
+        let id = self.next_job;
+        self.asks.insert(id);
+        self.pending.push(FileMessage::Change { id, change });
+        id
+    }
+
+    /// Asks the other side what its `path` holds, all levels down; the answer comes from `answers`.
+    pub fn measure_remote(&mut self, path: &str) -> u32 {
+        self.next_job += 1;
+        let id = self.next_job;
+        self.asks.insert(id);
+        self.pending.push(FileMessage::Measure {
+            id,
+            path: path.to_string(),
+        });
+        id
+    }
+
+    /// The changes made here at the other side's request since the last call (lines for the session's log).
+    pub fn served(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.served)
+    }
+
+    /// The other side's answers to this side's changes and counts since the last call (with the request's number).
+    pub fn answers(&mut self) -> Vec<(u32, Answer)> {
+        std::mem::take(&mut self.answers)
+    }
+
     /// The other side's folders that arrived since the last call (with the request's number).
     pub fn listings(&mut self) -> Vec<(u32, Listing)> {
         std::mem::take(&mut self.listings)
@@ -1452,6 +1606,26 @@ impl Transfers {
         match message {
             FileMessage::List { id, path } => self.serve_list(id, path),
             FileMessage::Fetch { id, path } => self.serve_fetch(id, path),
+            FileMessage::Change { id, change } => self.serve_change(id, change),
+            FileMessage::Measure { id, path } => self.serve_measure(id, path),
+            FileMessage::Changed { id, error } => {
+                if self.asks.remove(&id) {
+                    let result = if error.is_empty() { Ok(()) } else { Err(error) };
+                    self.answers.push((id, Answer::Changed(result)));
+                }
+                Vec::new()
+            }
+            FileMessage::Measured { id, size, error } => {
+                if self.asks.remove(&id) {
+                    let result = if error.is_empty() {
+                        Ok(size)
+                    } else {
+                        Err(error)
+                    };
+                    self.answers.push((id, Answer::Measured(result)));
+                }
+                Vec::new()
+            }
             FileMessage::Listing { id, listing, more } => {
                 self.add_listing(id, listing, more);
                 Vec::new()
@@ -1626,6 +1800,50 @@ impl Transfers {
         Vec::new()
     }
 
+    /// The other side's Change: made by the worker (or refused here).
+    fn serve_change(&mut self, id: u32, change: Change) -> Vec<Vec<u8>> {
+        let path = match &change {
+            Change::MakeFolder { folder, .. } => folder,
+            Change::Rename { path, .. } | Change::Delete { path } => path,
+        };
+        let refusal = self.refusal(path).or_else(|| {
+            path.is_empty()
+                .then(|| "choose a folder of that PC first".to_string())
+        });
+        if let Some(error) = refusal {
+            return vec![FileMessage::Changed { id, error }.encode()];
+        }
+        self.next_work += 1;
+        let work = self.next_work;
+        let described = match &change {
+            Change::MakeFolder { folder, name } => {
+                format!("new folder {}", browse::child(folder, name))
+            }
+            Change::Rename { path, name } => format!("renamed {path} to {name}"),
+            Change::Delete { path } => format!("deleted {path}"),
+        };
+        self.work.insert(work, Purpose::ServeChange(id, described));
+        self.lister().change(work, change);
+        Vec::new()
+    }
+
+    /// The other side's Measure: counted by the worker (or refused here).
+    fn serve_measure(&mut self, id: u32, path: String) -> Vec<Vec<u8>> {
+        let refusal = self.refusal(&path).or_else(|| {
+            path.is_empty()
+                .then(|| "choose files or folders to count".to_string())
+        });
+        if let Some(error) = refusal {
+            let size = Size::default();
+            return vec![FileMessage::Measured { id, size, error }.encode()];
+        }
+        self.next_work += 1;
+        let work = self.next_work;
+        self.work.insert(work, Purpose::ServeMeasure(id));
+        self.lister().measure(work, &path);
+        Vec::new()
+    }
+
     /// Why a List or Fetch of the other side is not answered, if it is not.
     fn refusal(&self, path: &str) -> Option<String> {
         if !self.serving {
@@ -1651,6 +1869,34 @@ impl Transfers {
                 Found::Listing(work, listing) => {
                     if let Some(Purpose::ServeList(request)) = self.work.remove(&work) {
                         self.pending.extend(listing_parts(request, listing));
+                    }
+                }
+                Found::Changed(work, result) => {
+                    if let Some(Purpose::ServeChange(request, described)) = self.work.remove(&work)
+                    {
+                        self.served.push(match &result {
+                            Ok(()) => format!("files: the viewer's change made: {described}"),
+                            Err(error) => {
+                                format!("files: the viewer's change refused: {described}: {error}")
+                            }
+                        });
+                        self.pending.push(FileMessage::Changed {
+                            id: request,
+                            error: result.err().unwrap_or_default(),
+                        });
+                    }
+                }
+                Found::Measured(work, result) => {
+                    if let Some(Purpose::ServeMeasure(request)) = self.work.remove(&work) {
+                        let (size, error) = match result {
+                            Ok(size) => (size, String::new()),
+                            Err(error) => (Size::default(), error),
+                        };
+                        self.pending.push(FileMessage::Measured {
+                            id: request,
+                            size,
+                            error,
+                        });
                     }
                 }
                 Found::Files(work, files) => match (self.work.remove(&work), files) {
@@ -2649,7 +2895,7 @@ mod browsing {
                 to_agent.extend(viewer.on_message(&message));
             }
             let _ = (viewer.outcomes(), agent.outcomes());
-            if moved || viewer.busy() || agent.busy() {
+            if moved || viewer.busy() || agent.busy() || !agent.work.is_empty() {
                 quiet = 0;
             } else {
                 quiet += 1;
@@ -2770,6 +3016,156 @@ mod browsing {
         assert!(matches!(job.state, JobState::Failed(_)), "{job:?}");
         assert!(!root.join("folder").join("f.txt").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_controller_changes_and_counts_folders_there_only_with_leave() {
+        let root =
+            std::env::temp_dir().join(format!("queqiao-browsing-change-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"abc").unwrap();
+        let folder = root.to_string_lossy().into_owned();
+        let at = |name: &str| root.join(name).to_string_lossy().into_owned();
+        let (mut viewer, mut agent) = sides(&root, true);
+        let made = viewer.change_remote(Change::MakeFolder {
+            folder: folder.clone(),
+            name: "new".into(),
+        });
+        let renamed = viewer.change_remote(Change::Rename {
+            path: at("a.txt"),
+            name: "b.txt".into(),
+        });
+        let twice = viewer.change_remote(Change::MakeFolder {
+            folder: folder.clone(),
+            name: "new".into(),
+        });
+        pump(&mut viewer, &mut agent);
+        let answers = viewer.answers();
+        assert_eq!(answers.len(), 3, "{answers:?}");
+        assert!(
+            answers.contains(&(made, Answer::Changed(Ok(())))),
+            "{answers:?}"
+        );
+        assert!(
+            answers.contains(&(renamed, Answer::Changed(Ok(())))),
+            "{answers:?}"
+        );
+        assert!(
+            answers
+                .iter()
+                .any(|(id, answer)| *id == twice && matches!(answer, Answer::Changed(Err(_)))),
+            "{answers:?}"
+        );
+        assert!(root.join("new").is_dir() && root.join("b.txt").is_file());
+        let counted = viewer.measure_remote(&folder);
+        pump(&mut viewer, &mut agent);
+        let answers = viewer.answers();
+        let Some((id, Answer::Measured(Ok(size)))) = answers.first() else {
+            panic!("{answers:?}");
+        };
+        assert_eq!(
+            (*id, size.files, size.folders, size.bytes),
+            (counted, 1, 1, 3)
+        );
+        let deleted = viewer.change_remote(Change::Delete { path: at("new") });
+        pump(&mut viewer, &mut agent);
+        assert_eq!(viewer.answers(), [(deleted, Answer::Changed(Ok(())))]);
+        assert!(!root.join("new").exists());
+        // Without leave, nothing changes; and the controlled side never changes the controller's files.
+        let (mut viewer, mut agent) = sides(&root, false);
+        let refused = viewer.change_remote(Change::Delete { path: at("b.txt") });
+        let uncounted = viewer.measure_remote(&folder);
+        pump(&mut viewer, &mut agent);
+        let answers = viewer.answers();
+        assert!(answers.iter().any(|(id, a)| *id == refused
+            && matches!(a, Answer::Changed(Err(e)) if e.contains("does not share"))));
+        assert!(
+            answers
+                .iter()
+                .any(|(id, a)| *id == uncounted && matches!(a, Answer::Measured(Err(_))))
+        );
+        agent.change_remote(Change::Delete { path: at("b.txt") });
+        pump(&mut viewer, &mut agent);
+        assert!(matches!(
+            agent.answers()[..],
+            [(_, Answer::Changed(Err(_)))]
+        ));
+        assert!(root.join("b.txt").is_file());
+        // A relative path is refused before it reaches the disk.
+        let (mut viewer, mut agent) = sides(&root, true);
+        viewer.change_remote(Change::Delete {
+            path: "b.txt".into(),
+        });
+        pump(&mut viewer, &mut agent);
+        assert!(matches!(
+            viewer.answers()[..],
+            [(_, Answer::Changed(Err(_)))]
+        ));
+        assert!(root.join("b.txt").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn change_messages_survive_the_wire() {
+        let size = Size {
+            files: 7,
+            folders: 2,
+            bytes: 1 << 40,
+            complete: false,
+        };
+        for message in [
+            FileMessage::Change {
+                id: 1,
+                change: Change::MakeFolder {
+                    folder: "C:\\x".into(),
+                    name: "新建".into(),
+                },
+            },
+            FileMessage::Change {
+                id: 2,
+                change: Change::Rename {
+                    path: "/a/b".into(),
+                    name: "c".into(),
+                },
+            },
+            FileMessage::Change {
+                id: 3,
+                change: Change::Delete {
+                    path: "/a/b".into(),
+                },
+            },
+            FileMessage::Changed {
+                id: 4,
+                error: String::new(),
+            },
+            FileMessage::Changed {
+                id: 5,
+                error: "no".into(),
+            },
+            FileMessage::Measure {
+                id: 6,
+                path: "/".into(),
+            },
+            FileMessage::Measured {
+                id: 7,
+                size,
+                error: String::new(),
+            },
+        ] {
+            assert_eq!(
+                FileMessage::decode(&message.encode()),
+                Some(message.clone())
+            );
+        }
+        // An unknown kind of change is not a message.
+        let mut bytes = FileMessage::Change {
+            id: 1,
+            change: Change::Delete { path: "/x".into() },
+        }
+        .encode();
+        bytes[5] = 99;
+        assert_eq!(FileMessage::decode(&bytes), None);
     }
 
     #[test]

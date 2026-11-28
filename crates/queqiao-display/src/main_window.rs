@@ -39,25 +39,58 @@ use crate::settings::{Control, Row, Shown, Tab};
 const CLASS: PCWSTR = w!("QueqiaoMain");
 static REGISTER: Once = Once::new();
 
-// Layout, in 96-DPI units.
+// Layout, in 96-DPI units. WIDTH x HEIGHT is the window's first size and its smallest: dragged larger, the page's
+// width (`content`) and the window's height (`height`) follow its client area.
 const WIDTH: i32 = 880;
 const HEIGHT: i32 = 580;
 const SIDEBAR: i32 = 216;
 const LEFT: i32 = SIDEBAR + 32;
-const CONTENT: i32 = WIDTH - LEFT - 32;
+
+thread_local! {
+    /// The client area now (96-DPI units), never below WIDTH x HEIGHT.
+    static SIZE: std::cell::Cell<(i32, i32)> = const { std::cell::Cell::new((WIDTH, HEIGHT)) };
+}
+
+/// The page's width beside the sidebar.
+fn content() -> i32 {
+    SIZE.get().0 - LEFT - 32
+}
+
+/// The client area's height.
+fn height() -> i32 {
+    SIZE.get().1
+}
+
+/// How much larger than its first size the window is now (96-DPI units).
+fn grown() -> (i32, i32) {
+    let (width, height) = SIZE.get();
+    (width - WIDTH, height - HEIGHT)
+}
 // The sidebar: the name, the devices, the pages, the account.
 const DEVICES_LABEL_Y: i32 = 62;
 const DEVICE_LIST: [i32; 4] = [10, 84, SIDEBAR - 20, 216];
 const DEVICE_ROW: i32 = 36;
-const NAV_TOP: i32 = 318;
+const NAV_TOP_BASE: i32 = 318;
+
+/// The page links' top: below the device list, which takes the height the window gains.
+fn nav_top() -> i32 {
+    NAV_TOP_BASE + grown().1
+}
 const NAV_STEP: i32 = 40;
 const NAV_HEIGHT: i32 = 36;
 const TRANSFER_ROW: i32 = 52;
 /// Where the account line is (a click logs in or out).
-const ACCOUNT_AREA: [i32; 4] = [12, HEIGHT - 70, SIDEBAR - 24, 58];
+fn account_area() -> [i32; 4] {
+    [12, height() - 70, SIDEBAR - 24, 58]
+}
 // The device page.
-const HERO: [i32; 4] = [LEFT, 92, CONTENT, 180];
-const ACTIONS: [i32; 4] = [LEFT, 288, CONTENT, 52];
+fn hero_base() -> [i32; 4] {
+    [LEFT, 92, content(), 180]
+}
+
+fn actions_base() -> [i32; 4] {
+    [LEFT, 288, content(), 52]
+}
 const RECENT_Y: i32 = 360;
 const RECENT_ROW: i32 = 38;
 const RECENT_ROWS: usize = 3;
@@ -208,6 +241,17 @@ struct State {
     settings: Shown,
     tab: Tab,
     scroll: i32,
+    /// The controls that move or grow with the window: each with its place at the first size.
+    anchored: Vec<(HWND, [i32; 4], Grow)>,
+}
+
+/// How a control follows the window's size: moved right or down, made wider or taller by what the window gained.
+#[derive(Clone, Copy, Default)]
+struct Grow {
+    right: bool,
+    wide: bool,
+    down: bool,
+    tall: bool,
 }
 
 struct Fonts {
@@ -263,7 +307,13 @@ impl MainWindow {
             };
             RegisterClassExW(&class);
         });
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        // Resizable by its edges and maximised: the page and the lists take the room (never smaller than at first).
+        let style = WS_OVERLAPPED
+            | WS_CAPTION
+            | WS_SYSMENU
+            | WS_MINIMIZEBOX
+            | WS_MAXIMIZEBOX
+            | WS_THICKFRAME;
         let ex_style = WS_EX_CONTROLPARENT | WS_EX_APPWINDOW;
         let title: Vec<u16> = tr("Queqiao").encode_utf16().chain(Some(0)).collect();
         let hwnd = unsafe {
@@ -354,6 +404,7 @@ impl MainWindow {
                 settings: Shown::default(),
                 tab: Tab::default(),
                 scroll: 0,
+                anchored: Vec::new(),
             })
         });
         let make = |class: PCWSTR,
@@ -439,7 +490,7 @@ impl MainWindow {
             button(
                 tr("Fixed help code..."),
                 crate::tray::MENU_FIXED_CODE,
-                [LEFT + CONTENT - 200, 212, 180, 34],
+                [LEFT + content() - 200, 212, 180, 34],
             )?,
         );
         let edit_style = tab | ES_AUTOHSCROLL;
@@ -479,7 +530,7 @@ impl MainWindow {
                 list_style,
                 WINDOW_EX_STYLE(0),
                 ID_TRANSFERS,
-                [LEFT, 100, CONTENT, 372],
+                [LEFT, 100, content(), 372],
             )?,
         );
         let no_transfers = place(
@@ -492,10 +543,10 @@ impl MainWindow {
                 SS_NOPREFIX,
                 WINDOW_EX_STYLE(0),
                 0,
-                [LEFT, 110, CONTENT, 60],
+                [LEFT, 110, content(), 60],
             )?,
         );
-        place(
+        let open_received = place(
             Page::Transfers,
             button(
                 tr("Open received files"),
@@ -503,7 +554,7 @@ impl MainWindow {
                 [LEFT, 492, 180, 34],
             )?,
         );
-        place(
+        let clear_transfers = place(
             Page::Transfers,
             button(
                 tr("Clear the list"),
@@ -511,6 +562,44 @@ impl MainWindow {
                 [LEFT + 192, 492, 140, 34],
             )?,
         );
+        STATE.with_borrow_mut(|state| {
+            if let Some(state) = state.as_mut() {
+                let (right, wide, down, tall) = (
+                    Grow {
+                        right: true,
+                        ..Grow::default()
+                    },
+                    Grow {
+                        wide: true,
+                        ..Grow::default()
+                    },
+                    Grow {
+                        down: true,
+                        ..Grow::default()
+                    },
+                    Grow {
+                        tall: true,
+                        ..Grow::default()
+                    },
+                );
+                state.anchored = vec![
+                    (devices, DEVICE_LIST, tall),
+                    (fixed_button, [LEFT + content() - 200, 212, 180, 34], right),
+                    (
+                        transfers,
+                        [LEFT, 100, content(), 372],
+                        Grow {
+                            wide: true,
+                            tall: true,
+                            ..Grow::default()
+                        },
+                    ),
+                    (no_transfers, [LEFT, 110, content(), 60], wide),
+                    (open_received, [LEFT, 492, 180, 34], down),
+                    (clear_transfers, [LEFT + 192, 492, 140, 34], down),
+                ];
+            }
+        });
 
         // Settings: painted (tabs and cards, settings.rs), no controls of their own.
 
@@ -655,7 +744,7 @@ impl MainWindow {
                 };
                 for (place, id) in cards(state).into_iter().flat_map(|card| card.hits) {
                     let (x, y) = (place[0] + place[2] / 2, place[1] + place[3] / 2);
-                    if (CARDS_TOP..CARDS_BOTTOM).contains(&y) {
+                    if (CARDS_TOP..cards_bottom()).contains(&y) {
                         checked += 1;
                         if settings_hit(state, x, y).map(|(hit, _)| hit) != Some(id) {
                             wrong.push(id);
@@ -1135,8 +1224,13 @@ fn chosen(state: &State) -> Option<&MainDevice> {
 
 /// Under the heading while a device of the account controls the chosen one (UU Remote's "被控中", the user,
 /// 2026-11-26): the banner, its Disconnect, and how far it moves the page's parts below it down.
-const BANNER: [i32; 4] = [LEFT, 90, CONTENT, 46];
-const BANNER_END: [i32; 4] = [LEFT + CONTENT - 114, 99, 102, 28];
+fn banner() -> [i32; 4] {
+    [LEFT, 90, content(), 46]
+}
+
+fn banner_end() -> [i32; 4] {
+    [LEFT + content() - 114, 99, 102, 28]
+}
 const BANNER_SPACE: i32 = 58;
 /// A pale blue band, its words in the accent blue (0x00BBGGRR).
 const BANNER_BACK: u32 = 0x00FE_F2EA;
@@ -1162,15 +1256,18 @@ fn below_banner(state: &State) -> i32 {
 
 /// The card, the tools under it and the recent connections: lower while the banner shows.
 fn hero(state: &State) -> [i32; 4] {
-    [HERO[0], HERO[1] + below_banner(state), HERO[2], HERO[3]]
+    {
+        let hero = hero_base();
+        [hero[0], hero[1] + below_banner(state), hero[2], hero[3]]
+    }
 }
 
 fn actions(state: &State) -> [i32; 4] {
     [
-        ACTIONS[0],
-        ACTIONS[1] + below_banner(state),
-        ACTIONS[2],
-        ACTIONS[3],
+        actions_base()[0],
+        actions_base()[1] + below_banner(state),
+        actions_base()[2],
+        actions_base()[3],
     ]
 }
 
@@ -1185,13 +1282,13 @@ fn paint_banner(dc: HDC, state: &State) {
     }
     let s = state.scale;
     let f = &state.fonts;
-    let band = rect_of(BANNER, s);
+    let band = rect_of(banner(), s);
     outlined(dc, &band, px(10, s), BANNER_BACK, BANNER_EDGE);
     let (label, words) = crate::model::controlled_banner();
     text(
         dc,
         GLYPH_CONTROLLED,
-        rect(LEFT + 16, BANNER[1], 22, BANNER[3], s),
+        rect(LEFT + 16, banner()[1], 22, banner()[3], s),
         f.glyph,
         ACCENT,
         LINE,
@@ -1220,7 +1317,7 @@ fn paint_banner(dc: HDC, state: &State) {
         },
         BANNER_EDGE,
     );
-    let end = rect_of(BANNER_END, s);
+    let end = rect_of(banner_end(), s);
     // The sentence on one line where it fits (Chinese), else two, centred in the band.
     let (left, right) = (label_right + px(26, s), end.left - px(10, s));
     let height = wrapped_height(dc, words, f.small, right - left).min(band.bottom - band.top);
@@ -1303,7 +1400,7 @@ fn paint(hwnd: HWND, dc: HDC, state: &State) {
     let mut area = RECT::default();
     let _ = unsafe { GetClientRect(hwnd, &mut area) };
     fill(dc, &area, PAGE_COLOR);
-    fill(dc, &rect(0, 0, SIDEBAR, HEIGHT, s), SIDE_BG);
+    fill(dc, &rect(0, 0, SIDEBAR, height(), s), SIDE_BG);
     paint_sidebar(dc, state);
     match state.page {
         Page::Devices => paint_device_page(dc, state),
@@ -1311,7 +1408,7 @@ fn paint(hwnd: HWND, dc: HDC, state: &State) {
             text(
                 dc,
                 Page::Settings.title(),
-                rect(LEFT, 20, CONTENT, 40, s),
+                rect(LEFT, 20, content(), 40, s),
                 state.fonts.title,
                 TEXT_COLOR,
                 LINE,
@@ -1322,7 +1419,7 @@ fn paint(hwnd: HWND, dc: HDC, state: &State) {
             text(
                 dc,
                 page.title(),
-                rect(LEFT, 24, CONTENT, 40, s),
+                rect(LEFT, 24, content(), 40, s),
                 state.fonts.title,
                 TEXT_COLOR,
                 LINE,
@@ -1330,7 +1427,7 @@ fn paint(hwnd: HWND, dc: HDC, state: &State) {
             text(
                 dc,
                 page.subtitle(),
-                rect(LEFT, 64, CONTENT, 22, s),
+                rect(LEFT, 64, content(), 22, s),
                 state.fonts.small,
                 SECONDARY,
                 LINE,
@@ -1399,10 +1496,10 @@ fn paint_sidebar(dc: HDC, state: &State) {
             DT_LEFT.0 | DT_WORDBREAK.0,
         );
     }
-    fill(dc, &rect(18, NAV_TOP - 12, SIDEBAR - 36, 1, s), SIDE_LINE);
+    fill(dc, &rect(18, nav_top() - 12, SIDEBAR - 36, 1, s), SIDE_LINE);
     // The other pages.
     for (index, page) in Page::ALL.iter().enumerate().skip(1) {
-        let y = NAV_TOP + (index as i32 - 1) * NAV_STEP;
+        let y = nav_top() + (index as i32 - 1) * NAV_STEP;
         if *page == state.page {
             rounded(
                 dc,
@@ -1435,7 +1532,7 @@ fn paint_sidebar(dc: HDC, state: &State) {
         );
     }
     // The account.
-    let [ax, ay, aw, _] = ACCOUNT_AREA;
+    let [ax, ay, aw, _] = account_area();
     fill(dc, &rect(ax + 6, ay - 8, aw - 12, 1, s), SIDE_LINE);
     let initial = state
         .user
@@ -1519,7 +1616,7 @@ fn paint_device_page(dc: HDC, state: &State) {
         text(
             dc,
             tr("Log in to see your devices."),
-            rect(LEFT, 92, CONTENT, 40, s),
+            rect(LEFT, 92, content(), 40, s),
             f.title,
             TEXT_COLOR,
             LINE,
@@ -1529,7 +1626,7 @@ fn paint_device_page(dc: HDC, state: &State) {
             tr(
                 "Your devices appear here once this PC is logged in to your account, and you can control them from here.",
             ),
-            rect(LEFT, 136, CONTENT, 40, s),
+            rect(LEFT, 136, content(), 40, s),
             f.body,
             SECONDARY,
             DT_LEFT.0 | DT_WORDBREAK.0,
@@ -1541,7 +1638,7 @@ fn paint_device_page(dc: HDC, state: &State) {
         text(
             dc,
             tr("Devices"),
-            rect(LEFT, 24, CONTENT, 40, s),
+            rect(LEFT, 24, content(), 40, s),
             f.title,
             TEXT_COLOR,
             LINE,
@@ -1549,7 +1646,7 @@ fn paint_device_page(dc: HDC, state: &State) {
         text(
             dc,
             tr("No devices yet: log in to this account on another PC, and it appears here."),
-            rect(LEFT, 70, CONTENT, 40, s),
+            rect(LEFT, 70, content(), 40, s),
             f.body,
             SECONDARY,
             DT_LEFT.0 | DT_WORDBREAK.0,
@@ -1596,7 +1693,7 @@ fn paint_device_page(dc: HDC, state: &State) {
         RECT {
             left: pill.right + px(12, s),
             top: px(22, s),
-            right: px(LEFT + CONTENT, s),
+            right: px(LEFT + content(), s),
             bottom: px(62, s),
         },
         f.title,
@@ -1613,7 +1710,7 @@ fn paint_device_page(dc: HDC, state: &State) {
     text(
         dc,
         line,
-        rect(LEFT, 62, CONTENT, 22, s),
+        rect(LEFT, 62, content(), 22, s),
         f.small,
         SECONDARY,
         LINE,
@@ -1667,7 +1764,7 @@ fn paint_device_page(dc: HDC, state: &State) {
     text(
         dc,
         tr("Recent connections"),
-        rect(LEFT, recent_top, CONTENT, 22, s),
+        rect(LEFT, recent_top, content(), 22, s),
         f.section,
         TEXT_COLOR,
         LINE,
@@ -1676,7 +1773,8 @@ fn paint_device_page(dc: HDC, state: &State) {
         .connections
         .iter()
         .filter(|row| row.device_id == device.id)
-        .take(RECENT_ROWS)
+        // Three rows at the first size; more as the window grows taller.
+        .take(RECENT_ROWS + (grown().1 / RECENT_ROW).max(0) as usize)
         .collect();
     if recent.is_empty() {
         let none = if device.this_pc {
@@ -1687,7 +1785,7 @@ fn paint_device_page(dc: HDC, state: &State) {
         text(
             dc,
             none,
-            rect(LEFT, recent_top + 28, CONTENT, 22, s),
+            rect(LEFT, recent_top + 28, content(), 22, s),
             f.small,
             SECONDARY,
             LINE,
@@ -1695,7 +1793,7 @@ fn paint_device_page(dc: HDC, state: &State) {
     }
     for (index, row) in recent.into_iter().enumerate() {
         let y = recent_top + 30 + index as i32 * RECENT_ROW;
-        let place = rect(LEFT, y, CONTENT, RECENT_ROW - 6, s);
+        let place = rect(LEFT, y, content(), RECENT_ROW - 6, s);
         rounded(dc, &place, px(8, s), CARD);
         text(
             dc,
@@ -1724,7 +1822,7 @@ fn paint_device_page(dc: HDC, state: &State) {
         text(
             dc,
             &row.length,
-            rect(LEFT + CONTENT - 132, y, 120, RECENT_ROW - 6, s),
+            rect(LEFT + content() - 132, y, 120, RECENT_ROW - 6, s),
             f.small,
             SECONDARY,
             DT_RIGHT.0 | DT_SINGLELINE.0 | DT_VCENTER.0,
@@ -1982,14 +2080,14 @@ fn paint_page(dc: HDC, state: &State) {
             text(
                 dc,
                 tr("Let someone help this PC"),
-                rect(LEFT, 98, CONTENT, 24, s),
+                rect(LEFT, 98, content(), 24, s),
                 f.section,
                 TEXT_COLOR,
                 LINE,
             );
             outlined(
                 dc,
-                &rect(LEFT, 128, CONTENT, 132, s),
+                &rect(LEFT, 128, content(), 132, s),
                 px(12, s),
                 CARD,
                 DIVIDER,
@@ -2034,7 +2132,7 @@ fn paint_page(dc: HDC, state: &State) {
                     tr(
                         "Someone of another account can control this PC with its help ID and code, after you allow it each time. Command lines, files, restarting and the sign-in screen stay closed to them.",
                     ),
-                    rect(LEFT + 20, 140, CONTENT - 40, 64, s),
+                    rect(LEFT + 20, 140, content() - 40, 64, s),
                     f.body,
                     SECONDARY,
                     DT_LEFT.0 | DT_WORDBREAK.0,
@@ -2043,7 +2141,7 @@ fn paint_page(dc: HDC, state: &State) {
             text(
                 dc,
                 tr("Help someone"),
-                rect(LEFT, 290, CONTENT, 24, s),
+                rect(LEFT, 290, content(), 24, s),
                 f.section,
                 TEXT_COLOR,
                 LINE,
@@ -2069,7 +2167,7 @@ fn paint_page(dc: HDC, state: &State) {
                 tr(
                     "Pasting an invitation into either field fills in both. The person there is asked before you see their screen.",
                 ),
-                rect(LEFT, 396, CONTENT, 40, s),
+                rect(LEFT, 396, content(), 40, s),
                 f.small,
                 SECONDARY,
                 DT_LEFT.0 | DT_WORDBREAK.0,
@@ -2273,12 +2371,12 @@ fn hit(state: &State, x: i32, y: i32) -> Option<u16> {
             return Some(ID_NAV);
         }
         for index in 1..4 {
-            let top = NAV_TOP + (index - 1) * NAV_STEP;
+            let top = nav_top() + (index - 1) * NAV_STEP;
             if (top..top + NAV_HEIGHT).contains(&y) {
                 return Some(ID_NAV + index as u16);
             }
         }
-        if inside(ACCOUNT_AREA, x, y) {
+        if inside(account_area(), x, y) {
             return Some(ID_ACCOUNT);
         }
         return None;
@@ -2289,7 +2387,7 @@ fn hit(state: &State, x: i32, y: i32) -> Option<u16> {
     if state.page != Page::Devices {
         return None;
     }
-    if controlled(state).is_some() && inside(BANNER_END, x, y) {
+    if controlled(state).is_some() && inside(banner_end(), x, y) {
         return Some(ID_END_CONTROL);
     }
     if let Some((place, command, _)) = go_button(state)
@@ -2316,9 +2414,64 @@ fn scaled_point(lparam: LPARAM, scale: f64) -> (i32, i32) {
     ((f64::from(x) / scale) as i32, (f64::from(y) / scale) as i32)
 }
 
+/// The window's new size: the page follows, the anchored controls move or grow, the settings' scroll stays in range.
+fn relayout(hwnd: HWND) {
+    let mut area = RECT::default();
+    let _ = unsafe { GetClientRect(hwnd, &mut area) };
+    if area.right <= 0 || area.bottom <= 0 {
+        // Minimised: nothing to lay out.
+        return;
+    }
+    STATE.with_borrow_mut(|state| {
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+        let s = state.scale;
+        let width = (f64::from(area.right) / s).floor() as i32;
+        let height = (f64::from(area.bottom) / s).floor() as i32;
+        SIZE.set((width.max(WIDTH), height.max(HEIGHT)));
+        let (dx, dy) = grown();
+        for (control, [x, y, w, h], grow) in &state.anchored {
+            let x = x + if grow.right { dx } else { 0 };
+            let y = y + if grow.down { dy } else { 0 };
+            let w = w + if grow.wide { dx } else { 0 };
+            let h = h + if grow.tall { dy } else { 0 };
+            let _ = unsafe { MoveWindow(*control, px(x, s), px(y, s), px(w, s), px(h, s), true) };
+        }
+        state.scroll = state.scroll.min(max_scroll(state));
+    });
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
+}
+
 extern "system" fn main_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let push = |command: u16| crate::forms::push_action(hwnd, command);
     match message {
+        WM_SIZE => {
+            relayout(hwnd);
+            LRESULT(0)
+        }
+        // Never smaller than the first size (its layout's least).
+        WM_GETMINMAXINFO => {
+            let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+            let scale = f64::from(dpi) / 96.0;
+            let mut frame = RECT {
+                left: 0,
+                top: 0,
+                right: px(WIDTH, scale),
+                bottom: px(HEIGHT, scale),
+            };
+            let style = WINDOW_STYLE(unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32);
+            let ex_style = WINDOW_EX_STYLE(unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32);
+            if unsafe { AdjustWindowRectExForDpi(&mut frame, style, false, ex_style, dpi) }.is_ok()
+            {
+                let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+                info.ptMinTrackSize = POINT {
+                    x: frame.right - frame.left,
+                    y: frame.bottom - frame.top,
+                };
+            }
+            LRESULT(0)
+        }
         WM_PAINT => {
             let mut paint_info = PAINTSTRUCT::default();
             let dc = unsafe { BeginPaint(hwnd, &mut paint_info) };
@@ -2506,11 +2659,13 @@ fn brush(color: u32) -> HBRUSH {
 }
 
 // The Settings page (96-DPI units): the tabs under the title, then the cards, scrolled between CARDS_TOP and
-// CARDS_BOTTOM.
+// cards_bottom().
 const TABS_Y: i32 = 66;
 const TAB_GAP: i32 = 30;
 const CARDS_TOP: i32 = 112;
-const CARDS_BOTTOM: i32 = HEIGHT - 12;
+fn cards_bottom() -> i32 {
+    height() - 12
+}
 const CARD_GAP: i32 = 10;
 /// A tab (+ its index).
 const ID_TAB: u16 = 340;
@@ -2558,7 +2713,7 @@ fn unscaled(width: i32, scale: f64) -> i32 {
 fn cards(state: &State) -> Vec<Card> {
     let rows = crate::settings::rows(state.tab, &state.settings);
     let dc = unsafe { GetDC(None) };
-    let right = LEFT + CONTENT - 18;
+    let right = LEFT + content() - 18;
     let mut y = CARDS_TOP - state.scroll;
     let mut cards = Vec::new();
     for (index, row) in rows.into_iter().enumerate() {
@@ -2606,7 +2761,7 @@ fn max_scroll(state: &State) -> i32 {
     let bottom = cards
         .last()
         .map_or(0, |card| card.top + card.height + state.scroll);
-    (bottom - CARDS_BOTTOM + 8).max(0)
+    (bottom - cards_bottom() + 8).max(0)
 }
 
 /// What a click at (x, y) on the Settings page sends, and the place clicked.
@@ -2618,7 +2773,7 @@ fn settings_hit(state: &State, x: i32, y: i32) -> Option<(u16, [i32; 4])> {
             .find(|(_, (_, left, width))| (*left - 8..*left + width + 8).contains(&x))
             .map(|(index, (_, left, width))| (ID_TAB + index as u16, [left, TABS_Y, width, 36]));
     }
-    if !(CARDS_TOP..CARDS_BOTTOM).contains(&y) {
+    if !(CARDS_TOP..cards_bottom()).contains(&y) {
         return None;
     }
     cards(state)
@@ -2651,15 +2806,15 @@ fn paint_settings(dc: HDC, state: &State) {
             );
         }
     }
-    fill(dc, &rect(LEFT, CARDS_TOP - 6, CONTENT, 1, s), DIVIDER);
+    fill(dc, &rect(LEFT, CARDS_TOP - 6, content(), 1, s), DIVIDER);
     let cards = cards(state);
     unsafe {
         let _ = IntersectClipRect(
             dc,
             px(LEFT - 2, s),
             px(CARDS_TOP - 2, s),
-            px(LEFT + CONTENT + 2, s),
-            px(CARDS_BOTTOM, s),
+            px(LEFT + content() + 2, s),
+            px(cards_bottom(), s),
         );
     }
     // Each card with the ones that belong to it, as one rounded panel; a line between them.
@@ -2673,14 +2828,18 @@ fn paint_settings(dc: HDC, state: &State) {
         let bottom = cards[end - 1].top + cards[end - 1].height;
         outlined(
             dc,
-            &rect(LEFT, top, CONTENT, bottom - top, s),
+            &rect(LEFT, top, content(), bottom - top, s),
             px(12, s),
             WHITE,
             DIVIDER,
         );
         for card in &cards[index..end] {
             if card.row.sub {
-                fill(dc, &rect(LEFT + 56, card.top, CONTENT - 74, 1, s), DIVIDER);
+                fill(
+                    dc,
+                    &rect(LEFT + 56, card.top, content() - 74, 1, s),
+                    DIVIDER,
+                );
             }
             paint_card(dc, state, card);
         }
@@ -2692,12 +2851,12 @@ fn paint_settings(dc: HDC, state: &State) {
     // A thin bar on the right while there is more to scroll to.
     let most = max_scroll(state);
     if most > 0 {
-        let track = CARDS_BOTTOM - CARDS_TOP;
+        let track = cards_bottom() - CARDS_TOP;
         let thumb = (track * track / (track + most)).max(24);
         let at = CARDS_TOP + (track - thumb) * state.scroll / most;
         rounded(
             dc,
-            &rect(LEFT + CONTENT + 8, at, 4, thumb, s),
+            &rect(LEFT + content() + 8, at, 4, thumb, s),
             px(4, s),
             SWITCH_OFF,
         );
@@ -2709,7 +2868,7 @@ fn paint_card(dc: HDC, state: &State, card: &Card) {
     let f = &state.fonts;
     let (top, height) = (card.top, card.height);
     let middle = top + height / 2;
-    let right = LEFT + CONTENT - 18;
+    let right = LEFT + content() - 18;
     // Where the control begins: the title and its line stop before it.
     let controls_left = card
         .hits

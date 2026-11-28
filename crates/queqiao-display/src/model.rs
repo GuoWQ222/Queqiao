@@ -30,6 +30,8 @@ pub enum PresenceEvent {
     SetAutostart(bool),
     /// Lock this PC when a session ends (true) or not.
     SetLockAfter(bool),
+    /// Linux, GNOME on Wayland: the account's devices control this PC without GNOME's question (true) or not.
+    SetGnomeDirect(bool),
     /// A setting was chosen while settings are locked (someone of another account is controlling, or the
     /// settings password was not given): refused.
     SettingsLocked,
@@ -325,6 +327,27 @@ pub enum FileWindowEvent {
     },
     /// Files dropped on the window from Explorer: into the other PC's folder.
     Dropped(Vec<PathBuf>),
+    /// A new folder `name` in the pane's folder.
+    MakeFolder {
+        remote: bool,
+        name: String,
+    },
+    /// The entry `name` of the pane's folder is named `new_name`.
+    Rename {
+        remote: bool,
+        name: String,
+        new_name: String,
+    },
+    /// These entries of the pane's folder are deleted (the person said yes to it).
+    Delete {
+        remote: bool,
+        names: Vec<String>,
+    },
+    /// What these entries of the pane's folder hold, all levels down (shown in the pane's note).
+    Measure {
+        remote: bool,
+        names: Vec<String>,
+    },
     PauseAll,
     ResumeAll,
     CancelAll,

@@ -490,6 +490,7 @@ impl Presence {
             terminal: self.menu.terminal,
             autostart: self.menu.autostart,
             lock_after: self.menu.lock_after,
+            gnome_direct: false,
             auto_update: self.menu.auto_update,
             password: self.menu.password_check.is_some(),
             fixed_code: self.menu.fixed_code,

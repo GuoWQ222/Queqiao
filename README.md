@@ -42,11 +42,11 @@
   <tr>
     <td width="33%" valign="top">
       <h4>🔗 Connect anywhere</h4>
-      Direct peer-to-peer connections across networks (NAT traversal, IPv4 and IPv6). When a direct connection is unavailable, the session uses a relay server.
+      Direct peer-to-peer connections across networks (NAT traversal, IPv4 and IPv6). When a direct connection is unavailable, the session uses a relay server. Port mapping reaches a port of your other PC (SSH, a web page) through the session.
     </td>
     <td width="33%" valign="top">
       <h4>🎞️ Sharp, fast picture</h4>
-      Hardware encoding on NVIDIA, Intel and AMD GPUs: H.264, H.265 (with 4:4:4 colour and 10-bit) and AV1, with adaptive bitrate. A software fallback runs on any PC.
+      Hardware encoding on NVIDIA, Intel and AMD GPUs: H.264, H.265 (with 4:4:4 colour and 10-bit) and AV1, with adaptive bitrate. A software fallback runs on any PC. The controlled PC's resolution can be set for the session, and goes back afterwards.
     </td>
     <td width="33%" valign="top">
       <h4>🌐 Relay Servers</h4>
@@ -57,7 +57,7 @@
   <tr>
     <td valign="top">
       <h4>📁 Files and clipboard</h4>
-      A two-pane file transfer window, drag and drop, and text, images and files through the clipboard, both ways.
+      A two-pane file transfer window (new folder, rename, delete, folder size), drag and drop, and text, images and files through the clipboard, both ways.
     </td>
     <td valign="top">
       <h4>🤝 Help someone</h4>

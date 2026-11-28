@@ -127,6 +127,13 @@ pub(crate) struct Options {
     /// Tests: the file transfer window opened, that PC's folder here (holding down.txt) shown, down.txt fetched and
     /// a test file sent there (see files_ui::BrowseTest).
     pub(crate) browse_test: Option<String>,
+    /// Tests: once the command lines' stream is open, a port mapping to this port of that PC, and a web page fetched
+    /// through it (GET /down.txt, which must hold the browse test's text).
+    pub(crate) tunnel_test: Option<u16>,
+    /// Tests: once that PC tells its resolutions, this one asked for; once it shows it, its own asked for again.
+    pub(crate) display_mode_test: Option<(u16, u16)>,
+    /// Tests: drawing on that PC's screen through the window's own events (annotate.rs's DrawTest), each step answered.
+    pub(crate) annotate_test: bool,
 }
 
 impl Options {
@@ -218,6 +225,13 @@ pub(crate) fn test_switch(
         "--input-test-click" => options.input_test_click = true,
         "--figures" => options.figures = true,
         "--browse-test" => options.browse_test = Some(args.next()?),
+        "--tunnel-test" => options.tunnel_test = Some(args.next()?.parse().ok()?),
+        "--display-mode-test" => {
+            let text = args.next()?;
+            let (w, h) = text.split_once('x')?;
+            options.display_mode_test = Some((w.parse().ok()?, h.parse().ok()?));
+        }
+        "--annotate-test" => options.annotate_test = true,
         "--picture-at" => options.picture_at = Some(args.next()?.parse().ok()?),
         "--input-test-at" => options.input_test_at = Some(args.next()?.parse().ok()?),
         "--ui-pictures" => options.ui_pictures = Some(PathBuf::from(args.next()?)),
@@ -367,6 +381,9 @@ mod option_tests {
             "--device",
             "--command",
             "--signup",
+            "--tunnel-test",
+            "--display-mode-test",
+            "--annotate-test",
         ] {
             assert!(
                 parse(args(&[option, "x"]).into_iter()).is_none(),

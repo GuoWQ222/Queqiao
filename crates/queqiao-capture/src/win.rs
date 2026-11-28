@@ -343,6 +343,14 @@ pub fn screens() -> Result<Vec<ScreenSummary>> {
         .collect())
 }
 
+/// The GDI names of the screens ("\\.\DISPLAY1"), in [`screens`]' order: what the display settings functions take.
+pub(crate) fn screen_names() -> Result<Vec<String>> {
+    Ok(attached_outputs()?
+        .into_iter()
+        .map(|(_, _, desc)| wide_to_string(&desc.DeviceName))
+        .collect())
+}
+
 /// The screens attached to the desktop, across all GPUs, with the GPU each belongs to.
 /// A screen's D3D11 device and description, without duplicating it: for a session that starts while another
 /// desktop takes input (the sign-in or lock screen), whose pictures come from the service's desktop helper.

@@ -8,9 +8,10 @@ use queqiao_core::text::tr;
 use queqiao_display::{PanelIcon, PanelItem};
 
 use crate::session::{
-    MENU_ACTUAL_SIZE, MENU_CHROMA444, MENU_CODEC, MENU_COMMAND_LINES, MENU_CTRL_ALT_DEL,
-    MENU_CUSTOM_BITRATE, MENU_END, MENU_FIGURES, MENU_FILE_TRANSFER, MENU_FPS, MENU_FULL_SCREEN,
-    MENU_GAME_MOUSE, MENU_HOTKEYS, MENU_LOCK, MENU_LOCK_AFTER, MENU_MICROPHONE, MENU_MOUSE_SPEED,
+    MAX_DISPLAY_MODES, MENU_ACTUAL_SIZE, MENU_CHROMA444, MENU_CODEC, MENU_COMMAND_LINES,
+    MENU_CTRL_ALT_DEL, MENU_CUSTOM_BITRATE, MENU_DISPLAY_FIT, MENU_DISPLAY_MODES, MENU_DISPLAY_OWN,
+    MENU_END, MENU_FIGURES, MENU_FILE_TRANSFER, MENU_FPS, MENU_FULL_SCREEN, MENU_GAME_MOUSE,
+    MENU_HOTKEYS, MENU_LOCK, MENU_LOCK_AFTER, MENU_MICROPHONE, MENU_MOUSE_SPEED,
     MENU_MUTE_SPEAKERS, MENU_NEXT_SCREEN, MENU_ON_TOP, MENU_OPACITY, MENU_POINTER_SHAPE,
     MENU_PRIVACY, MENU_QUALITY, MENU_RESOLUTION, MENU_RESTART, MENU_RESTART_QUEQIAO, MENU_SCREENS,
     MENU_SEND_FILES, MENU_SHORTCUTS, MENU_SOUND, MENU_TEN_BIT, MENU_TERMINAL, MENU_VOLUME,
@@ -21,14 +22,38 @@ pub(crate) const GROUP_PICTURE: usize = 2;
 
 /// The control center's items. `screens`: that PC's screens once it told them (names); `full_screen_key`,
 /// `game_mouse_key`: the keys as the person set them; `volume`: the sound's volume now.
+/// That PC's resolution as it last told it (`Message::DisplayModes`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ThatResolution {
+    pub(crate) current: (u16, u16),
+    pub(crate) own: (u16, u16),
+    pub(crate) sizes: Vec<(u16, u16)>,
+    pub(crate) note: String,
+}
+
+/// The size of `sizes` nearest to `wanted` that fits in it (this window); else the smallest.
+pub(crate) fn fitting(sizes: &[(u32, u32)], wanted: (u32, u32)) -> Option<(u32, u32)> {
+    sizes
+        .iter()
+        .copied()
+        .filter(|(w, h)| *w <= wanted.0 && *h <= wanted.1)
+        .max_by_key(|(w, h)| (w * h, *w))
+        .or_else(|| sizes.iter().copied().min_by_key(|(w, h)| w * h))
+}
+
 pub(crate) fn items(
     screens: &[String],
+    display: Option<&ThatResolution>,
     full_screen_key: &str,
     game_mouse_key: &str,
     volume: u8,
 ) -> Vec<PanelItem> {
     vec![
-        PanelItem::group(PanelIcon::Screen, tr("Screen"), screen_items(screens)),
+        PanelItem::group(
+            PanelIcon::Screen,
+            tr("Screen"),
+            screen_items(screens, display),
+        ),
         PanelItem::action(MENU_NEXT_SCREEN, tr("Next screen")).icon(PanelIcon::NextScreen),
         PanelItem::group(PanelIcon::Picture, tr("Picture"), picture_items()),
         PanelItem::group(PanelIcon::Window, tr("Window"), window_items()),
@@ -47,8 +72,9 @@ pub(crate) fn items(
     ]
 }
 
-/// The Screen group: that PC's screens (one choice each), then the picture's size.
-pub(crate) fn screen_items(screens: &[String]) -> Vec<PanelItem> {
+/// The Screen group: that PC's screens (one choice each), its resolution (its own, one fitting this window, its
+/// sizes), then the picture's size.
+pub(crate) fn screen_items(screens: &[String], display: Option<&ThatResolution>) -> Vec<PanelItem> {
     let mut items = vec![PanelItem::heading(tr("That PC's screens"))];
     if screens.is_empty() {
         items.push(PanelItem::action(0, tr("One screen")).disabled());
@@ -60,7 +86,39 @@ pub(crate) fn screen_items(screens: &[String]) -> Vec<PanelItem> {
             .map(|(index, name)| PanelItem::radio(MENU_SCREENS + 16 * index as u16, name)),
     );
     items.push(PanelItem::Separator);
-    items.push(PanelItem::heading(tr("Resolution")));
+    items.push(PanelItem::heading(tr("That PC's resolution")));
+    match display {
+        None => items.push(PanelItem::action(0, tr("Not offered by that PC's Queqiao")).disabled()),
+        Some(display) if display.sizes.is_empty() => items.push(
+            PanelItem::action(0, tr("Cannot be changed"))
+                .detail(&display.note)
+                .disabled(),
+        ),
+        Some(display) => {
+            let own = format!("{} ({}x{})", tr("Its own"), display.own.0, display.own.1);
+            items.push(PanelItem::radio(MENU_DISPLAY_OWN, &own));
+            items.push(
+                PanelItem::action(MENU_DISPLAY_FIT, tr("Fit this window")).detail(tr(
+                    "The size of that PC's screen nearest to this window's, for a sharp picture.",
+                )),
+            );
+            items.extend(
+                display
+                    .sizes
+                    .iter()
+                    .take(usize::from(MAX_DISPLAY_MODES))
+                    .enumerate()
+                    .map(|(index, (w, h))| {
+                        PanelItem::radio(
+                            MENU_DISPLAY_MODES + 16 * index as u16,
+                            &format!("{w}x{h}"),
+                        )
+                    }),
+            );
+        }
+    }
+    items.push(PanelItem::Separator);
+    items.push(PanelItem::heading(tr("Picture size")));
     items.extend(
         MENU_RESOLUTION
             .iter()
@@ -184,7 +242,9 @@ fn input_items(game_mouse_key: &str) -> Vec<PanelItem> {
 }
 
 fn tool_items() -> Vec<PanelItem> {
-    vec![
+    // Drawing on that PC's screen first (annotate.rs): what someone helping reaches for.
+    let mut items = crate::annotate::panel_items();
+    items.extend([
         PanelItem::action(MENU_FILE_TRANSFER, tr("File transfer")),
         PanelItem::action(MENU_SEND_FILES, tr("Send files...")),
         PanelItem::Separator,
@@ -193,7 +253,8 @@ fn tool_items() -> Vec<PanelItem> {
         PanelItem::Separator,
         PanelItem::action(MENU_RESTART_QUEQIAO, tr("Restart Queqiao on that PC")),
         PanelItem::action(MENU_RESTART, tr("Restart that PC...")).danger(),
-    ]
+    ]);
+    items
 }
 
 fn more_items() -> Vec<PanelItem> {
@@ -209,9 +270,25 @@ mod tests {
     use queqiao_display::PanelItem;
 
     #[test]
+    fn the_size_fitting_this_window_is_the_largest_inside_it() {
+        let sizes = [(2560, 1440), (1920, 1080), (1600, 900), (1280, 1024)];
+        assert_eq!(super::fitting(&sizes, (1920, 1050)), Some((1600, 900)));
+        assert_eq!(super::fitting(&sizes, (3840, 2160)), Some((2560, 1440)));
+        assert_eq!(super::fitting(&sizes, (1000, 700)), Some((1280, 1024)));
+        assert_eq!(super::fitting(&[], (1000, 700)), None);
+    }
+
+    #[test]
     fn every_choice_has_a_menu_id_of_its_own() {
+        let display = super::ThatResolution {
+            current: (1920, 1080),
+            own: (2560, 1440),
+            sizes: vec![(2560, 1440), (1920, 1080), (1280, 720)],
+            note: String::new(),
+        };
         let items = super::items(
             &["Screen 1".into(), "Screen 2".into()],
+            Some(&display),
             "Ctrl+Alt+Enter",
             "Ctrl+Alt+M",
             100,
